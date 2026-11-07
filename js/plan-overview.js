@@ -23,6 +23,9 @@ const VIEW_KEY = "po-view";                           // List or Calendar, remem
 const LONG_DOWNTIME = 7;                              // days: also warn in the month before an event
 const BOOKING_STATUSES = ["accepted", "in_progress"]; // booking reminders only once the patient has agreed
 const REC_LABEL = { tx: "Treatment record", cons: "Consent record", rx: "Prescription", summary: "Consultation notes" };
+const SVG = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+const ICON_PLAN = SVG('<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M9 14l2 2 4-4"/>');
+const ICON_SPARK = SVG('<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>');
 
 function openDlg(html) {
   const dlg = document.createElement("dialog");
@@ -281,31 +284,64 @@ export function createPlanOverview(el, ctx) {
 
   function emptyHtml() {
     const latest = ctx.latestConsult();
-    return `<div class="mp-bar is-empty">
-      <div class="mp-bar-main"><strong>No master plan yet</strong>
-        <small>One plan per patient, organised by concern and tracked visit by visit.</small></div>
-      ${latest ? '<button type="button" class="btn-primary sm" data-po="apply-latest">Create from the latest consultation</button>'
-        : '<small class="muted">Record a consultation with a treatment plan first.</small>'}
+    return `<div class="mp-empty">
+      <span class="mp-empty-ic">${ICON_PLAN}</span>
+      <div class="mp-empty-main">
+        <strong>No master plan yet</strong>
+        <p>One plan per patient, organised by concern and tracked visit by visit.</p>
+        <ol class="mp-empty-steps">
+          <li><b>1</b>Consultation plan</li><li><b>2</b>Review and apply</li><li><b>3</b>Track every visit</li>
+        </ol>
+      </div>
+      ${latest
+        ? `<button type="button" class="mp-empty-btn" data-po="apply-latest">${ICON_SPARK}<span>Create from the latest consultation</span></button>`
+        : '<small class="mp-empty-none">Record a consultation with a treatment plan first.</small>'}
     </div>`;
   }
 
-  function barHtml(m, eff) {
+  // Sessions done out of those planned (courses only; concerns still waiting don't count yet)
+  function progressOf(track) {
+    let done = 0;
+    let total = 0;
+    st.master.concerns.forEach((c) => {
+      if (!ACTIVE.includes(c.status) || isWaiting(c)) return;
+      c.lines.forEach((l) => {
+        const lt = track.get(c.key).lines.get(l.id);
+        if (lt && lt.total) { total += lt.total; done += Math.min(lt.done, lt.total); }
+      });
+    });
+    return { done, total, pct: total ? Math.round((done / total) * 100) : 0 };
+  }
+
+  function barHtml(m, eff, track) {
     const latest = ctx.latestConsult();
     const newer = latest && !m.sources.includes(latest.id);
     const lines = m.concerns.reduce((n, c) => n + c.lines.length, 0);
     const when = m.updatedAt ? m.updatedAt.toLocaleDateString("en-AU", { day: "numeric", month: "short" }) : "";
-    return `<div class="pv-bar">
-      <strong>Master plan</strong>
-      <span class="pv-status is-${esc(eff)}">${esc(PLAN_STATUS[eff])}</span>
-      <span class="pv-sub">${m.concerns.length} concern${m.concerns.length === 1 ? "" : "s"} · ${lines} treatment${lines === 1 ? "" : "s"} · v${m.version}${
-        when ? `, ${esc(when)}${m.updatedBy ? ` by ${esc(m.updatedBy)}` : ""}` : ""}</span>
-      <span class="pv-spacer"></span>
-      ${newer ? '<button type="button" class="lh-btn" data-po="apply-latest">Update from the latest consultation</button>' : ""}
-      <button type="button" class="lh-btn" data-po="doc">Patient copy</button>
-      <div class="fe-seg po-viewseg">${[["list", "List"], ["cal", "Calendar"]].map(([v, l]) =>
-        `<label class="fe-seg-btn"><input type="radio" name="po-view" value="${v}" data-po-view${st.view === v ? " checked" : ""} /><span>${l}</span></label>`).join("")}</div>
-      ${["proposed", "sent"].includes(eff) ? '<button type="button" class="lh-btn is-primary" data-po="accept">Patient accepted</button>' : ""}
-      <button type="button" class="lh-btn is-quiet pv-dots" data-po="plan-menu" aria-label="Plan options" title="Plan options">⋯</button>
+    const pg = progressOf(track);
+    return `<div class="pv-bar is-v2">
+      <div class="pv-bar-top">
+        <span class="pv-bar-ic">${ICON_PLAN}</span>
+        <div class="pv-bar-title">
+          <div><strong>Master plan</strong><span class="pv-status is-${esc(eff)}">${esc(PLAN_STATUS[eff])}</span></div>
+          <span class="pv-sub">${m.concerns.length} concern${m.concerns.length === 1 ? "" : "s"} · ${lines} treatment${lines === 1 ? "" : "s"} · v${m.version}${
+            when ? `, ${esc(when)}${m.updatedBy ? ` by ${esc(m.updatedBy)}` : ""}` : ""}</span>
+        </div>
+        <span class="pv-spacer"></span>
+        <div class="pv-bar-acts">
+          ${newer ? '<button type="button" class="lh-btn" data-po="apply-latest">Update from the latest consultation</button>' : ""}
+          <button type="button" class="lh-btn" data-po="doc">Patient copy</button>
+          <div class="fe-seg po-viewseg">${[["list", "List"], ["cal", "Calendar"]].map(([v, l]) =>
+            `<label class="fe-seg-btn"><input type="radio" name="po-view" value="${v}" data-po-view${st.view === v ? " checked" : ""} /><span>${l}</span></label>`).join("")}</div>
+          ${["proposed", "sent"].includes(eff) ? '<button type="button" class="lh-btn is-primary" data-po="accept">Patient accepted</button>' : ""}
+          <button type="button" class="lh-btn is-quiet pv-dots" data-po="plan-menu" aria-label="Plan options" title="Plan options">⋯</button>
+        </div>
+      </div>
+      ${pg.total ? `<div class="pv-prog${pg.done >= pg.total ? " is-done" : ""}" role="progressbar" aria-label="Planned sessions done"
+          aria-valuemin="0" aria-valuemax="${pg.total}" aria-valuenow="${pg.done}">
+        <div class="pv-prog-track"><i style="width:${pg.pct}%"></i></div>
+        <span><b>${pg.done}</b> of ${pg.total} planned session${pg.total === 1 ? "" : "s"} done · ${pg.pct}%</span>
+      </div>` : ""}
     </div>`;
   }
 
@@ -546,7 +582,7 @@ export function createPlanOverview(el, ctx) {
     const list = needsList(track, clashes, booking);
     if (hint) hint.textContent = `${PLAN_STATUS[eff]} · ${m.concerns.length} concern${m.concerns.length === 1 ? "" : "s"}`;
     el.innerHTML = `<div class="po pv">
-      ${barHtml(m, eff)}
+      ${barHtml(m, eff, track)}
       ${todayHtml(track)}
       ${needsHtml(list, booking, eff)}
       ${st.view === "cal"

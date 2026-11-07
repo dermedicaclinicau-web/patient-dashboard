@@ -1581,7 +1581,7 @@ function treatmentPlansSectionHtml() {
   return `
     <details class="section-card tp-card" data-key="tp-section" ${isOpen("tp-section", true) ? "open" : ""}>
       <summary>
-        <span class="pc-head">${ICONS.chev}<span class="pc-title">Treatment Plan</span><span class="hint tp-count">…</span></span>
+        <span class="pc-head">${ICONS.chev}<span class="tp-head-ic">${ICONS.route}</span><span class="pc-title">Treatment Plan</span><span class="hint tp-count">…</span></span>
       </summary>
       <div class="mp-wrap" data-role="mpbar"><div class="skeleton sm"></div></div>
       <details class="tp-history" data-key="tp-history" ${isOpen("tp-history", false) ? "open" : ""}>
@@ -1685,10 +1685,18 @@ function concernHtml(c) {
       <dl class="concern-grid">
         <div><dt>Treatment</dt><dd>${fieldHtml(c.treatment)}</dd></div>
         <div><dt>Frequency / interval</dt><dd>${fieldHtml(c.frequency)}</dd></div>
-        <div><dt>Quote</dt><dd>${fieldHtml(c.quote)}</dd></div>
+        <div><dt>Quote</dt><dd>${quoteHtml(c.quote)}</dd></div>
         <div class="full"><dt>Comments</dt><dd>${fieldHtml(c.comments)}</dd></div>
       </dl>
     </article>`;
+}
+
+// Quote lines with the dollar amounts in bold: "Hyalase - $195 per session"
+function quoteHtml(lines) {
+  if (!lines.length) return `<span class="missing">—</span>`;
+  const one = (l) => escapeHtml(l).replace(/\$\s?\d[\d,]*(?:\.\d{1,2})?/g, (m) => `<b class="concern-price">${m}</b>`);
+  if (lines.length === 1) return one(lines[0]);
+  return `<ul class="pc-list">${lines.map((l) => `<li>${one(l)}</li>`).join("")}</ul>`;
 }
 
 // "August 2026" -> "Aug 2026" (other labels unchanged)
