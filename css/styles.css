@@ -2034,6 +2034,29 @@ textarea.fe-input { resize: vertical; line-height: 1.5; }
   .ff-print { position: absolute; top: 0; left: 0; width: 100%; margin: 0 !important; border: none !important; box-shadow: none !important; }
 }
 
+/* ---------- Saved overlay (a record saved in its own tab) ---------- */
+dialog.ff-saved-dlg { margin: auto; width: min(460px, calc(100vw - 2rem)); padding: 0; overflow: hidden; border: 0;
+  border-radius: 22px; background: #fff; box-shadow: 0 40px 90px -30px rgba(15, 23, 42, .55); }
+dialog.ff-saved-dlg[open] { animation: ffs-in .28s cubic-bezier(.2, .9, .3, 1.2); }
+dialog.ff-saved-dlg::backdrop { background: rgba(15, 23, 42, .45); backdrop-filter: blur(4px); }
+@keyframes ffs-in { from { opacity: 0; transform: translateY(14px) scale(.96); } }
+.ff-saved-box { display: flex; flex-direction: column; align-items: center; gap: .35rem; padding: 2rem 1.75rem 1.5rem;
+  text-align: center; background: radial-gradient(120% 70% at 50% 0%, #ecfdf5 0%, #fff 60%); }
+.ff-saved-tick { display: grid; place-items: center; width: 72px; height: 72px; margin-bottom: .5rem; border-radius: 50%; color: #fff;
+  background: linear-gradient(135deg, #34d399 0%, #059669 100%); box-shadow: 0 0 0 8px #d1fae5, 0 14px 28px -12px #059669;
+  animation: ffs-pop .45s .1s both cubic-bezier(.2, .9, .3, 1.4); }
+.ff-saved-tick svg { width: 36px; height: 36px; stroke-width: 3; }
+@keyframes ffs-pop { from { opacity: 0; transform: scale(.4); } }
+.ff-saved-kicker { margin: 0; font-size: .75rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: #047857; }
+.ff-saved-box h2 { margin: 0; font-family: var(--font-serif); font-size: 1.55rem; font-weight: 500; line-height: 1.25; color: #0f172a; }
+.ff-saved-who { margin: .15rem 0 0; font-size: .92rem; color: #475569; }
+.ff-saved-note { margin: .5rem 0 0; font-size: .84rem; line-height: 1.5; color: var(--muted); }
+.ff-saved-acts { display: flex; flex-wrap: wrap; justify-content: center; gap: .5rem; width: 100%; margin-top: 1.25rem; }
+.ff-saved-acts .ff-btn { flex: 1 1 0; min-width: 120px; height: 46px; font-size: .95rem; }
+.ff-saved-msg { margin: .75rem 0 0; padding: .55rem .75rem; border-radius: 10px; background: #fffbeb; color: #92400e; font-size: .84rem; }
+@media (prefers-reduced-motion: reduce) { dialog.ff-saved-dlg[open], .ff-saved-tick { animation: none; } }
+@media print { dialog.ff-saved-dlg { display: none !important; } }
+
 /* ---------- Completed forms list ---------- */
 .fr-list { display: flex; flex-direction: column; gap: .4rem; }
 .fr-row { display: flex; align-items: center; gap: .75rem; padding: .7rem .85rem; border: 1px solid var(--border);

@@ -137,6 +137,22 @@ function takeCopy(pid, tid) {
     return Date.now() - Number(c.at || 0) < 10 * 60000 ? c : null;
   } catch { return null; }
 }
+// "Saved" overlay on the record page, after saving in its own tab.
+// sessionStorage, so it only ever shows in the tab that saved it.
+const SAVED_KEY = "dm.justSaved";
+const SAVED_OVERLAY = ["treatment"];   // add "consent", "prescription"… to use it for those too
+function markJustSaved(id, edited = false) {
+  try { sessionStorage.setItem(SAVED_KEY, JSON.stringify({ id, edited, at: Date.now() })); } catch { /* private mode */ }
+}
+function takeJustSaved(id) {
+  try {
+    const s = JSON.parse(sessionStorage.getItem(SAVED_KEY) || "null");
+    if (!s || s.id !== id) return null;
+    sessionStorage.removeItem(SAVED_KEY);
+    return Date.now() - Number(s.at || 0) < 60000 ? s : null;
+  } catch { return null; }
+}
+
 // "Open in new tab": the consent tab knows what it was opened for from its window name,
 // and tells the other tabs when a form is saved (BroadcastChannel, or localStorage on older browsers)
 const TAB_PREFIX = "dm-consent:";
@@ -1485,6 +1501,11 @@ export async function mountFormFill(container, param, { staff, embedded = null }
       if (kind === "save" && isConsentLeg) {
         location.hash = ret.returnHash;
         showToast(`${ver.name} saved. Back to ${ret.templateName}.`);
+      } else if (kind === "save" && SAVED_OVERLAY.includes(tpl.category)) {
+        // Stay on this record (its TxR tab) with a Saved overlay. The profile tab updates itself.
+        highlightRecord(id);
+        markJustSaved(id);
+        location.replace(`#/form-record/${encodeURIComponent(id)}`);   // replace: Back doesn't return to the empty form
       } else if (kind === "save") {
         if (tpl.category === "consent" || tpl.category === "treatment") highlightRecord(id);
         location.hash = patientHref;
@@ -1542,8 +1563,13 @@ export async function mountFormFill(container, param, { staff, embedded = null }
       });
       dirty = false;
       announceSaved({ type: "form-saved", patientId: patient.id, templateId: tid, category: tpl.category, submissionId: editId });
-      showToast("Changes saved. The edit is kept on the record.");
-      location.hash = exitHref;
+      if (SAVED_OVERLAY.includes(tpl.category)) {
+        markJustSaved(editId, true);
+        location.replace(exitHref);
+      } else {
+        showToast("Changes saved. The edit is kept on the record.");
+        location.hash = exitHref;
+      }
     } catch (err) {
       console.error("Edit form failed:", err);
       msgEl.textContent = err.code === "permission-denied"
@@ -1807,4 +1833,61 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
   const next = takeDelivery(submissionId);
   if (next === "email") emailFlow();
   else if (next === "print") printerFlow();
+
+  // Just saved in this tab: the Saved overlay
+  const just = takeJustSaved(submissionId);
+  if (just && !next && root.isConnected) {
+    showSavedOverlay({
+      sub, edited: just.edited, patientHref,
+      editHref: isAdmin() && !sub.deleted
+        ? `#/fill/${encodeURIComponent(sub.patientId)}/${encodeURIComponent(sub.templateId)}/edit/${encodeURIComponent(sub.id)}` : "",
+    });
+  }
+}
+
+// "Saved" with Close tab / Edit. Close tab only works in a tab the portal opened; otherwise it offers the profile.
+function showSavedOverlay({ sub, edited, patientHref, editHref }) {
+  const first = String(sub.patientName || "").split(" ")[0] || "the patient";
+  const dlg = document.createElement("dialog");
+  dlg.className = "ff-saved-dlg";
+  dlg.setAttribute("aria-labelledby", "ff-saved-title");
+  dlg.innerHTML = `
+    <div class="ff-saved-box">
+      <span class="ff-saved-tick">${BAR_ICONS.check}</span>
+      <p class="ff-saved-kicker">${edited ? "Changes saved" : "Saved"}</p>
+      <h2 id="ff-saved-title">${esc(sub.templateName)}</h2>
+      <p class="ff-saved-who"><strong>${esc(sub.patientName)}</strong> · ${esc(niceDate(sub.recordDate))}${
+        sub.createdBy ? ` · by ${esc(sub.createdBy)}` : ""}</p>
+      <p class="ff-saved-note">It's on ${esc(first)}'s profile. If the profile is open in another tab, it has updated by itself.</p>
+      <div class="ff-saved-acts">
+        ${editHref
+          ? `<a class="ff-btn" href="${editHref}">${BAR_ICONS.edit}<span>Edit</span></a>`
+          : '<button type="button" class="ff-btn" data-act="saved-view">View record</button>'}
+        <button type="button" class="ff-btn is-primary" data-act="saved-close">Close tab</button>
+      </div>
+      <p class="ff-saved-msg" role="status" hidden></p>
+    </div>`;
+  const onHash = () => { if (dlg.open) dlg.close(); };
+  dlg.addEventListener("close", () => { window.removeEventListener("hashchange", onHash); dlg.remove(); });
+  window.addEventListener("hashchange", onHash);
+
+  dlg.addEventListener("click", (e) => {
+    if (e.target.closest("a")) { dlg.close(); return; }                 // Edit, or the profile link
+    if (e.target.closest('[data-act="saved-view"]')) { dlg.close(); return; }
+    const btn = e.target.closest('[data-act="saved-close"]');
+    if (!btn) return;
+    window.close();
+    setTimeout(() => {
+      if (window.closed || !dlg.isConnected) return;
+      // Not a tab the portal opened, so the browser won't let it close itself
+      const msg = dlg.querySelector(".ff-saved-msg");
+      msg.textContent = "This browser won't let the portal close this tab. Close it yourself, or go to the profile.";
+      msg.hidden = false;
+      btn.outerHTML = `<a class="ff-btn is-primary" href="${patientHref}">Go to ${esc(first)}'s profile</a>`;
+    }, 400);
+  });
+
+  document.body.appendChild(dlg);
+  dlg.showModal();
+  dlg.querySelector('[data-act="saved-close"]').focus();
 }
