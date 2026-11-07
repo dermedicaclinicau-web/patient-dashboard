@@ -4,8 +4,8 @@ import { db } from "./firebase-config.js";
 import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const KINDS = {
-  notes: { bg: "#0f766e", mic: true },        // consultation notes
-  recording: { bg: "#dc2626", mic: true },    // recording right now
+  notes: { bg: "#16a34a", dot: true },        // consultation notes: a green dot
+  recording: { bg: "#dc2626", dot: true },    // recording right now: a red dot
   tx: { bg: "#2563eb", text: "TxR", label: "TxR" },
   consent: { bg: "#7c3aed", text: "C", label: "Consent" },
   rx: { bg: "#db2777", text: "Rx", label: "Rx" },
@@ -25,6 +25,20 @@ function drawIcon(kind) {
   const c = document.createElement("canvas");
   c.width = c.height = 64;
   const g = c.getContext("2d");
+
+  // A dot: a soft halo with a solid dot inside, so it's still clear at 16px
+  if (k.dot) {
+    g.fillStyle = k.bg;
+    g.globalAlpha = 0.25;
+    g.beginPath(); g.arc(32, 32, 31, 0, Math.PI * 2); g.fill();
+    g.globalAlpha = 1;
+    g.beginPath(); g.arc(32, 32, 22, 0, Math.PI * 2); g.fill();
+    g.fillStyle = "rgba(255, 255, 255, .35)";        // a small highlight
+    g.beginPath(); g.arc(25, 25, 7, 0, Math.PI * 2); g.fill();
+    const url = c.toDataURL("image/png");
+    urls.set(kind, url);
+    return url;
+  }
   const r = 14;
   g.beginPath();
   g.moveTo(r, 0); g.lineTo(64 - r, 0); g.quadraticCurveTo(64, 0, 64, r);
