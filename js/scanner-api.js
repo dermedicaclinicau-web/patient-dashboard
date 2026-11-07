@@ -603,40 +603,160 @@ export function reviewRx(result, rxProducts) {
     items,
   };
 }
+/* ---------- Finding patients: any order, part of a name, small typos, mobile or ID ---------- */
+// Searched in the Patient List index (patient_index, rebuilt every morning), kept in memory for 30 minutes.
+// The plain search still runs alongside, so patients added since this morning are found too.
+const fold = (s) => String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+// "O'Brien-Smith" → ["obrien", "smith"]
+const searchWords = (s) => fold(s).replace(/['’`]/g, "").replace(/[^a-z0-9]+/g, " ").trim().split(" ").filter(Boolean);
+const phoneKey = (s) => String(s ?? "").replace(/\D/g, "").replace(/^61(?=4)/, "0");
+
+let ptIndex = null, ptIndexAt = 0;
+
+function ptEntry(id, f) {
+  const first = String(f["First Name"] || "").trim();
+  const last = String(f["Last Name"] || "").trim();
+  const name = String(f["Patient Name"] || `${first} ${last}`).trim();
+  const mergedIds = Array.isArray(f.MergedIds) ? f.MergedIds.map(String) : [];
+  const mergedNames = Array.isArray(f.MergedNames) ? f.MergedNames.map(String) : [];
+  const pttId = String(f.PttID ?? id);
+  return {
+    words: [...new Set([name, `${first} ${last}`, ...mergedNames].flatMap(searchWords))],
+    ids: [id, pttId, ...mergedIds].map((x) => fold(x).trim()).filter(Boolean),
+    phone: phoneKey(f.Mobile),
+    p: { ...f, id, pttId, name, firstName: first, lastName: last, dob: String(f.DOB || ""), dobKey: String(f.DobKey || ""),
+      address: String(f.Address || ""), email: String(f.Email || ""), mobile: String(f.Mobile || ""),
+      mergedIds, mergedNames, mergedInto: "" },
+  };
+}
+
+function loadPtIndex() {
+  if (ptIndex && Date.now() - ptIndexAt < 30 * 60000) return ptIndex;
+  ptIndexAt = Date.now();
+  ptIndex = (async () => {
+    const meta = await getDoc(doc(db, "patient_index", "meta"));
+    const m = meta.exists() ? meta.data() : null;
+    const n = m ? Number(m.parts) || 0 : 0;
+    if (!n) throw new Error("No patient index yet");
+    const parts = await Promise.all(Array.from({ length: n }, (_, i) => getDoc(doc(db, "patient_index", `p${i}`))));
+    const rows = [];
+    parts.forEach((s) => {
+      if (!s.exists() || s.data().build !== m.build) throw new Error("The patient index is being rebuilt");
+      JSON.parse(s.data().data || "[]").forEach(([id, f]) => { if (f && !f.MergedInto) rows.push(ptEntry(String(id), f)); });
+    });
+    return rows;
+  })().catch((err) => {
+    console.warn("Patient search index not loaded, using the plain search:", err);
+    ptIndexAt = Date.now() - 25 * 60000;   // tried again in 5 minutes
+    return null;
+  });
+  return ptIndex;
+}
+// Starts loading the index early (e.g. when the patient picker opens), so the first search is quick
+export function warmPatientSearch() { loadPtIndex(); }
+
+// Letters different between two words (swapped letters count as one), giving up past max
+function editDist(a, b, max) {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let pp = null, p = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const c = [i];
+    let low = i;
+    for (let j = 1; j <= b.length; j++) {
+      let v = Math.min(p[j] + 1, c[j - 1] + 1, p[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (pp && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) v = Math.min(v, pp[j - 2] + 1);
+      c[j] = v;
+      if (v < low) low = v;
+    }
+    if (low > max) return max + 1;
+    pp = p; p = c;
+  }
+  return p[b.length];
+}
+
+// 4 the same · 3 the start of it · 2 a small typo · 1 a typo in the start · 0 no match
+function wordScore(q, w) {
+  if (w === q) return 4;
+  if (w.startsWith(q)) return 3;
+  if (q.length < 4 || q[0] !== w[0]) return 0;   // typos only for 4+ letters, with the first letter right
+  const max = q.length >= 7 ? 2 : 1;
+  if (editDist(q, w, max) <= max) return 2;
+  if (w.length > q.length && editDist(q, w.slice(0, q.length), max) <= max) return 1;
+  return 0;
+}
+
+// all: every typed word must match part of the name (the search box). Otherwise any word (finding a prescription's patient).
+function rankIndex(idx, text, { max = 12, all = true } = {}) {
+  const qs = searchWords(text);
+  if (!idx || !qs.length) return [];
+  const digits = phoneKey(text);
+  const isId = qs.length === 1 && /\d/.test(qs[0]);
+  const out = [];
+  for (const e of idx) {
+    let score = 0;
+    if (isId && e.ids.includes(qs[0])) score = 100;
+    else if (digits.length >= 6 && e.phone && e.phone.includes(digits)) score = 50;
+    else {
+      let hit = 0, total = 0;
+      for (const q of qs) {
+        let best = 0;
+        for (const w of e.words) { const s = wordScore(q, w); if (s > best) best = s; if (best === 4) break; }
+        if (best) hit++;
+        total += best;
+      }
+      if (all ? hit === qs.length : hit > 0) score = total;
+    }
+    if (score) out.push({ e, score });
+  }
+  out.sort((a, b) => b.score - a.score || a.e.p.name.localeCompare(b.e.p.name));
+  return out.slice(0, max).map((x) => x.e.p);
+}
 
 // The patient this prescription is for, from every patient (not just today's bookings).
-// Searched by full name (either order), then surname. The postcode in their address breaks ties.
-// Picked automatically only when one patient is clearly the best.
+// Picked automatically only when one patient is clearly the best (the same strict rule as before).
+// The list to choose from also has misspelt names and names in a different order.
 export async function findRxPatient(review) {
-  const name = normName(review.patientName);
+  const read = String(review.patientName || "");
+  const name = normName(read);
   if (!name) return { match: null, candidates: [] };
   const words = name.split(" ").filter((w) => w.length > 1);
   const terms = [...new Set([name, words[words.length - 1], words[0]].filter(Boolean))];
+  const [idx, ...results] = await Promise.all([loadPtIndex(),
+    ...terms.map((t) => fetchPatients({ mode: "name", term: t }).catch(() => ({ patients: [] })))]);
   const found = new Map();
-  const results = await Promise.all(terms.map((t) => fetchPatients({ mode: "name", term: t }).catch(() => ({ patients: [] }))));
   results.forEach((r) => (r.patients || []).forEach((p) => { if (!p.mergedInto) found.set(p.id, p); }));
+  const fuzzy = rankIndex(idx, read, { max: 20, all: false });
+  fuzzy.forEach((p) => { if (!found.has(p.id)) found.set(p.id, p); });
+  const rankOf = new Map(fuzzy.map((p, i) => [p.id, i]));
   const pc = review.postcode;
   const scored = [...found.values()].map((p) => {
-    let s = nameScore(review.patientName, p.name);
+    let s = nameScore(read, p.name);
     if (pc && String(p.address || "").includes(pc)) s += 0.3;
-    return { p, s };
-  }).filter((x) => x.s >= 0.5).sort((a, b) => b.s - a.s);
-  const top = scored[0];
-  const clear = !!top && top.s >= 0.8 && (!scored[1] || scored[1].s <= top.s - 0.3);
+    return { p, s, r: rankOf.has(p.id) ? rankOf.get(p.id) : 999 };
+  }).filter((x) => x.s >= 0.5 || x.r < 999);
+  const best = scored.slice().sort((a, b) => b.s - a.s);
+  const top = best[0];
+  const clear = !!top && top.s >= 0.8 && (!best[1] || best[1].s <= top.s - 0.3);
+  scored.sort((a, b) => a.r - b.r || b.s - a.s);   // the list: best name match first
   return { match: clear ? top.p : null, candidates: scored.slice(0, 8).map((x) => x.p) };
 }
 
-// "change": search all patients by name or patient ID
+// The search box: name (any order, part of it, small typos), mobile or patient ID
 export async function searchPatientsQuick(term) {
   const t = String(term || "").trim();
   if (t.length < 2) return [];
-  const [byName, byId] = await Promise.all([
-    fetchPatients({ mode: "name", term: normName(t) }).then((r) => r.patients).catch(() => []),
+  const [idx, byId, byName] = await Promise.all([
+    loadPtIndex(),
     findPatientsById(t).catch(() => []),
+    fetchPatients({ mode: "name", term: normName(t) }).then((r) => r.patients || []).catch(() => []),
   ]);
+  const full = new Map();
+  [...byId, ...byName].forEach((p) => { if (p && !p.mergedInto) full.set(p.id, p); });
   const out = new Map();
-  [...byId, ...byName].forEach((p) => { if (!p.mergedInto) out.set(p.id, p); });
-  return [...out.values()].slice(0, 10);
+  byId.forEach((p) => { if (p && !p.mergedInto) out.set(p.id, p); });   // an exact patient ID first
+  rankIndex(idx, t).forEach((p) => { if (!out.has(p.id)) out.set(p.id, full.get(p.id) || p); });
+  byName.forEach((p) => { if (p && !p.mergedInto && !out.has(p.id)) out.set(p.id, p); });   // added since this morning
+  return [...out.values()].slice(0, 12);
 }
 
 // A prescription with this script number that's already been saved, or null

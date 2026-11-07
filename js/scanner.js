@@ -9,7 +9,7 @@
 import { listProducts, INV_CATEGORIES, plural } from "./inventory-api.js";
 import { preparePhoto, readBillingSheet, readDocket, readPrescription, startReview, reviewBilling, saveBillingScan,
   earlierScans, findBooking, money, searchPatientsQuick, todaysScans, readAuto, smallCopy,
-  setScanJob, newScanJobId, parkScan, scanJobs, openScanJob, finishScanJob, staffList} from "./scanner-api.js";
+  setScanJob, newScanJobId, parkScan, scanJobs, openScanJob, finishScanJob, staffList, warmPatientSearch} from "./scanner-api.js";
 import { mountRxResult } from "./scanner-rx.js";
 import { rxProductList } from "./rx-products.js";
 import { mountDocketResult } from "./scanner-docket.js";
@@ -1288,6 +1288,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     else if (act === "save") save(b);
     else if (act === "pickpat") {
       st.pickPatient = !st.pickPatient;
+      if (st.pickPatient) warmPatientSearch();
       render();
       if (st.pickPatient && !((st.booking && st.booking.list) || []).length) {
         const q = root.querySelector('[data-role="bpq"]');
