@@ -31,6 +31,7 @@ const I = {
   moon: svg('<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>'),
   smile: svg('<circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>'),
   trash: svg('<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>'),
+  min: svg('<polyline points="6 9 12 15 18 9"/>'),
 };
 
 // The emoji panel in the message box
@@ -144,6 +145,7 @@ let popTimer = null;
 let baseTitle = "";
 let pendingOpen = "";        // a conversation to open from a link (e.g. the reminder email)
 let attach = null;           // the picture waiting to be sent: { blob, url, w, h, type }
+let minimized = false;       // folded down to its header: the conversation, typing and picture are kept
 
 /* ---------- Pictures ---------- */
 // Shrunk to about 1600px before sending. Screenshots stay PNG (sharp text); photos become JPEG. GIFs are sent as they are.
@@ -477,11 +479,12 @@ function syncBadge() {
   badge.textContent = n > 9 ? "9+" : String(n);
   badge.hidden = !n;
   document.title = n ? `(${n}) ${baseTitle}` : baseTitle;
+  paintMin();
 }
 
 // The conversation on screen is read as soon as it's seen
 function readIfViewing() {
-  if (!me || !isOpen() || view !== "thread" || document.hidden) return;
+  if (!me || !isOpen() || minimized || view !== "thread" || document.hidden) return;
   const c = chats.find((x) => x.id === openId);
   if (c && isUnread(c, me.uid) && (c.members.includes(me.uid) || (admin && c.kind === "help"))) {
     markRead(c.id).catch((err) => console.warn("Mark read failed:", err));
@@ -520,7 +523,7 @@ function chime() {
 const fromText = (c) => (c.kind === "group" ? `${c.lastByName || "Someone"} in ${c.name || "a group"}` : c.lastByName || titleOf(c));
 
 function notify(c) {
-  if (isOpen() && view === "thread" && openId === c.id && !document.hidden) return;   // already looking at it
+  if (isOpen() && !minimized && view === "thread" && openId === c.id && !document.hidden) return;   // already looking at it
   if (!muted()) chime();
   popup(c);
   if (document.hidden && "Notification" in window && Notification.permission === "granted") {
@@ -551,6 +554,8 @@ function showPanel() {
 }
 function hidePanel() {
   clearAttach();
+  minimized = false;
+  paintMin();
   panel.hidden = true;
   root.classList.remove("is-open");
   stopMessages();
@@ -559,9 +564,41 @@ function hidePanel() {
 }
 function stopMessages() { if (msgUnsub) msgUnsub(); msgUnsub = null; }
 
+// Folded: just the header shows. Unfolded: back where you were, scrolled to the latest message.
+function setMin(on) {
+  if (!panel || panel.hidden) return;
+  minimized = !!on;
+  if (minimized) {
+    hideEmoji();
+    panel.querySelectorAll(".ch-m-acts").forEach((a) => { a.hidden = true; });
+  }
+  const b = panel.querySelector('[data-act="min"]');
+  if (b) { b.setAttribute("aria-label", minimized ? "Open chat" : "Minimise"); b.title = minimized ? "Open" : "Minimise"; }
+  paintMin();
+  if (minimized) return;
+  hidePop();
+  const box = panel.querySelector('[data-role="msgs"]');
+  if (box) box.scrollTop = box.scrollHeight;
+  readIfViewing();
+  const ta = panel.querySelector(".ch-comp textarea");
+  if (ta && !isTouch()) ta.focus();
+}
+
+// The folded bar: its class, and the unread count shown on it
+function paintMin() {
+  if (!panel || !me) return;
+  const n = minimized ? myChats().filter((c) => isUnread(c, me.uid)).length : 0;
+  root.classList.toggle("is-min", minimized);
+  panel.classList.toggle("is-min", minimized);
+  panel.classList.toggle("has-new", n > 0);
+  panel.style.setProperty("--n", `"${n > 9 ? "9+" : n}"`);
+}
+
 const head = (title, { back = false, extra = "" } = {}) => `<header class="ch-hd">
     ${back ? `<button type="button" class="ch-ic" data-act="back" aria-label="Back">${I.back}</button>` : ""}
     ${title}<span class="ch-sp"></span>${extra}
+    <button type="button" class="ch-ic ch-min-btn" data-act="min" aria-label="${minimized ? "Open chat" : "Minimise"}"
+      title="${minimized ? "Open" : "Minimise"}">${I.min}</button>
     <button type="button" class="ch-ic" data-act="close" aria-label="Close">${I.x}</button></header>`;
 
 const row = (c) => {
@@ -630,6 +667,7 @@ function openThread(id) {
   const c = chatFor(id);
   if (!c || !me) return;
   if (!isOpen()) showPanel();
+  if (minimized) { minimized = false; paintMin(); }
   view = "thread";
   openId = id;
   current = c;
@@ -1120,6 +1158,8 @@ async function submitAway(form) {
 
 async function onClick(e) {
   if (!e.target.closest('.ch-emo, [data-act="emoji"]')) hideEmoji();   // a tap anywhere else closes the emoji panel
+  // A tap on the header (not one of its buttons) folds it down or opens it again
+  if (e.target.closest(".ch-hd") && !e.target.closest("button, a, input, label")) { setMin(!minimized); return; }
   const t = e.target.closest("[data-act],[data-open],[data-dm],[data-pick],[data-back],[data-emo],[data-mine],[data-reply],[data-zoom]");
   if (!t || !me) return;
   if (t.dataset.zoom !== undefined) { zoomImage(t); return; }
@@ -1135,6 +1175,7 @@ async function onClick(e) {
       if (isOpen()) hidePanel(); else { showPanel(); drawList(); }
       break;
     case "close": hidePanel(); break;
+    case "min": setMin(!minimized); break;
     case "back": clearAttach(); stopMessages(); drawList(); break;
     case "attach": { const f = panel.querySelector('[data-role="file"]'); if (f) f.click(); break; }
     case "unattach": clearAttach(); break;
@@ -1217,7 +1258,7 @@ function onSubmit(e) {
 }
 
 function onKey(e) {
-  if (e.key === "Escape" && isOpen()) {
+  if (e.key === "Escape" && isOpen() && !minimized) {
     const emo = panel.querySelector('[data-role="emo"]');
     if (emo && !emo.hidden) { emo.hidden = true; return; }
     if (editing) { stopEdit(); return; }
