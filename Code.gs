@@ -35,6 +35,7 @@ function doPost(e) {
     if (body.action === 'deleteRecording') return json_(handleDeleteRecording_(body));
     if (body.action === 'sendTreatmentEmail') return json_(handleSendTreatmentEmail_(body));
     if (body.action === 'regenerateSoap') return json_(handleRegenerateSoap_(body));
+    if (body.action === 'pasteNotes') return json_(handlePasteNotes_(body));
     if (body.action === 'mergeConsults') return json_(handleMergeConsults_(body));
     if (body.action === 'emailFromPlan') return json_(handleEmailFromPlan_(body));
     if (body.action === 'sendFormPdf') return json_(handleSendFormPdf_(body));
@@ -1498,7 +1499,8 @@ function deleteRecording_(body) {
 
   // Only the clinician who recorded it, or an Admin
   const job = fsGetDoc_(cfg, 'recording_jobs/' + id);
-  const isOwner = !!(job && job.createdByUid && job.createdByUid === session.uid);
+  const isOwner = !!((job && job.createdByUid && job.createdByUid === session.uid) ||
+    (rec['Created By Uid'] && rec['Created By Uid'] === session.uid));
   const isAdmin = /^admin$/i.test(String(session.role || ''));
   if (!isOwner && !can_(session, 'consult.delete')) return { ok: false, error: 'FORBIDDEN' };
 
@@ -1740,6 +1742,162 @@ function handleRegenerateSoap_(body) {
   } finally {
     cache.remove(busyKey);
   }
+}
+
+
+// ===================== Pasted consultation notes (Heidi, or any written notes) =====================
+// Patient page → Paste Heidi notes. "generate": the Recorder's prompt writes SOAP from the pasted text (nothing saved).
+// "save": the consultation record, exactly like a recording's, so it shows everywhere recordings do.
+const PASTE_MAX_ = 200000;
+const PASTE_SOURCE_ = 'Pasted notes';
+
+function handlePasteNotes_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'consult.record')) return { ok: false, error: 'FORBIDDEN' };
+  const op = String(body.op || '');
+  try {
+    if (op === 'generate') return pasteGenerate_(body, session);
+    if (op === 'save') return pasteSave_(body, session);
+  } catch (err) {
+    console.error('Paste notes ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: true, problem: 'Something went wrong: ' + String(err && err.message ? err.message : err).slice(0, 200) };
+  }
+  return { ok: false, error: 'BAD_REQUEST' };
+}
+
+// "2026-11-07" + "14:30" → a Date in Perth time (no time: midday)
+function pasteWhen_(dateKey, time) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || ''))) return null;
+  const t = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(time || '')) ? String(time) : '12:00';
+  return Utilities.parseDate(dateKey + ' ' + t, REC_TZ_, 'yyyy-MM-dd HH:mm');
+}
+
+function pasteGenerate_(body, session) {
+  const text = String(body.text || '').replace(/\r/g, '').trim();
+  if (text.length < 40) return { ok: true, problem: "There isn't enough there to write notes from yet." };
+  if (text.length > PASTE_MAX_) return { ok: true, problem: "That's too long to write notes from in one go." };
+  const cache = CacheService.getScriptCache();
+  const rk = 'paste_ai_' + session.uid;
+  const used = Number(cache.get(rk) || 0);
+  if (used >= 20) return { ok: true, problem: "You've written a lot of notes with AI in the last hour. Try again a bit later." };
+  cache.put(rk, String(used + 1), 3600);
+
+  const when = pasteWhen_(body.date, body.time) || new Date();   // "in 2 weeks" is worked out from the consultation date
+  let soapJson;
+  try {
+    soapJson = cleanSoapJson_(callGeminiComplex(text, when));
+  } catch (err) {
+    console.error('Paste notes: Gemini failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: true, problem: "Gemini couldn't write the notes just now. Try again in a minute, or use Split into sections." };
+  }
+  return {
+    ok: true,
+    soap: formatSoapFromJSON(soapJson),
+    personalNotes: Array.isArray(soapJson.personal_notes) ? soapJson.personal_notes.map(String).filter(Boolean).slice(0, 10) : [],
+  };
+}
+
+function pasteSave_(body, session) {
+  const cfg = getConfig_();
+  const p = flowPatient_(cfg, String(body.patientId || ''));   // follows a merge to the record that was kept
+  if (!p) return { ok: true, problem: "This patient couldn't be found." };
+
+  const soap = String(body.soap || '').replace(/\r/g, '').trim();
+  if (!/!!\s*[A-Z][^:\n]*:/.test(soap)) return { ok: true, problem: "There's nothing to save yet." };
+  if (soap.length > PASTE_MAX_) return { ok: true, problem: 'The notes are too long to save.' };
+  const raw = String(body.text || '').replace(/\r/g, '').trim().slice(0, PASTE_MAX_);
+
+  const when = pasteWhen_(body.date, body.time);
+  if (!when) return { ok: true, problem: 'Choose the consultation date.' };
+  if (when.getTime() > Date.now() + 6 * 3600000) return { ok: true, problem: "The consultation date can't be in the future." };
+  const day = Utilities.formatDate(when, REC_TZ_, 'yyyy-MM-dd');
+
+  let clin = { id: String(session.uid || ''), name: String(session.name || '') };
+  const sid = String(body.staffId || '');
+  if (sid && sid !== session.uid) {
+    const s = getStaffDocs_().filter(function (x) { return x.id === sid && x.active !== false; })[0];
+    if (!s) return { ok: true, problem: "That clinician isn't on the staff list." };
+    clin = { id: s.id, name: String(s.name || '') };
+  }
+  const who = flowWho_(p);
+  const pid = String(p.PttID || p._id);
+
+  // Already has notes that day? Asked first, never merged
+  if (body.force !== true) {
+    const same = fsQuery_(cfg, 'appointment_transcripts', quoteField_('Patient ID'), 'EQUAL', pid, 100).filter(function (r) {
+      return consultDateKey_(r) === day && !/^merged$/i.test(String(r.Status || '')) && !r['Merged Into'];
+    });
+    if (same.length) {
+      return { ok: true, needsForce: true, existing: same.slice(0, 5).map(function (r) {
+        return { id: r._id, staff: String(r['Staff Name'] || ''), status: String(r.Status || ''),
+          pasted: String(r.Source || '') === PASTE_SOURCE_ };
+      }) };
+    }
+  }
+
+  const id = 'PST-' + Utilities.formatDate(new Date(), REC_TZ_, 'yyyyMMdd') + '-' +
+    Utilities.getUuid().replace(/-/g, '').slice(0, 8).toUpperCase();
+  const now = new Date();
+  const status = body.status === 'Reviewed' ? 'Reviewed' : 'Draft';
+  const mode = body.mode === 'ai' ? 'ai' : 'split';
+
+  // Recording rules (reminders, and the list of rules that fired). Never stops the save.
+  let ruleHits = [];
+  let ruleError = '';
+  if (raw) {
+    try {
+      ruleHits = recApplyRules_(cfg, {
+        _id: id, patientId: pid, patientDocId: p._id, patientName: who.name,
+        staffName: clin.name, createdByUid: clin.id, startedAt: when.toISOString(),
+      }, raw) || [];
+    } catch (e) {
+      console.error('Paste notes: recording rules failed for ' + id + ': ' + (e && e.stack ? e.stack : e));
+      ruleError = String((e && e.message) || e).slice(0, 300);
+    }
+  }
+
+  const stamp = Utilities.formatDate(now, REC_TZ_, 'MMMM d, yyyy h:mm a');
+  const fields = {
+    'Record ID': id,
+    'Status': status,
+    'Record Date and Time': Utilities.formatDate(when, REC_TZ_, 'MMMM d, yyyy h:mm a'),
+    'Record Date': day,
+    'Patient ID': pid,
+    'Patient Doc ID': p._id,
+    'Patient Name': who.name,
+    'Staff Name': clin.name,
+    'Staff Uid': clin.id,
+    'Merged Into': '',
+    'Merged From': [],
+    'Full Raw Transcript': raw,        // kept, so Regenerate works later
+    'DeepGram Transcript': '',
+    'DeepGram Summary': '',
+    'Gemini SOAP': soap,
+    'Suggested Personal Notes': (Array.isArray(body.personalNotes) ? body.personalNotes : [])
+      .map(function (s) { return String(s || '').trim().slice(0, 500); }).filter(Boolean).slice(0, 10),
+    'Audio Path': '',
+    'Duration Sec': 0,
+    'Consent Recorded': false,
+    'Source': PASTE_SOURCE_,
+    'Paste Mode': mode === 'ai' ? 'Written by AI' : 'Split into sections',
+    'Rule Hits': ruleHits,
+    'Rules Checked At': raw ? now.toISOString() : '',
+    'Rule Error': ruleError,
+    'Created At': now.toISOString(),
+    'Created By': String(session.name || ''),
+    'Created By Uid': String(session.uid || ''),
+    'Last Saved': stamp,
+    'Last Saved By': String(session.name || ''),
+    'Last Saved By Uid': String(session.uid || ''),
+  };
+  if (status === 'Reviewed') {
+    Object.assign(fields, { 'Reviewed By': String(session.name || ''), 'Reviewed By Uid': String(session.uid || ''),
+      'Reviewed At': now.toISOString() });
+  }
+  commitWrites_(cfg, [updateWrite_(cfg, 'appointment_transcripts/' + id, fields)]);
+  console.log('Pasted notes ' + id + ' (' + mode + ', ' + status + ') for ' + who.name + ' by ' + session.name);
+  return { ok: true, id: id, status: status, rules: ruleHits.length };
 }
 
 // ===================== Consultations: one set of notes per patient, clinician and day =====================

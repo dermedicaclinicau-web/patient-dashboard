@@ -41,6 +41,7 @@ import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase
 import { copyOldWrRecord } from "./wr-copy.js";
 import { listTaskTypes } from "./task-types.js";
 import { startPageCache, stopPageCache, clearPageCache } from "./page-cache.js";
+import { openPasteNotes } from "./paste-notes.js";
 
 /* ===================== Config ===================== */
 
@@ -51,8 +52,10 @@ const DOC_ACTIONS = [
   ["Skin script (SSP)", "ssp", "create-ssp"],
   ["General note", "note"],
   ["Personal note", "lock", "add-note"],
+  ["Paste Heidi notes", "paste", "paste-notes"],  
   ["+ Reminder", "bell", "add-reminder"],
   ["+ Staff Task", "staff", "staff-task"],
+
 ];
 
 // Order and look of the Pre-Consultation section.
@@ -176,6 +179,7 @@ const ICONS = {
   tick: svg('<polyline points="20 6 9 17 4 12"/>'),
   route: svg('<circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/>'),
   chev: svg('<polyline points="6 9 12 15 18 9"/>', "sum-chev"),
+  paste: svg('<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="13" y2="16"/>'),
 };
 
 /* ===================== Remember open/closed sections ===================== */
@@ -255,6 +259,13 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     if (refreshBtn) { refreshAll(refreshBtn); return; }
     if (t.closest("[data-action='merge-info']")) { mergeInfo(); return; }
     if (t.closest("[data-action='add-reminder']")) { addReminderFlow(); return; }
+    if (t.closest("[data-action='paste-notes']")) {
+      openPasteNotes({
+        patient, staff,
+        onSaved: () => { clearPageCache(); loadTranscriptSections(); },   // badges, plans and history show the new notes
+      });
+      return;
+    }
     const staffTaskBtn = t.closest("[data-action='staff-task']");
     if (staffTaskBtn) { openStaffTaskMenu(staffTaskBtn); return; }
     if (t.closest("[data-action='sms']")) { openSmsDialog({ patient }); return; }
@@ -351,7 +362,10 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     <div>
       <p class="eyebrow">Clinical documentation</p>
       <div class="doc-tiles">
-        ${DOC_ACTIONS.filter(([, , action]) => action !== "staff-task" || (can("tasks.run") && can("tasks.staff"))).map(([label, icon, action]) =>
+        ${DOC_ACTIONS.filter(([, , action]) =>
+            (action !== "staff-task" || (can("tasks.run") && can("tasks.staff"))) &&
+            (action !== "paste-notes" || can("consult.record"))
+          ).map(([label, icon, action]) =>
           `<button type="button" class="doc-tile" ${action ? `data-action="${action}"` : `data-soon="${escapeHtml(label)}"`}>${ICONS[icon]}<span>${escapeHtml(label)}</span></button>`
         ).join("")}
       </div>

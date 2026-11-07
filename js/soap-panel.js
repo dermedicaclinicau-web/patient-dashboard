@@ -276,6 +276,7 @@ function render() {
   const d = current.data;
   const status = String(d.Status || "Draft");
   const reviewed = /^reviewed$/i.test(status);
+  const pasted = /^pasted/i.test(String(d.Source || ""));
   const hasSoap = !!String(d["Gemini SOAP"] || "").trim();
   const keepPn = panel.querySelector("[data-pn]") ? panel.querySelector("[data-pn]").value : null;
   const suggestions = Array.isArray(d["Suggested Personal Notes"]) ? d["Suggested Personal Notes"] : [];
@@ -303,6 +304,8 @@ function render() {
              <button type="button" class="sp-link" data-sp="undo-regen">Restore previous version</button></p>`
         : ""}
       ${!hasSoap ? `<p class="sp-banner warn">Clinical notes haven't been generated for this record yet. You can still type notes below.</p>` : ""}
+      ${pasted ? `<p class="sp-banner info">Pasted${d["Paste Mode"] ? ` (${escapeHtml(String(d["Paste Mode"]).toLowerCase())})` : ""}${
+        d["Created By"] ? ` by ${escapeHtml(d["Created By"])}` : ""}. The original text is under “Pasted text” below.</p>` : ""}
       ${Array.isArray(d["Merged From"]) && d["Merged From"].length
         ? `<p class="sp-banner info">These notes combine ${d["Merged From"].length + 1} recordings of this consultation${
             d["Merged By"] ? ` (merged: ${escapeHtml(String(d["Merged By"]))})` : ""}. The raw transcript below contains all of them.</p>`
@@ -310,7 +313,7 @@ function render() {
       ${rulesHtml(d)}
 
       <details class="sp-raw">
-        <summary>${ICONS.chev}${ICONS.lines}<span>Raw transcript</span></summary>
+        <summary>${ICONS.chev}${ICONS.lines}<span>${pasted ? "Pasted text" : "Raw transcript"}</span></summary>
         <div class="sp-raw-body">${transcriptHtml(d["Full Raw Transcript"], escapeHtml)}</div>
       </details>
 
