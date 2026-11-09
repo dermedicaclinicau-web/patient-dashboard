@@ -29,6 +29,15 @@ const ICONS = {
   eye: svg('<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>'),
   edit: svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'),
   copy: svg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
+  drop: svg('<path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>'),
+  bag: svg('<path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/>'),
+  plus: svg('<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>'),
+  refresh: svg('<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>'),
+  star: svg('<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>'),
+  calendar: svg('<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>'),
+  gift: svg('<polyline points="20 12 20 22 4 22 4 12"/><rect x="2" y="7" width="20" height="5"/><line x1="12" y1="22" x2="12" y2="7"/><path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z"/><path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/>'),
+  sun: svg('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>'),
+  moon: svg('<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>'),
 };
 
 // Shares the dashboard's "remember open sections" storage
@@ -40,23 +49,29 @@ function wasOpen() {
 
 export function skincareSectionHtml() {
   const open = wasOpen() ? "open" : "";
+  // The heading sits beside the row, not around it: the dashboard's Expand all / Collapse all finds the cards one level down
   return `
+    <button type="button" class="sec-head sk-head" aria-expanded="false" title="Open or close both">
+      ${ICONS.chev}<span class="sec-head-ic">${ICONS.drop}</span>
+      <span class="pc-title">Skin Care</span>
+      <span class="sec-head-sum sk-head-sum"></span>
+    </button>
     <div class="sk-grid">
-      <details class="sk-card" data-key="skincare" ${open}>
+      <details class="sk-card sk-ssp" data-key="skincare" ${open}>
         <summary>
-          <span class="sk-title">${ICONS.chev}Skin Script Protocol</span>
+          <span class="sk-title">${ICONS.chev}<span class="sk-ic">${ICONS.drop}</span>Skin Script Protocol</span>
           <span class="sk-tools">
-            <button type="button" class="sk-btn" data-sk-action="refresh">Refresh</button>
-            <button type="button" class="sk-btn" data-action="create-ssp">Create new SSP</button>
+            <button type="button" class="sk-btn sk-btn-ic" data-sk-action="refresh" title="Refresh" aria-label="Refresh">${ICONS.refresh}</button>
+            <button type="button" class="sk-btn is-primary" data-action="create-ssp">${ICONS.plus}<span>New SSP</span></button>
             <span class="sk-badge sk-ssp-count">–</span>
           </span>
         </summary>
         <div class="sk-body sk-ssp-body"><div class="skeleton sm"></div></div>
       </details>
 
-      <details class="sk-card" data-key="skincare" ${open}>
+      <details class="sk-card sk-pur" data-key="skincare" ${open}>
         <summary>
-          <span class="sk-title">${ICONS.chev}Product Purchase Records</span>
+          <span class="sk-title">${ICONS.chev}<span class="sk-ic">${ICONS.bag}</span>Product Purchase Records</span>
           <span class="sk-tools"><span class="sk-badge sk-pur-count">–</span></span>
         </summary>
         <div class="sk-body sk-pur-body"><div class="skeleton sm"></div></div>
@@ -109,8 +124,23 @@ const isoAddMonths = (iso, n) => {
   const dt = new Date(y, m - 1 + n, d);
   return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
 };
-const todayIso = () => isoAddMonths(new Date().toISOString().slice(0, 10), 0);
+// Today in local time (toISOString is UTC, so before 8 am in Perth it gave yesterday)
+const todayIso = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
 
+// Valid / expires soon / expired, for protocols saved in the portal
+function protoStatus(p) {
+  const until = p.portal ? String(p.portal.validUntil || "") : "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(until)) return { cls: "", text: "" };
+  const today = todayIso();
+  if (until < today) return { cls: "is-expired", text: `Expired ${formatDobLong(until)}` };
+  const days = Math.round((Date.parse(until) - Date.parse(today)) / 864e5);
+  return days <= 14
+    ? { cls: "is-soon", text: `Expires ${formatDobLong(until)}` }
+    : { cls: "is-valid", text: `Valid until ${formatDobLong(until)}` };
+}
 // The portal version of an SSP_NEW protocol. Keeps the sheet's record ID, so the patient page shows it once
 // and the sheet isn't written to again.
 async function sheetRecord(p, patient) {
@@ -148,6 +178,19 @@ export function mountSkincare(root, patient, staff = null) {
   const [sspCard, purCard] = grid.querySelectorAll(".sk-card");
   const sspBody = grid.querySelector(".sk-ssp-body");
   const purBody = grid.querySelector(".sk-pur-body");
+
+  // The "Skin Care" heading: opens or closes both cards, and shows the latest protocol
+  const head = root.querySelector(".sk-head");
+  const syncHead = () => {
+    if (!head) return;
+    head.classList.toggle("is-open", sspCard.open);
+    head.setAttribute("aria-expanded", String(sspCard.open));
+  };
+  if (head) head.addEventListener("click", () => {
+    const open = !sspCard.open;
+    sspCard.open = open;
+    purCard.open = open;
+  });
 
   let data = null;
   let loading = null;
@@ -191,9 +234,22 @@ export function mountSkincare(root, patient, staff = null) {
     sspBody.innerHTML = data.protocols.length
       ? data.protocols.map((p, i) => protocolHtml(p, i === 0, lastMap, i)).join("") + legendHtml() +
         (data.matchedByName ? `<p class="sk-note">Some records were matched by patient name.</p>` : "")
-      : `<p class="sk-empty">No skin script protocol on record.</p>`;
+      : `<div class="sk-empty"><span class="sk-empty-ic">${ICONS.drop}</span><p>No skin script protocol yet.</p>${
+          can("ssp.create") ? `<button type="button" class="sk-btn is-primary" data-action="create-ssp">${ICONS.plus}<span>Create one</span></button>` : ""}</div>`;
 
     renderPurchases();
+    renderHead();
+  }
+
+  function renderHead() {
+    const el = head && head.querySelector(".sk-head-sum");
+    if (!el) return;
+    const p = data.protocols[0];
+    if (!p) { el.innerHTML = '<span class="sec-ago">No protocol yet</span>'; return; }
+    const st = protoStatus(p);
+    const when = p.date ? formatDobLong(p.date) : (p.dateText || "Undated");
+    el.innerHTML = `<span class="sec-ago">Latest protocol ${escapeHtml(when)}</span>${
+      st.text ? `<span class="ssp-status ${st.cls}">${escapeHtml(st.text)}</span>` : ""}`;
   }
 
   function renderPurchases() {
@@ -206,6 +262,7 @@ export function mountSkincare(root, patient, staff = null) {
     if (!card.classList || !card.classList.contains("sk-card")) return;
     const other = card === sspCard ? purCard : sspCard;
     if (other.open !== card.open) other.open = card.open;
+    syncHead();
     if (card.open) load();
   }, true);
 
@@ -296,6 +353,7 @@ export function mountSkincare(root, patient, staff = null) {
   });
 
   // Counts on the collapsed bars: load quietly once the page has drawn
+  syncHead();
   if (sspCard.open) load();
   else setTimeout(() => { if (grid.isConnected) load(); }, 600);
 }
@@ -351,8 +409,7 @@ function portalMeta(r) {
   const sent = (r.deliveries || []).slice(-2).reverse()
     .map((d) => (d.kind === "print" ? "Sent to printer" : `Emailed to ${d.to}`));
   return [
-    r.validUntil ? `Valid until ${formatDobLong(r.validUntil)}` : "",
-    r.createdBy ? `by ${r.createdBy}` : "",
+    r.createdBy ? `Made by ${r.createdBy}` : "",
     r.editCount ? `Edited${r.editCount > 1 ? ` ${r.editCount}×` : ""}${r.editedBy ? ` · last by ${r.editedBy}` : ""}` : "",
     ...sent,
   ].filter(Boolean).map(escapeHtml).join(" · ");
@@ -372,6 +429,12 @@ function sheetItems(p) {
   });
 }
 
+// "Step A - Preparing your Skin" -> letter A, "Preparing your Skin"
+function stepText(l, label) {
+  const m = /^Step ([A-F]) - (.+)$/.exec(label);
+  return { letter: m ? m[1] : l === "BOOST" ? "+" : "•", text: m ? m[2] : label };
+}
+
 function protocolHtml(p, isLatest, lastMap, idx = 0) {
   const rows = {};
   (p.items || []).forEach((item) => {
@@ -388,6 +451,8 @@ function protocolHtml(p, isLatest, lastMap, idx = 0) {
   const cell = (list) => (list.length ? list.join("") : `<span class="missing">—</span>`);
   const dateLabel = p.date ? formatDobLong(p.date) : (p.dateText || "Undated");
   const id = p.portal ? escapeHtml(p.portal.id) : "";
+  const st = protoStatus(p);
+  const meta = p.portal ? portalMeta(p.portal) : "";
 
   const canEdit = can("ssp.create");
   const editBtns = canEdit
@@ -402,22 +467,34 @@ function protocolHtml(p, isLatest, lastMap, idx = 0) {
        <button type="button" class="ssp-btn" data-sk-sheet="print" data-idx="${idx}">${ICONS.print}Print</button>${editBtns}`;
 
   return `
-    <details class="ssp-protocol" ${isLatest ? "open" : ""}>
+    <details class="ssp-protocol${isLatest ? " is-latest" : ""}" ${isLatest ? "open" : ""}>
       <summary>
-        <span class="ssp-title">Protocol from ${escapeHtml(dateLabel)}</span>
+        <span class="ssp-title">
+          ${isLatest ? '<span class="ssp-latest">Latest</span>' : ""}
+          <span>Protocol from ${escapeHtml(dateLabel)}</span>
+          ${st.text ? `<span class="ssp-status ${st.cls}">${escapeHtml(st.text)}</span>` : ""}
+          ${p.portal ? "" : '<span class="ssp-src" title="From the old Google Sheet">Older protocol</span>'}
+        </span>
         <span class="ssp-actions">${actions}${ICONS.chev}</span>
       </summary>
-      ${p.portal ? `<p class="sk-ssp-meta">${portalMeta(p.portal)}</p>` : ""}
+      ${meta ? `<p class="sk-ssp-meta">${meta}</p>` : ""}
       <div class="ssp-table-wrap">
         <table class="ssp-table">
-          <thead><tr><th>Step</th><th>Morning</th><th>Evening</th></tr></thead>
+          <thead><tr>
+            <th>Step</th>
+            <th><span class="ssp-th">${ICONS.sun}Morning</span></th>
+            <th><span class="ssp-th">${ICONS.moon}Evening</span></th>
+          </tr></thead>
           <tbody>
-            ${ordered.map(([l, label]) => `
+            ${ordered.map(([l, label]) => {
+              const s = stepText(l, label);
+              return `
               <tr>
-                <td class="ssp-step">${escapeHtml(label)}</td>
+                <td class="ssp-step"><span class="ssp-step-in"><span class="ssp-letter s-${escapeHtml(l)}">${escapeHtml(s.letter)}</span><span>${escapeHtml(s.text)}</span></span></td>
                 <td>${cell(rows[l].am)}</td>
                 <td>${cell(rows[l].pm)}</td>
-              </tr>`).join("")}
+              </tr>`;
+            }).join("")}
           </tbody>
         </table>
       </div>
@@ -446,7 +523,9 @@ function timeAgo(dateKey) {
 }
 
 function purchasesHtml(purchases, sspProducts, shown) {
-  if (!purchases.length) return `<p class="sk-empty">No product purchases on record.</p>`;
+  if (!purchases.length) {
+    return `<div class="sk-empty"><span class="sk-empty-ic">${ICONS.bag}</span><p>No product purchases on record.</p></div>`;
+  }
 
   const counts = new Map();
   purchases.forEach((p) => {
@@ -461,6 +540,21 @@ function purchasesHtml(purchases, sspProducts, shown) {
   const last = purchases[0];
   const remaining = purchases.length - shown;
 
+  // Newest first, with a line for each year
+  let year = "";
+  const rows = purchases.slice(0, shown).map((p) => {
+    const y = String(p.date || "").slice(0, 4);
+    const yearRow = /^\d{4}$/.test(y) && y !== year ? `<li class="pur-year">${y}</li>` : "";
+    if (yearRow) year = y;
+    return `${yearRow}
+      <li class="pur-row">
+        <span class="pur-date">${escapeHtml(p.date ? formatDobLong(p.date) : p.dateText)}</span>
+        <span class="pur-prod">${escapeHtml(p.product)}
+          ${sspProducts.has(normProduct(p.product)) ? "" : `<span class="tag-notssp">Not in SSP</span>`}</span>
+        <span class="pur-staff">${escapeHtml(p.staff || "")}</span>
+      </li>`;
+  }).join("");
+
   return `
     <div class="pur-chips">
       <span class="pur-chip">${purchases.length} purchase${purchases.length === 1 ? "" : "s"}</span>
@@ -469,23 +563,15 @@ function purchasesHtml(purchases, sspProducts, shown) {
     </div>
 
     <div class="pur-stats">
-      <div class="pur-stat"><small>Most purchased</small>
-        <strong>${escapeHtml(top.name)}${top.n > 1 ? ` <em>×${top.n}</em>` : ""}</strong></div>
-      <div class="pur-stat"><small>Last purchase</small>
-        <strong>${escapeHtml(last.date ? formatDobLong(last.date) : last.dateText)}${last.date ? ` · <span class="muted">${timeAgo(last.date)}</span>` : ""}</strong></div>
-      <div class="pur-stat"><small>Samples given</small>
-        <strong>${samples || "None"}</strong></div>
+      <div class="pur-stat"><span class="pur-stat-ic">${ICONS.star}</span><div><small>Most purchased</small>
+        <strong title="${escapeHtml(top.name)}">${escapeHtml(top.name)}${top.n > 1 ? ` <em>×${top.n}</em>` : ""}</strong></div></div>
+      <div class="pur-stat"><span class="pur-stat-ic">${ICONS.calendar}</span><div><small>Last purchase</small>
+        <strong>${escapeHtml(last.date ? formatDobLong(last.date) : last.dateText)}${last.date ? ` · <span class="muted">${timeAgo(last.date)}</span>` : ""}</strong></div></div>
+      <div class="pur-stat"><span class="pur-stat-ic">${ICONS.gift}</span><div><small>Samples given</small>
+        <strong>${samples || "None"}</strong></div></div>
     </div>
 
-    <ul class="pur-list">
-      ${purchases.slice(0, shown).map((p) => `
-        <li class="pur-row">
-          <span class="pur-date">${escapeHtml(p.date ? formatDobLong(p.date) : p.dateText)}</span>
-          <span class="pur-prod">${escapeHtml(p.product)}
-            ${sspProducts.has(normProduct(p.product)) ? "" : `<span class="tag-notssp">Not in SSP</span>`}</span>
-          <span class="pur-staff">${escapeHtml(p.staff || "")}</span>
-        </li>`).join("")}
-    </ul>
+    <ul class="pur-list">${rows}</ul>
 
     ${remaining > 0
       ? `<button type="button" class="pur-more" data-sk-action="more">Load ${Math.min(PAGE, remaining)} more · ${remaining} remaining</button>`

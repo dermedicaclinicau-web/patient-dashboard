@@ -40,6 +40,24 @@ const keyDate = (key) => {
   return m ? new Date(+m[1], +m[2] - 1, +m[3], 12) : null;
 };
 
+// "3 mo ago"
+function agoText(d) {
+  if (!(d instanceof Date) || isNaN(d)) return "";
+  const days = Math.floor((Date.now() - d.getTime()) / 864e5);
+  if (days < 1) return "today";
+  if (days < 2) return "yesterday";
+  if (days < 30) return `${days} days ago`;
+  const mo = Math.floor(days / 30.44);
+  if (mo < 12) return `${mo} mo ago`;
+  const y = Math.floor(mo / 12);
+  return `${y} yr${y === 1 ? "" : "s"} ago`;
+}
+
+// The date as a block: 12 / MAR / 2026
+const dateBlock = (it) => (it.date instanceof Date && !isNaN(it.date)
+  ? `<span class="bp-date" title="${escapeHtml(fmt(it))}"><b>${it.date.getDate()}</b><span>${MONTHS[it.date.getMonth()]}</span><small>${it.date.getFullYear()}</small></span>`
+  : `<span class="bp-date is-none" title="${escapeHtml(it.dateText || "Undated")}"><b>–</b><span>Undated</span></span>`);
+
 // Prescriptions filled in on the portal, sorted by the type set on the version they were filled in on
 async function portalPrescriptions(patient) {
   try {
@@ -152,9 +170,15 @@ async function loadBillingAndRx(patient) {
 
 export function billingRxSectionHtml() {
   const open = isOpenSaved("billing-rx", true) ? "open" : "";
+  // The heading sits beside the rows, not around them: the dashboard's Expand all / Collapse all finds the cards one level down
   return `
+    <button type="button" class="sec-head bp-head" aria-expanded="false" title="Open or close all">
+      ${ICONS.chev}<span class="sec-head-ic">${ICONS.receipt}</span>
+      <span class="pc-title">Billing &amp; Prescriptions</span>
+      <span class="sec-head-sum bp-head-sum"></span>
+    </button>
     <div class="bp-grid">
-      <details class="rc-card" data-key="billing-rx" ${open}>
+      <details class="rc-card bp-card bp-billing" data-key="billing-rx" ${open}>
         <summary>
           <span class="rc-title">${ICONS.chev}<span class="bp-icon billing">${ICONS.receipt}</span>Billing Sheet</span>
           <span class="sk-badge bp-billing-count">–</span>
@@ -162,7 +186,7 @@ export function billingRxSectionHtml() {
         <div class="rc-body"><div class="bp-list bp-billing-body"><div class="skeleton sm"></div></div></div>
       </details>
 
-      <details class="rc-card" data-key="billing-rx" ${open}>
+      <details class="rc-card bp-card bp-rx" data-key="billing-rx" ${open}>
         <summary>
           <span class="rc-title">${ICONS.chev}<span class="bp-icon rx">${ICONS.rx}</span>Product Prescriptions</span>
           <span class="sk-tools">
@@ -174,6 +198,7 @@ export function billingRxSectionHtml() {
       </details>
     </div>`;
 }
+
 /* ===================== Behaviour ===================== */
 
 export function mountBillingRx(root, patient) {
@@ -183,17 +208,45 @@ export function mountBillingRx(root, patient) {
   const phGrid = root.querySelector(".ph-grid");
 
   const VIEWS = {
-    billing: { scope: grid, body: ".bp-billing-body", count: ".bp-billing-count", item: billingHtml,
+    billing: { scope: grid, body: ".bp-billing-body", count: ".bp-billing-count", item: billingHtml, icon: "receipt",
                empty: "No billing sheets on file.", what: "billing sheets" },
-    rx: { scope: grid, body: ".bp-rx-body", count: ".bp-rx-count", item: rxHtml,
+    rx: { scope: grid, body: ".bp-rx-body", count: ".bp-rx-count", item: rxHtml, icon: "rx",
           empty: "No other prescriptions on file.", what: "prescriptions" },
-    injectables: irGrid && { scope: irGrid, body: ".ir-body", count: ".ir-count", item: rxHtml,
+    injectables: irGrid && { scope: irGrid, body: ".ir-body", count: ".ir-count", item: rxHtml, icon: "syringe",
                              empty: "No injectable prescriptions on file.", what: "injectable prescriptions" },
   };
 
   let data = null;
   let loading = false;
   const shown = { billing: PAGE, rx: PAGE, injectables: PAGE };
+
+  // The "Billing & Prescriptions" heading: opens or closes every card in its three rows
+  const head = root.querySelector(".bp-head");
+  const cardsAll = () => [grid, irGrid, phGrid].filter(Boolean).flatMap((g) => [...g.querySelectorAll(":scope > details")]);
+  const syncHead = () => {
+    if (!head) return;
+    const all = cardsAll().every((c) => c.open);
+    head.classList.toggle("is-open", all);
+    head.setAttribute("aria-expanded", String(all));
+  };
+  if (head) head.addEventListener("click", () => {
+    const cards = cardsAll();
+    const open = cards.some((c) => !c.open);   // any closed: open them all
+    cards.forEach((c) => { c.open = open; });
+  });
+  root.addEventListener("toggle", (e) => {
+    if (e.target.matches && e.target.matches(".bp-card")) syncHead();
+  }, true);
+  syncHead();
+
+  function renderHead() {
+    const el = head && head.querySelector(".bp-head-sum");
+    if (!el || !data) return;
+    const nRx = (data.rx || []).length + (data.injectables || []).length;
+    const last = (data.billing || []).find((b) => b.date);
+    const bits = [last && `Last billed ${agoText(last.date)}`, nRx && `${nRx} prescription${nRx === 1 ? "" : "s"}`].filter(Boolean);
+    el.innerHTML = bits.length ? `<span class="sec-ago">${escapeHtml(bits.join(" · "))}</span>` : "";
+  }
 
   async function load() {
     if (data || loading) return;
@@ -202,6 +255,7 @@ export function mountBillingRx(root, patient) {
       data = await fetchBillingAndRx(patient);
       if (!grid.isConnected) return;
       Object.keys(VIEWS).forEach((k) => { if (VIEWS[k]) render(k); });
+      renderHead();
     } catch (err) {
       console.error("Billing / prescriptions load failed:", err);
       if (!grid.isConnected) return;
@@ -227,7 +281,7 @@ export function mountBillingRx(root, patient) {
       return;
     }
     if (!items.length) {
-      body.innerHTML = `<p class="rc-empty">${v.empty}</p>`;
+      body.innerHTML = `<div class="bp-empty"><span class="bp-empty-ic">${ICONS[v.icon]}</span><p>${v.empty}</p></div>`;
       return;
     }
 
@@ -275,7 +329,7 @@ function syncRow(row, onOpen) {
 
 function placeholderCard(rowKey, open, icon, iconClass, title, message, addLabel) {
   return `
-    <details class="rc-card" data-key="${rowKey}" ${open}>
+    <details class="rc-card bp-card bp-${iconClass} is-soon" data-key="${rowKey}" ${open}>
       <summary>
         <span class="rc-title">${ICONS.chev}<span class="bp-icon ${iconClass}">${ICONS[icon]}</span>${title}</span>
         <span class="sk-tools">
@@ -283,7 +337,7 @@ function placeholderCard(rowKey, open, icon, iconClass, title, message, addLabel
           <span class="ph-badge">Soon</span>
         </span>
       </summary>
-      <div class="rc-body"><p class="rc-empty pad">${message}</p></div>
+      <div class="rc-body"><div class="bp-empty"><span class="bp-empty-ic">${ICONS[icon]}</span><p>${message}</p></div></div>
     </details>`;
 }
 
@@ -291,7 +345,7 @@ export function injectableReferralSectionHtml() {
   const open = isOpenSaved("inj-referral", true) ? "open" : "";
   return `
     <div class="ir-grid">
-      <details class="rc-card ir-card" data-key="inj-referral" ${open}>
+      <details class="rc-card ir-card bp-card bp-inj" data-key="inj-referral" ${open}>
         <summary>
           <span class="rc-title">${ICONS.chev}<span class="bp-icon inj">${ICONS.syringe}</span>Injectable Prescription Records</span>
           <span class="sk-tools">
@@ -325,50 +379,35 @@ function viewLink(link) {
     : `<span class="rc-act is-disabled" title="No file attached">${ICONS.view}View</span>`;
 }
 
+// One record: the date as a block on the left, the details beside it
+const itemHtml = (it, inner) =>
+  `<article class="rc-item bp-item">${dateBlock(it)}<div class="bp-main">${inner}</div></article>`;
+
 function billingHtml(b) {
-  return `
-    <article class="rc-item">
-      <div class="rc-item-top"><h4>${escapeHtml(b.title)}</h4><span class="rc-date">${escapeHtml(fmt(b))}</span></div>
-      ${b.staff ? `<p class="rc-staff">Assigned by ${escapeHtml(b.staff)}</p>` : ""}
-      ${b.fileName ? `<p class="bp-file">${ICONS.file}${escapeHtml(b.fileName)}</p>` : ""}
-      <div class="rc-actions">
-        ${viewLink(b.link)}
-        <button type="button" class="rc-act danger" data-soon="Delete billing sheet">${ICONS.trash}Delete</button>
-      </div>
-    </article>`;
+  return itemHtml(b, `
+    <h4>${escapeHtml(b.title)}</h4>
+    ${b.staff ? `<p class="rc-staff">Assigned by ${escapeHtml(b.staff)}</p>` : ""}
+    ${b.fileName ? `<p class="bp-file">${ICONS.file}<span>${escapeHtml(b.fileName)}</span></p>` : ""}
+    <div class="rc-actions">
+      ${viewLink(b.link)}
+      <button type="button" class="rc-act danger" data-soon="Delete billing sheet">${ICONS.trash}Delete</button>
+    </div>`);
 }
 
 function rxHtml(r) {
-  if (r.scanned) {
-    return `
-      <article class="rc-item">
-        <div class="rc-item-top"><h4>${escapeHtml(r.title)}</h4><span class="rc-date">${escapeHtml(fmt(r))}</span></div>
-        ${r.detail ? `<p class="rc-staff">${escapeHtml(r.detail)}</p>` : ""}
-        ${r.staff ? `<p class="rc-staff">${escapeHtml(r.staff)}</p>` : ""}
-        <p class="bp-id"><span class="bp-portal is-scan">Scanned</span>${r.recordId ? ` ${escapeHtml(r.recordId)}` : ""}</p>
-        <div class="rc-actions">${viewLink(r.link)}</div>
-      </article>`;
-  }
-  if (r.portalId) {
-    return `
-      <article class="rc-item">
-        <div class="rc-item-top"><h4>${escapeHtml(r.title)}</h4><span class="rc-date">${escapeHtml(fmt(r))}</span></div>
-        ${r.staff ? `<p class="rc-staff">${escapeHtml(r.staff)}</p>` : ""}
-        <p class="bp-id"><span class="bp-portal">Portal form</span></p>
-        <div class="rc-actions">
-          <a class="rc-act" href="#/form-record/${encodeURIComponent(r.portalId)}">${ICONS.view}View</a>
-        </div>
-      </article>`;
-  }
-  return `
-    <article class="rc-item">
-      <div class="rc-item-top"><h4>${escapeHtml(r.title)}</h4><span class="rc-date">${escapeHtml(fmt(r))}</span></div>
-      ${r.staff ? `<p class="rc-staff">${escapeHtml(r.staff)}</p>` : ""}
-      ${r.recordId ? `<p class="bp-id">${escapeHtml(r.recordId)}</p>` : ""}
-      <div class="rc-actions">
-        ${viewLink(r.link)}
-        <button type="button" class="rc-act" data-soon="Edit prescription">${ICONS.edit}Edit</button>
-        <button type="button" class="rc-act danger" data-soon="Delete prescription">${ICONS.trash}Delete</button>
-      </div>
-    </article>`;
+  const tag = r.scanned ? '<span class="bp-portal is-scan">Scanned</span>'
+    : r.portalId ? '<span class="bp-portal">Portal form</span>' : "";
+  // Every record opens in a new tab, so the patient page stays open
+  const acts = r.portalId
+    ? `<a class="rc-act" href="#/form-record/${encodeURIComponent(r.portalId)}" target="_blank" rel="noopener">${ICONS.view}View</a>`
+    : r.scanned ? viewLink(r.link)
+    : `${viewLink(r.link)}
+       <button type="button" class="rc-act" data-soon="Edit prescription">${ICONS.edit}Edit</button>
+       <button type="button" class="rc-act danger" data-soon="Delete prescription">${ICONS.trash}Delete</button>`;
+  return itemHtml(r, `
+    <div class="bp-item-top"><h4>${escapeHtml(r.title)}</h4>${tag}</div>
+    ${r.detail ? `<p class="bp-detail">${escapeHtml(r.detail)}</p>` : ""}
+    ${r.staff ? `<p class="rc-staff">${escapeHtml(r.staff)}</p>` : ""}
+    ${r.recordId ? `<p class="bp-id">${r.scanned ? "Script no. " : ""}${escapeHtml(r.recordId)}</p>` : ""}
+    <div class="rc-actions">${acts}</div>`);
 }
