@@ -9923,6 +9923,10 @@ function handleUpload_(body) {
     if (op === 'daysheetChunk') return upDsChunk_(body, session);
     if (op === 'daysheetFinish') return upDsFinish_(body, session);
     if (op === 'invoices') return upInvoices_(body, session);
+    if (op === 'sales') return upSales_(body, session);
+    if (op === 'salesStart') return upSalesStart_(body, session);
+    if (op === 'salesChunk') return upSalesChunk_(body, session);
+    if (op === 'salesFinish') return upSalesFinish_(body, session);
     if (op === 'invoicesSync') return upInvSync_();
     if (op === 'packages') return upPackages_(body, session);
     if (op === 'pcnStep') return upPcnStep_(body, session);
@@ -10388,6 +10392,317 @@ function upInvSync_() {
   } finally {
     lock.releaseLock();
   }
+}
+
+/* ---------- 2b) Invoice Record, every line → SALES RECORD (used for spend) ---------- */
+// Every Type (Appointment, Package, Product, Discount…). Paid = UnitPrice × Quantity + TaxAmount (inc GST).
+// A package counts when it's bought: using it later is a "Package redemption" line that cancels the appointment.
+// rows from the portal: CSV columns A, B, C, E, F, G, H, I, J, K
+// [Invoice ID, InvoiceDate, CustomerName, StaffName, Type, Description, UnitPrice, Quantity, TaxAmount, PackageLiabilityAmount]
+
+const UP_SALES_TAB_ = 'SALES RECORD';
+const UP_SALES_HEAD_ = ['Invoice ID', 'InvoiceDate', 'CustomerName', 'Patient ID', 'StaffName', 'Type', 'Description',
+  'UnitPrice', 'Quantity', 'TaxAmount', 'PackageLiabilityAmount', 'Paid'];
+const UP_SALES_MAX_DAILY_ = 20000;
+const UP_SALES_MAX_ROWS_ = 600000;   // 12 columns × 600k rows stays under Google Sheets' 10 million cells
+
+function upSalesSheet_(ss) {
+  let sh = ss.getSheetByName(UP_SALES_TAB_);
+  if (!sh) sh = ss.insertSheet(UP_SALES_TAB_);
+  if (sh.getMaxColumns() < 12) sh.insertColumnsAfter(sh.getMaxColumns(), 12 - sh.getMaxColumns());
+  if (String(sh.getRange(1, 1).getValue() || '').trim() !== UP_SALES_HEAD_[0]) {
+    sh.getRange(1, 1, 1, 12).setValues([UP_SALES_HEAD_]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+function upSalesFormat_(sh, start, n) {
+  if (n < 1) return;
+  sh.getRange(start, 1, n, 1).setNumberFormat('@');            // A Invoice ID
+  sh.getRange(start, 2, n, 1).setNumberFormat('d/m/yyyy');     // B
+  sh.getRange(start, 3, n, 5).setNumberFormat('@');            // C:G as text (a description starting with "+" stays text)
+  sh.getRange(start, 8, n, 1).setNumberFormat('$#,##0.00');    // H
+  sh.getRange(start, 9, n, 1).setNumberFormat('0.##');         // I
+  sh.getRange(start, 10, n, 3).setNumberFormat('$#,##0.00');   // J:L
+}
+
+// "$1,234.50", "(12.00)", "-125" → a number (blank → 0)
+function upSalesNum_(v) {
+  if (typeof v === 'number') return isFinite(v) ? v : 0;
+  let s = String(v == null ? '' : v).replace(/[$,\s\u00A0]/g, '');
+  const neg = /^\(.*\)$/.test(s);
+  if (neg) s = s.slice(1, -1);
+  const n = Number(s);
+  return isFinite(n) ? (neg ? -n : n) : 0;
+}
+
+// One CSV line → { id, key, sig, row } (row = SALES RECORD A:L), or null
+function upSalesLine_(r, tz, match, memo, stats) {
+  if (!Array.isArray(r)) return null;
+  const t = function (v) { return String(v == null ? '' : v).replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim(); };
+  const id = t(r[0]), rawDate = t(r[1]), name = t(r[2]);
+  if (!id && !name) return null;
+  const key = upDateKey_(rawDate);
+  if (rawDate && !key) stats.badDates++;
+  const type = t(r[4]), desc = t(r[5]);
+  const unit = upSalesNum_(r[6]);
+  const qty = t(r[7]) === '' ? 1 : upSalesNum_(r[7]);
+  const tax = upSalesNum_(r[8]);
+  const liab = upSalesNum_(r[9]);
+  const paid = Math.round((unit * qty + tax) * 100) / 100;
+  const m = name ? (memo[name] || (memo[name] = match(name))) : { id: '', how: 'blank' };
+  if (m.id) stats.matched++;
+  else if (name && m.how !== 'skip') {
+    const b = m.how === 'ambiguous' ? stats.ambiguous : stats.unmatched;
+    b[name] = (b[name] || 0) + 1;
+  }
+  return {
+    id: id, key: key, sig: [type, desc, unit, qty, tax].join('|'),
+    row: [id, key ? (stats.dates[key] || (stats.dates[key] = Utilities.parseDate(key, tz, 'yyyy-MM-dd'))) : rawDate,
+      name, m.id, t(r[3]), type, desc, unit, qty, tax, liab || '', paid],
+  };
+}
+
+function upSalesStats_() { return { matched: 0, unmatched: {}, ambiguous: {}, badDates: 0, dates: {} }; }
+function upSalesTop_(o) {
+  return { names: Object.keys(o).length,
+    sample: Object.keys(o).sort(function (a, b) { return o[b] - o[a]; }).slice(0, 20).map(function (n) { return { name: n, rows: o[n] }; }) };
+}
+
+// Daily: yesterday's file. Invoices already there are replaced by the file's lines (so a changed invoice is right);
+// invoices in the file's dates that aren't in it any more (voided) are removed once confirmed (force).
+function upSales_(body, session) {
+  let rows;
+  try { rows = JSON.parse(uploadText_(body)); }
+  catch (e) { return { ok: true, problem: "The file didn't arrive properly. Upload it again." }; }
+  if (!Array.isArray(rows) || !rows.length) return { ok: true, problem: 'The file has no invoice lines in it.' };
+  if (rows.length > UP_SALES_MAX_DAILY_) {
+    return { ok: true, problem: 'The file has ' + rows.length + ' lines. Use "Load invoice history" for a big file.' };
+  }
+  const cache = CacheService.getScriptCache();
+  const busy = cache.get('up_sales_active');
+  if (busy && Date.now() - Number(busy) < 3 * 60000) {
+    return { ok: true, problem: 'Another invoice upload is still saving. Try again in a minute.' };
+  }
+  cache.put('up_sales_active', String(Date.now()), 600);
+  try {
+    const started = Date.now();
+    const ss = SpreadsheetApp.openById(SSP_SHEET_ID);
+    const sh = upSalesSheet_(ss);
+    const tz = ss.getSpreadsheetTimeZone();
+    const stats = upSalesStats_();
+    const match = upInvPatientMatcher_(ss);
+    const memo = {};
+    const lines = rows.map(function (r) { return upSalesLine_(r, tz, match, memo, stats); }).filter(Boolean);
+    if (!lines.length) return { ok: true, problem: 'The file has no invoice lines in it.' };
+
+    const fileSig = {};
+    lines.forEach(function (l) { if (l.id) (fileSig[l.id] = fileSig[l.id] || []).push(l.sig); });
+    const keys = lines.map(function (l) { return l.key; }).filter(Boolean).sort();
+    const from = keys[0] || '', to = keys[keys.length - 1] || '';
+
+    // What's there now: each invoice's rows and date
+    const last = sh.getLastRow();
+    const have = {};
+    if (last >= 2) {
+      sh.getRange(2, 1, last - 1, 2).getValues().forEach(function (r, i) {
+        const id = String(r[0] == null ? '' : r[0]).trim();
+        if (!id) return;
+        const h = have[id] || (have[id] = { rows: [], date: sheetDateKey_(r[1], tz) });
+        h.rows.push(i + 2);
+      });
+    }
+    const missing = from ? Object.keys(have).filter(function (id) {
+      const d = have[id].date;
+      return !fileSig[id] && d && d >= from && d <= to;
+    }) : [];
+    if (missing.length && body.force !== true) {
+      return { ok: true, needsForce: true, missing: missing.length,
+        problem: missing.length + " invoice(s) in SALES RECORD for these dates aren't in this file any more (voided or deleted in Timely). Remove them?" };
+    }
+
+    // Only the rows from the first affected invoice down are rewritten (usually just the last few days)
+    let first = 0;
+    const touch = function (id) { have[id].rows.forEach(function (n) { if (!first || n < first) first = n; }); };
+    Object.keys(fileSig).forEach(function (id) { if (have[id]) touch(id); });
+    missing.forEach(touch);
+
+    const added = Object.keys(fileSig).filter(function (id) { return !have[id]; }).length;
+    let updated = 0;
+    let tail = [];
+    if (first) {
+      tail = sh.getRange(first, 1, last - first + 1, 12).getValues();
+      const old = {};
+      tail.forEach(function (r) {
+        const id = String(r[0] == null ? '' : r[0]).trim();
+        if (fileSig[id]) (old[id] = old[id] || []).push([r[5], r[6], r[7], r[8], r[9]].join('|'));
+      });
+      Object.keys(old).forEach(function (id) {
+        if (old[id].slice().sort().join('\n') !== fileSig[id].slice().sort().join('\n')) updated++;
+      });
+    }
+    const noIdLines = lines.filter(function (l) { return !l.id; }).length;
+    if (!added && !updated && !missing.length && !noIdLines) {
+      return { ok: true, rows: 0, added: 0, updated: 0, removed: 0, from: from, to: to, nothingNew: true };
+    }
+
+    const drop = {};
+    Object.keys(fileSig).forEach(function (id) { drop[id] = true; });
+    missing.forEach(function (id) { drop[id] = true; });
+    const fresh = lines.slice().sort(function (a, b) { return a.key.localeCompare(b.key) || a.id.localeCompare(b.id); })
+      .map(function (l) { return l.row; });
+    const out = tail.filter(function (r) { return !drop[String(r[0] == null ? '' : r[0]).trim()]; }).concat(fresh);
+    const start = first || last + 1;
+    if (first) sh.getRange(first, 1, tail.length, 12).clearContent();
+    const end = start + out.length - 1;
+    if (sh.getMaxRows() < end) sh.insertRowsAfter(sh.getMaxRows(), end - sh.getMaxRows());
+    upSalesFormat_(sh, start, out.length);
+    if (out.length) sh.getRange(start, 1, out.length, 12).setValues(out);
+    SpreadsheetApp.flush();
+    PropertiesService.getScriptProperties().deleteProperty('RECALL_SIG');   // spend is worked out again at the next hourly check
+
+    const res = {
+      ok: true, rows: fresh.length, added: added, updated: updated, removed: missing.length, from: from, to: to,
+      matched: stats.matched, badDates: stats.badDates,
+      unmatched: upSalesTop_(stats.unmatched), ambiguous: upSalesTop_(stats.ambiguous),
+      ms: Date.now() - started, at: new Date().toISOString(),
+    };
+    try {
+      fsPatch_(getConfig_(), 'data_uploads/sales', {
+        status: 'done', kind: 'sales', fileName: String(body.fileName || '').slice(0, 150), rows: res.rows,
+        added: added, updated: updated, removed: missing.length, from: from, to: to,
+        unmatchedNames: res.unmatched.names + res.ambiguous.names, ms: res.ms, at: res.at,
+        by: String(session.name || ''), byUid: String(session.uid || ''),
+      });
+    } catch (e) { console.warn('Sales saved, but the upload log failed: ' + e); }
+    console.log('SALES RECORD: ' + fresh.length + ' line(s), ' + added + ' new, ' + updated + ' changed, ' +
+      missing.length + ' removed, by ' + session.name);
+    return res;
+  } finally {
+    cache.remove('up_sales_active');
+  }
+}
+
+/* ---------- Load invoice history (once): replaces SALES RECORD from an all-time file, in batches ---------- */
+
+function upSalesStart_(body, session) {
+  const total = Math.floor(Number(body.total) || 0);
+  if (total < 1) return { ok: true, problem: 'The file has no invoice lines in it.' };
+  if (total > UP_SALES_MAX_ROWS_) return { ok: true, problem: 'The file has ' + total + ' lines, more than one tab can hold.' };
+  const cache = CacheService.getScriptCache();
+  const busy = cache.get('up_sales_active');
+  if (busy && !body.force && Date.now() - Number(busy) < 3 * 60000) {
+    return { ok: true, problem: 'Another invoice upload is still running. Try again in a few minutes.' };
+  }
+  try {
+    const ss = SpreadsheetApp.openById(SSP_SHEET_ID);
+    const sh = upSalesSheet_(ss);
+    const before = Math.max(0, sh.getLastRow() - 1);
+    if (!body.force && before > 1000 && total < before * 0.7) {
+      return { ok: true, needsForce: true, before: before,
+        problem: 'This file has ' + total + ' lines, but SALES RECORD has ' + before + ' now. Check it covers all time. Replace it anyway?' };
+    }
+    if (sh.getLastRow() >= 2) sh.getRange(2, 1, sh.getLastRow() - 1, 12).clearContent();
+    if (sh.getMaxRows() < total + 1) sh.insertRowsAfter(sh.getMaxRows(), total + 1 - sh.getMaxRows());
+    upSalesFormat_(sh, 2, total);
+    SpreadsheetApp.flush();
+    try { ptFsEntries_(); } catch (e) { console.warn('Portal patient list not read yet: ' + e); }
+    const token = Utilities.getUuid().replace(/-/g, '');
+    cache.put('up_sales_active', String(Date.now()), 1800);
+    cache.put('up_sales_' + token, JSON.stringify({ total: total, before: before, done: {}, started: Date.now(),
+      fileName: String(body.fileName || '').slice(0, 150) }), 21600);
+    try {
+      fsPatch_(getConfig_(), 'data_uploads/sales', { status: 'running', startedAt: new Date().toISOString(), startedBy: String(session.name || '') });
+    } catch (e) { console.warn('Upload log not saved: ' + e); }
+    return { ok: true, token: token, before: before };
+  } catch (err) {
+    cache.remove('up_sales_active');
+    throw err;
+  }
+}
+
+function upSalesChunk_(body, session) {
+  const token = String(body.token || '');
+  if (!/^[a-f0-9]{32}$/.test(token)) return { ok: false, error: 'BAD_REQUEST' };
+  const cache = CacheService.getScriptCache();
+  const raw = cache.get('up_sales_' + token);
+  if (!raw) return { ok: true, problem: 'This upload ran out of time. Upload the file again.' };
+  const st = JSON.parse(raw);
+  const offset = Math.floor(Number(body.offset));
+  let rows;
+  try { rows = JSON.parse(uploadText_(body)); }
+  catch (e) { return { ok: true, problem: "Part of the file didn't arrive properly. Upload it again." }; }
+  if (!Array.isArray(rows) || !rows.length || !(offset >= 0) || offset + rows.length > st.total) return { ok: false, error: 'BAD_REQUEST' };
+
+  const ss = SpreadsheetApp.openById(SSP_SHEET_ID);
+  const sh = upSalesSheet_(ss);
+  const tz = ss.getSpreadsheetTimeZone();
+  const stats = upSalesStats_();
+  const match = upInvPatientMatcher_(ss);
+  const memo = {};
+  const out = rows.map(function (r) {
+    const l = upSalesLine_(r, tz, match, memo, stats);
+    return l ? l.row : ['', '', '', '', '', '', '', '', '', '', '', ''];   // keeps every line at its place
+  });
+  sh.getRange(2 + offset, 1, out.length, 12).setValues(out);
+  SpreadsheetApp.flush();
+  st.done[offset] = out.length;
+  cache.put('up_sales_' + token, JSON.stringify(st), 21600);
+  cache.put('up_sales_active', String(Date.now()), 1800);
+  return { ok: true, written: out.length, unmatched: stats.unmatched, ambiguous: stats.ambiguous, badDates: stats.badDates };
+}
+
+function upSalesFinish_(body, session) {
+  const token = String(body.token || '');
+  if (!/^[a-f0-9]{32}$/.test(token)) return { ok: false, error: 'BAD_REQUEST' };
+  const cache = CacheService.getScriptCache();
+  const raw = cache.get('up_sales_' + token);
+  if (!raw) return { ok: true, problem: 'This upload ran out of time. Upload the file again.' };
+  const st = JSON.parse(raw);
+  const got = Object.keys(st.done).reduce(function (a, k) { return a + Number(st.done[k] || 0); }, 0);
+  if (got !== st.total) return { ok: true, problem: 'Only ' + got + ' of ' + st.total + ' lines arrived. Upload the file again.' };
+  const sm = body.summary || {};
+  const n = function (v) { v = Math.floor(Number(v) || 0); return v < 0 ? 0 : v; };
+  const res = { rows: st.total, before: st.before, ms: Date.now() - st.started, at: new Date().toISOString() };
+  try {
+    fsPatch_(getConfig_(), 'data_uploads/sales', {
+      status: 'done', kind: 'salesHistory', fileName: st.fileName, rows: res.rows, before: res.before,
+      badDates: n(sm.badDates), unmatchedNames: n(sm.unmatchedNames), ms: res.ms, at: res.at,
+      by: String(session.name || ''), byUid: String(session.uid || ''),
+    });
+  } catch (e) { console.warn('Invoice history loaded, but the upload log failed: ' + e); }
+  cache.remove('up_sales_' + token);
+  cache.remove('up_sales_active');
+  PropertiesService.getScriptProperties().deleteProperty('RECALL_SIG');
+  console.log('SALES RECORD: ' + res.rows + ' lines loaded in ' + res.ms + ' ms by ' + session.name);
+  return Object.assign({ ok: true }, res);
+}
+
+// Every paid line: [ "yyyy-MM-dd", Patient ID, paid ], or null when SALES RECORD is empty
+function salesLines_() {
+  const ss = SpreadsheetApp.openById(SSP_SHEET_ID);
+  const sh = ss.getSheetByName(UP_SALES_TAB_);
+  if (!sh || sh.getLastRow() < 2) return null;
+  const tz = ss.getSpreadsheetTimeZone();
+  const n = sh.getLastRow() - 1;
+  const bd = sh.getRange(2, 2, n, 3).getValues();     // B date · C name · D Patient ID
+  const paid = sh.getRange(2, 12, n, 1).getValues();  // L Paid
+  const dayOf = {};
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const ptt = String(bd[i][2] == null ? '' : bd[i][2]).trim();
+    const v = Number(paid[i][0]);
+    if (!ptt || !isFinite(v) || !v) continue;
+    const d0 = bd[i][0];
+    let d;
+    if (d0 instanceof Date) {
+      const t = d0.getTime();
+      d = dayOf[t] || (dayOf[t] = Utilities.formatDate(d0, tz, 'yyyy-MM-dd'));
+    } else d = sheetDateKey_(d0, tz);
+    if (d) out.push([d, ptt, v]);
+  }
+  return out.length ? out : null;
 }
 
 /* ---------- 3) Customer Packages → customer_packages (A2:M replaced) ---------- */
@@ -11369,12 +11684,26 @@ function upRefillDef_(kind) {
   if (kind === 'daysheet') return { file: APPTS_SHEET_ID, tab: UPLOAD_TABS_.daysheet, nameCol: 2, idCol: 15, pt: UPLOAD_TABS_.patients, busy: 'up_ds_active' };
   if (kind === 'packages') return { file: APPTS_SHEET_ID, tab: UP_PKG_TAB_, nameCol: 1, idCol: 13, pt: UPLOAD_TABS_.patients, busy: 'up_pkg_active' };
   if (kind === 'invoices') return { file: SSP_SHEET_ID, tab: UP_INV_TAB_, nameCol: 3, idCol: 4, pt: UP_INV_PTT_TAB_, busy: 'up_inv_active', words: true };
+  if (kind === 'sales') return { file: SSP_SHEET_ID, tab: UP_SALES_TAB_, nameCol: 3, idCol: 4, pt: UP_INV_PTT_TAB_, busy: 'up_sales_active', words: true };
   return null;
 }
 
-// Fills in only the blank Patient IDs (IDs already there are never changed)
+// Fills in only the blank Patient IDs (IDs already there are never changed).
+// Invoice Record's "Fill in missing Patient IDs" fills SALES RECORD too.
 function upRefill_(body, session) {
   const kind = String(body.kind || '');
+  const res = upRefillOne_(kind, session);
+  if (kind === 'invoices' && res.ok && !res.problem) {
+    try {
+      const s = upRefillOne_('sales', session);
+      res.salesFilled = s.filled || 0;
+      if (s.problem) res.salesProblem = s.problem;
+    } catch (e) { console.warn('SALES RECORD Patient IDs not filled: ' + e); }
+  }
+  return res;
+}
+
+function upRefillOne_(kind, session) {
   const def = upRefillDef_(kind);
   if (!def) return { ok: false, error: 'BAD_REQUEST' };
   const cache = CacheService.getScriptCache();
@@ -11387,7 +11716,10 @@ function upRefill_(body, session) {
     const started = Date.now();
     const ss = SpreadsheetApp.openById(def.file);
     const sh = ss.getSheetByName(def.tab);
-    if (!sh) throw new Error('Sheet tab not found: ' + def.tab);
+    if (!sh) {
+      if (kind === 'sales') return { ok: true, kind: kind, rows: 0, filled: 0, skipped: 0 };   // not loaded yet
+      throw new Error('Sheet tab not found: ' + def.tab);
+    }
     const last = sh.getLastRow();
     const res = { ok: true, kind: kind, rows: Math.max(0, last - 1), filled: 0, skipped: 0 };
     const unmatched = {};
@@ -11420,6 +11752,7 @@ function upRefill_(body, session) {
         refilledAt: new Date().toISOString(), refilledBy: String(session.name || ''),
       });
     } catch (e) { console.warn('Refill log not saved: ' + e); }
+    if (kind === 'sales' && res.filled) PropertiesService.getScriptProperties().deleteProperty('RECALL_SIG');   // spend worked out again
     console.log(def.tab + ': ' + res.filled + ' Patient ID(s) filled in by ' + session.name);
     return res;
   } finally {
@@ -14796,26 +15129,49 @@ const SPEND_NONE_ = { spendTier: '', spend12: 0, spendAll: 0, spendVisits12: 0 }
 // Cancelled, no-shows and future appointments don't count. Tiers by rank on the last 12 months, among patients
 // who spent anything: Platinum = top 10%, Gold = next 20%, Silver = next 30% (recall_settings/config → spend).
 // Patients on the same amount at a boundary get the higher tier.
+// Spend per patient: the last 12 months and all time. From SALES RECORD (what they paid, inc GST) once it has data;
+// until then, the Day Sheet prices. Visits in the last 12 months always come from the appointment book.
+// Tiers by rank on the last 12 months, among patients who spent anything (recall_settings/config → spend).
+// Patients on the same amount at a boundary get the higher tier.
 function recallSpend_(ctx, rows, pts, opt) {
   opt = opt || { platinum: 10, gold: 20, silver: 30 };
   const from = flowAddMonthsKey_(ctx.todayKey, -12);
   const acc = Object.create(null);
   const keyOf = Object.create(null);
+  const pidOf = function (ptt) { if (!(ptt in keyOf)) keyOf[ptt] = pts.find(ptt); return keyOf[ptt]; };
+  const get = function (pid) { return acc[pid] || (acc[pid] = { m12: 0, all: 0, days: Object.create(null) }); };
+
+  let sales = null;
+  try { sales = salesLines_(); } catch (e) { console.warn('Spend: SALES RECORD not read, using Day Sheet prices: ' + e); }
+
   rows.forEach(function (r) {
     if (!pcnIsDate_(r[0]) || r[0].getTime() >= ctx.today || !pcnStatusOk_(r[7], 'full')) return;
     if (REP_NOT_VISIT_.test(String(r[9] == null ? '' : r[9]))) return;
     const ptt = String(r[14] == null ? '' : r[14]).trim();
     if (!ptt) return;
-    if (!(ptt in keyOf)) keyOf[ptt] = pts.find(ptt);
-    const pid = keyOf[ptt];
+    const pid = pidOf(ptt);
     if (!pid) return;
     const dk = Utilities.formatDate(r[0], ctx.tz, 'yyyy-MM-dd');
+    const x = get(pid);
+    if (dk >= from) x.days[dk] = true;
+    if (sales) return;   // the money comes from the invoices
     const raw = r[12];
     const price = typeof raw === 'number' ? raw : Number(String(raw == null ? '' : raw).replace(/[$,\s]/g, ''));
-    const x = acc[pid] || (acc[pid] = { m12: 0, all: 0, days: Object.create(null) });
     if (isFinite(price) && price > 0) { x.all += price; if (dk >= from) x.m12 += price; }
-    if (dk >= from) x.days[dk] = true;
   });
+
+  let through = '';
+  if (sales) {
+    sales.forEach(function (s) {
+      if (s[0] > ctx.todayKey) return;
+      const pid = pidOf(s[1]);
+      if (!pid) return;
+      const x = get(pid);
+      x.all += s[2];
+      if (s[0] >= from) x.m12 += s[2];
+      if (s[0] > through) through = s[0];
+    });
+  }
 
   const by = Object.create(null);
   Object.keys(acc).forEach(function (pid) {
@@ -14841,13 +15197,17 @@ function recallSpend_(ctx, rows, pts, opt) {
   return {
     by: by,
     status: {
-      at: new Date().toISOString(), patients: n, basis: 'Day Sheet prices, last 12 months',
+      at: new Date().toISOString(), patients: n,
+      source: sales ? 'invoices' : 'daysheet', through: through,
+      basis: sales ? 'Invoices (amount paid inc GST), last 12 months'
+        : 'Day Sheet prices, last 12 months (load the invoice history to use invoices)',
       pct: { platinum: opt.platinum, gold: opt.gold, silver: opt.silver },
       from: { platinum: fin(t.platinum), gold: fin(t.gold), silver: fin(t.silver) },
       counts: counts,
     },
   };
 }
+
 
 // Every patient record: 'Spend' { tier, m12, all, visits12, at } from the appointment book, or null.
 // Only records whose spend changed are written. The patient page shows it in the patient bar.
