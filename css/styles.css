@@ -12527,3 +12527,15 @@ dialog.lh-dialog.ae-dlg { width: min(520px, calc(100vw - 2rem)); }
 .appt.is-changed { box-shadow: inset 3px 0 0 #0284c7; }
 .appt.is-conflict { box-shadow: inset 3px 0 0 #dc2626; }
 @media (max-width: 520px) { .ae-two { grid-template-columns: 1fr; } }
+
+/* Calendar: the pencil on each Day Sheet card */
+.appt { position: relative; }
+.appt:has(.appt-edit) .appt-time { padding-right: 2.1rem; }
+.appt-edit { position: absolute; top: .5rem; right: .5rem; display: grid; place-items: center; width: 30px; height: 30px; padding: 0;
+  border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--muted); cursor: pointer;
+  opacity: 0; transition: opacity .15s, color .15s, border-color .15s; }
+.appt-edit svg { width: 15px; height: 15px; }
+.appt:hover .appt-edit, .appt:focus-within .appt-edit, .appt-edit:focus-visible { opacity: 1; }
+.appt-edit:hover { border-color: var(--primary); color: var(--primary); }
+.appt-edit:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+@media (hover: none) { .appt-edit { opacity: 1; } }

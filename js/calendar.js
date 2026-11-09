@@ -12,6 +12,7 @@ import { confirmDialog } from "./dialog.js";
 import { openBookingDialog } from "./booking-dialog.js";
 import { removeManualAppt } from "./manual-appts.js";
 import { openBillingSheets } from "./billing-sheets.js";
+import { openApptEdit, changeClass, changeTagsHtml } from "./appt-edit.js";
 
 // Column order, left to right. Each entry matches any staff name that CONTAINS it as whole words
 // (capitals, dots and spaces don't matter): "Teh" matches "Dr Joanna Teh" and "Dr. Teh".
@@ -26,6 +27,7 @@ const COLUMN_COLOURS = [
 
 const ICON_CAL = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>`;
 const ICON_REFRESH = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>`;
+const ICON_EDIT = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>`;
 
 export function mountCalendar(container, param) {
   let dateKey = parseDateKey(param) ? param : toDateKey();
@@ -278,6 +280,20 @@ export function mountCalendar(container, param) {
     if (btn.dataset.action === "relogin") logout();
     if (btn.dataset.action === "eod") openEndOfDay();
     if (btn.dataset.action === "mappt-add") openBooking({ staff: btn.dataset.staff || "" });
+    // A Day Sheet booking (or a whole visit): change the time, who it's with, cancelled / no-show
+    if (btn.dataset.action === "appt-edit") {
+      e.preventDefault();   // the card is a link to the patient: only open the window
+      e.stopPropagation();
+      const rows = String(btn.dataset.rows || "").split(",").map(Number).map((i) => shown[i]).filter(Boolean);
+      if (!rows.length) return;
+      const columns = sortStaff([...new Set([...shown.map((a) => a.staff), ...known((a) => [a.staff])])]
+        .filter((s) => s && !/^unassigned$/i.test(s)));
+      openApptEdit({
+        dateKey, rows, columns,
+        onSaved: () => { bookingChanged(dateKey); load(true); },
+      });
+      return;
+    }
     if (btn.dataset.action === "mappt-edit" || btn.dataset.action === "mappt-remove") {
       e.preventDefault();
       const a = shown.find((x) => x.manualId === btn.dataset.id);
@@ -373,6 +389,15 @@ function groupVisits(appts) {
   return out;
 }
 
+// The pencil on a Day Sheet card. Every booking on the card goes with it, so a visit moves together.
+function editBtnHtml(rows) {
+  if (!can("calendar.book")) return "";
+  const ids = rows.map((a) => a._i).filter(Number.isInteger);
+  if (!ids.length) return "";
+  return `<button type="button" class="appt-edit" data-action="appt-edit" data-rows="${ids.join(",")}"
+    aria-label="Change this booking" title="Change booking">${ICON_EDIT}</button>`;
+}
+
 // "1:00 pm - 1:15 pm" → "1:15 pm" (falls back to the start time)
 function endTime(a) {
   const m = String(a.timeRange || "").match(/[-–]\s*([0-9].*)$/);
@@ -408,14 +433,16 @@ function visitCard(group) {
   const inner = `
     <span class="appt-time">${escapeHtml(first.time || "—")} – ${escapeHtml(endTime(last))}<span class="appt-count">${group.length} bookings</span></span>
     <span class="appt-name">${escapeHtml(first.patientName || "Unknown patient")}</span>
+    ${changeTagsHtml(group)}
     <span class="appt-badges"></span>
     <span class="appt-services">${lines}</span>
-    ${extras ? `<span class="appt-extras">${extras}</span>` : ""}`;
+    ${extras ? `<span class="appt-extras">${extras}</span>` : ""}
+    ${editBtnHtml(group)}`;
 
   // Hovering over the card shows each booking's time
   const title = escapeHtml(group.map((a) =>
     [a.timeRange || a.time, (a.services || []).join(", "), a.resources].filter(Boolean).join(" · ")).join("\n"));
-  const classes = `appt is-visit ${cls}`.trim();
+  const classes = `appt is-visit ${cls}${changeClass(group)}`.trim();
   const idx = Number.isInteger(first._i) ? ` data-i="${first._i}"` : "";
 
   return first.patientId
@@ -480,12 +507,14 @@ function apptCard(a) {
   const inner = `
     <span class="appt-time">${escapeHtml(a.time || "—")}</span>
     <span class="appt-name">${escapeHtml(a.patientName || "Unknown patient")}</span>
+    ${changeTagsHtml([a])}
     <span class="appt-badges"></span>
     ${services ? `<span class="appt-services">${services}</span>` : ""}
-    ${extras ? `<span class="appt-extras">${extras}</span>` : ""}`;
+    ${extras ? `<span class="appt-extras">${extras}</span>` : ""}
+    ${editBtnHtml([a])}`;
 
   const title = escapeHtml([a.timeRange || a.time, a.resources].filter(Boolean).join(" · "));
-  const classes = `appt ${cls}`.trim();
+  const classes = `appt ${cls}${changeClass([a])}`.trim();
   const idx = Number.isInteger(a._i) ? ` data-i="${a._i}"` : "";
 
   return a.patientId
