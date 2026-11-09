@@ -126,7 +126,9 @@ const isMobile = (m) => /^04\d{8}$/.test(telOf(m));
 const me = () => (auth.currentUser && auth.currentUser.uid) || "";
 const can = (staff, p) => !!staff && (/^admin$/i.test(String(staff.role || "")) || (Array.isArray(staff.perms) && staff.perms.includes(p)));
 const nameKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9' -]/g, " ").replace(/\s+/g, " ").trim(); // same as recallKeys_
-const blank = () => ({ note: "", remind: "", reason: "", until: "", sms: null, smsKey: "main" });
+const blank = () => ({ note: "", remind: "", reason: "", until: "", sms: null, smsKey: "main", all: null });
+// "Stop all their recalls" starts ticked for reasons about the person, not one treatment
+const allDefault = (r) => !!r && (r.dnc || /moved|pregnan|breastfeed|passed|deceased/i.test(r.label));
 const errText = (err, fallback) => (err && err.code === "permission-denied"
   ? "You don't have access to Recall. Check Recall access in Staff, and that the Firestore rules are published."
   : (err && err.message) || fallback);
@@ -804,7 +806,10 @@ export function mountRecall(container, { staff = null } = {}) {
           ${reason && reason.askDate ? `<label>until <input type="date" class="fe-input" data-role="until" min="${addDays(t, 1)}" value="${esc(draft.until)}" /></label>` : ""}
           <button type="button" class="lh-btn" data-act="close">${reason && reason.askDate ? "Pause" : "Stop"}</button>
         </div>
-        ${reason && reason.dnc ? '<small class="fe-note">This also puts them on the do-not-contact list.</small>' : ""}</div>`;
+        ${reason ? `<label class="fe-check rc-all"><input type="checkbox" data-role="allCards"${
+          reason.dnc ? " checked disabled" : (draft.all ?? allDefault(reason)) ? " checked" : ""} />
+          ${reason.askDate ? "Pause" : "Stop"} all their recalls, not just ${esc(c.category || "this one")}</label>` : ""}
+        ${reason && reason.dnc ? '<small class="fe-note">This also puts them on the do-not-contact list, and stops all their recalls.</small>' : ""}</div>`;
     return `<details class="rc-more" data-role="more"${moreOpen ? " open" : ""}>
       <summary><span>Given to ${esc(c.assignedToName || "nobody yet")}${c.status === "open" ? " · Stop recall" : ""}</span>${I.chev}</summary>
       <div class="rc-more-body">
@@ -1361,7 +1366,8 @@ export function mountRecall(container, { staff = null } = {}) {
     }
     if (el.matches("[data-remind]")) { draft.remind = el.value; el.blur(); drawPanel(true); return; }   // blur: N, V, S, B keep working
     if (r === "until") { draft.until = el.value; return; }
-    if (r === "reason") { draft.reason = el.value; drawPanel(true); return; }
+    if (r === "allCards") { draft.all = el.checked; return; }
+    if (r === "reason") { draft.reason = el.value; draft.all = null; drawPanel(true); return; }
     if (r === "assign" && !(await act("assign", { toId: el.value }, { label: "Saving", btn: el }))) drawPanel(true);
   });
   root.addEventListener("keydown", (e) => {
@@ -1557,12 +1563,14 @@ export function mountRecall(container, { staff = null } = {}) {
       const r = settings.reasons.find((x) => x.label === draft.reason);
       if (!r) { showToast("Choose a reason."); return; }
       if (r.askDate && !draft.until) { showToast("Choose when to start recalling them again."); return; }
-      if (r.dnc && !(await confirmDialog({ title: "Don't contact again?", message: "Recall stops, and they go on the do-not-contact list for marketing emails.", confirmLabel: "Stop and add to the list", tone: "danger" }))) return;
+      if (r.dnc && !(await confirmDialog({ title: "Don't contact again?", message: "All their recalls stop, and they go on the do-not-contact list for marketing emails.", confirmLabel: "Stop and add to the list", tone: "danger" }))) return;
       const ids = shownIds(), from = sel;
-      if (await act("close", { reason: r.label, until: draft.until, note: draft.note }, { label: r.askDate ? "Pausing" : "Stopping recall", btn: b })) {
+      const all = r.dnc || (draft.all ?? allDefault(r));
+      if (await act("close", { reason: r.label, until: draft.until, note: draft.note, all }, { label: r.askDate ? "Pausing" : "Stopping recall", btn: b })) {
         draft = blank();
         drawPanel(true);
-        showToast(r.askDate ? "Paused" : "Recall stopped");
+        showToast(all ? (r.askDate ? "Paused for all their treatments" : "Recall stopped for all their treatments")
+          : (r.askDate ? "Paused" : "Recall stopped"));
         if (sel === from) { if (session) sessionMove(1, from); else if (autoNext) goNext(from, ids); }
       }
       return;

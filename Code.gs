@@ -13654,6 +13654,7 @@ function recallAction_(op, id, body, session) {
   };
   const dateOk = function (d) { return /^\d{4}-\d{2}-\d{2}$/.test(d) && d > today && flowDays_(today, d) <= 730; };
   let patch = null;
+  let extraWrites = [];   // their other recall cards (Stop recall for all of them)
 
   if (op === 'log') {
     if (c.status !== 'open') return { ok: true, problem: 'This card is booked or closed. Reopen it first.' };
@@ -13740,6 +13741,15 @@ function recallAction_(op, id, body, session) {
       }
     }
     patch.replyOpen = false;
+    // Their other open recalls: always for a "don't contact" reason, otherwise when "all their recalls" is ticked
+    if (c.patientId && (r.dnc || body.all === true)) {
+      const until = String(body.until || '');
+      extraWrites = recallSiblingWrites_(cfg, c, id, r.askDate
+        ? { status: 'open', stage: 'later', remindOn: until, pauseReason: r.label, bookedFor: '', bookedAt: '' }
+        : { status: 'closed', closeReason: r.label, closedAt: now, closedBy: who, remindOn: '' },
+        (r.askDate ? r.label + ': paused until ' + recLongDate_(until) : 'Closed: ' + r.label) +
+          ' (with their ' + (c.category || 'other') + ' recall)', who, uid, note);
+    }
   } else if (op === 'reopen') {
     if (c.status === 'open') return { ok: true, already: true };
     if (c.status === 'closed' && c.closeReason === 'Came in') {
@@ -13755,8 +13765,8 @@ function recallAction_(op, id, body, session) {
   if (worked && c.callBackDue) patch.callBackDue = '';
   patch.log = log.slice(-80);
   patch.updatedAt = now;
-  commitWrites_(cfg, [patchWrite_(cfg, path, patch)]);
-  return { ok: true };
+  commitWrites_(cfg, [patchWrite_(cfg, path, patch)].concat(extraWrites));
+  return { ok: true, others: extraWrites.length };
 }
 
 
@@ -14088,10 +14098,19 @@ function recallStop_(cfg, phone, text, at, pid, cards, portal) {
   const key = recallPhone04_(phone);
 
   // Everyone with this number: their recall cards, a patient-page text, and the Patient List
+  // A card from a merged record counts as the record that was kept
+  const kept = {};
+  const keptOf = function (pidIn) {
+    const s = String(pidIn || '');
+    if (!s) return '';
+    if (!(s in kept)) { let d = null; try { d = flowPatient_(cfg, s); } catch (e) { /* as it is */ } kept[s] = d ? d._id : s; }
+    return kept[s];
+  };
+  pid = keptOf(pid);
   const owners = {};
   if (pid) owners[pid] = true;
-  cards.forEach(function (c) { if (c.patientId) owners[String(c.patientId)] = true; });
-  if (portal && portal.patientId) owners[String(portal.patientId)] = true;
+  cards.forEach(function (c) { const k = keptOf(c.patientId); if (k) owners[k] = true; });
+  if (portal && portal.patientId) owners[keptOf(portal.patientId)] = true;
   if (key) {
     const core = key.slice(1);
     const spaced = key.slice(0, 4) + ' ' + key.slice(4, 7) + ' ' + key.slice(7);
@@ -14111,6 +14130,15 @@ function recallStop_(cfg, phone, text, at, pid, cards, portal) {
     commitWrites_(cfg, [updateWrite_(cfg, SMS_SUPPRESS_ + '/' + key, {
       phone: key, at: at, text: text.slice(0, 200), source: 'Replied STOP to a text', patientId: pid || '', patientIds: ids,
     })]);
+  }
+
+  // Their patient records show it straight away (the hourly check keeps them right after that)
+  if (ids.length) {
+    try {
+      commitWrites_(cfg, ids.map(function (id) {
+        return patchWrite_(cfg, 'patient_list/' + id, { 'SMS Opt Out': { at: at, source: 'Replied STOP' } });
+      }));
+    } catch (e) { console.warn('SMS Opt Out not saved on the patient records: ' + e); }
   }
 
   // 2. The patient who was texted: on the do-not-contact list
@@ -14134,7 +14162,7 @@ function recallStop_(cfg, phone, text, at, pid, cards, portal) {
   Object.keys(all).forEach(function (cid) {
     const c = all[cid];
     if (c.status === 'closed') return;
-    const mine = !!pid && String(c.patientId) === pid;
+    const mine = !!pid && keptOf(c.patientId) === pid;
     const log = (Array.isArray(c.log) ? c.log : []).slice();
     const p = { updatedAt: now, smsStop: { at: at, source: 'Replied STOP' } };
     if (mine) {
@@ -14234,7 +14262,16 @@ function tmUnsubSync_(cfg, force) {
     if (cw.length) { commitWrites_(cfg, cw, 100); flagged += cw.length; }
   }
 
-  const status = { at: now, count: Object.keys(tm).length, added: fresh.length, flagged: flagged, partial: partial, ms: Date.now() - t0 };
+  // Once turned on (recallStopOptouts), opting out in Textmagic also stops recall, the same as replying STOP
+  let stopped = 0;
+  if (props.getProperty('TM_OPTOUT_STOPS') === '1' && Date.now() - t0 < 200000) {
+    try { stopped = recallStopPending_(cfg, t0 + 240000, false).stopped.length; }
+    catch (e) { console.warn('Textmagic opt-outs: recall not stopped: ' + e); }
+  }
+  let ptMarked = 0;
+  try { ptMarked = smsOptoutPatients_(cfg); } catch (e) { console.warn('Textmagic opt-outs: patient records not updated: ' + e); }
+  const status = { at: now, count: Object.keys(tm).length, added: fresh.length, flagged: flagged, stopped: stopped,
+    patients: ptMarked, partial: partial, ms: Date.now() - t0 };
   fsPatch_(cfg, RECALL_SET_ + '/sms_optouts', status);
   if (fresh.length) console.log('Textmagic opt-outs: ' + JSON.stringify(status));
   return status;
@@ -14277,6 +14314,141 @@ function recallOptoutList_(sync) {
   } catch (e) { /* the names from Textmagic are used */ }
 
   return { ok: true, rows: rows, status: fsGetDoc_(cfg, RECALL_SET_ + '/sms_optouts') || null };
+}
+
+// Mobiles on Textmagic's opt-out list that still have an open recall card: recall stops for them, the same as
+// replying STOP (recallStop_). Each mobile is done once (recallDone). dry: only lists them.
+function recallStopPending_(cfg, deadline, dry) {
+  const sup = {};
+  fsListAll_(cfg, SMS_SUPPRESS_, ['tm', 'tmAt', 'at', 'recallDone']).forEach(function (d) {
+    const f = fromFields_(d.fields || {});
+    if (f.tm === true && f.recallDone !== true) sup[d.name.split('/').pop()] = String(f.tmAt || f.at || '');
+  });
+  const byKey = {};
+  if (Object.keys(sup).length) {
+    fsQuery_(cfg, RECALL_COL_, 'status', 'IN', ['open', 'booked'], 10000).forEach(function (c) {
+      const k = recallPhone04_(c.mobileKey || c.mobile);
+      if (k && k in sup) (byKey[k] = byKey[k] || []).push(c);
+    });
+  }
+  const out = { stopped: [], shared: [], left: 0 };
+  const keys = Object.keys(byKey).filter(function (k) { return byKey[k].some(function (c) { return c.status === 'open'; }); });
+  for (let i = 0; i < keys.length; i++) {
+    if (Date.now() > deadline) { out.left = keys.length - i; break; }
+    const k = keys[i];
+    const list = byKey[k];
+    const pids = uniq_(list.map(function (c) { return String(c.patientId || ''); }).filter(Boolean));
+    const line = { mobile: k, name: String(list[0].patientName || ''),
+      cards: list.filter(function (c) { return c.status === 'open'; }).map(function (c) { return c.category; }) };
+    (pids.length > 1 ? out.shared : out.stopped).push(line);
+    if (dry) continue;
+    try {
+      recallStop_(cfg, k, "On Textmagic's unsubscribe list (opted out of texts)", sup[k] || new Date().toISOString(), '', list, null);
+      fsPatch_(cfg, SMS_SUPPRESS_ + '/' + k, { tm: true, tmAt: sup[k], recallDone: true });
+    } catch (e) { console.warn('Recall not stopped for ' + k + ': ' + e); }
+  }
+  return out;
+}
+
+// RUN THIS FIRST: gets Textmagic's latest list, then shows who would be stopped. Recall isn't changed.
+function recallStopOptoutsPreview() {
+  const cfg = getConfig_();
+  console.log('Textmagic: ' + JSON.stringify(tmUnsubSync_(cfg, true)));
+  const r = recallStopPending_(cfg, Date.now() + 240000, true);
+  r.stopped.forEach(function (x) { console.log('Would stop: ' + x.name + ' · ' + x.mobile + ' · ' + x.cards.join(', ')); });
+  r.shared.forEach(function (x) { console.log('Shared mobile, left for staff: ' + x.name + ' · ' + x.mobile); });
+  console.log(r.stopped.length + ' would be stopped, ' + r.shared.length + ' left for staff. Recall was not changed.');
+}
+
+// THEN RUN THIS: stops them, and from now on does it by itself every hour.
+// Run it again if the log says some are left. To turn the hourly part off, delete TM_OPTOUT_STOPS in Script Properties.
+function recallStopOptouts() {
+  const cfg = getConfig_();
+  tmUnsubSync_(cfg, true);
+  PropertiesService.getScriptProperties().setProperty('TM_OPTOUT_STOPS', '1');
+  const r = recallStopPending_(cfg, Date.now() + 270000, false);
+  r.stopped.forEach(function (x) { console.log('Stopped: ' + x.name + ' · ' + x.mobile + ' · ' + x.cards.join(', ')); });
+  r.shared.forEach(function (x) { console.log('Shared mobile, note added, left for staff: ' + x.name + ' · ' + x.mobile); });
+  console.log(r.stopped.length + ' stopped.' + (r.left ? ' ' + r.left + ' left: run it again.' : ' All done.'));
+}
+
+// A patient's other open recall cards, changed the same way as the one staff stopped or paused
+function recallSiblingWrites_(cfg, c, id, change, what, who, uid, note) {
+  const now = new Date().toISOString();
+  return fsQuery_(cfg, RECALL_COL_, 'patientId', 'EQUAL', String(c.patientId), 50)
+    .filter(function (x) { return x._id !== id && x.status === 'open'; })
+    .map(function (x) {
+      const p = Object.assign({}, change, { replyOpen: false, callBackDue: '', updatedAt: now,
+        log: (Array.isArray(x.log) ? x.log : []).concat([{ at: now, by: who, byUid: uid, kind: 'status', what: what, note: note || '' }]).slice(-80) });
+      if (change.status === 'closed') Object.assign(p, { flowState: 'done', flowNext: '', joinedTo: '' });
+      else if (['run', 'wait', 'team', 'cycle', 'queued', 'joined', 'released'].indexOf(String(x.flowState || '')) !== -1) {
+        Object.assign(p, { flowState: 'paused', pausedFlow: String(x.flowState), flowNext: '', joinedTo: '' });
+      }
+      return patchWrite_(cfg, RECALL_COL_ + '/' + x._id, p);
+    });
+}
+
+// Every patient record: 'SMS Opt Out' { at, source } when their mobile opted out of texts, otherwise null.
+// Hourly (tmUnsubSync_), so it follows STOP replies, Textmagic's list, lifts and changed mobiles.
+function smsOptoutPatients_(cfg) {
+  const sup = {};
+  fsListAll_(cfg, SMS_SUPPRESS_, ['at', 'tm', 'source']).forEach(function (d) {
+    const f = fromFields_(d.fields || {});
+    sup[d.name.split('/').pop()] = { at: String(f.at || ''),
+      source: f.tm === true && f.source !== 'Replied STOP to a text' ? 'Textmagic' : 'Replied STOP' };
+  });
+  const writes = [];
+  fsListAll_(cfg, 'patient_list', ['Mobile', 'MergedInto', 'SMS Opt Out']).forEach(function (d) {
+    const f = fromFields_(d.fields || {});
+    if (f.MergedInto) return;
+    const want = sup[recallPhone04_(f.Mobile)] || null;
+    const o = f['SMS Opt Out'];
+    const have = o && typeof o === 'object' ? { at: String(o.at || ''), source: String(o.source || '') } : null;
+    if (JSON.stringify(want) !== JSON.stringify(have)) {
+      writes.push(patchWrite_(cfg, d.name.split('/documents/')[1], { 'SMS Opt Out': want }));
+    }
+  });
+  if (writes.length) commitWrites_(cfg, writes, 200);
+  return writes.length;
+}
+
+// One-off fix: patients already stopped (replied STOP, or a "don't contact" reason) whose other recalls are still open
+function recallCloseSiblingsRun_(dry) {
+  const cfg = getConfig_();
+  const set = recallSettings_(cfg);
+  const reasons = uniq_(['Replied STOP'].concat(set.reasons.filter(function (r) { return r.dnc; }).map(function (r) { return r.label; }))).slice(0, 30);
+  const why = {};
+  fsQuery_(cfg, RECALL_COL_, 'closeReason', 'IN', reasons, 5000).forEach(function (c) {
+    if (c.patientId && !why[c.patientId]) why[c.patientId] = { reason: String(c.closeReason), cat: String(c.category || 'other') };
+  });
+  const pids = Object.keys(why);
+  const specs = [];
+  for (let j = 0; j < pids.length; j += 30) specs.push([RECALL_COL_, 'patientId', 'IN', pids.slice(j, j + 30), 500]);
+  const now = new Date().toISOString();
+  const writes = [];
+  [].concat.apply([], fsQueryMany_(cfg, specs)).forEach(function (c) {
+    if (c.status !== 'open') return;
+    const w = why[c.patientId];
+    console.log((dry ? 'Would close: ' : 'Closed: ') + c.patientName + ' · ' + c.category + ' (their ' + w.cat + ' recall: ' + w.reason + ')');
+    if (dry) return;
+    writes.push(patchWrite_(cfg, RECALL_COL_ + '/' + c._id, {
+      status: 'closed', closeReason: w.reason, closedAt: now, closedBy: 'Recall', remindOn: '', replyOpen: false, callBackDue: '',
+      flowState: 'done', flowNext: '', joinedTo: '', updatedAt: now,
+      log: (Array.isArray(c.log) ? c.log : []).concat([{ at: now, by: 'Recall', byUid: '', kind: 'status', note: '',
+        what: 'Closed: ' + w.reason + ' (with their ' + w.cat + ' recall)' }]).slice(-80),
+    }));
+  });
+  if (writes.length) commitWrites_(cfg, writes, 100);
+  return writes.length;
+}
+
+// RUN THIS FIRST: lists the open recalls that would close. Nothing is changed.
+function recallCloseSiblingsPreview() { recallCloseSiblingsRun_(true); }
+
+// THEN THIS: closes them, and marks every patient whose mobile opted out of texts
+function recallCloseSiblings() {
+  console.log(recallCloseSiblingsRun_(false) + ' recall card(s) closed.');
+  console.log(smsOptoutPatients_(getConfig_()) + ' patient record(s) marked or cleared for opting out of texts.');
 }
 
 /* ---------- Recall settings: status and a test text ---------- */
@@ -14793,7 +14965,7 @@ function recallFlowRelease_(cfg, nowIso) {
     const lead = id ? leads[id] : null;
     if (lead && (lead.status === 'open' || lead.status === 'booked')) return;
     const reason = String((lead && lead.closeReason) || '');
-    const closeToo = !!lead && (lead.closedBy === 'Recall flow' || /stop|do.?not.?contact/i.test(reason));
+    const closeToo = !!lead && (lead.closedBy === 'Recall flow' || /stop|do.?not.?contact|don.?t contact|moved/i.test(reason));
     const what = closeToo ? 'Closed with their ' + lead.category + ' recall: ' + (reason || 'No response')
       : 'Their ' + ((lead && lead.category) || 'other') + ' recall has finished, so this one starts the flow after the quiet time';
     const patch = closeToo
