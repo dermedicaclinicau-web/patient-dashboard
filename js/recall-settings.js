@@ -94,6 +94,9 @@ export function normRecallSettings(x = {}) {
       missedMode: ["ask", "auto", "off"].includes(sm.missedMode) ? sm.missedMode : "ask",
       missedTemplate: String(sm.missedTemplate || RECALL_MISSED_TEMPLATE).slice(0, 560),
       missedQuiet: int(sm.missedQuiet, 1, 60, 7),
+      saved: (Array.isArray(sm.saved) ? sm.saved : [])
+        .map((m) => ({ name: String((m && m.name) || "").replace(/\s+/g, " ").trim().slice(0, 40), text: String((m && m.text) || "").slice(0, 560) }))
+        .filter((m) => m.name && m.text.trim()).slice(0, 10),
     },
   };
 }
@@ -164,6 +167,10 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
         missedMode: $("missedMode").value,
         missedTemplate: $("missedTpl").value.slice(0, 560) || RECALL_MISSED_TEMPLATE,
         missedQuiet: Number($("missedQuiet").value) || 7,
+        saved: [...root.querySelectorAll("[data-saved]")].map((r) => ({
+          name: r.querySelector('[data-f="sname"]').value.replace(/\s+/g, " ").trim().slice(0, 40),
+          text: r.querySelector('[data-f="stext"]').value.slice(0, 560),
+        })).filter((m) => keepEmpty || (m.name && m.text.trim())),
       },
     };
   }
@@ -375,6 +382,15 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
               (d) => `${d} day${d === 1 ? "" : "s"}`)}</select></label>
           <p class="fe-note">Never offered to anyone on the do-not-contact list. With no mobile on file, staff are offered an email
             instead. The blanks above work here too: click in this message first, then on a blank.</p>
+
+          <h4 class="mc-h rs-subhead">More messages to choose from</h4>
+          <p class="fe-note">Staff choose these in the Text window on a recall card, as well as the two above. Up to 10.</p>
+          <div class="rs-saved">${set.sms.saved.map((m, i) => `<div class="rs-saved-row" data-saved="${i}">
+              <div class="rc-row"><input class="fe-input" data-f="sname" maxlength="40" value="${esc(m.name)}" placeholder="Gentle follow-up" aria-label="Message name" />
+                <button type="button" class="lh-btn is-quiet" data-rm-saved="${i}" aria-label="Remove ${esc(m.name || "this message")}">×</button></div>
+              <textarea class="fe-input" data-f="stext" data-role="saved-${i}" rows="3" maxlength="560" aria-label="Message">${esc(m.text)}</textarea>
+            </div>`).join("")}</div>
+          ${set.sms.saved.length < 10 ? '<button type="button" class="lh-btn is-quiet" data-act="add-saved">+ Add a message</button>' : ""}
         </section>
 
         <section class="tb-card">
@@ -448,7 +464,7 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
 
   root.addEventListener("focusin", (e) => {
     const r = e.target.dataset.role;
-    if (r === "smsTpl" || r === "missedTpl") lastTpl = r;
+    if (r === "smsTpl" || r === "missedTpl" || /^saved-\d+$/.test(r || "")) lastTpl = r;
   });
   root.addEventListener("input", (e) => {
     if (e.target.dataset.role === "smsTestTo") return;   // not a setting
@@ -483,6 +499,23 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     }
     const ck = e.target.closest('[data-act="check"]');
     if (ck) { check(ck); return; }
+    if (e.target.closest('[data-act="add-saved"]')) {
+      set = { ...set, ...collect(true) };
+      set.sms.saved.push({ name: "", text: "" });
+      dirty = true;
+      draw();
+      const names = root.querySelectorAll('[data-f="sname"]');
+      if (names.length) names[names.length - 1].focus();
+      return;
+    }
+    const rmSaved = e.target.closest("[data-rm-saved]");
+    if (rmSaved) {
+      set = { ...set, ...collect(true) };
+      set.sms.saved.splice(Number(rmSaved.dataset.rmSaved), 1);
+      dirty = true;
+      draw();
+      return;
+    }
     if (e.target.closest('[data-act="add-reason"]')) {
       set = { ...set, ...collect(true) };
       set.reasons.push({ label: "", askDate: false, dnc: false });

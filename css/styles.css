@@ -12734,3 +12734,64 @@ dialog.lh-dialog.ae-dlg { width: min(520px, calc(100vw - 2rem)); }
 .rc-work-foot .rc-auto { min-width: 0; font-size: .84rem; }
 .rc-work-foot .lh-btn { flex: none; white-space: nowrap; }
 .rc-panel { scrollbar-width: thin; }
+
+/* ================= Recall: Phase 2 ================= */
+/* Start calling */
+.rc-start { display: inline-flex; align-items: center; gap: 7px; padding: .55rem 1rem; border: 0; border-radius: 10px;
+  background: var(--primary, #1f6f63); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+.rc-start:hover { filter: brightness(1.08); }
+.rc-start[hidden] { display: none; }
+
+/* On a call */
+.rc-oncall { display: flex; align-items: center; gap: 10px; margin: 14px 0 6px; padding: 10px 14px; border-radius: 12px;
+  background: #e8f6ee; color: #136c3a; }
+.rc-oncall strong { flex: 1; min-width: 0; }
+.rc-oncall-dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; flex: none; animation: rc-pulse 1.4s ease-in-out infinite; }
+@keyframes rc-pulse { 50% { opacity: .35; transform: scale(.8); } }
+.rc-oncall-t { font-variant-numeric: tabular-nums; font-weight: 600; }
+.rc-oncall-sub { margin: 0 0 4px; font-size: .84rem; color: var(--muted, #6b7280); }
+.rc-tag.is-call { background: #e8f6ee; color: #136c3a; }
+
+/* The Text window's message picker */
+.rc-sms { display: grid; gap: 8px; margin: 0 0 12px; }
+.rc-sms-pick { display: grid; gap: 4px; font-size: .78rem; color: var(--muted, #6b7280); }
+.rc-sms-pick .fb-select { width: 100%; }
+.rc-sms .btn-primary { display: inline-flex; align-items: center; gap: 6px; }
+
+/* Calling session: the board steps aside */
+.rc.is-session .rc-stats2, .rc.is-session .rc-bar, .rc.is-session .rc-chips, .rc.is-session .rc-layout,
+.rc.is-session .rc-top .lh-btn, .rc.is-session .rc-start { display: none; }
+.rc-session[hidden] { display: none; }
+.rc-ss-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.rc-ss-top .lh-btn { display: inline-flex; align-items: center; gap: 6px; }
+.rc-ss-title { display: grid; gap: 2px; }
+.rc-ss-title strong { display: inline-flex; align-items: center; gap: 8px; font-size: 1.05rem; }
+.rc-ss-title small { color: var(--muted, #6b7280); }
+.rc-ss-prog { height: 6px; margin-bottom: 16px; }
+.rc-ss-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 16px; align-items: start; }
+.rc-ss-who, .rc-ss-work { padding: 20px; }
+.rc-ss-head { display: flex; align-items: center; gap: 14px; }
+.rc-ss-head h3 { margin: 0 0 6px; font-size: 1.4rem; }
+.rc-av-xl { width: 60px; height: 60px; font-size: 1.15rem; flex: none; }
+.rc-ss-num { margin: 18px 0 10px; font-size: 1.7rem; font-weight: 700; letter-spacing: .02em; font-variant-numeric: tabular-nums; }
+.rc-call.is-big { width: 100%; justify-content: center; padding: .85rem 1rem; font-size: 1.05rem; margin-bottom: 10px; box-sizing: border-box; }
+.rc-call.is-big kbd { background: transparent; color: rgba(255, 255, 255, .85); border-color: rgba(255, 255, 255, .5); }
+.rc-ss-who .rc-contact { margin-top: 0; }
+.rc-ss-work .rc-ask { margin-top: 0; }
+.rc-ss-work .rc-tiles { gap: 10px; }
+.rc-ss-work .rc-tile { min-height: 58px; font-size: .9rem; }
+.rc-ss-work.is-saving .rc-tiles { opacity: .5; pointer-events: none; }
+.rc-ss-msg { max-width: 520px; margin: 40px auto; padding: 28px; text-align: center; display: grid; gap: 8px; }
+.rc-ss-msg strong { font-size: 1.15rem; }
+.rc-ss-msg p { margin: 0; color: var(--muted, #6b7280); }
+.rc-ss-msg-acts { display: flex; justify-content: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.rc-ss-msg-acts .btn-primary { display: inline-flex; align-items: center; gap: 6px; }
+.rc-ss-keys { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 14px 2px 90px; font-size: .78rem; color: var(--muted, #6b7280); }
+@media (hover: none) { .rc-ss-keys { display: none; } }
+@media (max-width: 980px) { .rc-ss-grid { grid-template-columns: minmax(0, 1fr); } }
+
+/* Recall settings: more messages */
+.rs-subhead { margin-top: 1.2rem; }
+.rs-saved { display: grid; gap: 10px; margin-bottom: 6px; }
+.rs-saved-row { display: grid; gap: 6px; padding: 10px; border: 1px solid var(--border, #e5e7eb); border-radius: 10px; }
+.rs-saved-row .rc-row .fe-input { flex: 1; }

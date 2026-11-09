@@ -5,6 +5,7 @@
 // With a Last visit filter on, each tab is one list sorted by last visit (Firestore can only sort by the date it filters on).
 // Logging a call: tap what happened. It saves after 5 seconds (Undo until then). After No answer or Left voicemail
 // a text is offered (Recall settings → Texts → After a missed call).
+// Pressing Call turns the card into "On a call" (timer, outcomes first). Start calling works through My calls one at a time.
 import { db, auth } from "./firebase-config.js";
 import { collection, query, where, orderBy, limit, onSnapshot, getDocs, getDoc, doc, getCountFromServer }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -30,6 +31,8 @@ const LV_OPTS = [["", "Any time"], ["3", "Past 3 months"], ["3-6", "3 to 6 month
 const APPT_OPTS = [["", "Any"], ["yes", "Has one booked"], ["no", "None booked"]];
 const PICKS = [["Tomorrow", (t) => addDays(t, 1)], ["Next week", (t) => addDays(t, 7)],
   ["2 weeks", (t) => addDays(t, 14)], ["1 month", (t) => addMonths(t, 1)]];
+const SESSION_KEYS = [["N", "No answer"], ["V", "Voicemail"], ["S", "Spoke"], ["B", "Booked"], ["C", "Call"],
+  ["T", "Send the offered text"], ["U", "Undo"], ["↓", "Skip"], ["↑", "Previous"], ["Esc", "Pause"]];
 
 const REPLY_TAG = { yes: "Wants to book", stop: "Opted out", other: "Replied" };
 const STOP_LINE = "Reply STOP to opt out.";
@@ -64,6 +67,11 @@ const I = {
   clock: svg('<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/>'),
   dot: svg('<circle cx="12" cy="12" r="3"/>'),
   chev: svg('<polyline points="6 9 12 15 18 9"/>'),
+  headset: svg('<path d="M3 14v-2a9 9 0 0 1 18 0v2"/><path d="M21 19a2 2 0 0 1-2 2h-1v-7h3z"/><path d="M3 19a2 2 0 0 0 2 2h1v-7H3z"/>'),
+  play: svg('<polygon points="6 4 20 12 6 20 6 4"/>'),
+  pause: svg('<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>'),
+  next: svg('<polyline points="9 6 15 12 9 18"/>'),
+  prev: svg('<polyline points="15 6 9 12 15 18"/>'),
 };
 const TILE_ICON = { no_answer: I.phoneOff, voicemail: I.voicemail, spoke: I.chat, booked: I.cal };
 const histIcon = (w) => {
@@ -94,6 +102,7 @@ const daysFrom = (a, b) => { const x = keyDate(a), y = keyDate(b); return x && y
 const when = (iso) => { const d = new Date(iso || ""); return isNaN(d) ? "" : d.toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }); };
 const first = (n) => String(n || "").split(" ")[0];
 const plural = (n, w) => `${Number(n).toLocaleString()} ${w}${n === 1 ? "" : "s"}`;
+const clock = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
 // "Victoria Winters}}" → "Victoria Winters": stray brackets and marks from the appointment book are dropped
 const cleanName = (s) => String(s || "").replace(/[{}[\]<>|\\~^*_=+#]+/g, " ").replace(/\s+/g, " ").trim()
   .replace(/^[^\p{L}(]+|[^\p{L})'.]+$/gu, "").trim();
@@ -117,7 +126,7 @@ const isMobile = (m) => /^04\d{8}$/.test(telOf(m));
 const me = () => (auth.currentUser && auth.currentUser.uid) || "";
 const can = (staff, p) => !!staff && (/^admin$/i.test(String(staff.role || "")) || (Array.isArray(staff.perms) && staff.perms.includes(p)));
 const nameKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9' -]/g, " ").replace(/\s+/g, " ").trim(); // same as recallKeys_
-const blank = () => ({ note: "", remind: "", reason: "", until: "", sms: null });
+const blank = () => ({ note: "", remind: "", reason: "", until: "", sms: null, smsKey: "main" });
 const errText = (err, fallback) => (err && err.code === "permission-denied"
   ? "You don't have access to Recall. Check Recall access in Staff, and that the Firestore rules are published."
   : (err && err.message) || fallback);
@@ -193,6 +202,7 @@ export function mountRecall(container, { staff = null } = {}) {
   root.className = "page rc";
   root.innerHTML = `
     <div class="rc-top"><h2>Recall</h2><span class="inv-spacer"></span>
+      <button type="button" class="rc-start" data-act="session-start" hidden title="Work through My calls one patient at a time">${I.headset}<span>Start calling</span></button>
       <a class="lh-btn is-quiet" href="#/recall/messages">Texts & emails</a>
       ${can(staff, "recall.manage") ? '<a class="lh-btn is-quiet" href="#/recall/results">Results</a>' : ""}
       ${can(staff, "recall.manage") ? '<a class="lh-btn is-quiet" href="#/settings/recall">Recall settings</a>' : ""}</div>
@@ -218,6 +228,7 @@ export function mountRecall(container, { staff = null } = {}) {
       <div data-role="list"></div>
       <aside class="tb-card rc-panel" data-role="panel" aria-label="Recall card" hidden></aside>
     </div>
+    <div class="rc-session" data-role="session" aria-label="Calling session" hidden></div>
     <div class="rc-ub" data-role="undo" role="status" aria-live="polite" hidden></div>`;
   container.replaceChildren(root);
   const $ = (r) => root.querySelector(`[data-role="${r}"]`);
@@ -243,11 +254,16 @@ export function mountRecall(container, { staff = null } = {}) {
   let jumpTo = "";            // a group to scroll to once My calls has loaded ("replies", "callbacks")
 
   // The call just logged: saved after UNDO_MS unless Undo is pressed. One at a time.
-  let pend = null;            // { id, first, label, body, kept, deadline, timer, tick, auto }
+  let pend = null;            // { id, first, label, body, kept, deadline, timer, tick, auto, counted }
   let bar = null;             // the bar at the bottom: { id, first, text, state: wait | saving | saved | failed, sent }
   let offer = null;           // the text (or email) offered after a missed call
   let quietNote = "";
   let barHide = 0;
+
+  // On a call (after pressing Call): { id, start }. A calling session: { ids, calls, booked, paused, done, waitMore }.
+  let call = null, callTick = 0;
+  let session = null;
+  let sessionSig = "", sessionId = "";
 
   /* ---------- Last visit filter ---------- */
   function lvRange() {
@@ -316,9 +332,18 @@ export function mountRecall(container, { staff = null } = {}) {
       const here = sel ? inRows(sel) : false;
       if (sel && seenSel && !here) keepOpen(sel);   // the open card has left this list
       seenSel = here;
+      // The calling session asked for the next 50: they join the end of it
+      if (session && session.waitMore && sec.key === "mine") {
+        session.waitMore = false;
+        const last = session.ids[session.ids.length - 1];
+        const add = shownIds().filter((id) => !session.ids.includes(id) && (findCard(id) || {}).status === "open");
+        session.ids.push(...add);
+        if (add.length) sessionMove(1, last);
+      }
       drawList();
       drawPanel(false);
       drawStats();
+      drawStart();
       if (jumpTo && sec.key === "mine") { const g = jumpTo; jumpTo = ""; scrollGroup(g); }
       scheduleCounts();
     }, (err) => {
@@ -331,7 +356,7 @@ export function mountRecall(container, { staff = null } = {}) {
     });
   }
 
-  function drawBar() { drawTabs(); drawWho(); drawLv(); drawFilters(); drawChips(); }
+  function drawBar() { drawTabs(); drawWho(); drawLv(); drawFilters(); drawChips(); drawStart(); }
   function build() {
     stopAll();
     sections = tabSections().map((s) => ({ ...s, n: PAGE, rows: [], loaded: false, more: false, error: "", open: !s.lazy, count: null, stop: null }));
@@ -442,6 +467,13 @@ export function mountRecall(container, { staff = null } = {}) {
         <span class="rc-stat2-txt"><small>Booked this month</small></span></button>`;
   }
 
+  // "Start calling" shows on My calls once there's someone to call
+  function drawStart() {
+    const b = root.querySelector('[data-act="session-start"]');
+    const sec = sections.find((s) => s.key === "mine");
+    b.hidden = !(ui.tab === "mine" && ui.q.trim().length < 2 && sec && sec.loaded && sec.rows.length);
+  }
+
   function drawTabs() {
     const searchingNow = ui.q.trim().length >= 2;
     const tab = (k, label) => {
@@ -515,7 +547,9 @@ export function mountRecall(container, { staff = null } = {}) {
     const side = [c.attempts ? `${c.attempts} tr${c.attempts === 1 ? "y" : "ies"}` : "",
       c.assignedToId && c.assignedToId !== me() ? first(c.assignedToName) : ""].filter(Boolean).join(" · ");
     const sv = busyLabel(c.id);
+    const onCall = call && call.id === c.id;
     const tag = sv ? `<span class="rc-tag is-saving">${esc(sv)}…</span>`
+      : onCall ? '<span class="rc-tag is-call">On a call</span>'
       : c.replyOpen && c.reply
         ? `<span class="rc-tag is-${esc(c.reply.kind)}">${esc(REPLY_TAG[c.reply.kind] || "Replied")}</span>`
       : c.callBackDue && c.status === "open" && c.stage === "call"
@@ -531,8 +565,8 @@ export function mountRecall(container, { staff = null } = {}) {
     const tel = telOf(c.mobile);
     const name = esc(c.patientName || "this patient");
     const contact = tel
-      ? (on ? `<a class="rc-call is-main" href="tel:${esc(tel)}">${I.phone}<span>Call</span></a>`
-        : `<a class="rc-call-ic" href="tel:${esc(tel)}" aria-label="Call ${name}" title="Call ${esc(mobileText(c.mobile))}">${I.phone}</a>`)
+      ? (on ? `<a class="rc-call is-main" href="tel:${esc(tel)}" data-call="${esc(c.id)}">${I.phone}<span>Call</span></a>`
+        : `<a class="rc-call-ic" href="tel:${esc(tel)}" data-call="${esc(c.id)}" aria-label="Call ${name}" title="Call ${esc(mobileText(c.mobile))}">${I.phone}</a>`)
       : c.email && !c.dnc
         ? `<a class="rc-call-ic" href="mailto:${esc(c.email)}" data-card="${esc(c.id)}" aria-label="Email ${name}" title="No mobile · email them">${I.mail}</a>`
         : `<span class="rc-nomob">${c.email ? "No mobile" : "No mobile or email"}</span>`;
@@ -622,7 +656,7 @@ export function mountRecall(container, { staff = null } = {}) {
     return out;
   }
 
-  // A text for this card, from Recall settings → Texts (the usual one, or the one after a missed call)
+  // A text for this card, from Recall settings → Texts (the usual one, the one after a missed call, or a saved one)
   function fillSms(c, template = settings.sms.template) {
     const s = settings.sms || {};
     const cat = settings.categories.find((x) => x.key === c.category);
@@ -639,25 +673,30 @@ export function mountRecall(container, { staff = null } = {}) {
       .replace(/\{\s*clinic phone\s*\}/gi, s.phone || "")
       .replace(/\s+/g, " ").trim();
   }
+  // The messages to choose from in the Text window [key, name, template]
+  function smsChoices() {
+    const s = settings.sms || {};
+    return [["main", "Recall reminder", s.template], ["missed", "After a missed call", s.missedTemplate],
+      ...(Array.isArray(s.saved) ? s.saved : []).map((m, i) => [`s${i}`, m.name, m.text])];
+  }
 
-  /* ---------- One card ---------- */
-  function panelHtml(c, sv) {
-    const t = todayKey();
-    const team = new Set(settings.team);
-    const ppl = [...people].sort((a, b) => (team.has(b.id) - team.has(a.id)) || String(a.name).localeCompare(String(b.name)));
-    if (c.assignedToId && !ppl.some((s) => s.id === c.assignedToId)) ppl.unshift({ id: c.assignedToId, name: c.assignedToName || "Someone" });
-    const reason = settings.reasons.find((r) => r.label === draft.reason);
-    const tel = telOf(c.mobile);
+  /* ---------- One card: the pieces (the panel and the calling session both use them) ---------- */
+  function chipsHtml(c, t) {
     const dueCls = rail(c, t).replace("r-", "is-");
-
-    const chips = [
+    return [
       c.category ? `<span class="rc-pill is-cat">${esc(c.category)}</span>` : "",
       `<span class="rc-pill ${dueCls}">${esc(dueText(c, t))}</span>`,
       c.alsoDue.length ? `<span class="rc-pill is-also">Also due: ${esc(c.alsoDue.join(", "))}</span>` : "",
     ].join("");
-
+  }
+  function noticesHtml(c) {
+    return (c.reply ? `<div class="rc-reply${c.replyOpen ? " is-open" : ""}"><strong>${esc(REPLY_TAG[c.reply.kind] || "Replied")} · ${esc(when(c.reply.at))}</strong>
+        <p>${esc(c.reply.text)}</p></div>` : "") +
+      (c.dnc ? `<div class="rc-dnc-note"><strong>Do not contact</strong> · ${esc(dncTitle(c))}</div>` : "");
+  }
+  function ctxHtml(c, t) {
     const lastCall = c.log.slice().reverse().find((l) => /no answer|voicemail|spoke|booked/i.test(String(l.what || "")));
-    const ctx = [
+    const items = [
       ["Last visit", c.lastVisit ? `${nice(c.lastVisit)}${c.lastStaff ? ` with ${c.lastStaff}` : ""}` : "Not known"],
       ["Had", c.lastServices.join(", ") || "–"],
       ["Calls so far", c.attempts ? `${c.attempts}${lastCall ? ` · ${String(lastCall.what).toLowerCase()} ${dayOf(lastCall.at)}` : ""}` : "None yet"],
@@ -665,10 +704,14 @@ export function mountRecall(container, { staff = null } = {}) {
       ["Upcoming", c.nextAppt && c.nextAppt >= t ? short(c.nextAppt) : "Nothing booked"],
       ["Due", nice(c.dueDate) || "–"],
     ];
-
-    const contact = `<div class="rc-contact">
-      ${tel ? `<a class="rc-call is-main" href="tel:${esc(tel)}">${I.phone}<span>Call ${esc(mobileText(c.mobile))}</span></a>`
-        : '<span class="rc-nomob">No mobile on file</span>'}
+    return `<div class="rc-ctx">${items.map(([a, b]) => `<div><small>${esc(a)}</small><span>${esc(b)}</span></div>`).join("")}</div>`;
+  }
+  // Call on top (unless it's drawn elsewhere), then Text · Email · Patient
+  function contactHtml(c, withCall = true) {
+    const tel = telOf(c.mobile);
+    return `<div class="rc-contact">
+      ${withCall ? (tel ? `<a class="rc-call is-main" href="tel:${esc(tel)}" data-call="${esc(c.id)}">${I.phone}<span>Call ${esc(mobileText(c.mobile))}</span></a>`
+        : '<span class="rc-nomob">No mobile on file</span>') : ""}
       ${tel && c.status !== "closed" ? (c.dnc
         ? `<button type="button" class="lh-btn" disabled title="${esc(dncTitle(c))}">${I.msg}<span>Text</span></button>`
         : `<button type="button" class="lh-btn" data-act="sms">${I.msg}<span>Text</span></button>`) : ""}
@@ -676,47 +719,70 @@ export function mountRecall(container, { staff = null } = {}) {
         ? `<button type="button" class="lh-btn" disabled title="${esc(dncTitle(c))}">${I.mail}<span>Email</span></button>`
         : `<a class="lh-btn" href="mailto:${esc(c.email)}" data-card="${esc(c.id)}">${I.mail}<span>Email</span></a>`) : ""}
       ${c.patientId ? `<a class="lh-btn" href="#/patient/${encodeURIComponent(c.patientId)}" title="Open their patient page">${I.user}<span>Patient</span></a>` : ""}
-       </div>`;
-
-    const smsBox = draft.sms == null ? "" : `<div class="rc-sms">
-      <textarea class="fe-input" data-role="sms" rows="4" maxlength="560" aria-label="Text message">${esc(draft.sms)}</textarea>
-      <div class="rc-row"><small class="fe-note" data-role="smsInfo">${esc(smsInfo(draft.sms))}</small><span class="inv-spacer"></span>
-        <button type="button" class="lh-btn is-quiet" data-act="sms-cancel">Cancel</button>
-        <button type="button" class="btn-primary" data-act="sms-send">Send to ${esc(mobileText(c.mobile))}</button></div>
     </div>`;
-
-    const ownDate = !!draft.remind && !PICKS.some(([, fn]) => fn(t) === draft.remind);   // picked from the calendar
-    let work;
+  }
+  function smsBoxHtml() {
+    if (draft.sms == null) return "";
+    return `<div class="rc-sms">
+      <label class="rc-sms-pick"><span>Message</span>
+        <select class="fb-select" data-role="smsPick" aria-label="Message">${smsChoices().map(([k, l]) =>
+          `<option value="${esc(k)}"${draft.smsKey === k ? " selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+      <textarea class="fe-input" data-role="sms" rows="4" maxlength="560" aria-label="Text message">${esc(draft.sms)}</textarea>
+      <small class="fe-note" data-role="smsInfo">${esc(smsInfo(draft.sms))}</small>
+      <div class="rc-row"><span class="inv-spacer"></span>
+        <button type="button" class="lh-btn is-quiet" data-act="sms-cancel">Cancel</button>
+        <button type="button" class="btn-primary" data-act="sms-send">${I.send}<span>Send text</span></button></div>
+    </div>`;
+  }
+  function onCallHtml(c, t, withSub = true) {
+    const sub = [c.category, dueText(c, t),
+      c.lastServices.length ? `last had ${c.lastServices.join(", ")}${c.lastStaff ? ` with ${c.lastStaff}` : ""}` : c.lastStaff ? `last with ${c.lastStaff}` : "",
+      c.alsoDue.length ? `also due: ${c.alsoDue.join(", ")}` : ""].filter(Boolean).join(" · ");
+    return `<div class="rc-oncall"><span class="rc-oncall-dot" aria-hidden="true"></span>
+        <strong>On a call with ${esc(first(c.patientName) || "them")}</strong>
+        <span class="rc-oncall-t" data-role="callTime">${clock(Date.now() - call.start)}</span></div>
+      ${withSub ? `<p class="rc-oncall-sub">${esc(sub)}</p>` : ""}`;
+  }
+  function workHtml(c, t, inSession) {
     if (c.status === "closed") {
-      work = `<div class="rc-state">Closed: ${esc(c.closeReason)}${c.closedBy ? ` · ${esc(c.closedBy)}` : ""}${c.closedAt ? ` · ${esc(when(c.closedAt))}` : ""}</div>
+      return `<div class="rc-state">Closed: ${esc(c.closeReason)}${c.closedBy ? ` · ${esc(c.closedBy)}` : ""}${c.closedAt ? ` · ${esc(when(c.closedAt))}` : ""}</div>
         ${c.closeReason === "Came in" ? "" : '<button type="button" class="lh-btn" data-act="reopen">Reopen</button>'}`;
-    } else if (c.status === "booked") {
-      work = `<div class="rc-state is-ok">${c.bookedFor
+    }
+    if (c.status === "booked") {
+      return `<div class="rc-state is-ok">${c.bookedFor
         ? `Booked for ${esc(nice(c.bookedFor))}. The card closes by itself when they come in.`
         : "Marked as booked by phone. If it isn't in the appointment book within 3 days, the card goes back to My calls."}</div>
         <button type="button" class="lh-btn" data-act="reopen">Not booked after all</button>`;
-    } else {
-      work = `
-        <div class="rc-ask">What happened?</div>
-        <div class="rc-tiles">${TILES.map(([k, l, key]) => `<button type="button" class="rc-tile${k === "booked" ? " is-good" : ""}" data-out="${k}">
-          ${TILE_ICON[k]}<span>${esc(l)}</span><kbd>${key}</kbd></button>`).join("")}</div>
-        <textarea class="fe-input rc-note" data-role="note" rows="2" maxlength="1000"
-          placeholder="Add a note or call-back first if you like, then tap what happened">${esc(draft.note)}</textarea>
-        <div class="rc-cb"><small class="rc-cb-lbl">Call back</small><div class="rc-cb-picks">${PICKS.map(([l, fn], i) =>
-          `<button type="button" class="rc-chip${draft.remind === fn(t) ? " is-on" : ""}" data-pick="${i}">${esc(l)}</button>`).join("")}
-          <span class="rc-cb-date">
-            <button type="button" class="rc-chip rc-cb-pick${ownDate ? " is-on" : ""}" data-act="pick-date" title="Choose a date"
-              aria-label="${ownDate ? `Call back ${esc(short(draft.remind))}. Change the date` : "Choose a date"}">${I.cal}${
-              ownDate ? `<span>${esc(short(draft.remind))}</span>` : ""}</button>
-            <input type="date" class="rc-cb-input" data-remind min="${addDays(t, 1)}" value="${esc(draft.remind)}" tabindex="-1" aria-hidden="true" />
-          </span></div></div>
-        <div class="rc-work-foot">
-          <label class="fe-check rc-auto"><input type="checkbox" data-role="auto"${autoNext ? " checked" : ""} /> Open the next patient after</label>
-          <span class="inv-spacer"></span>
-          <button type="button" class="lh-btn is-quiet" data-act="save">${draft.remind ? "Save call-back" : "Save note"}</button>
-        </div>`;
     }
-
+    const onCall = !!(call && call.id === c.id);
+    const ownDate = !!draft.remind && !PICKS.some(([, fn]) => fn(t) === draft.remind);   // picked from the calendar
+    return `
+      <div class="rc-ask">${onCall ? "How did it go?" : "What happened?"}</div>
+      <div class="rc-tiles">${TILES.map(([k, l, key]) => `<button type="button" class="rc-tile${k === "booked" ? " is-good" : ""}" data-out="${k}">
+        ${TILE_ICON[k]}<span>${esc(l)}</span><kbd>${key}</kbd></button>`).join("")}</div>
+      <textarea class="fe-input rc-note" data-role="note" rows="2" maxlength="1000"
+        placeholder="Add a note or call-back first if you like, then tap what happened">${esc(draft.note)}</textarea>
+      <div class="rc-cb"><small class="rc-cb-lbl">Call back</small><div class="rc-cb-picks">${PICKS.map(([l, fn], i) =>
+        `<button type="button" class="rc-chip${draft.remind === fn(t) ? " is-on" : ""}" data-pick="${i}">${esc(l)}</button>`).join("")}
+        <span class="rc-cb-date">
+          <button type="button" class="rc-chip rc-cb-pick${ownDate ? " is-on" : ""}" data-act="pick-date" title="Choose a date"
+            aria-label="${ownDate ? `Call back ${esc(short(draft.remind))}. Change the date` : "Choose a date"}">${I.cal}${
+            ownDate ? `<span>${esc(short(draft.remind))}</span>` : ""}</button>
+          <input type="date" class="rc-cb-input" data-remind min="${addDays(t, 1)}" value="${esc(draft.remind)}" tabindex="-1" aria-hidden="true" />
+        </span></div></div>
+      <div class="rc-work-foot">
+        ${inSession || onCall ? "" : `<label class="fe-check rc-auto"><input type="checkbox" data-role="auto"${autoNext ? " checked" : ""} /> Open the next patient after</label>`}
+        <span class="inv-spacer"></span>
+        ${onCall ? '<button type="button" class="lh-btn is-quiet" data-act="call-end" title="Close the call screen without logging">Log it later</button>' : ""}
+        <button type="button" class="lh-btn is-quiet" data-act="save">${draft.remind ? "Save call-back" : "Save note"}</button>
+      </div>`;
+  }
+  function moreHtml(c, t) {
+    if (c.status === "closed") return "";
+    const team = new Set(settings.team);
+    const ppl = [...people].sort((a, b) => (team.has(b.id) - team.has(a.id)) || String(a.name).localeCompare(String(b.name)));
+    if (c.assignedToId && !ppl.some((s) => s.id === c.assignedToId)) ppl.unshift({ id: c.assignedToId, name: c.assignedToName || "Someone" });
+    const reason = settings.reasons.find((r) => r.label === draft.reason);
     const stop = c.status !== "open" ? "" : `
       <div class="rc-f-row"><span>Stop recall</span>
         <div class="rc-row">
@@ -727,7 +793,7 @@ export function mountRecall(container, { staff = null } = {}) {
           <button type="button" class="lh-btn" data-act="close">${reason && reason.askDate ? "Pause" : "Stop"}</button>
         </div>
         ${reason && reason.dnc ? '<small class="fe-note">This also puts them on the do-not-contact list.</small>' : ""}</div>`;
-    const more = c.status === "closed" ? "" : `<details class="rc-more" data-role="more"${moreOpen ? " open" : ""}>
+    return `<details class="rc-more" data-role="more"${moreOpen ? " open" : ""}>
       <summary><span>Given to ${esc(c.assignedToName || "nobody yet")}${c.status === "open" ? " · Stop recall" : ""}</span>${I.chev}</summary>
       <div class="rc-more-body">
         <label class="rc-f-row"><span>Given to</span>
@@ -737,32 +803,39 @@ export function mountRecall(container, { staff = null } = {}) {
           </select></label>
         ${stop}
       </div></details>`;
-
-    const hist = c.log.length ? `<h4 class="rc-h">History</h4><ul class="rc-hist">${c.log.slice().reverse().map((l) => `<li>
+  }
+  function histHtml(c, max = 0) {
+    if (!c.log.length) return "";
+    const list = c.log.slice().reverse();
+    const shown = max ? list.slice(0, max) : list;
+    return `<h4 class="rc-h">History${max && list.length > max ? ` <small class="muted">latest ${max} of ${list.length}</small>` : ""}</h4>
+      <ul class="rc-hist">${shown.map((l) => `<li>
         <span class="rc-hist-ic">${histIcon(l.what)}</span>
         <div><strong>${esc(l.what)}</strong>${l.note ? `<p>${esc(l.note)}</p>` : ""}
-          <small>${esc(when(l.at))}${l.by ? ` · ${esc(l.by)}` : ""}</small></div></li>`).join("")}</ul>` : "";
+          <small>${esc(when(l.at))}${l.by ? ` · ${esc(l.by)}` : ""}</small></div></li>`).join("")}</ul>`;
+  }
 
+  function panelHtml(c, sv) {
+    const t = todayKey();
+    const onCall = !!(call && call.id === c.id) && c.status === "open";
     return `
       <div class="rc-ph"><span class="rc-av rc-av-lg h${hue(c.category)}" aria-hidden="true">${esc(initials(c.patientName))}</span>
-        <div class="rc-ph-main"><h3>${esc(c.patientName || "Unknown patient")}</h3><div class="rc-pchips">${chips}</div></div>
+        <div class="rc-ph-main"><h3>${esc(c.patientName || "Unknown patient")}</h3><div class="rc-pchips">${chipsHtml(c, t)}</div></div>
         <button type="button" class="rc-x" data-act="deselect" aria-label="Close">${I.x}</button></div>
-      ${c.reply ? `<div class="rc-reply${c.replyOpen ? " is-open" : ""}"><strong>${esc(REPLY_TAG[c.reply.kind] || "Replied")} · ${esc(when(c.reply.at))}</strong>
-        <p>${esc(c.reply.text)}</p></div>` : ""}
-      ${c.dnc ? `<div class="rc-dnc-note"><strong>Do not contact</strong> · ${esc(dncTitle(c))}</div>` : ""}
-      ${contact}${smsBox}
-      <div class="rc-ctx">${ctx.map(([a, b]) => `<div><small>${esc(a)}</small><span>${esc(b)}</span></div>`).join("")}</div>
+      ${noticesHtml(c)}
+      ${onCall ? onCallHtml(c, t) : contactHtml(c) + smsBoxHtml() + ctxHtml(c, t)}
       ${sv ? `<p class="rc-saving-line" role="status">${esc(sv)}…</p>` : ""}
-      <div class="rc-work">${work}</div>
-      ${more}${hist}`;
+      <div class="rc-work">${workHtml(c, t, false)}</div>
+      ${moreHtml(c, t)}${histHtml(c)}`;
   }
 
   function drawPanel(force) {
+    if (session) { drawSession(force); return; }
     const p = $("panel");
     const c = sel ? findCard(sel) : null;
     if (!c) { p.hidden = true; p.innerHTML = ""; panelSig = ""; panelId = ""; return; }
     const sv = busyLabel(c.id);
-    const sig = `${c.id}|${c.updatedAt}|${c.status}|${people.length}|${sv}`;
+    const sig = `${c.id}|${c.updatedAt}|${c.status}|${people.length}|${sv}|${call && call.id === c.id ? "call" : ""}`;
     if (!force && sig === panelSig) return;
     const same = panelId === c.id;
     panelSig = sig;
@@ -778,19 +851,159 @@ export function mountRecall(container, { staff = null } = {}) {
     else { render(); p.scrollTop = 0; }
   }
 
+  /* ---------- Calling session: My calls, one patient at a time ---------- */
+  function sessionHtml(c) {
+    const s = session, t = todayKey(), n = s.ids.length;
+    const pos = c ? Math.max(1, s.ids.indexOf(c.id) + 1) : n;
+    const pct = s.done ? 100 : Math.round(((pos - 1) / n) * 100);
+    const live = !s.done && !s.paused;
+    const top = `<div class="rc-ss-top">
+        <div class="rc-ss-title"><strong>${I.headset}<span>Calling session</span></strong>
+          <small>${s.done ? "Finished" : `${pos} of ${n}`} · ${plural(s.calls, "call")} logged · ${s.booked} booked</small></div>
+        <span class="inv-spacer"></span>
+        ${live ? `<button type="button" class="lh-btn is-quiet" data-act="session-prev" title="Previous patient (↑)">${I.prev}<span>Previous</span></button>
+          <button type="button" class="lh-btn is-quiet" data-act="session-skip" title="Skip for now (↓)"><span>Skip</span>${I.next}</button>
+          <button type="button" class="lh-btn" data-act="session-pause" title="Pause (Esc)">${I.pause}<span>Pause</span></button>` : ""}
+        <button type="button" class="lh-btn" data-act="session-end">${I.x}<span>End</span></button>
+      </div>
+      <span class="rc-prog rc-ss-prog"><i style="width:${pct}%"></i></span>`;
+    if (s.paused) {
+      return `${top}<div class="tb-card rc-ss-msg"><strong>Paused</strong>
+        <p>${pos} of ${n} · ${plural(s.calls, "call")} logged so far.</p>
+        <div class="rc-ss-msg-acts"><button type="button" class="btn-primary" data-act="session-resume">${I.play}<span>Resume</span></button>
+          <button type="button" class="lh-btn" data-act="session-end">End session</button></div></div>`;
+    }
+    if (s.done) {
+      const sec = sections.find((x) => x.key === "mine");
+      return `${top}<div class="tb-card rc-ss-msg"><strong>${s.waitMore ? "Loading the next patients…" : "That's everyone in the list"}</strong>
+        <p>${plural(s.calls, "call")} logged · ${s.booked} booked this session.</p>
+        <div class="rc-ss-msg-acts">${sec && sec.more && !s.waitMore
+          ? `<button type="button" class="btn-primary" data-act="session-more">Keep going: load ${PAGE} more</button>` : ""}
+          <button type="button" class="lh-btn" data-act="session-end">Back to Recall</button></div></div>`;
+    }
+    if (!c) return `${top}<div class="skeleton" style="height:360px;border-radius:14px"></div>`;
+    const tel = telOf(c.mobile);
+    const onCall = !!(call && call.id === c.id) && c.status === "open";
+    const sv = busyLabel(c.id);
+    return `${top}<div class="rc-ss-grid">
+      <section class="tb-card rc-ss-who">
+        <div class="rc-ss-head"><span class="rc-av rc-av-xl h${hue(c.category)}" aria-hidden="true">${esc(initials(c.patientName))}</span>
+          <div><h3>${esc(c.patientName || "Unknown patient")}</h3><div class="rc-pchips">${chipsHtml(c, t)}</div></div></div>
+        ${noticesHtml(c)}
+        ${onCall ? onCallHtml(c, t, false) : `<div class="rc-ss-num">${tel ? esc(mobileText(c.mobile)) : "No mobile on file"}</div>
+          ${tel ? `<a class="rc-call is-main is-big" href="tel:${esc(tel)}" data-call="${esc(c.id)}">${I.phone}<span>Call</span><kbd>C</kbd></a>` : ""}`}
+        ${contactHtml(c, false)}${smsBoxHtml()}
+        ${ctxHtml(c, t)}
+      </section>
+      <section class="tb-card rc-ss-work${sv ? " is-saving" : ""}">
+        ${sv ? `<p class="rc-saving-line" role="status">${esc(sv)}…</p>` : ""}
+        <div class="rc-work">${workHtml(c, t, true)}</div>
+        ${moreHtml(c, t)}${histHtml(c, 5)}
+      </section></div>
+      <p class="rc-ss-keys">${SESSION_KEYS.map(([k, l]) => `<span><kbd>${k}</kbd> ${esc(l)}</span>`).join("")}</p>`;
+  }
+
+  function drawSession(force) {
+    const box = $("session");
+    const s = session;
+    const c = !s.done && sel ? findCard(sel) : null;
+    if (!s.done && !s.paused && sel && !c) {   // their card has gone (booked or moved by someone else): on to the next
+      setTimeout(() => { if (session && !session.done && sel && !findCard(sel)) sessionMove(1, sel); }, 0);
+    }
+    const sv = c ? busyLabel(c.id) : "";
+    const sig = [s.done, s.paused, s.waitMore, s.calls, s.booked, c ? `${c.id}|${c.updatedAt}|${c.status}` : "",
+      sv, call ? call.id : "", people.length].join("|");
+    if (!force && sig === sessionSig) return;
+    const same = !!c && sessionId === c.id;
+    sessionSig = sig;
+    sessionId = c ? c.id : "";
+    const render = () => {
+      box.innerHTML = sessionHtml(c);
+      const nb = box.querySelector('[data-role="note"]');
+      if (nb) grow(nb);
+    };
+    if (same) keepFocus(box, render); else render();
+  }
+
+  // The next (dir 1) or previous (dir -1) open card in the session. Past the last one, the session is finished.
+  function sessionMove(dir, fromId = sel) {
+    const s = session;
+    if (!s) return false;
+    const i = s.ids.indexOf(fromId);
+    for (let j = i + dir; j >= 0 && j < s.ids.length; j += dir) {
+      const id = s.ids[j];
+      const c = findCard(id);
+      if (c && c.status === "open" && !busyLabel(id)) { s.done = false; openCard(id); return true; }
+    }
+    if (dir > 0) { endCall(); s.done = true; sel = ""; drawPanel(true); }
+    else showToast("This is the first patient in the session.");
+    return false;
+  }
+
+  function startSession() {
+    if (ui.tab !== "mine" || ui.q.trim().length >= 2) return;
+    const ids = shownIds().filter((id) => { const c = findCard(id); return c && c.status === "open"; });
+    if (!ids.length) { showToast("Nothing to call right now."); return; }
+    session = { ids, calls: 0, booked: 0, paused: false, done: false, waitMore: false };
+    sessionSig = ""; sessionId = "";
+    root.classList.add("is-session");
+    const p = $("panel");
+    p.hidden = true; p.innerHTML = ""; panelSig = ""; panelId = "";
+    $("session").hidden = false;
+    const startId = sel && ids.includes(sel) && !busyLabel(sel) ? sel : ids.find((id) => !busyLabel(id));
+    if (startId) openCard(startId); else { session.done = true; drawPanel(true); }
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+  function endSession() {
+    if (!session) return;
+    const s = session;
+    session = null;
+    endCall();
+    root.classList.remove("is-session");
+    const box = $("session");
+    box.hidden = true; box.innerHTML = ""; sessionSig = ""; sessionId = "";
+    drawList();
+    drawPanel(true);
+    drawStart();
+    if (s.calls) showToast(`Session ended: ${plural(s.calls, "call")} logged, ${s.booked} booked.`);
+  }
+
+  /* ---------- On a call ---------- */
+  function startCall(id) {
+    endCall();
+    call = { id, start: Date.now() };
+    callTick = setInterval(() => {
+      const el = root.querySelector('[data-role="callTime"]');
+      if (el && call) el.textContent = clock(Date.now() - call.start);
+    }, 1000);
+    if (sel !== id) openCard(id);
+    else { drawList(); drawPanel(true); }
+    const first = root.querySelector('.rc-tile[data-out="no_answer"]');
+    if (first) first.focus({ preventScroll: true });
+  }
+  function endCall() {
+    if (callTick) clearInterval(callTick);
+    callTick = 0;
+    const had = !!call;
+    call = null;
+    return had;
+  }
+
   function openCard(id) {
+    if (call && call.id !== id) endCall();
     sel = id;
     seenSel = inRows(id);
     draft = blank();
     moreOpen = false;
     drawList();
     drawPanel(true);
+    if (session) return;
     const row = root.querySelector(`[data-card="${CSS.escape(id)}"]`);
     if (row) row.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
   function select(id) {
     if (pend && pend.id === id) commit();   // reopening it: save now
-    if (sel === id) { sel = ""; seenSel = false; draft = blank(); drawList(); drawPanel(true); return; }
+    if (sel === id) { endCall(); sel = ""; seenSel = false; draft = blank(); drawList(); drawPanel(true); return; }
     openCard(id);
   }
   // After logging a call: the next open card that was below this one (not one still saving)
@@ -799,6 +1012,14 @@ export function mountRecall(container, { staff = null } = {}) {
     const next = ids.slice(i + 1).find((id) => { const c = findCard(id); return c && c.status === "open" && !busyLabel(id); });
     if (next) openCard(next);
     else { sel = ""; draft = blank(); drawList(); drawPanel(true); }
+  }
+  // ↓ / ↑ on the board: the next or previous patient in the list
+  function moveSel(dir) {
+    const ids = shownIds();
+    if (!ids.length) return;
+    const i = ids.indexOf(sel);
+    const j = i === -1 ? (dir > 0 ? 0 : ids.length - 1) : i + dir;
+    if (j >= 0 && j < ids.length) openCard(ids[j]);
   }
 
   // Saves through Apps Script (1 to 3 seconds). The card shows "Saving…" meanwhile; other cards can be worked.
@@ -856,6 +1077,7 @@ export function mountRecall(container, { staff = null } = {}) {
     if (!c || c.status !== "open") return;
     if (busyLabel(id)) { showToast("Still saving the last change. One moment."); return; }
     if (pend) commit();   // the call before this one saves now
+    endCall();
     const f = first(c.patientName) || "Patient";
     const kept = { ...draft };
     const ids = shownIds();
@@ -864,12 +1086,16 @@ export function mountRecall(container, { staff = null } = {}) {
     offer = o && o.kind ? { ...o, id, first: f, mobile: c.mobile, email: c.email, editing: false, busy: false } : null;
     quietNote = o && o.skip ? o.skip : "";
     pend = { id, first: f, label: LABEL[k], body: { outcome: k, note: kept.note, remindOn: kept.remind }, kept,
-      deadline: Date.now() + UNDO_MS, auto: offer && offer.auto ? offer : null };
+      deadline: Date.now() + UNDO_MS, auto: offer && offer.auto ? offer : null, counted: session ? k : "" };
     pend.timer = setTimeout(commit, UNDO_MS);
     pend.tick = setInterval(tickUndo, 500);
     bar = { id, first: f, text: `${f}: ${LABEL[k].toLowerCase()}`, state: "wait", sent: false };
     draft = blank();
-    if (autoNext) goNext(id, ids);
+    if (session) {
+      session.calls += 1;
+      if (k === "booked") session.booked += 1;
+      sessionMove(1, id);
+    } else if (autoNext) goNext(id, ids);
     else { drawList(); drawPanel(true); }
     drawUndo();
   }
@@ -887,7 +1113,10 @@ export function mountRecall(container, { staff = null } = {}) {
     if (bar && bar.id === p.id) bar.state = ok ? "saved" : "failed";
     if (!ok) {
       if (offer && offer.id === p.id) offer = null;
-      if (root.isConnected && sel !== p.id) { sel = p.id; seenSel = inRows(p.id); draft = p.kept; drawList(); drawPanel(true); }
+      if (root.isConnected && sel !== p.id) {
+        if (session) session.done = false;
+        sel = p.id; seenSel = inRows(p.id); draft = p.kept; drawList(); drawPanel(true);
+      }
     } else if (p.auto) {
       // "Send the text automatically" in Recall settings: it goes once the call is saved
       const sent = await act("text", { text: p.auto.text }, { id: p.id, label: "Sending the text" });
@@ -909,6 +1138,12 @@ export function mountRecall(container, { staff = null } = {}) {
     if (offer && offer.id === p.id) offer = null;
     bar = null;
     quietNote = "";
+    if (session && p.counted) {
+      session.calls = Math.max(0, session.calls - 1);
+      if (p.counted === "booked") session.booked = Math.max(0, session.booked - 1);
+      session.done = false;
+      session.paused = false;
+    }
     sel = p.id;
     seenSel = inRows(p.id);
     draft = p.kept;
@@ -916,8 +1151,10 @@ export function mountRecall(container, { staff = null } = {}) {
     drawList();
     drawPanel(true);
     drawUndo();
-    const row = root.querySelector(`[data-card="${CSS.escape(p.id)}"]`);
-    if (row) row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    if (!session) {
+      const row = root.querySelector(`[data-card="${CSS.escape(p.id)}"]`);
+      if (row) row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
     showToast("Undone. Nothing was saved.");
   }
 
@@ -1034,6 +1271,12 @@ export function mountRecall(container, { staff = null } = {}) {
     }
     if (r === "lvFrom" || r === "lvTo") { ui[r] = el.value; sel = ""; build(); return; }
     if (r === "auto") { autoNext = el.checked; setPref("rc_autonext", autoNext); return; }
+    if (r === "smsPick") {
+      const ch = smsChoices().find(([k]) => k === el.value);
+      const c = findCard(sel);
+      if (ch && c) { draft.smsKey = ch[0]; draft.sms = fillSms(c, ch[2]); drawPanel(true); }
+      return;
+    }
     if (el.matches("[data-remind]")) { draft.remind = el.value; el.blur(); drawPanel(true); return; }   // blur: N, V, S, B keep working
     if (r === "until") { draft.until = el.value; return; }
     if (r === "reason") { draft.reason = el.value; drawPanel(true); return; }
@@ -1044,7 +1287,7 @@ export function mountRecall(container, { staff = null } = {}) {
     if (row && e.target === row && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); select(row.dataset.card); }
   });
 
-  // Keys for desk users: N, V, S, B log a call · T sends the offered text · U undoes · Esc closes
+  // Keys: N, V, S, B log a call · C calls · T sends the offered text · U undoes · ↓ ↑ (or J K) move · Esc closes or pauses
   const onKey = (e) => {
     if (!root.isConnected) { document.removeEventListener("keydown", onKey); return; }
     if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
@@ -1052,15 +1295,32 @@ export function mountRecall(container, { staff = null } = {}) {
     if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
     if (document.querySelector("dialog[open]") || document.querySelector(".rem:not(.is-min)")) return;
     const k = e.key.toLowerCase();
+    if (session && session.paused) {
+      if (k === "enter" && !/^(BUTTON|A)$/.test(t.tagName)) { e.preventDefault(); session.paused = false; drawPanel(true); }
+      return;
+    }
     if (k === "escape") {
       const f = $("filters");
       if (f.open) { f.open = false; return; }
       if (bar || offer) { dismissBar(); return; }
-      if (sel) { sel = ""; drawList(); drawPanel(true); }
+      if (session) { if (!session.done) { session.paused = true; drawPanel(true); } return; }
+      if (sel) { endCall(); sel = ""; drawList(); drawPanel(true); }
       return;
     }
     if (k === "u" && pend) { e.preventDefault(); undo(); return; }
     if (k === "t" && offer && offer.kind === "sms" && !offer.auto) { e.preventDefault(); sendOffer(); return; }
+    if (k === "arrowdown" || k === "arrowup" || k === "j" || k === "k") {
+      if (!session && !sel && (k === "arrowdown" || k === "arrowup")) return;   // nothing open: arrows scroll the page
+      e.preventDefault();
+      const dir = k === "arrowdown" || k === "j" ? 1 : -1;
+      if (session) { if (!session.done) sessionMove(dir); } else moveSel(dir);
+      return;
+    }
+    if (k === "c" && sel) {
+      const a = root.querySelector(`a[data-call="${CSS.escape(sel)}"]`);
+      if (a) { e.preventDefault(); a.click(); }
+      return;
+    }
     const tile = TILES.find((x) => x[2].toLowerCase() === k);
     if (tile && sel) {
       const c = findCard(sel);
@@ -1078,11 +1338,12 @@ export function mountRecall(container, { staff = null } = {}) {
   document.addEventListener("click", onDocClick);
 
   root.addEventListener("click", async (e) => {
-    // Calling from a row opens that patient too, ready to log what happened
+    // Calling: the phone dials (if it can) and the card turns into "On a call"
     const tl = e.target.closest('a[href^="tel:"]');
     if (tl) {
-      const r = tl.closest(".rc-item");
-      if (r && r.dataset.card !== sel) { const id = r.dataset.card; setTimeout(() => openCard(id), 0); }
+      const row = tl.closest(".rc-item");
+      const id = tl.dataset.call || (row && row.dataset.card) || sel;
+      if (id) setTimeout(() => startCall(id), 0);
       return;
     }
     if (e.target.closest('a[href^="mailto:"]')) return;
@@ -1116,9 +1377,9 @@ export function mountRecall(container, { staff = null } = {}) {
       return;
     }
     const tb = e.target.closest("[data-tab]");
-    if (tb) { ui.tab = tb.dataset.tab; ui.q = ""; $("q").value = ""; found = null; sel = ""; build(); return; }
+    if (tb) { ui.tab = tb.dataset.tab; ui.q = ""; $("q").value = ""; found = null; sel = ""; endCall(); build(); return; }
     const ch = e.target.closest("[data-cat]");
-    if (ch) { ui.cat = ch.dataset.cat; sel = ""; build(); return; }
+    if (ch) { ui.cat = ch.dataset.cat; sel = ""; endCall(); build(); return; }
     const opn = e.target.closest("[data-open]");
     if (opn) {
       const s = sections.find((x) => x.key === opn.dataset.open);
@@ -1139,6 +1400,18 @@ export function mountRecall(container, { staff = null } = {}) {
     const b = e.target.closest("[data-act]");
     if (!b) return;
     const a = b.dataset.act;
+    if (a === "session-start") { startSession(); return; }
+    if (a === "session-end") { endSession(); return; }
+    if (a === "session-pause") { if (session) { session.paused = true; drawPanel(true); } return; }
+    if (a === "session-resume") { if (session) { session.paused = false; drawPanel(true); } return; }
+    if (a === "session-skip") { sessionMove(1); return; }
+    if (a === "session-prev") { sessionMove(-1); return; }
+    if (a === "session-more") {
+      const sec = sections.find((x) => x.key === "mine");
+      if (session && sec && sec.more) { session.waitMore = true; sec.n += PAGE; listen(sec); drawPanel(true); }
+      return;
+    }
+    if (a === "call-end") { endCall(); drawList(); drawPanel(true); return; }
     if (a === "undo") { undo(); return; }
     if (a === "bar-x") { dismissBar(); return; }
     if (a === "offer-send") { sendOffer(); return; }
@@ -1164,14 +1437,15 @@ export function mountRecall(container, { staff = null } = {}) {
       return;
     }
     if (a === "pick-date") {
-      const inp = $("panel").querySelector("[data-remind]");
+      const inp = root.querySelector("[data-remind]");
       if (inp) { try { inp.showPicker(); } catch { inp.focus(); inp.click(); } }
       return;
     }
-    if (a === "deselect") { sel = ""; drawList(); drawPanel(true); return; }
+    if (a === "deselect") { endCall(); sel = ""; drawList(); drawPanel(true); return; }
     if (a === "sms") {
       const c = findCard(sel);
       if (!c) return;
+      draft.smsKey = "main";
       draft.sms = fillSms(c);
       drawPanel(true);
       const ta = $("sms");
@@ -1206,7 +1480,7 @@ export function mountRecall(container, { staff = null } = {}) {
         draft = blank();
         drawPanel(true);
         showToast(r.askDate ? "Paused" : "Recall stopped");
-        if (autoNext && sel === from) goNext(from, ids);
+        if (sel === from) { if (session) sessionMove(1, from); else if (autoNext) goNext(from, ids); }
       }
       return;
     }
@@ -1222,6 +1496,7 @@ export function mountRecall(container, { staff = null } = {}) {
     setTimeout(() => {
       if (root.isConnected) return;
       if (pend) commit();
+      endCall();
       stopAll(); clearTimeout(countTimer); clearTimeout(searchTimer); clearTimeout(barHide);
       document.removeEventListener("keydown", onKey);
       document.removeEventListener("click", onDocClick);
