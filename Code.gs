@@ -13243,7 +13243,7 @@ function recallPatients_(cfg) {
   const byId = Object.create(null);
   const byPtt = Object.create(null);
   fsListAll_(cfg, 'patient_list', ['PttID', 'Patient Name', 'First Name', 'Last Name', 'Mobile', 'Email', 'MergedInto',
-    'Marketing OK', 'Marketing Consent', 'Spend'])
+    'Marketing OK', 'Marketing Consent', 'Spend', 'Tags', 'Recall Hold'])
     .forEach(function (d) {
       const f = fromFields_(d.fields || {});
       const id = d.name.split('/').pop();
@@ -13349,6 +13349,18 @@ function recallCheck_(cfg, set, today, force) {
   catch (e) { console.warn('Spend summary not saved: ' + e); }
   try { spendPatients_(cfg, pts, spend.by, ctx.todayKey); }
   catch (e) { console.warn('Spend not saved on the patient records: ' + e); }
+  // Tags and holds come from the patient record
+  const tagsOf = function (pid) { const t = (pts.doc(pid) || {}).Tags; return Array.isArray(t) ? t.map(String).slice(0, 20) : []; };
+  const holdOf = function (pid) {
+    const h = (pts.doc(pid) || {})['Recall Hold'];
+    if (!h || typeof h !== 'object') return null;
+    const until = String(h.until || '');
+    return !until || until > today ? { until: until, reason: String(h.reason || '') } : null;
+  };
+  const holdNew = function (pid) {
+    const h = holdOf(pid);
+    return h ? { stage: 'later', remindOn: h.until, pauseReason: 'On hold' + (h.reason ? ': ' + h.reason : ''), onHold: true, holdUntil: h.until } : {};
+  };
   const pidOf = Object.create(null);
   const groups = Object.create(null);
   const skipped = Object.create(null);   // patient|treatment → past days that had a skipped service
@@ -13406,6 +13418,8 @@ function recallCheck_(cfg, set, today, force) {
       const spNow = spendOf(c.patientId);
       const spendFix = typeof c.spendTier !== 'string' || c.spendTier !== spNow.spendTier || Number(c.spend12) !== spNow.spend12 ||
         Number(c.spendAll) !== spNow.spendAll || Number(c.spendVisits12) !== spNow.spendVisits12 ? spNow : null;
+      const tagsNow = tagsOf(c.patientId);
+      const tagFix = JSON.stringify(Array.isArray(c.tags) ? c.tags : []) !== JSON.stringify(tagsNow) ? { tags: tagsNow } : null;
       let touched = false;
       const put = function (patch, what) {
         touched = true;
@@ -13414,6 +13428,7 @@ function recallCheck_(cfg, set, today, force) {
         if (apptFix) Object.assign(patch, apptFix);
         if (smsFix) Object.assign(patch, smsFix);
         if (spendFix) Object.assign(patch, spendFix);
+        if (tagFix) Object.assign(patch, tagFix);
         patch.log = add(c, what);
         patch.updatedAt = now;
         writes.push(patchWrite_(cfg, path, patch));
@@ -13463,6 +13478,19 @@ function recallCheck_(cfg, set, today, force) {
           }
           return;
         }
+        // On hold for this patient: stays on hold until the date, or until someone takes it off
+        const hold = holdOf(c.patientId);
+        if (hold) {
+          if (c.onHold && String(c.holdUntil || '') === hold.until && c.stage === 'later') return;
+          put(recallHoldPatch_(c, hold), recallHoldText_(hold));
+          return;
+        }
+        if (c.onHold) {
+          put(recallReleasePatch_(c), c.holdUntil && c.holdUntil <= today
+            ? 'Off hold: the hold ended on ' + recLongDate_(c.holdUntil) : 'Off hold');
+          sum.back++;
+          return;
+        }
         // Any appointment booked (for any treatment): paused until the day after it. Recall settings → the tick.
         const appt = set.anyFuturePauses ? anyFuture[c.patientId] : '';
         if (appt) {
@@ -13487,8 +13515,8 @@ function recallCheck_(cfg, set, today, force) {
           sum.back++;
         }
       })();
-      if (!touched && (fix || dncFix || apptFix || smsFix || spendFix)) {
-        writes.push(patchWrite_(cfg, path, Object.assign({}, fix || {}, dncFix || {}, apptFix || {}, smsFix || {}, spendFix || {})));
+      if (!touched && (fix || dncFix || apptFix || smsFix || spendFix || tagFix)) {
+        writes.push(patchWrite_(cfg, path, Object.assign({}, fix || {}, dncFix || {}, apptFix || {}, smsFix || {}, spendFix || {}, tagFix || {})));
       }
     });
 
@@ -13532,7 +13560,8 @@ function recallCheck_(cfg, set, today, force) {
       closeReason: '', closedAt: '', closedBy: '',
       log: [{ at: now, by: 'Recall', byUid: '', kind: 'auto', what: 'Due for ' + w.g.cat.key + ' (last visit ' + recLongDate_(w.g.last) + ')', note: '' }],
       createdAt: now, updatedAt: now,
-    }, recallKeys_(who.name, doc.Mobile, doc.Email), recallDncOf_(doc), { smsStop: stopOf(doc.Mobile) }, spendOf(w.g.pid))));
+    }, recallKeys_(who.name, doc.Mobile, doc.Email), recallDncOf_(doc), { smsStop: stopOf(doc.Mobile) }, spendOf(w.g.pid),
+      holdNew(w.g.pid), { tags: tagsOf(w.g.pid) })));
     sum.made++;
   });
 
@@ -13662,6 +13691,18 @@ function handleRecall_(body) {
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
   const op = String(body.op || '');
   const manage = can_(session, 'recall.manage');
+  // Patient tags: Recall staff, and anyone who can edit patient details (the patient page). The list itself: Recall settings.
+  if (op === 'tagSet' || op === 'tagNew' || op === 'tagLibSave') {
+    const allowed = op === 'tagLibSave' ? manage
+      : manage || can_(session, 'recall.work') || can_(session, 'patients.edit');
+    if (!allowed) return { ok: false, error: 'FORBIDDEN' };
+    try {
+      return op === 'tagSet' ? recallTagSet_(body, session) : op === 'tagNew' ? recallTagNew_(body, session) : recallTagLibSave_(body, session);
+    } catch (err) {
+      console.error('Tags ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+      return { ok: true, problem: 'Something went wrong: ' + String(err && err.message ? err.message : err).slice(0, 200) };
+    }
+  }
   if (!manage && !can_(session, 'recall.work')) return { ok: false, error: 'FORBIDDEN' };
   try {
     if (op === 'refresh') {
@@ -13825,6 +13866,23 @@ function recallAction_(op, id, body, session) {
         (r.askDate ? r.label + ': paused until ' + recLongDate_(until) : 'Closed: ' + r.label) +
           ' (with their ' + (c.category || 'other') + ' recall)', who, uid, note);
     }
+  } else if (op === 'hold') {
+    if (c.status !== 'open') return { ok: true, problem: 'Only open recalls can be put on hold.' };
+    if (!c.patientId) return { ok: true, problem: "This card isn't linked to a patient." };
+    const until = String(body.until || '');
+    if (until && !dateOk(until)) return { ok: true, problem: 'Choose a date after today, or leave it empty to hold it until someone takes it off.' };
+    const hold = { until: until, reason: String(body.reason || '').replace(/\s+/g, ' ').trim().slice(0, 80), by: who, byUid: uid, at: now };
+    const what = recallHoldText_(hold);
+    add('status', what, false);
+    patch = recallHoldPatch_(c, hold);
+    extraWrites = [patchWrite_(cfg, 'patient_list/' + c.patientId, { 'Recall Hold': hold })]
+      .concat(recallSiblingHold_(cfg, c, id, hold, what + ' (with their ' + (c.category || 'other') + ' recall)', who, uid));
+  } else if (op === 'holdOff') {
+    if (!c.patientId) return { ok: true, problem: "This card isn't linked to a patient." };
+    add('status', 'Off hold', false);
+    patch = c.onHold && c.status === 'open' ? recallReleasePatch_(c) : {};
+    extraWrites = [patchWrite_(cfg, 'patient_list/' + c.patientId, { 'Recall Hold': null })]
+      .concat(recallSiblingHold_(cfg, c, id, null, 'Off hold (with their ' + (c.category || 'other') + ' recall)', who, uid));
   } else if (op === 'reopen') {
     if (c.status === 'open') return { ok: true, already: true };
     if (c.status === 'closed' && c.closeReason === 'Came in') {
@@ -14814,6 +14872,156 @@ function spendPatients_(cfg, pts, by, todayKey) {
 // Run from the editor: works out spend tiers now (and the rest of Recall's daily check)
 function recallSpendNow() {
   console.log(JSON.stringify(recallRun_(true)));
+}
+
+/* ---------- Patient tags ---------- */
+// Short labels on a patient, shown on their recall cards and patient page. The clinic's list: ui_settings/patient_tags.
+const TAG_LIB_ = 'ui_settings/patient_tags';
+const TAG_COLORS_ = ['teal', 'blue', 'violet', 'amber', 'red', 'green', 'pink', 'grey'];
+const TAG_STARTERS_ = [   // the same as STARTER_TAGS in patient-tags.js
+  { id: 't_notperth', label: "Doesn't live in Perth", color: 'blue' },
+  { id: 't_prefertext', label: 'Prefers text', color: 'teal' },
+  { id: 't_preferemail', label: 'Prefers email', color: 'violet' },
+  { id: 't_callafter3', label: 'Call after 3pm', color: 'amber' },
+  { id: 't_vip', label: 'VIP', color: 'pink' },
+];
+const TAG_ID_RE_ = /^t_[a-z0-9_]{2,40}$/;
+const tagNewId_ = function () { return 't_' + Utilities.getUuid().replace(/-/g, '').slice(0, 12); };
+
+function tagLib_(cfg) {
+  const d = fsGetDoc_(cfg, TAG_LIB_);
+  return (d && Array.isArray(d.tags) ? d.tags : TAG_STARTERS_).map(function (t) {
+    t = t || {};
+    return { id: String(t.id || ''), label: String(t.label || '').replace(/\s+/g, ' ').trim().slice(0, 40),
+      color: TAG_COLORS_.indexOf(t.color) !== -1 ? t.color : 'grey' };
+  }).filter(function (t) { return TAG_ID_RE_.test(t.id) && t.label; });
+}
+
+// A new tag, from the tag picker (anyone who can tag patients)
+function recallTagNew_(body, session) {
+  const cfg = getConfig_();
+  const label = String(body.label || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  if (label.length < 2) return { ok: true, problem: 'Type the tag first.' };
+  const color = TAG_COLORS_.indexOf(body.color) !== -1 ? body.color : 'grey';
+  const unlock = staffTaskLock_('tag_lib');
+  if (!unlock) return { ok: true, problem: 'Someone else is saving a tag. Try again.' };
+  try {
+    const list = tagLib_(cfg);
+    const same = list.filter(function (t) { return t.label.toLowerCase() === label.toLowerCase(); })[0];
+    if (same) return { ok: true, tag: same, tags: list };
+    if (list.length >= 60) return { ok: true, problem: 'There are 60 tags already. Remove some in Recall settings first.' };
+    const tag = { id: tagNewId_(), label: label, color: color };
+    list.push(tag);
+    commitWrites_(cfg, [updateWrite_(cfg, TAG_LIB_, { tags: list, updatedAt: new Date().toISOString(), updatedBy: String(session.name || '') })]);
+    return { ok: true, tag: tag, tags: list };
+  } finally { unlock(); }
+}
+
+// A patient's tags: on their record and every open or booked recall card, with a History line
+function recallTagSet_(body, session) {
+  const cfg = getConfig_();
+  const p = flowPatient_(cfg, String(body.patientId || ''));
+  if (!p) return { ok: true, problem: "This patient couldn't be found." };
+  const lib = tagLib_(cfg);
+  const byId = {};
+  lib.forEach(function (t) { byId[t.id] = t; });
+  const want = uniq_((Array.isArray(body.tags) ? body.tags : []).map(String).filter(function (id) { return byId[id]; })).slice(0, 20);
+  const unlock = staffTaskLock_('pt_tags_' + p._id);
+  if (!unlock) return { ok: true, problem: 'Someone else is changing these tags. Try again.' };
+  try {
+    const had = Array.isArray(p.Tags) ? p.Tags.map(String) : [];
+    const added = want.filter(function (id) { return had.indexOf(id) === -1; });
+    const gone = had.filter(function (id) { return want.indexOf(id) === -1; });
+    if (!added.length && !gone.length) return { ok: true, tags: want };
+    const now = new Date().toISOString();
+    const who = String(session.name || 'Staff');
+    const uid = String(session.uid || '');
+    const nameOf = function (id) { return (byId[id] || { label: 'a removed tag' }).label; };
+    const what = [added.length ? 'Tag added: ' + added.map(nameOf).join(', ') : '',
+      gone.length ? 'Tag removed: ' + gone.map(nameOf).join(', ') : ''].filter(Boolean).join(' · ');
+    const writes = [patchWrite_(cfg, 'patient_list/' + p._id, { Tags: want, 'Tags At': now, 'Tags By': who })];
+    if (!fsGetDoc_(cfg, TAG_LIB_)) writes.push(updateWrite_(cfg, TAG_LIB_, { tags: lib, updatedAt: now, updatedBy: who }));   // keep the starter ids
+    fsQuery_(cfg, RECALL_COL_, 'patientId', 'EQUAL', p._id, 50).forEach(function (c) {
+      if (c.status === 'closed') return;
+      writes.push(patchWrite_(cfg, RECALL_COL_ + '/' + c._id, { tags: want, updatedAt: now,
+        log: (Array.isArray(c.log) ? c.log : []).concat([{ at: now, by: who, byUid: uid, kind: 'tag', what: what, note: '' }]).slice(-80) }));
+    });
+    commitWrites_(cfg, writes);
+    return { ok: true, tags: want };
+  } finally { unlock(); }
+}
+
+// Recall settings → Patient tags: rename, recolour, remove. Removed tags come off every patient and recall card.
+function recallTagLibSave_(body, session) {
+  const cfg = getConfig_();
+  const unlock = staffTaskLock_('tag_lib');
+  if (!unlock) return { ok: true, problem: 'Someone else is saving tags. Try again.' };
+  try {
+    const old = tagLib_(cfg);
+    const seen = {};
+    const list = [];
+    (Array.isArray(body.tags) ? body.tags : []).slice(0, 60).forEach(function (t) {
+      t = t || {};
+      const label = String(t.label || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+      if (label.length < 2 || seen[label.toLowerCase()]) return;
+      seen[label.toLowerCase()] = true;
+      list.push({ id: TAG_ID_RE_.test(String(t.id || '')) ? String(t.id) : tagNewId_(), label: label,
+        color: TAG_COLORS_.indexOf(t.color) !== -1 ? t.color : 'grey' });
+    });
+    const keep = {};
+    list.forEach(function (t) { keep[t.id] = true; });
+    const gone = old.filter(function (t) { return !keep[t.id]; }).map(function (t) { return t.id; });
+    const writes = [updateWrite_(cfg, TAG_LIB_, { tags: list, updatedAt: new Date().toISOString(), updatedBy: String(session.name || '') })];
+    const fix = {};
+    gone.forEach(function (tid) {
+      [['patient_list', 'Tags'], [RECALL_COL_, 'tags']].forEach(function (w) {
+        fsQuery_(cfg, w[0], w[1], 'ARRAY_CONTAINS', tid, 3000).forEach(function (d) {
+          const path = w[0] + '/' + d._id;
+          const cur = fix[path] ? fix[path].list : (Array.isArray(d[w[1]]) ? d[w[1]].map(String) : []);
+          fix[path] = { field: w[1], list: cur.filter(function (x) { return x !== tid; }) };
+        });
+      });
+    });
+    Object.keys(fix).forEach(function (path) {
+      const o = {};
+      o[fix[path].field] = fix[path].list;
+      writes.push(patchWrite_(cfg, path, o));
+    });
+    commitWrites_(cfg, writes, 200);
+    return { ok: true, tags: list, stripped: Object.keys(fix).filter(function (k) { return k.indexOf('patient_list/') === 0; }).length };
+  } finally { unlock(); }
+}
+
+/* ---------- Put on hold: all of a patient's recalls pause, until a date or until taken off ---------- */
+// Kept on the patient record ('Recall Hold' { until, reason, by, byUid, at }), so cards made later start on hold too.
+function recallHoldText_(hold) {
+  return 'On hold' + (hold.until ? ' until ' + recLongDate_(hold.until) : ' until taken off') + (hold.reason ? ': ' + hold.reason : '');
+}
+function recallHoldPatch_(x, hold) {
+  const p = { stage: 'later', remindOn: hold.until || '', pauseReason: 'On hold' + (hold.reason ? ': ' + hold.reason : ''),
+    onHold: true, holdUntil: hold.until || '', callBackDue: '' };
+  // The flow stops sending while they're on hold
+  if (['run', 'wait', 'team', 'cycle', 'queued', 'joined', 'released'].indexOf(String(x.flowState || '')) !== -1) {
+    Object.assign(p, { flowState: 'paused', pausedFlow: String(x.flowState), flowNext: '' });
+  }
+  return p;
+}
+function recallReleasePatch_(x) {
+  const p = { stage: x.assignedToId ? 'call' : 'due', remindOn: '', pauseReason: '', onHold: false, holdUntil: '' };
+  if (x.flowState === 'paused') Object.assign(p, { flowState: 'released', pausedFlow: '' });
+  return p;
+}
+// The patient's other open cards: on hold (hold given), or off hold (hold null)
+function recallSiblingHold_(cfg, c, id, hold, what, who, uid) {
+  const now = new Date().toISOString();
+  return fsQuery_(cfg, RECALL_COL_, 'patientId', 'EQUAL', String(c.patientId), 50)
+    .filter(function (x) { return x._id !== id && x.status === 'open' && (hold ? true : x.onHold === true); })
+    .map(function (x) {
+      const p = hold ? recallHoldPatch_(x, hold) : recallReleasePatch_(x);
+      p.updatedAt = now;
+      p.log = (Array.isArray(x.log) ? x.log : []).concat([{ at: now, by: who, byUid: uid, kind: 'status', what: what, note: '' }]).slice(-80);
+      return patchWrite_(cfg, RECALL_COL_ + '/' + x._id, p);
+    });
 }
 
 /* ---------- Recall settings: status and a test text ---------- */

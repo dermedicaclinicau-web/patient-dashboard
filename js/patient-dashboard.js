@@ -44,6 +44,7 @@ import { copyOldWrRecord } from "./wr-copy.js";
 import { listTaskTypes } from "./task-types.js";
 import { startPageCache, stopPageCache, clearPageCache } from "./page-cache.js";
 import { openPasteNotes } from "./paste-notes.js";
+import { loadTagLib, tagChipsHtml, openTagPicker } from "./patient-tags.js";
 
 /* ===================== Config ===================== */
 
@@ -294,6 +295,18 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     const staffTaskBtn = t.closest("[data-action='staff-task']");
     if (staffTaskBtn) { openStaffTaskMenu(staffTaskBtn); return; }
     if (t.closest("[data-action='sms']")) { openSmsDialog({ patient }); return; }
+    const tagBtn = t.closest("[data-action='edit-tags']");
+    if (tagBtn) {
+      openTagPicker({
+        anchor: tagBtn, patientId: patient.id, name: patient.firstName || patient.name,
+        current: (extras && extras.tags) || [],
+        onSaved: (tags) => {
+          loadTagLib().then((lib) => { extras = { ...(extras || {}), tags, lib }; renderTop(); });
+          showToast("Tags saved");
+        },
+      });
+      return;
+    }
 
     const openT = t.closest("[data-action='task-open']");
     if (openT && !t.closest("a")) { openTask(openT.dataset.id); return; }
@@ -694,19 +707,20 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     }
   }
 
-  // Spend tier and "opted out of texts", straight from the patient record
+  // Spend tier, "opted out of texts", tags and recall hold, straight from the patient record
   async function loadExtras() {
     try {
-      const s = await getDoc(doc(db, "patient_list", patient.id));
+      const [s, lib] = await Promise.all([getDoc(doc(db, "patient_list", patient.id)), loadTagLib()]);
       if (!root.isConnected) return;
       const x = s.exists() ? s.data() : {};
+      const obj = (v) => (v && typeof v === "object" ? v : null);
       extras = {
-        spend: x.Spend && typeof x.Spend === "object" ? x.Spend : null,
-        smsStop: x["SMS Opt Out"] && typeof x["SMS Opt Out"] === "object" ? x["SMS Opt Out"] : null,
+        spend: obj(x.Spend), smsStop: obj(x["SMS Opt Out"]), hold: obj(x["Recall Hold"]),
+        tags: Array.isArray(x.Tags) ? x.Tags.map(String) : [], lib,
       };
       renderTop();
     } catch (err) {
-      console.warn("Spend and opt-outs not loaded:", err);
+      console.warn("Spend, opt-outs and tags not loaded:", err);
     }
   }
 
@@ -1129,10 +1143,11 @@ function barHtml(p, today = [], pre = null, allergies = null, mentions = [], ext
   const groups = [
     today.length ? todayPillHtml(today) : "",
     [allergyChipHtml(allergies), pre && pre.overdue && overdueChipHtml(pre.overdue), p.marketingOk === false && dncChipHtml(p),
-      extras && extras.smsStop && smsStopChipHtml(extras.smsStop)]
+      extras && extras.smsStop && smsStopChipHtml(extras.smsStop), extras && holdChipHtml(extras.hold)]
       .filter(Boolean).join(""),
     [
       extras && extras.spend && tierChipHtml(extras.spend),
+      extras && tagsBarHtml(extras),
       mentionChipHtml(mentions),
       birthdayChipHtml(dob),
       p.mergedIds && p.mergedIds.length &&
@@ -1222,6 +1237,26 @@ function tierChipHtml(s) {
     ? `${name}: ${money(s.m12)} in the last 12 months · ${money(s.all)} all time · ${v} visit${v === 1 ? "" : "s"} in 12 months. From Day Sheet prices.`
     : `${name}: one of the clinic's top patients by spend in the last 12 months.`;
   return `<span class="chip chip-tier is-${escapeHtml(s.tier)}" title="${escapeHtml(title)}">${escapeHtml(name)}</span>`;
+}
+
+// Tags, with "+ Tag" / "Edit tags" for anyone who can tag patients
+function tagsBarHtml(x) {
+  const chips = tagChipsHtml(x.tags, x.lib);
+  const canTag = can("patients.edit") || can("recall.work") || can("recall.manage");
+  if (!chips && !canTag) return "";
+  return `${chips}${canTag ? `<button type="button" class="chip chip-addtag" data-action="edit-tags">${
+    x.tags && x.tags.length ? "Edit tags" : "+ Tag"}</button>` : ""}`;
+}
+
+// "Recall on hold": until a date, or until someone takes it off (Recall → Put on hold)
+function holdChipHtml(h) {
+  if (!h) return "";
+  if (h.until && h.until <= toDateKey()) return "";   // the hold has ended
+  const day = (k) => { const d = parseDateKey(k); return d ? d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : k; };
+  const title = `Recall is on hold${h.until ? ` until ${day(h.until)}` : " until someone takes it off"}${h.reason ? `: ${h.reason}` : ""}${
+    h.by ? `. Set by ${h.by}` : ""}.`;
+  return `<span class="chip chip-hold" title="${escapeHtml(title)}">${ICONS.clock}<span>Recall on hold${
+    h.until ? ` until ${escapeHtml(day(h.until))}` : ""}</span></span>`;
 }
 
 // "No texts": the mobile replied STOP, or is on Textmagic's opt-out list (Code.gs → smsOptoutPatients_)

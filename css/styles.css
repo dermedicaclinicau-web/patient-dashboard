@@ -12890,3 +12890,53 @@ dialog.lh-dialog.ae-dlg { width: min(520px, calc(100vw - 2rem)); }
 .chip.chip-tier.is-silver { background: linear-gradient(135deg, #f8fafc, #e2e8f0); color: #475569; border-color: #cbd5e1; }
 .chip.chip-nosms { background: #fff7ed; color: #9a3412; border: 1px solid #fed7aa; }
 .chip.chip-nosms svg { width: 14px; height: 14px; }
+
+/* Patient tags */
+.pt-tags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.pt-tags.is-row { display: flex; margin-top: 4px; }
+.pt-tag { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 600;
+  line-height: 1.6; white-space: nowrap; background: #f1f5f9; color: #475569; }
+.pt-tag.is-teal { background: #ccfbf1; color: #115e59; }
+.pt-tag.is-blue { background: #dbeafe; color: #1e40af; }
+.pt-tag.is-violet { background: #ede9fe; color: #5b21b6; }
+.pt-tag.is-amber { background: #fef3c7; color: #92400e; }
+.pt-tag.is-red { background: #fee2e2; color: #991b1b; }
+.pt-tag.is-green { background: #dcfce7; color: #166534; }
+.pt-tag.is-pink { background: #fce7f3; color: #9d174d; }
+.pt-tag.is-more { background: #e2e8f0; color: #334155; }
+
+/* Recall panel: tags and the hold notice */
+.rc-tagrow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; }
+.rc-tag-edit { border: 1px dashed #cbd5e1; background: none; border-radius: 999px; padding: 1px 10px; font: inherit; font-size: 12px;
+  color: #0f766e; cursor: pointer; }
+.rc-tag-edit:hover { background: #f0fdfa; }
+.rc-hold-note { display: flex; align-items: center; gap: 12px; margin: 8px 0; padding: 10px 12px; border-radius: 12px;
+  background: #eff6ff; border: 1px solid #bfdbfe; color: #1e3a8a; }
+.rc-hold-note > div { flex: 1; min-width: 0; }
+.rc-hold-note small { color: #3b5b9a; }
+
+/* The tag picker */
+.tgp { position: fixed; z-index: 1000; display: flex; flex-direction: column; gap: 8px; padding: 12px; overflow: auto;
+  background: #fff; border-radius: 14px; box-shadow: 0 18px 48px rgba(15, 23, 42, .22); }
+.tgp-list { display: grid; gap: 2px; max-height: 260px; overflow: auto; }
+.tgp-item { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 8px; cursor: pointer; }
+.tgp-item:hover { background: #f8fafc; }
+.tgp-none { margin: 6px; }
+.tgp-new { display: grid; gap: 8px; padding: 10px; border-radius: 10px; background: #f8fafc; font-size: 13px; }
+.tgp-colors { display: flex; gap: 6px; flex-wrap: wrap; }
+.tgp-color { width: 22px; height: 22px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
+.tgp-color.is-on { border-color: #0f172a; }
+.tgp-color.is-teal { background: #5eead4; } .tgp-color.is-blue { background: #93c5fd; }
+.tgp-color.is-violet { background: #c4b5fd; } .tgp-color.is-amber { background: #fcd34d; }
+.tgp-color.is-red { background: #fca5a5; } .tgp-color.is-green { background: #86efac; }
+.tgp-color.is-pink { background: #f9a8d4; } .tgp-color.is-grey { background: #cbd5e1; }
+.tgp-foot { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Recall settings: the tag list */
+.rs-tags { display: grid; gap: 6px; margin: 8px 0; }
+.rs-tagrow { display: grid; grid-template-columns: minmax(90px, auto) 1fr auto auto; gap: 8px; align-items: center; }
+
+/* Patient bar: tags and hold */
+.chip.chip-addtag { border: 1px dashed #cbd5e1; background: #fff; color: #0f766e; cursor: pointer; }
+.chip.chip-hold { background: #eff6ff; color: #1e3a8a; border: 1px solid #bfdbfe; }
+.chip.chip-hold svg { width: 14px; height: 14px; }

@@ -4,6 +4,7 @@ import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
 import { showToast } from "./utils.js";
+import { loadTagLib, setTagLib, TAG_COLORS } from "./patient-tags.js";
 
 // The same defaults as RECALL_CATS_ / RECALL_REASONS_ in Code.gs
 export const RECALL_CATEGORIES = [["Wrinkle Relaxer", 4, true], ["Filler/Radiesse", 9, true], ["Laser/OPL/Peel", 6, true],
@@ -118,14 +119,16 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
   root.innerHTML = '<div class="skeleton" style="height:420px;border-radius:14px"></div>';
   container.replaceChildren(root);
 
-  let set, status, people, spendStatus;
+  let set, status, people, spendStatus, tagList;
   try {
-    const [a, b, c, d] = await Promise.all([
+    const [a, b, c, d, e] = await Promise.all([
       getDoc(doc(db, "recall_settings", "config")),
       getDoc(doc(db, "recall_settings", "status")),
       callApi({ action: "staffList" }).catch(() => ({ staff: [] })),
       getDoc(doc(db, "recall_settings", "spend_status")).catch(() => null),
+      loadTagLib(true),
     ]);
+    tagList = e;
     set = normRecallSettings(a.exists() ? a.data() : {});
     status = b.exists() ? b.data() : null;
     spendStatus = d && d.exists() ? d.data() : null;
@@ -396,6 +399,24 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
         </section>
 
         <section class="tb-card">
+          <h4 class="mc-h">Patient tags</h4>
+          <p class="fe-note">Short labels staff add to a patient, shown on their recall cards and patient page. Staff can add new
+            ones as they go. Rename, recolour or remove them here. Removing a tag takes it off every patient.</p>
+          <div class="rs-tags">${tagList.map((t) => `<div class="rs-tagrow" data-tagrow="${esc(t.id)}">
+              <span class="pt-tag is-${t.color}" data-role="tpill">${esc(t.label || "New tag")}</span>
+              <input class="fe-input" data-f="tlabel" maxlength="40" value="${esc(t.label)}" placeholder="Doesn't live in Perth" aria-label="Tag" />
+              <select class="fb-select" data-f="tcolor" aria-label="Colour">${TAG_COLORS.map((col) =>
+                `<option value="${col}"${col === t.color ? " selected" : ""}>${col[0].toUpperCase()}${col.slice(1)}</option>`).join("")}</select>
+              <button type="button" class="lh-btn is-quiet" data-rm-tag aria-label="Remove ${esc(t.label || "this tag")}">×</button>
+            </div>`).join("")}</div>
+          <div class="rc-row">
+            ${tagList.length < 60 ? '<button type="button" class="lh-btn is-quiet" data-act="add-tag">+ Add a tag</button>' : ""}
+            <span class="inv-spacer"></span>
+            <button type="button" class="lh-btn" data-act="save-tags">Save tags</button>
+          </div>
+        </section>
+
+        <section class="tb-card">
           <h4 class="mc-h">Texts</h4>
           <p class="fe-note" data-role="smsStatus"></p>
           <p class="fe-note">This is the message staff start from when they press Send text on a card. Automatic texts and emails
@@ -510,6 +531,11 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     if (r === "smsTpl" || r === "missedTpl" || /^saved-\d+$/.test(r || "")) lastTpl = r;
   });
   root.addEventListener("input", (e) => {
+    if (e.target.closest(".rs-tags")) {   // saved with Save tags, not Save
+      const row = e.target.closest("[data-tagrow]");
+      if (row && e.target.dataset.f === "tlabel") row.querySelector('[data-role="tpill"]').textContent = e.target.value.trim() || "New tag";
+      return;
+    }
     if (e.target.dataset.role === "smsTestTo") return;   // not a setting
     dirty = true;
     setState();
@@ -517,6 +543,11 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     if (r === "smsTpl" || r === "missedTpl" || r === "smsPhone" || e.target.dataset.f === "smsName") drawPreview();
   });
   root.addEventListener("change", (e) => {
+    if (e.target.closest(".rs-tags")) {
+      const row = e.target.closest("[data-tagrow]");
+      if (row && e.target.dataset.f === "tcolor") row.querySelector('[data-role="tpill"]').className = `pt-tag is-${e.target.value}`;
+      return;
+    }
     if (e.target.dataset.role === "smsTestTo") return;
     dirty = true;
     setState();
@@ -524,7 +555,50 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
   root.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && e.target.dataset.role === "skipNew") { e.preventDefault(); addSkip(); }
   });
+  const collectTags = () => [...root.querySelectorAll("[data-tagrow]")].map((r) => ({
+    id: r.dataset.tagrow,
+    label: r.querySelector('[data-f="tlabel"]').value.replace(/\s+/g, " ").trim().slice(0, 40),
+    color: r.querySelector('[data-f="tcolor"]').value,
+  }));
+  async function saveTags(btn) {
+    const list = collectTags().filter((t) => t.label.length >= 2);
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+    try {
+      const r = await callApi({ action: "recall", op: "tagLibSave", tags: list });
+      if (r.problem) { showToast(r.problem); return; }
+      tagList = r.tags || list;
+      setTagLib(tagList);
+      set = { ...set, ...collect(true) };
+      draw();
+      showToast(r.stripped ? `Tags saved. Removed tags were taken off ${r.stripped} patient${r.stripped === 1 ? "" : "s"}.` : "Tags saved");
+    } catch (err) {
+      showToast(errText(err, "Couldn't save the tags."));
+    } finally {
+      if (btn.isConnected) { btn.disabled = false; btn.textContent = "Save tags"; }
+    }
+  }
+
   root.addEventListener("click", (e) => {
+    if (e.target.closest('[data-act="add-tag"]')) {
+      set = { ...set, ...collect(true) };
+      tagList = [...collectTags(), { id: "", label: "", color: "teal" }];
+      draw();
+      const rows = root.querySelectorAll('[data-f="tlabel"]');
+      if (rows.length) rows[rows.length - 1].focus();
+      return;
+    }
+    const rmTag = e.target.closest("[data-rm-tag]");
+    if (rmTag) {
+      set = { ...set, ...collect(true) };
+      const row = rmTag.closest("[data-tagrow]");
+      const rows = [...root.querySelectorAll("[data-tagrow]")];
+      tagList = collectTags().filter((_, i) => rows[i] !== row);
+      draw();
+      return;
+    }
+    const st = e.target.closest('[data-act="save-tags"]');
+    if (st) { saveTags(st); return; }
     if (e.target.closest('[data-act="save"]')) { save(); return; }
     if (e.target.closest('[data-act="add-skip"]')) { addSkip(); return; }
     if (e.target.closest('[data-act="load-svcs"]')) { loadServices(); return; }

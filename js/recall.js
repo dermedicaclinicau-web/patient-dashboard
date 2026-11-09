@@ -14,6 +14,7 @@ import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 import { normRecallSettings } from "./recall-settings.js";
 import { installRecallEmail, openRecallEmail } from "./recall-email.js"; installRecallEmail();
+import { loadTagLib, tagChipsHtml, openTagPicker } from "./patient-tags.js";
 
 const COL = "recalls";
 const PAGE = 50;
@@ -132,7 +133,7 @@ const isMobile = (m) => /^04\d{8}$/.test(telOf(m));
 const me = () => (auth.currentUser && auth.currentUser.uid) || "";
 const can = (staff, p) => !!staff && (/^admin$/i.test(String(staff.role || "")) || (Array.isArray(staff.perms) && staff.perms.includes(p)));
 const nameKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9' -]/g, " ").replace(/\s+/g, " ").trim(); // same as recallKeys_
-const blank = () => ({ note: "", remind: "", reason: "", until: "", sms: null, smsKey: "main", all: null });
+const blank = () => ({ note: "", remind: "", reason: "", until: "", sms: null, smsKey: "main", all: null, holdUntil: "", holdWhy: "" });
 // "Stop all their recalls" starts ticked for reasons about the person, not one treatment
 const allDefault = (r) => !!r && (r.dnc || /moved|pregnan|breastfeed|passed|deceased/i.test(r.label));
 const errText = (err, fallback) => (err && err.code === "permission-denied"
@@ -170,7 +171,10 @@ function keepFocus(box, fn) {
 
 function dueText(c, t) {
   if (c.status === "booked") return c.bookedFor ? `Booked for ${short(c.bookedFor)}` : "Booked by phone";
-  if (c.stage === "later") return c.pauseReason ? `Paused until ${short(c.remindOn)}` : `Call back ${short(c.remindOn)}`;
+  if (c.stage === "later") {
+    if (c.onHold) return c.holdUntil ? `On hold until ${short(c.holdUntil)}` : "On hold";
+    return c.pauseReason ? `Paused until ${short(c.remindOn)}` : `Call back ${short(c.remindOn)}`;
+  }
   const d = daysFrom(c.dueDate, t);
   if (d < 0) return `Due in ${plural(-d, "day")}`;
   if (d === 0) return "Due today";
@@ -209,6 +213,7 @@ function norm(snap) {
     dnc: x.dnc === true, dncWhy: s("dncWhy"), nextAppt: s("nextAppt"), callBackDue: s("callBackDue"),
     spendTier: s("spendTier"), spend12: Number(x.spend12) || 0, spendAll: Number(x.spendAll) || 0,
     spendVisits12: Number(x.spendVisits12) || 0,
+    tags: Array.isArray(x.tags) ? x.tags.map(String) : [], onHold: x.onHold === true, holdUntil: s("holdUntil"),
     smsStop: x.smsStop && typeof x.smsStop === "object"
       ? { at: String(x.smsStop.at || ""), source: String(x.smsStop.source || "") } : null,
     log: Array.isArray(x.log) ? x.log : [], updatedAt: s("updatedAt"),
@@ -239,6 +244,8 @@ export function mountRecall(container, { staff = null } = {}) {
           <label class="rc-f-row"><span>Spend</span>
             <select class="fb-select" data-role="spend" aria-label="Spend">${SPEND_OPTS.map(([k, l]) =>
               `<option value="${k}">${esc(l)}</option>`).join("")}</select></label>
+          <label class="rc-f-row"><span>Tag</span>
+            <select class="fb-select" data-role="tagf" aria-label="Tag"><option value="">Any</option></select></label>
           <label class="fe-check rc-f-row rc-f-tick"><input type="checkbox" data-role="spendFirst" />
             <span>My calls: higher spend first</span></label>
         </div>
@@ -256,10 +263,11 @@ export function mountRecall(container, { staff = null } = {}) {
   container.replaceChildren(root);
   const $ = (r) => root.querySelector(`[data-role="${r}"]`);
 
-  const ui = { tab: "mine", who: "mine", cat: "", q: "", lv: "", lvFrom: "", lvTo: "", appt: "", spend: "" };
+  const ui = { tab: "mine", who: "mine", cat: "", q: "", lv: "", lvFrom: "", lvTo: "", appt: "", spend: "", tag: "" };
   // Upcoming visit and Spend: both added to every list and count
   const apptWhere = () => [
     ...(ui.appt ? [where("hasAppt", "==", ui.appt === "yes")] : []),
+    ...(ui.tag ? [where("tags", "array-contains", ui.tag)] : []),
     ...(ui.spend === "pg" ? [where("spendTier", "in", ["platinum", "gold"])]
       : ui.spend ? [where("spendTier", "==", ui.spend === "none" ? "" : ui.spend)] : []),
   ];
@@ -280,6 +288,7 @@ export function mountRecall(container, { staff = null } = {}) {
   let autoNext = getPref("rc_autonext", true);
   let spendFirst = getPref("rc_spendfirst", false);
   let spendInfo = null;   // recall_settings/spend_status: where each tier starts
+  let tagLib = [];        // the clinic's patient tags (patient-tags.js)
   const showMoney = can(staff, "recall.manage");
   const tierTitle = (c) => {
     const name = TIERS[c.spendTier] || "";
@@ -512,7 +521,7 @@ export function mountRecall(container, { staff = null } = {}) {
 
   /* ---------- Drawing ---------- */
   // My calls fully loaded with no filters: the numbers come straight from the list, so they're exact
-  const exactMine = () => (ui.tab === "mine" && ui.who === "mine" && !ui.cat && !ui.appt && !ui.spend && !lvRange()
+  const exactMine = () => (ui.tab === "mine" && ui.who === "mine" && !ui.cat && !ui.appt && !ui.spend && !ui.tag && !lvRange()
     ? sections.find((s) => s.key === "mine" && s.loaded && !s.more && !s.error) : null);
 
   function drawStats() {
@@ -566,6 +575,8 @@ export function mountRecall(container, { staff = null } = {}) {
     $("appt").value = ui.appt;
     $("spend").value = ui.spend;
     $("spendFirst").checked = spendFirst;
+    $("tagf").innerHTML = `<option value="">Any</option>${tagLib.map((x) =>
+      `<option value="${esc(x.id)}"${x.id === ui.tag ? " selected" : ""}>${esc(x.label)}</option>`).join("")}`;
     const t = todayKey();
     $("lvbox").innerHTML = `<select class="fb-select" data-role="lv" aria-label="Last visit">${LV_OPTS.map(([k, l]) =>
       `<option value="${k}"${k === ui.lv ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>` +
@@ -592,6 +603,7 @@ export function mountRecall(container, { staff = null } = {}) {
     }
     if (ui.appt) active.push(["appt", ui.appt === "yes" ? "Has an upcoming visit" : "No upcoming visit"]);
     if (ui.spend) active.push(["spend", `Spend: ${(SPEND_OPTS.find(([k]) => k === ui.spend) || ["", ""])[1]}`]);
+    if (ui.tag) active.push(["tag", `Tag: ${(tagLib.find((x) => x.id === ui.tag) || { label: "…" }).label}`]);
     $("fcount").textContent = active.length ? ` · ${active.length}` : "";
     $("filters").classList.toggle("is-on", !!active.length);
     $("active").innerHTML = searchingNow ? "" : active.map(([k, l]) =>
@@ -644,7 +656,8 @@ export function mountRecall(container, { staff = null } = {}) {
         <span class="rc-av h${hue(c.category)}" aria-hidden="true">${esc(initials(c.patientName))}</span>
         <span class="rc-main"><strong>${esc(c.patientName || "Unknown patient")}${tierPill(c)}${c.dnc
           ? ` <span class="rc-dnc" title="${esc(dncTitle(c))}">Do not contact</span>`
-          : c.smsStop ? ` <span class="rc-dnc is-sms" title="${esc(smsStopText(c))}">No texts</span>` : ""}</strong><small>${meta}</small></span>
+          : c.smsStop ? ` <span class="rc-dnc is-sms" title="${esc(smsStopText(c))}">No texts</span>` : ""}</strong><small>${meta}</small>${
+          tagChipsHtml(c.tags, tagLib, { max: 3, cls: "is-row" })}</span>
         ${tag}
         ${side ? `<span class="rc-side">${esc(side)}</span>` : ""}
         ${contact}
@@ -669,6 +682,7 @@ export function mountRecall(container, { staff = null } = {}) {
   }
 
   function emptyText(sec) {
+    if (ui.tag) return "Nobody here with that tag.";
     if (ui.spend) return "Nobody here in that spend tier.";
     if (ui.appt) return ui.appt === "yes" ? "Nobody here with an upcoming visit." : "Nobody here without an upcoming visit.";
     if (lvRange()) return ui.cat ? `Nobody here for ${ui.cat} with a last visit in those dates.` : "Nobody here with a last visit in those dates.";
@@ -761,8 +775,21 @@ export function mountRecall(container, { staff = null } = {}) {
       c.alsoDue.length ? `<span class="rc-pill is-also">Also due: ${esc(c.alsoDue.join(", "))}</span>` : "",
     ].join("");
   }
+  // On hold: why, until when, and Take off hold
+  function holdNoteHtml(c) {
+    if (!c.onHold || c.status !== "open") return "";
+    const why = String(c.pauseReason || "").replace(/^On hold:?\s*/i, "");
+    return `<div class="rc-hold-note"><div><strong>On hold</strong>${why ? ` · ${esc(why)}` : ""}<br>
+      <small>${c.holdUntil ? `Back on the list ${esc(nice(c.holdUntil))}` : "Until someone takes it off"}. No calls, and no texts or emails from the flow.</small></div>
+      <button type="button" class="lh-btn" data-act="hold-off">Take off hold</button></div>`;
+  }
+  function tagRowHtml(c) {
+    if (!c.patientId) return "";
+    return `<div class="rc-tagrow">${tagChipsHtml(c.tags, tagLib) || ""}
+      <button type="button" class="rc-tag-edit" data-act="tags">${c.tags.length ? "Edit tags" : "+ Add a tag"}</button></div>`;
+  }
   function noticesHtml(c) {
-    return (c.reply ? `<div class="rc-reply${c.replyOpen ? " is-open" : ""}"><strong>${esc(REPLY_TAG[c.reply.kind] || "Replied")} · ${esc(when(c.reply.at))}</strong>
+    return holdNoteHtml(c) + tagRowHtml(c) + (c.reply ? `<div class="rc-reply${c.replyOpen ? " is-open" : ""}"><strong>${esc(REPLY_TAG[c.reply.kind] || "Replied")} · ${esc(when(c.reply.at))}</strong>
         <p>${esc(c.reply.text)}</p></div>` : "") +
       (c.dnc ? `<div class="rc-dnc-note"><strong>Do not contact</strong> · ${esc(dncTitle(c))}</div>`
         : c.smsStop ? `<div class="rc-dnc-note is-sms"><strong>No texts</strong> · ${esc(smsStopText(c))}</div>` : "");
@@ -874,13 +901,22 @@ export function mountRecall(container, { staff = null } = {}) {
           ${reason.askDate ? "Pause" : "Stop"} all their recalls, not just ${esc(c.category || "this one")}</label>` : ""}
         ${reason && reason.dnc ? '<small class="fe-note">This also puts them on the do-not-contact list, and stops all their recalls.</small>' : ""}</div>`;
     return `<details class="rc-more" data-role="more"${moreOpen ? " open" : ""}>
-      <summary><span>Given to ${esc(c.assignedToName || "nobody yet")}${c.status === "open" ? " · Stop recall" : ""}</span>${I.chev}</summary>
+      <summary><span>Given to ${esc(c.assignedToName || "nobody yet")}${c.status === "open" ? " · Hold or stop recall" : ""}</span>${I.chev}</summary>
       <div class="rc-more-body">
         <label class="rc-f-row"><span>Given to</span>
           <select class="fb-select" data-role="assign" aria-label="Given to">
             <option value="">Nobody yet (waiting)</option>${ppl.map((s) =>
               `<option value="${esc(s.id)}"${s.id === c.assignedToId ? " selected" : ""}>${esc(s.name)}${team.size && !team.has(s.id) ? " (not in the recall team)" : ""}</option>`).join("")}
           </select></label>
+        ${c.status === "open" && !c.onHold && c.patientId ? `
+        <div class="rc-f-row"><span>Put on hold</span>
+          <div class="rc-row">
+            <input type="date" class="fe-input" data-role="holdUntil" min="${addDays(t, 1)}" value="${esc(draft.holdUntil)}" aria-label="On hold until" />
+            <input class="fe-input" data-role="holdWhy" maxlength="80" placeholder="Why, e.g. overseas until March" value="${esc(draft.holdWhy)}" aria-label="Why" />
+            <button type="button" class="lh-btn" data-act="hold">Put on hold</button>
+          </div>
+          <small class="fe-note">Leave the date empty to keep it on hold until someone takes it off. All their recalls pause,
+            including texts and emails from the flow.</small></div>` : ""}
         ${stop}
       </div></details>`;
   }
@@ -1484,6 +1520,7 @@ export function mountRecall(container, { staff = null } = {}) {
       clearTimeout(searchTimer);
       searchTimer = setTimeout(runSearch, 300);
     } else if (r === "note") { draft.note = e.target.value; grow(e.target); }
+    else if (r === "holdWhy") { draft.holdWhy = e.target.value; }
     else if (r === "sms") {
       draft.sms = e.target.value;
       const info = $("smsInfo");
@@ -1505,6 +1542,8 @@ export function mountRecall(container, { staff = null } = {}) {
     if (r === "who") { ui.who = el.value; sel = ""; build(); return; }
     if (r === "appt") { ui.appt = el.value; sel = ""; build(); return; }
     if (r === "spend") { ui.spend = el.value; sel = ""; build(); return; }
+    if (r === "tagf") { ui.tag = el.value; sel = ""; build(); return; }
+    if (r === "holdUntil") { draft.holdUntil = el.value; return; }
     if (r === "spendFirst") { spendFirst = el.checked; setPref("rc_spendfirst", spendFirst); drawList(); return; }
     if (r === "lv") {
       ui.lv = el.value;
@@ -1611,6 +1650,7 @@ export function mountRecall(container, { staff = null } = {}) {
       if (k === "lv") { ui.lv = ""; ui.lvFrom = ""; ui.lvTo = ""; }
       if (k === "appt") ui.appt = "";
       if (k === "spend") ui.spend = "";
+      if (k === "tag") ui.tag = "";
       sel = "";
       build();
       return;
@@ -1662,6 +1702,25 @@ export function mountRecall(container, { staff = null } = {}) {
     }
     if (a === "call-end") { endCall(); drawList(); drawPanel(true); return; }
     if (a === "tl-retry") { tl.delete(sel); drawPanel(true); return; }
+    if (a === "tags") {
+      const c = findCard(sel);
+      if (!c || !c.patientId) return;
+      openTagPicker({ anchor: b, patientId: c.patientId, name: first(c.patientName), current: c.tags,
+        onSaved: () => { loadTagLib().then((l) => { tagLib = l; drawLv(); drawList(); }); showToast("Tags saved"); } });
+      return;
+    }
+    if (a === "hold") {
+      const until = draft.holdUntil;
+      if (await act("hold", { until, reason: draft.holdWhy.trim() }, { label: "Putting on hold", btn: b })) {
+        draft = blank();
+        showToast(until ? `On hold until ${short(until)}` : "On hold until someone takes it off");
+      }
+      return;
+    }
+    if (a === "hold-off") {
+      if (await act("holdOff", {}, { label: "Taking off hold", btn: b })) showToast("Off hold. They're back on the list.");
+      return;
+    }
     if (a === "undo") { undo(); return; }
     if (a === "bar-x") { dismissBar(); return; }
     if (a === "offer-send") { sendOffer(); return; }
@@ -1769,6 +1828,7 @@ export function mountRecall(container, { staff = null } = {}) {
     .then((s) => { settings = normRecallSettings(s.exists() ? s.data() : {}); drawWho(); drawChips(); drawStats(); drawPanel(true); scheduleCounts(0); })
     .catch(() => {});
   callApi({ action: "staffList" }).then((r) => { people = (r && r.staff) || []; drawWho(); drawFilters(); drawPanel(true); }).catch(() => {});
+  loadTagLib().then((l) => { tagLib = l; drawLv(); drawList(); drawPanel(true); });
   getDoc(doc(db, "recall_settings", "spend_status"))
     .then((s) => { spendInfo = s.exists() ? s.data() : null; drawList(); drawPanel(true); })
     .catch(() => {});
