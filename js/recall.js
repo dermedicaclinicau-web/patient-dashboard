@@ -276,6 +276,28 @@ export function mountRecall(container, { staff = null } = {}) {
   let session = null;
   let sessionSig = "", sessionId = "";
 
+  // History: each card's texts and emails, from Apps Script (op "timeline")
+  const tl = new Map();          // card id → { state: "loading" | "ok" | "error", data, for: the card's updatedAt }
+  let tlFilter = "all";
+  const openMail = new Set();    // emails opened in History (they stay open when the panel redraws)
+  const tlSig = (id) => `${(tl.get(id) || {}).state || ""}|${tlFilter}`;
+  function needTimeline(c) {
+    const t = tl.get(c.id);
+    if (t && (t.state === "loading" || t.for === c.updatedAt)) return;
+    const fresh = !!t;   // the card has changed since: read it again
+    tl.set(c.id, { state: "loading", data: t ? t.data : null, for: c.updatedAt });
+    callApi({ action: "recall", op: "timeline", id: c.id, fresh })
+      .then((r) => {
+        if (!r || r.problem) throw new Error((r && r.problem) || "");
+        tl.set(c.id, { state: "ok", data: r, for: c.updatedAt });
+      })
+      .catch((err) => {
+        const old = tl.get(c.id);
+        tl.set(c.id, { state: "error", data: old && old.data, for: c.updatedAt, error: errText(err, "") });
+      })
+      .finally(() => { if (root.isConnected && sel === c.id) drawPanel(true); });
+  }
+
   /* ---------- Last visit filter ---------- */
   function lvRange() {
     const t = todayKey();
@@ -821,15 +843,100 @@ export function mountRecall(container, { staff = null } = {}) {
         ${stop}
       </div></details>`;
   }
+  /* ---------- History: texts, emails, calls and changes, by day ---------- */
+  const tlDay = (iso) => {
+    const d = new Date(iso || "");
+    if (isNaN(d)) return "";
+    const k = fmtKey(d), t = todayKey();
+    if (k === t) return "Today";
+    if (k === addDays(t, -1)) return "Yesterday";
+    return d.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short",
+      ...(d.getFullYear() === new Date().getFullYear() ? {} : { year: "numeric" }) });
+  };
+  const tlTime = (iso) => { const d = new Date(iso || ""); return isNaN(d) ? "" : d.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }); };
+  const tlAuto = (by) => /^recall( flow)?$/i.test(String(by || ""));
+
+  // The card's own History, with its texts and emails swapped for the full ones once they've loaded
+  function tlItems(c) {
+    const t = tl.get(c.id);
+    const d = t && t.data;
+    const haveTexts = !!(d && Array.isArray(d.texts));
+    const haveMail = !!(d && Array.isArray(d.emails));
+    const out = [];
+    c.log.forEach((l) => {
+      const w = String(l.what || "");
+      const isText = l.kind === "text" || (l.kind === "flow" && /^Text sent/.test(w));
+      const isMail = l.kind === "email" || (l.kind === "flow" && /^Email sent/.test(w));
+      const isReply = l.kind === "reply" && /^Replied(: wants to book| STOP)?$/.test(w);
+      if ((isText || isReply) && haveTexts) return;
+      if (isMail && haveMail) return;
+      if (isText && l.note) out.push({ type: "sms", dir: "out", at: l.at, text: l.note, by: l.by, auto: !l.byUid });
+      else if (isReply && l.note) out.push({ type: "sms", dir: "in", at: l.at, text: l.note, kind: /STOP/.test(w) ? "stop" : /book/.test(w) ? "yes" : "other" });
+      else if (isMail) out.push({ type: "mail", dir: "out", at: l.at, subject: w.replace(/^Email sent:\s*/, ""), text: "", by: l.by, auto: !l.byUid });
+      else out.push({ type: "ev", at: l.at, what: w, note: l.note, by: l.by, kind: l.kind });
+    });
+    if (haveTexts) d.texts.forEach((m) => out.push({ type: "sms", dir: m.dir, at: m.at, text: m.text, by: m.by, src: m.src, kind: m.kind, auto: tlAuto(m.by) }));
+    if (haveMail) d.emails.forEach((m) => out.push({ type: "mail", ...m }));
+    return out.sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
+  }
+
+  function tlItemHtml(x, c) {
+    const meta = (bits) => `<small class="rc-tl-meta">${bits.filter(Boolean).map(esc).join(" · ")}</small>`;
+    if (x.type === "sms") {
+      const who = x.dir === "in" ? first(c.patientName) || "Patient" : x.auto ? "Automatic" : x.by || "Clinic";
+      const tag = x.dir === "in" && x.kind && x.kind !== "other"
+        ? `<span class="rc-tl-tag is-${esc(x.kind)}">${esc(REPLY_TAG[x.kind] || "")}</span>` : "";
+      return `<div class="rc-tl-msg is-${x.dir}"><span class="rc-tl-ic">${I.msg}</span><div class="rc-tl-body">
+        <div class="rc-tl-bubble">${esc(x.text)}</div>
+        ${meta([x.dir === "in" ? "Text received" : "Text sent", who, x.src && x.src !== "Recall" ? x.src : "", tlTime(x.at)])}${tag}</div></div>`;
+    }
+    if (x.type === "mail") {
+      const key = x.id || `${x.at}|${x.subject}`;
+      const who = x.dir === "in" ? x.from || first(c.patientName) : x.auto ? "Automatic" : x.by || x.from || "Clinic";
+      const prev = String(x.text || "").replace(/\s+/g, " ").trim().slice(0, 140);
+      return `<details class="rc-tl-mail is-${x.dir}${x.bulk ? " is-bulk" : ""}" data-mail="${esc(key)}"${openMail.has(key) ? " open" : ""}>
+        <summary><span class="rc-tl-ic">${I.mail}</span><span class="rc-tl-mhead">
+          <strong>${esc(x.subject || "(no subject)")}</strong>${prev ? `<span class="rc-tl-prev">${esc(prev)}</span>` : ""}
+          ${meta([x.dir === "in" ? "Email received" : x.bulk ? "Marketing email" : "Email sent", who, tlTime(x.at)])}</span></summary>
+        ${x.text ? `<div class="rc-tl-mbody">${esc(x.text)}</div>` : '<p class="rc-tl-mbody muted">Only the subject was saved for this one.</p>'}
+        ${/^https:\/\/mail\.google\.com\//.test(String(x.link || "")) ? `<a class="rc-tl-open" href="${esc(x.link)}" target="_blank" rel="noopener">Open in Gmail</a>` : ""}
+      </details>`;
+    }
+    return `<div class="rc-tl-ev${x.kind === "call" ? " is-call" : ""}"><span class="rc-tl-ic">${histIcon(x.what)}</span><div>
+      <strong>${esc(x.what)}</strong>${x.note ? `<p>${esc(x.note)}</p>` : ""}${meta([x.by, tlTime(x.at)])}</div></div>`;
+  }
+
   function histHtml(c, max = 0) {
-    if (!c.log.length) return "";
-    const list = c.log.slice().reverse();
-    const shown = max ? list.slice(0, max) : list;
-    return `<h4 class="rc-h">History${max && list.length > max ? ` <small class="muted">latest ${max} of ${list.length}</small>` : ""}</h4>
-      <ul class="rc-hist">${shown.map((l) => `<li>
-        <span class="rc-hist-ic">${histIcon(l.what)}</span>
-        <div><strong>${esc(l.what)}</strong>${l.note ? `<p>${esc(l.note)}</p>` : ""}
-          <small>${esc(when(l.at))}${l.by ? ` · ${esc(l.by)}` : ""}</small></div></li>`).join("")}</ul>`;
+    const t = tl.get(c.id);
+    const all = tlItems(c);
+    if (!all.length && !(t && t.state === "loading")) return "";
+    const groups = [["all", "All", () => true], ["sms", "Texts", (x) => x.type === "sms"],
+      ["mail", "Emails", (x) => x.type === "mail"], ["calls", "Calls", (x) => x.type === "ev" && x.kind === "call"]];
+    const items = all.filter((groups.find((g) => g[0] === tlFilter) || groups[0])[2]);
+    const shown = max ? items.slice(0, max) : items;
+    let day = "";
+    const body = shown.map((x) => {
+      const dl = tlDay(x.at);
+      const head = dl !== day ? `<div class="rc-tl-day"><span>${esc(dl)}</span></div>` : "";
+      day = dl;
+      return head + tlItemHtml(x, c);
+    }).join("");
+    const d = t && t.data;
+    const status = !t || t.state === "loading" ? '<small class="rc-tl-status">Loading texts and emails…</small>'
+      : t.state === "error" ? `<small class="rc-tl-status is-err">Texts and emails couldn't be loaded.
+          <button type="button" class="rc-tl-retry" data-act="tl-retry">Try again</button></small>`
+      : d && (d.textError || d.emailError) ? `<small class="rc-tl-status">${esc([d.textError, d.emailError].filter(Boolean).join(" "))}</small>` : "";
+    return `<div class="rc-tl-wrap">
+      <div class="rc-tl-top"><h4 class="rc-h">History</h4><span class="inv-spacer"></span>
+        <div class="rc-tl-filters">${groups.map(([k, l, fn]) => {
+          const n = all.filter(fn).length;
+          return k === "all" || n ? `<button type="button" class="rc-chip${tlFilter === k ? " is-on" : ""}" data-tlf="${k}">${esc(l)}${
+            k === "all" ? "" : ` <em>${n}</em>`}</button>` : "";
+        }).join("")}</div></div>
+      ${status}
+      ${items.length ? `<div class="rc-tl">${body}</div>` : '<p class="rc-empty">Nothing here yet.</p>'}
+      ${max && items.length > max ? `<small class="muted">Latest ${max} of ${items.length}. Open the card for all of them.</small>` : ""}
+    </div>`;
   }
 
   function panelHtml(c, sv) {
@@ -852,7 +959,8 @@ export function mountRecall(container, { staff = null } = {}) {
     const c = sel ? findCard(sel) : null;
     if (!c) { p.hidden = true; p.innerHTML = ""; panelSig = ""; panelId = ""; return; }
     const sv = busyLabel(c.id);
-    const sig = `${c.id}|${c.updatedAt}|${c.status}|${people.length}|${sv}|${call && call.id === c.id ? "call" : ""}`;
+    needTimeline(c);
+    const sig = `${c.id}|${c.updatedAt}|${c.status}|${people.length}|${sv}|${call && call.id === c.id ? "call" : ""}|${tlSig(c.id)}`;
     if (!force && sig === panelSig) return;
     const same = panelId === c.id;
     panelSig = sig;
@@ -928,7 +1036,8 @@ export function mountRecall(container, { staff = null } = {}) {
       setTimeout(() => { if (session && !session.done && sel && !findCard(sel)) sessionMove(1, sel); }, 0);
     }
     const sv = c ? busyLabel(c.id) : "";
-    const sig = [s.done, s.paused, s.waitMore, s.calls, s.booked, c ? `${c.id}|${c.updatedAt}|${c.status}` : "",
+    if (c) needTimeline(c);
+    const sig = [s.done, s.paused, s.waitMore, s.calls, s.booked, c ? `${c.id}|${c.updatedAt}|${c.status}|${tlSig(c.id)}` : "",
       sv, call ? call.id : "", people.length].join("|");
     if (!force && sig === sessionSig) return;
     const same = !!c && sessionId === c.id;
@@ -1342,7 +1451,9 @@ export function mountRecall(container, { staff = null } = {}) {
     }
   });
   root.addEventListener("toggle", (e) => {   // toggle doesn't bubble, so this listens on the way down
-    if (e.target.dataset && e.target.dataset.role === "more") moreOpen = e.target.open;
+    const ds = e.target.dataset || {};
+    if (ds.role === "more") moreOpen = e.target.open;
+    if (ds.mail) { if (e.target.open) openMail.add(ds.mail); else openMail.delete(ds.mail); }
   }, true);
   root.addEventListener("change", async (e) => {
     const el = e.target;
@@ -1480,6 +1591,8 @@ export function mountRecall(container, { staff = null } = {}) {
       if (s) { s.n += PAGE; more.disabled = true; more.textContent = "Loading…"; listen(s); }
       return;
     }
+    const tf = e.target.closest("[data-tlf]");
+    if (tf) { tlFilter = tf.dataset.tlf; drawPanel(true); return; }
     const out = e.target.closest("[data-out]");
     if (out) { logOutcome(out.dataset.out); return; }
     const row = e.target.closest("[data-card]");
@@ -1501,6 +1614,7 @@ export function mountRecall(container, { staff = null } = {}) {
       return;
     }
     if (a === "call-end") { endCall(); drawList(); drawPanel(true); return; }
+    if (a === "tl-retry") { tl.delete(sel); drawPanel(true); return; }
     if (a === "undo") { undo(); return; }
     if (a === "bar-x") { dismissBar(); return; }
     if (a === "offer-send") { sendOffer(); return; }

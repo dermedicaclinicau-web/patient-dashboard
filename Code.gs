@@ -13608,6 +13608,7 @@ function handleRecall_(body) {
     }
     if (op === 'sendEmail') return recallSendEmail_(body, session);   // anyone with Recall access (checked above)
     if (op === 'messages') return recallMessages_(body);   // anyone with Recall access
+    if (op === 'timeline') return recallTimeline_(body);   // anyone with Recall access
     if (op === 'flowPreview' || op === 'flowSkip' || op === 'flowAdopt') {
       if (!manage) return { ok: false, error: 'FORBIDDEN' };
       if (op === 'flowAdopt') return recallFlowAdopt_(body, session);
@@ -14449,6 +14450,73 @@ function recallCloseSiblingsPreview() { recallCloseSiblingsRun_(true); }
 function recallCloseSiblings() {
   console.log(recallCloseSiblingsRun_(false) + ' recall card(s) closed.');
   console.log(smsOptoutPatients_(getConfig_()) + ' patient record(s) marked or cleared for opting out of texts.');
+}
+
+// Recall → History: their texts (Recall, the flow, the patient page) and replies, and their emails from Gmail.
+// Remembered 5 minutes (fresh: read again).
+function recallTimeline_(body) {
+  const id = String(body.id || '');
+  if (!/^[A-Za-z0-9_-]{5,200}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+  const key = 'rc_tl_' + flowHash_(id);
+  if (body.fresh !== true) {
+    const hit = repCacheGet_(key);
+    if (hit) return Object.assign({ ok: true, cached: true }, hit);
+  }
+  const cfg = getConfig_();
+  const c = fsGetDoc_(cfg, RECALL_COL_ + '/' + id);
+  if (!c) return { ok: true, problem: "That recall card couldn't be found." };
+  let doc = null;
+  try { doc = c.patientId ? flowPatient_(cfg, String(c.patientId)) : null; } catch (e) { doc = null; }
+
+  const out = { texts: null, emails: null, textError: '', emailError: '', at: new Date().toISOString() };
+  try {
+    out.texts = smsThread_(cfg, doc || { _id: String(c.patientId || ''), Mobile: c.mobile }).items || [];
+  } catch (e) {
+    console.warn('Recall history: texts not read: ' + e);
+    out.textError = "Texts couldn't be loaded.";
+  }
+  const email = mktEmail_((doc && doc.Email) || c.email);
+  if (!isEmail_(email)) out.emails = [];
+  else {
+    try { out.emails = recallMailOf_(email); }
+    catch (e) {
+      console.warn('Recall history: Gmail not read: ' + e);
+      out.emailError = "Emails couldn't be read from Gmail just now.";
+    }
+  }
+  repCachePut_(key, out, 300);
+  return Object.assign({ ok: true }, out);
+}
+
+// Emails to and from one address in the clinic's Gmail, newest first (the past 13 months, up to 30)
+function recallMailOf_(email) {
+  const out = [];
+  GmailApp.search('{to:' + email + ' from:' + email + ' cc:' + email + '} newer_than:400d', 0, 15).forEach(function (th) {
+    const link = th.getPermalink();
+    th.getMessages().forEach(function (m) {
+      if (m.isDraft() || out.length >= 40) return;
+      const fromRaw = String(m.getFrom() || '');
+      const from = ((fromRaw.match(/<([^>]+)>/) || [])[1] || fromRaw).trim().toLowerCase();
+      const to = (String(m.getTo() || '') + ',' + String(m.getCc() || '')).toLowerCase();
+      const inbound = from === email;
+      if (!inbound && to.indexOf(email) === -1) return;
+      const html = String(m.getBody() || '');
+      // Just this message: quoted replies and the marketing footer are left out
+      const text = String(m.getPlainBody() || '')
+        .split(/\r?\n\s*(?:On .{0,300}wrote:|-{2,}\s*Original Message|From: .+)/i)[0]
+        .split(/\n\s*Sent by Dermedica\b/)[0]
+        .replace(/^>.*$/gm, '').replace(/\[image:[^\]]*\]/g, '').replace(/\n{3,}/g, '\n\n').trim();
+      out.push({
+        id: m.getId(), dir: inbound ? 'in' : 'out', at: m.getDate().toISOString(),
+        subject: String(m.getSubject() || '').slice(0, 200),
+        from: fromRaw.replace(/<[^>]+>/, '').replace(/"/g, '').trim().slice(0, 120) || from,
+        text: text.slice(0, 4000) + (text.length > 4000 ? '…' : ''),
+        bulk: /[?&]o=m1\./.test(html),   // a tracked marketing campaign
+        link: link,
+      });
+    });
+  });
+  return out.sort(function (a, b) { return b.at.localeCompare(a.at); }).slice(0, 30);
 }
 
 /* ---------- Recall settings: status and a test text ---------- */
