@@ -11555,6 +11555,11 @@ function mktSetConsent_(cfg, pid, yes, meta) {
       if (cur && cur.reason !== 'bounced') writes.push(deleteWrite_(cfg, path));
     }
   }
+  // Saying yes (staff told, with a note, or the patient resubscribed) also lifts a STOP on their mobile
+  if (yes && pdoc) {
+    const mk = recallPhone04_(pdoc.Mobile);
+    if (mk && smsSuppressed_(cfg, mk)) writes.push(deleteWrite_(cfg, SMS_SUPPRESS_ + '/' + mk));
+  }
   writes.push(updateWrite_(cfg, MKT_LOG_ + '/c_' + Date.now() + '_' + Utilities.getUuid().slice(0, 8), {
     patientId: patientId, patientName: pdoc ? flowWho_(pdoc).name : '',
     email: email, status: yes ? 'yes' : 'no', source: source, why: String(meta.why || '').slice(0, 80),
@@ -13665,7 +13670,7 @@ function recallAction_(op, id, body, session) {
     if (!phone) return { ok: true, problem: "There's no Australian mobile number on their record." };
     const h = Number(Utilities.formatDate(new Date(), REC_TZ_, 'H'));
     if (h < 8 || h >= 20) return { ok: true, problem: 'Texts can only be sent between 8 am and 8 pm.' };
-    const blocked = recallTextBlocked_(cfg, c.patientId);
+    const blocked = recallTextBlocked_(cfg, c.patientId, c.mobile);
     if (blocked) return { ok: true, problem: blocked + " Recall texts can't be sent to them." };
     const text = recallSmsText_(body.text);
     if (text.replace(/reply\s+stop\s+to\s+opt\s+out\.?/i, '').trim().length < 10) return { ok: true, problem: 'Write the message first.' };
@@ -13771,6 +13776,14 @@ function recallReshare() {
 
 const TM_API_ = 'https://rest.textmagic.com/api/v2';
 const RECALL_REPLIES_ = 'recall_replies';
+// Mobiles that replied STOP (sms_suppress/{0412345678}): no recall or marketing texts to them, whoever's record they're on
+const SMS_SUPPRESS_ = 'sms_suppress';
+function smsSuppressed_(cfg, m) {
+  const k = recallPhone04_(m);
+  if (!k) return null;
+  try { return fsGetDoc_(cfg, SMS_SUPPRESS_ + '/' + k); }
+  catch (e) { return { reason: 'unknown' }; }   // unsure: treat as blocked, never risk it
+}
 // Kept general on purpose: Australian advertising rules don't allow prescription medicines to be named
 const RECALL_SMS_NAMES_ = {
   'Wrinkle Relaxer': 'anti-wrinkle treatment', 'Filler/Radiesse': 'filler treatment', 'Laser/OPL/Peel': 'laser or peel treatment',
@@ -13847,7 +13860,8 @@ function tmSend_(auth, phone61, text) {
 }
 
 // Why they can't be texted, or ''
-function recallTextBlocked_(cfg, pid) {
+function recallTextBlocked_(cfg, pid, mobile) {
+  if (mobile && smsSuppressed_(cfg, mobile)) return 'This mobile replied STOP to a text.';
   const p = pid ? fsGetDoc_(cfg, 'patient_list/' + encodeURIComponent(pid)) : null;
   if (p && p['Marketing OK'] === false) return "They're on the do-not-contact list.";
   const e = p ? mktEmail_(p.Email) : '';
@@ -13892,7 +13906,7 @@ function recallAutoText_(cfg, set, today) {
     const note = function (what, text) {
       return log.concat([{ at: now, by: 'Recall', byUid: '', kind: text ? 'text' : 'auto', what: what, note: text || '' }]).slice(-80);
     };
-    const blocked = recallTextBlocked_(cfg, c.patientId);
+    const blocked = recallTextBlocked_(cfg, c.patientId, c.mobile);
     if (blocked) {
       fsPatch_(cfg, path, { textAutoAt: now, textAuto: 'skipped', updatedAt: now, log: note('No automatic text: on the do-not-contact list') });
       continue;
@@ -13922,9 +13936,13 @@ function recallAutoText_(cfg, set, today) {
 
 /* ---------- Replies ---------- */
 
+// "Cancel" is left out on purpose: patients often mean an appointment
 function recallReplyKind_(t) {
   const s = String(t || '').toLowerCase().replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
-  if (/^(stop|stop all|unsubscribe|opt out|optout|remove me)( |$)/.test(s)) return 'stop';
+  const words = s ? s.split(' ').length : 0;
+  if (/^((please|pls|plz) )?(stop|stopall|stop all|unsubscribe|unsub|opt out|optout|remove me|take me off)( |$)/.test(s)) return 'stop';
+  if (/^(end|quit|stop all|stop it)$/.test(s)) return 'stop';
+  if (words <= 5 && /\b(stop|unsubscribe|optout)\b|\bopt out\b/.test(s)) return 'stop';   // "ok stop", "no more, stop"
   if (/^(yes|yep|yeah|yes please|y|ok|okay|sure|please)( |$)/.test(s)) return 'yes';
   return 'other';
 }
@@ -13952,10 +13970,16 @@ function recallReplies_(cfg) {
   if (!auth) return 0;
   const props = PropertiesService.getScriptProperties();
   const last = Number(props.getProperty('TM_LAST_REPLY_ID') || 0);
-  const r = tmFetch_(auth, 'get', '/replies?page=1&limit=100&orderBy=id&direction=desc');
-  const list = (Array.isArray(r.resources) ? r.resources : []).map(function (x) {
-    return { id: Number(x.id) || 0, from: String(x.sender || ''), text: String(x.text || ''), at: String(x.messageTime || '') };
-  }).filter(function (x) { return x.id; });
+  // Newest first, up to 500, until it reaches the last reply already read (so a gap in the trigger doesn't skip any)
+  let list = [];
+  for (let page = 1; page <= 5; page++) {
+    const r = tmFetch_(auth, 'get', '/replies?page=' + page + '&limit=100&orderBy=id&direction=desc');
+    const got = (Array.isArray(r.resources) ? r.resources : []).map(function (x) {
+      return { id: Number(x.id) || 0, from: String(x.sender || ''), text: String(x.text || ''), at: String(x.messageTime || '') };
+    }).filter(function (x) { return x.id; });
+    list = list.concat(got);
+    if (got.length < 100 || !last || got.some(function (x) { return x.id <= last; })) break;
+  }
   if (!list.length) return 0;
   const top = Math.max.apply(null, list.map(function (x) { return x.id; }));
   if (!last) { props.setProperty('TM_LAST_REPLY_ID', String(top)); return 0; }
@@ -14005,21 +14029,7 @@ function recallOneReply_(cfg, set, x, memo) {
   const entry = { at: at, by: 'Patient', byUid: '', kind: 'reply', what: what, note: text };
   const reply = { at: at, text: text.slice(0, 500), kind: kind };
 
-  if (kind === 'stop') {
-    if (pid) {
-      try {
-        mktSetConsent_(cfg, pid, false, { by: 'The patient', source: 'Replied STOP to a text', dnc: true, why: 'Opted out',
-          note: 'Replied "' + text.slice(0, 80) + '" to a recall text' });
-      } catch (e) { console.warn('STOP not saved to do not contact: ' + e); }
-    }
-    const writes = live.map(function (c) {
-      const p = { reply: reply, replyOpen: false, updatedAt: now, log: (Array.isArray(c.log) ? c.log : []).concat([entry]).slice(-80) };
-      if (c.status === 'open') Object.assign(p, { status: 'closed', closeReason: 'Replied STOP', closedAt: now, closedBy: 'Patient', remindOn: '' });
-      return patchWrite_(cfg, RECALL_COL_ + '/' + c._id, p);
-    });
-    if (writes.length) commitWrites_(cfg, writes);
-    return;
-  }
+  if (kind === 'stop') { recallStop_(cfg, phone || x.from, text, at, pid, cards, portal); return; }
   if (!card || toPortal) return;   // saved in recall_replies (a reply to a patient-page text shows in their conversation)
 
   const log = (Array.isArray(card.log) ? card.log : []).concat([entry]);
@@ -14041,6 +14051,85 @@ function recallOneReply_(cfg, set, x, memo) {
   }
   patch.log = log.slice(-80);
   commitWrites_(cfg, [patchWrite_(cfg, RECALL_COL_ + '/' + card._id, patch)]);
+}
+
+// A STOP reply. The number goes on the do-not-text list, the patient who was texted goes on do not contact, and their
+// open recall cards close, each with a History line. Anyone else whose record has the same mobile gets no more recall
+// texts to it, and a note on their cards (they didn't ask, so their recall, calls and emails carry on).
+function recallStop_(cfg, phone, text, at, pid, cards, portal) {
+  const now = new Date().toISOString();
+  const key = recallPhone04_(phone);
+
+  // Everyone with this number: their recall cards, a patient-page text, and the Patient List
+  const owners = {};
+  if (pid) owners[pid] = true;
+  cards.forEach(function (c) { if (c.patientId) owners[String(c.patientId)] = true; });
+  if (portal && portal.patientId) owners[String(portal.patientId)] = true;
+  if (key) {
+    const core = key.slice(1);
+    const spaced = key.slice(0, 4) + ' ' + key.slice(4, 7) + ' ' + key.slice(7);
+    fsQueryMany_(cfg, [
+      ['patient_list', 'PhoneKey', 'IN', [key, core, '61' + core], 20],
+      ['patient_list', 'Mobile', 'IN', [key, core, '61' + core, '+61' + core, spaced], 20],
+    ]).forEach(function (list) { list.forEach(function (d) { if (!d.MergedInto) owners[d._id] = true; }); });
+  }
+  const ids = Object.keys(owners).slice(0, 10);
+  if (!pid && ids.length === 1) pid = ids[0];   // not texted from the portal, but only one patient has this number
+  const docs = ids.length ? fsBatchGet_(cfg, ids.map(function (id) { return 'patient_list/' + id; })) : {};
+  const nameOf = function (id) { const d = docs['patient_list/' + id]; return d ? flowWho_(d).name : 'another patient'; };
+  const others = ids.filter(function (id) { return id !== pid; });
+
+  // 1. The number: no more recall or marketing texts to it, whoever's record it's on
+  if (key) {
+    commitWrites_(cfg, [updateWrite_(cfg, SMS_SUPPRESS_ + '/' + key, {
+      phone: key, at: at, text: text.slice(0, 200), source: 'Replied STOP to a text', patientId: pid || '', patientIds: ids,
+    })]);
+  }
+
+  // 2. The patient who was texted: on the do-not-contact list
+  if (pid) {
+    try {
+      mktSetConsent_(cfg, pid, false, { by: 'The patient', source: 'Replied STOP to a text', dnc: true, why: 'Opted out',
+        note: 'Replied "' + text.slice(0, 80) + '" to a text' + (key ? ' (' + key + ')' : '') });
+    } catch (e) { console.warn('STOP not saved to do not contact: ' + e); }
+  }
+
+  // 3. Their recall cards close. Cards on other records with this mobile get a note.
+  const all = {};
+  cards.forEach(function (c) { all[c._id] = c; });
+  ids.forEach(function (id) {
+    fsQuery_(cfg, RECALL_COL_, 'patientId', 'EQUAL', id, 50).forEach(function (c) { all[c._id] = c; });
+  });
+  const shared = others.length
+    ? 'This mobile is also on ' + others.map(nameOf).join(', ') + "'s record: no more recall texts to it." : '';
+  const reply = { at: at, text: text.slice(0, 500), kind: 'stop' };
+  const writes = [];
+  Object.keys(all).forEach(function (cid) {
+    const c = all[cid];
+    if (c.status === 'closed') return;
+    const mine = !!pid && String(c.patientId) === pid;
+    const log = (Array.isArray(c.log) ? c.log : []).slice();
+    const p = { updatedAt: now };
+    if (mine) {
+      log.push({ at: at, by: 'Patient', byUid: '', kind: 'reply', note: text.slice(0, 500),
+        what: c.status === 'open' ? 'Replied STOP · recall stopped (Textmagic)' : 'Replied STOP (already booked, so the card stays)' });
+      if (shared) log.push({ at: now, by: 'Recall', byUid: '', kind: 'auto', what: shared, note: '' });
+      Object.assign(p, { reply: reply, replyOpen: false });
+      if (c.status === 'open') {
+        Object.assign(p, { status: 'closed', closeReason: 'Replied STOP', closedAt: now, closedBy: 'Patient', remindOn: '',
+          flowState: 'done', flowNext: '', joinedTo: '' });
+      }
+    } else {
+      log.push({ at: now, by: 'Recall', byUid: '', kind: 'auto', note: '',
+        what: 'Their mobile replied STOP' + (pid ? ' (to a text for ' + nameOf(pid) + ')' : '') +
+          ': no more recall texts to it. Calls and emails are still fine.' });
+    }
+    p.log = log.slice(-80);
+    writes.push(patchWrite_(cfg, RECALL_COL_ + '/' + cid, p));
+  });
+  if (writes.length) commitWrites_(cfg, writes);
+  console.log('Recall: STOP from ' + (key || phone) + ' · ' + writes.length + ' card(s) updated · ' +
+    ids.length + ' patient(s) with this number');
 }
 
 /* ---------- Recall settings: status and a test text ---------- */
@@ -14169,7 +14258,7 @@ function recallFlowSend_(cfg, set, s, c, test) {
   const vals = recallFlowVals_(c, set);
   const what = s.type === 'text' ? 'Text' : 'Email';
   if (!test) {
-    const b = recallTextBlocked_(cfg, c.patientId);
+    const b = recallTextBlocked_(cfg, c.patientId, s.type === 'text' ? c.mobile : '');
     if (b) return { sent: false, what: what + ' skipped: on the do-not-contact list' };
   }
   if (s.type === 'text') {
@@ -15348,14 +15437,17 @@ function handleSms_(body) {
 }
 
 // On the do-not-contact list, or replied STOP: texts about their care only
+// Replied STOP (from this mobile, or on their record) or on the do-not-contact list: texts about their care only
 function smsBlock_(cfg, doc) {
   const c = doc['Marketing Consent'] || {};
-  const stop = doc['Marketing OK'] === false && c.source === 'Replied STOP to a text';
+  const sup = smsSuppressed_(cfg, doc.Mobile);
+  const stop = !!sup || (doc['Marketing OK'] === false && c.source === 'Replied STOP to a text');
   const why = recallTextBlocked_(cfg, doc._id);
   if (!stop && !why) return { dnc: false, stop: false, why: '' };
+  const when = String((sup && sup.at) || c.at || '').slice(0, 10);
   return {
     dnc: true, stop: stop,
-    why: stop ? 'They replied STOP to a text' + (c.at ? ' on ' + recLongDate_(String(c.at).slice(0, 10)) : '') + '.'
+    why: stop ? 'This mobile replied STOP to a text' + (when ? ' on ' + recLongDate_(when) : '') + '.'
       : "They're on the do-not-contact list" + (c.source ? ' (' + c.source + ')' : '') + '.',
   };
 }
@@ -18421,6 +18513,7 @@ function prosAction_(cfg, op, id, body, session) {
     if (!auth) return { ok: true, problem: "Texts aren't set up yet. Add the Textmagic details in Script Properties." };
     const phone61 = recallPhone61_(p.phone);
     if (!phone61) return { ok: true, problem: "There's no Australian mobile number for them." };
+    if (smsSuppressed_(cfg, p.phone)) return { ok: true, problem: "This mobile replied STOP to a text, so it can't be texted." };
     const h = Number(Utilities.formatDate(new Date(), REC_TZ_, 'H'));
     if (h < 8 || h >= 20) return { ok: true, problem: 'Texts can only be sent between 8 am and 8 pm.' };
     if (p.emailKey) { const s = mktSuppressed_(cfg, p.emailKey); if (s && s.reason !== 'bounced') return { ok: true, problem: "They've asked not to be contacted." }; }
@@ -20732,4 +20825,12 @@ function grantReportTabs() {
   CacheService.getScriptCache().remove('staff_docs_v1');
   console.log('Reporting tabs added to roles: ' + (roleNamesDone.join(', ') || 'none (defaults apply)') +
     ' · and ' + people + ' person/people with their own exception.');
+}
+
+// Run from the editor: treats a STOP from this mobile exactly as if it came from Textmagic.
+// It's real: that patient goes on do not contact and their recall cards close.
+function testRecallStop() {
+  const mobile = 'PASTE_A_TEST_MOBILE';   // e.g. your own number, on a test patient
+  const cfg = getConfig_();
+  recallOneReply_(cfg, recallSettings_(cfg), { id: 0, from: mobile, text: 'STOP', at: new Date().toISOString() }, {});
 }

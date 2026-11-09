@@ -1485,6 +1485,13 @@ export function mountRecall(container, { staff = null } = {}) {
       return;
     }
     if (a === "reopen") {
+      const rc = findCard(sel);
+      if (rc && rc.closeReason === "Replied STOP" && !(await confirmDialog({
+        title: "Reopen after they replied STOP?",
+        message: "They asked for no more texts, and they stay on the do-not-contact list. " +
+          "Only reopen it if they've asked to be called about booking.",
+        confirmLabel: "Reopen", tone: "warning",
+      }))) return;
       if (await act("reopen", {}, { label: "Reopening", btn: b })) showToast("Reopened");
     }
   });
