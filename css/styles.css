@@ -12028,3 +12028,95 @@ body.no-patients-edit .pb-add-alt { display: inline; }
 @media (max-width: 640px) {
   .ch.is-open.is-min .ch-panel { bottom: calc(4.75rem + env(safe-area-inset-bottom)); }   /* above the bottom menu */
 }
+
+
+/* ===================== Chat: Round 1 polish ===================== */
+/* Thin scrollbars */
+.ch-msgs, .ch-list { scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; }
+.ch-msgs::-webkit-scrollbar, .ch-list::-webkit-scrollbar { width: 8px; }
+.ch-msgs::-webkit-scrollbar-thumb, .ch-list::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px;
+  background: #cbd5e1; background-clip: padding-box; }
+.ch-msgs::-webkit-scrollbar-button, .ch-list::-webkit-scrollbar-button { display: none; }
+
+/* Messages: a run sits close together, with stacked corners */
+.ch-m { position: relative; }
+.ch-m.is-mid, .ch-m.is-last { margin-top: -.4rem; }
+.ch-m .ch-m-b { border-radius: 16px 16px 16px 5px; }
+.ch-m.is-mid .ch-m-b { border-radius: 5px 16px 16px 5px; }
+.ch-m.is-last .ch-m-b { border-radius: 5px 16px 16px 16px; }
+.ch-m.is-me .ch-m-b { border-radius: 16px 16px 5px 16px; }
+.ch-m.is-me.is-mid .ch-m-b { border-radius: 16px 5px 5px 16px; }
+.ch-m.is-me.is-last .ch-m-b { border-radius: 16px 5px 16px 16px; }
+.ch-m-meta { margin-top: .2rem; }
+.ch-m-slow { color: #b45309; font-weight: 600; }
+.ch-m-b .ch-m-a { color: inherit; text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
+
+/* Edit / Delete beside my message: on hover with a mouse, on tap with a finger */
+.ch-m-acts { position: absolute; top: 0; right: calc(100% + 6px); z-index: 2; display: flex; gap: 2px; margin: 0; padding: 2px;
+  border: 1px solid var(--border); border-radius: 999px; background: #fff; box-shadow: 0 4px 12px -6px rgba(15, 23, 42, .3);
+  opacity: 0; pointer-events: none; transition: opacity .12s; }
+.ch-m-acts::after { content: ""; position: absolute; top: 0; bottom: 0; left: 100%; width: 8px; }   /* no gap to lose the hover */
+.ch-m-acts button { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%;
+  background: none; color: #64748b; cursor: pointer; }
+.ch-m-acts button svg { width: 15px; height: 15px; }
+.ch-m-acts button:hover { border-color: transparent; background: #f1f5f9; color: var(--text); }
+.ch-m-acts button.is-danger:hover { background: #fef2f2; color: var(--danger); }
+@media (hover: hover) and (pointer: fine) { .ch-m:hover .ch-m-acts { opacity: 1; pointer-events: auto; } }
+.ch-m.is-acts .ch-m-acts, .ch-m:focus-within .ch-m-acts { opacity: 1; pointer-events: auto; }
+
+/* "↓ 2 new messages" */
+.ch-msgs-wrap { position: relative; display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.ch-jump { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); display: inline-flex; align-items: center; gap: .35rem;
+  height: 32px; padding: 0 .9rem; border: 0; border-radius: 999px; background: var(--primary); color: #fff; font: inherit;
+  font-size: .8rem; font-weight: 600; cursor: pointer; box-shadow: 0 8px 20px -8px rgba(15, 118, 110, .6); animation: ov-in .16s ease-out; }
+.ch-jump svg { width: 14px; height: 14px; }
+
+/* ⋯ and + menus */
+.ch-hd { position: relative; }
+.ch-more-wrap { position: relative; display: inline-flex; }
+.ch-menu { position: absolute; z-index: 6; min-width: 220px; padding: 4px; border: 1px solid var(--border); border-radius: 12px;
+  background: #fff; box-shadow: 0 14px 32px -12px rgba(15, 23, 42, .35); cursor: default; animation: ov-in .14s ease-out; }
+.ch-more-wrap .ch-menu { top: calc(100% + 6px); right: 0; }
+.ch-menu button { display: flex; align-items: center; gap: .6rem; width: 100%; padding: .55rem .65rem; border: 0; border-radius: 8px;
+  background: none; color: var(--text); font: inherit; font-size: .88rem; text-align: left; cursor: pointer; }
+.ch-menu button svg { width: 16px; height: 16px; flex: none; color: var(--muted); }
+.ch-menu button small { max-width: 120px; margin-left: auto; padding-left: .75rem; overflow: hidden; font-size: .75rem;
+  color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.ch-menu button:hover:not(:disabled) { background: var(--surface-2); }
+.ch-menu button:disabled { opacity: .5; cursor: default; }
+.ch-menu button.is-danger, .ch-menu button.is-danger svg { color: var(--danger); }
+.ch-menu hr { height: 1px; margin: 4px 6px; border: 0; background: var(--border); }
+.ch-plus { left: .6rem; bottom: calc(100% + 6px); }
+.ch-plus-btn svg { transition: transform .15s; }
+.ch-plus-btn[aria-expanded="true"] { background: var(--primary-soft); color: var(--primary); }
+.ch-plus-btn[aria-expanded="true"] svg { transform: rotate(45deg); }
+.ch-panel.is-min .ch-hd .ch-more-wrap { display: none; }
+
+/* The message box: one slim line that grows */
+.ch-comp { align-items: flex-end; gap: .3rem; padding: .55rem .6rem; }
+.ch-comp .ch-ic { width: 38px; height: 38px; margin-bottom: 1px; }
+.ch-comp textarea { min-height: 40px; max-height: 160px; padding: .55rem .95rem; border-radius: 20px; line-height: 1.4; }
+.ch-comp .ch-send { width: 38px; height: 38px; margin-bottom: 1px; }
+.ch-hint { display: block; padding: 0 .9rem .5rem; text-align: right; }
+.ch-linkchip { display: flex; align-items: center; gap: .4rem; margin: .5rem .7rem 0; padding: .25rem .3rem .25rem .65rem;
+  border: 1px solid #99d5cf; border-radius: 999px; background: var(--primary-soft); color: var(--primary-hover);
+  font-size: .78rem; font-weight: 600; }
+.ch-linkchip > svg { width: 14px; height: 14px; flex: none; }
+.ch-linkchip span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-linkchip .ch-ic { width: 24px; height: 24px; }
+
+/* Search this chat */
+.ch-search { display: flex; align-items: center; gap: .3rem; padding: .45rem .6rem; border-bottom: 1px solid var(--border); background: var(--surface-2); }
+.ch-search input { flex: 1; min-width: 0; height: 34px; }
+.ch-search small { font-size: .75rem; color: var(--muted); white-space: nowrap; }
+.ch-m.is-hit .ch-m-b { box-shadow: 0 0 0 2px #fde68a; }
+.ch-m.is-hit-on .ch-m-b { box-shadow: 0 0 0 3px #f59e0b; }
+
+/* Chat list: drafts and muted chats */
+.ch-row-last.is-draft b { color: #b45309; }
+.ch-muted svg { width: 13px; height: 13px; margin-left: 4px; color: #94a3b8; vertical-align: -2px; }
+
+@media (max-width: 600px) {
+  .ch-comp textarea { font-size: 16px; }
+  .ch-menu { min-width: 200px; }
+}

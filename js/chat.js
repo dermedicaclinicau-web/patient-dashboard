@@ -32,6 +32,13 @@ const I = {
   smile: svg('<circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>'),
   trash: svg('<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>'),
   min: svg('<polyline points="6 9 12 15 18 9"/>'),
+  down: svg('<polyline points="6 9 12 15 18 9"/>'),
+  up: svg('<polyline points="18 15 12 9 6 15"/>'),
+  dots: svg('<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>'),
+  search: svg('<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>'),
+  edit: svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'),
+  photo: svg('<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>'),
+  userPlus: svg('<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/>'),
 };
 
 // The emoji panel in the message box
@@ -67,6 +74,27 @@ const dayLabel = (d) => {
 const timeOf = (d) => (d ? d.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }) : "");
 // Phones and iPads: Enter makes a new line, the Send button sends
 const isTouch = () => !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+
+// Web addresses and portal links (#/…) in a message can be tapped. The text is made safe first.
+const LINK_RE = /(https?:\/\/[^\s<]+|#\/[\w\-/%.~]+)/g;
+function linkify(text) {
+  return esc(text).replace(LINK_RE, (m) => {
+    const tail = (m.match(/[).,!?;:]+$/) || [""])[0];   // full stops and brackets after a link aren't part of it
+    const url = tail ? m.slice(0, -tail.length) : m;
+    const web = url.startsWith("http");
+    const shown = web ? url.replace(/^https?:\/\//, "").replace(/\/$/, "") : url;
+    return `<a class="ch-m-a" href="${url}"${web ? ' target="_blank" rel="noopener noreferrer"' : ""}>${shown}</a>${tail}`;
+  });
+}
+
+// "Enter to send" shows while typing, for your first few messages
+const hintKey = () => `chat:hints:${me.uid}`;
+const hintsLeft = () => { try { return Number(localStorage.getItem(hintKey()) || 0) < 8; } catch { return true; } };
+const usedHint = () => { try { localStorage.setItem(hintKey(), String(Number(localStorage.getItem(hintKey()) || 0) + 1)); } catch { /* ignore */ } };
+
+// One chat muted: no sound, pop-up or desktop alert (the red badge still counts it)
+const chatMuteKey = (id) => `chat:mute:${me.uid}:${id}`;
+const chatMuted = (id) => { try { return localStorage.getItem(chatMuteKey(id)) === "1"; } catch { return false; } };
 // One tap for you on Help. The last one also marks it as sorted.
 const QUICK_REPLIES = ["On my way", "Looking into it now", "Can you call me?", "All sorted ✓"];
 // A person's profile photo: mine from my login, everyone else's from the staff list. "" if none.
@@ -146,6 +174,12 @@ let baseTitle = "";
 let pendingOpen = "";        // a conversation to open from a link (e.g. the reminder email)
 let attach = null;           // the picture waiting to be sent: { blob, url, w, h, type }
 let minimized = false;       // folded down to its header: the conversation, typing and picture are kept
+const draftText = new Map(); // chat id → what was typed and not sent yet
+let linkPage = false;        // the next message links the page you're on
+let actsOpen = "";           // my message whose Edit / Delete is showing (survives a redraw)
+let searchQ = "";            // Search this chat
+let hitIdx = -1;
+let jumpCount = 0;           // new messages below while you're scrolled up
 
 /* ---------- Pictures ---------- */
 // Shrunk to about 1600px before sending. Screenshots stay PNG (sharp text); photos become JPEG. GIFs are sent as they are.
@@ -325,6 +359,7 @@ export function teardownChat() {
   current = null;
   msgList = [];
   editing = "";
+  draftText.clear();
   document.removeEventListener("pointerdown", unlockAudio);
   document.removeEventListener("visibilitychange", readIfViewing);
   window.removeEventListener("hashchange", checkChatLink);
@@ -524,6 +559,7 @@ const fromText = (c) => (c.kind === "group" ? `${c.lastByName || "Someone"} in $
 
 function notify(c) {
   if (isOpen() && !minimized && view === "thread" && openId === c.id && !document.hidden) return;   // already looking at it
+  if (chatMuted(c.id)) return;   // muted: just the badge
   if (!muted()) chime();
   popup(c);
   if (document.hidden && "Notification" in window && Notification.permission === "granted") {
@@ -570,7 +606,9 @@ function setMin(on) {
   minimized = !!on;
   if (minimized) {
     hideEmoji();
-    panel.querySelectorAll(".ch-m-acts").forEach((a) => { a.hidden = true; });
+    closeMenus();
+    panel.querySelectorAll(".ch-m.is-acts").forEach((x) => x.classList.remove("is-acts"));
+    actsOpen = "";
   }
   const b = panel.querySelector('[data-act="min"]');
   if (b) { b.setAttribute("aria-label", minimized ? "Open chat" : "Minimise"); b.title = minimized ? "Open" : "Minimise"; }
@@ -605,15 +643,19 @@ const row = (c) => {
   const unread = isUnread(c, me.uid);
   const helpRow = c.kind === "help" && c.members[0] === me.uid;
   const empty = helpRow ? (awayOn() ? helpSub() : "Ask anything about the portal") : c.kind === "group" ? membersText(c) : "";
+  const draft = draftText.get(c.id);
+  const quiet = chatMuted(c.id) ? `<span class="ch-muted" title="Muted">${I.bellOff}</span>` : "";
+  const last = draft ? `<b>Draft:</b> ${esc(draft)}`
+    : c.lastAt ? `${c.lastBy === me.uid ? "You: " : c.kind === "group" ? `${esc((c.lastByName || "").split(/\s+/)[0])}: ` : ""}${esc(c.lastText)}`
+    : esc(empty);
   return `<button type="button" class="ch-row${unread ? " is-unread" : ""}" data-open="${esc(c.id)}">
     ${avatar(titleOf(c), kindOf(c), faceOf(c))}
     <span class="ch-row-main">
-      <span class="ch-row-top"><strong>${esc(titleOf(c))}</strong><small>${esc(when(c.lastAt))}</small></span>
-      <small class="ch-row-last">${c.lastAt ? `${c.lastBy === me.uid ? "You: " : c.kind === "group" ? `${esc((c.lastByName || "").split(/\s+/)[0])}: ` : ""}${esc(c.lastText)}` : esc(empty)}</small>
+      <span class="ch-row-top"><strong>${esc(titleOf(c))}${quiet}</strong><small>${esc(when(c.lastAt))}</small></span>
+      <small class="ch-row-last${draft ? " is-draft" : ""}">${last}</small>
       ${admin && c.kind === "help" && c.status === "sorted" ? '<span class="ch-tag">Sorted</span>' : ""}
     </span>${unread ? '<span class="ch-dot" aria-label="Unread"></span>' : ""}</button>`;
 };
-
 // The faces of everyone on the portal now (online first). Tap one to message them.
 function hereHtml() {
   if (!staffList) return "";
@@ -673,48 +715,116 @@ function openThread(id) {
   current = c;
   msgList = [];
   editing = "";
+  actsOpen = "";
+  searchQ = "";
+  hitIdx = -1;
+  jumpCount = 0;
   clearAttach();
   const isMember = c.members.includes(me.uid);
   const canWrite = isMember || (admin && c.kind === "help");
   canWriteNow = canWrite;
   const helpStaff = c.kind === "help" && c.members[0] === me.uid;
   const adminHelp = admin && c.kind === "help" && !helpStaff;
+  linkPage = helpStaff;   // Help messages link the page you're on, unless you turn it off
   // Remove from my list: saved conversations I'm part of (not my own Help chat, which is always there)
   const canHide = !helpStaff && (isMember || adminHelp) && chats.some((x) => x.id === id);
   const sub = helpStaff ? `<small data-role="helpsub" class="${awayOn() ? "is-away" : ""}">${esc(helpSub())}</small>`
     : c.kind === "group" ? `<small>${esc(membersText(c))}</small>`
     : c.kind === "dm" && isMember ? '<small data-role="presub"></small>' : "";
+  const muteOn = chatMuted(id);
+  const more = `<span class="ch-more-wrap">
+      <button type="button" class="ch-ic" data-act="more" aria-label="More" aria-haspopup="true" aria-expanded="false" title="More">${I.dots}</button>
+      <div class="ch-menu" data-role="more" hidden>
+        <button type="button" data-act="cmute">${muteOn ? I.bell : I.bellOff}<span>${muteOn ? "Unmute this chat" : "Mute this chat"}</span></button>
+        <button type="button" data-act="search">${I.search}<span>Search this chat</span></button>
+        ${canHide ? `<hr /><button type="button" class="is-danger" data-act="hide">${I.trash}<span>Remove from my list</span></button>` : ""}
+      </div></span>`;
   panel.innerHTML = `${head(`${avatar(titleOf(c), kindOf(c), faceOf(c))}<span class="ch-hd-t"><strong>${esc(titleOf(c))}</strong>${sub}</span>`, {
       back: true,
-      extra: `${adminHelp ? `<button type="button" class="lh-btn" data-act="sorted">${c.status === "sorted" ? "Reopen" : "Mark as sorted"}</button>` : ""}${
-        canHide ? `<button type="button" class="ch-ic" data-act="hide" aria-label="Remove from my list" title="Remove from my list">${I.trash}</button>` : ""}`,
+      extra: `${adminHelp ? `<button type="button" class="lh-btn" data-act="sorted">${c.status === "sorted" ? "Reopen" : "Mark as sorted"}</button>` : ""}${more}`,
     })}
-    <div class="ch-msgs" data-role="msgs"><p class="ch-empty">${helpStaff
-      ? "Ask anything about the portal. Bethany will get back to you."
-      : c.kind === "group" ? "Say hello to start the group." : "No messages yet."}</p></div>
+    <div class="ch-search" data-role="search" hidden>
+      <input type="search" class="fe-input" data-role="sq" placeholder="Search this chat" aria-label="Search this chat" />
+      <small data-role="shits"></small>
+      <button type="button" class="ch-ic" data-act="sprev" aria-label="Older match" title="Older">${I.up}</button>
+      <button type="button" class="ch-ic" data-act="snext" aria-label="Newer match" title="Newer">${I.down}</button>
+      <button type="button" class="ch-ic" data-act="sclose" aria-label="Close search">${I.x}</button>
+    </div>
+    <div class="ch-msgs-wrap">
+      <div class="ch-msgs" data-role="msgs"><p class="ch-empty">${helpStaff
+        ? "Ask anything about the portal. Bethany will get back to you."
+        : c.kind === "group" ? "Say hello to start the group." : "No messages yet."}</p></div>
+      <button type="button" class="ch-jump" data-act="jump" hidden>${I.down}<span></span></button>
+    </div>
     ${canWrite ? `<div class="ch-editing" data-role="editing" hidden><span>Editing your message</span>
         <button type="button" class="rc-link" data-act="canceledit">Cancel</button></div>
       ${adminHelp ? `<div class="ch-replies">${QUICK_REPLIES.map((q) =>
         `<button type="button" class="ch-chip" data-reply="${esc(q)}">${esc(q)}</button>`).join("")}</div>` : ""}
       <div class="ch-att" data-role="att" hidden></div>
+      <div class="ch-linkchip" data-role="linkchip" hidden>${I.link}<span></span>
+        <button type="button" class="ch-ic" data-act="unlink" aria-label="Don't link this page" title="Don't link this page">${I.x}</button></div>
       <form class="ch-comp" novalidate>
         <div class="ch-emo" data-role="emo" hidden>${EMOJI.map((x) => `<button type="button" data-emo="${x}">${x}</button>`).join("")}</div>
-        <button type="button" class="ch-ic ch-clip" data-act="attach" aria-label="Add a picture" title="Add a picture or screenshot">${I.clip}</button>
+        <div class="ch-menu ch-plus" data-role="plus" hidden>
+          <button type="button" data-act="attach">${I.photo}<span>Add a picture</span></button>
+          <button type="button" data-act="linkpage">${I.link}<span data-role="lptext">Link this page</span><small>${esc(pageInfo().label)}</small></button>
+          <button type="button" disabled title="Coming soon">${I.userPlus}<span>Link a patient</span><small>Soon</small></button>
+        </div>
+        <button type="button" class="ch-ic ch-plus-btn" data-act="plus" aria-label="Add a picture or link" aria-haspopup="true" aria-expanded="false" title="Add">${I.plus}</button>
         <input type="file" accept="image/*" data-role="file" hidden />
+        <textarea rows="1" maxlength="4000" placeholder="Type a message…" aria-label="Message"
+          data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false" data-lt-active="false"></textarea>
         <button type="button" class="ch-ic ch-emo-btn" data-act="emoji" aria-label="Add emoji" title="Emoji">${I.smile}</button>
-        <textarea rows="2" maxlength="4000" placeholder="Type a message…" aria-label="Message"></textarea>
         <button type="submit" class="ch-send" aria-label="Send">${I.send}</button></form>
-      <div class="ch-under">
-        <label class="ch-link"><input type="checkbox" data-role="withpage"${helpStaff ? " checked" : ""} /> Include a link to this page</label>
-        ${isTouch() ? "" : '<small class="ch-hint">Enter to send · Shift+Enter for a new line</small>'}
-      </div>`
+      ${isTouch() ? "" : '<small class="ch-hint" data-role="hint" hidden>Enter to send · Shift+Enter for a new line</small>'}`
       : '<p class="ch-ro">You\'re viewing a chat between staff. Only they can reply.</p>'}`;
   updatePresSub();
+  paintLink();
+  // Back at the bottom: the "new messages" button goes
+  const box = panel.querySelector('[data-role="msgs"]');
+  box.addEventListener("scroll", () => {
+    if (jumpCount && box.scrollTop + box.clientHeight >= box.scrollHeight - 40) setJump(0);
+  }, { passive: true });
   stopMessages();
   if (chats.some((x) => x.id === id) || (allChats || []).some((x) => x.id === id)) startMessages(id);
   readIfViewing();
-  const ta = panel.querySelector("textarea");
-  if (ta && !isTouch()) setTimeout(() => ta.focus(), 30);
+  // What you'd typed here before comes back
+  const ta = panel.querySelector(".ch-comp textarea");
+  if (ta) {
+    const draft = draftText.get(id) || "";
+    if (draft) { ta.value = draft; ta.dispatchEvent(new Event("input", { bubbles: true })); }
+    if (!isTouch()) setTimeout(() => { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }, 30);
+  }
+}
+
+// "Linking this page: Stock" above the message box
+function paintLink() {
+  if (!panel) return;
+  const chip = panel.querySelector('[data-role="linkchip"]');
+  if (chip) { chip.hidden = !linkPage; chip.querySelector("span").textContent = `Linking this page: ${pageInfo().label}`; }
+  const t = panel.querySelector('[data-role="lptext"]');
+  if (t) t.textContent = linkPage ? "Don't link this page" : "Link this page";
+}
+
+// The ⋯ and + menus: one open at a time, closed by a tap anywhere else
+function toggleMenu(role, btn) {
+  const m = panel && panel.querySelector(`[data-role="${role}"]`);
+  if (!m) return;
+  const show = m.hidden;
+  closeMenus();
+  m.hidden = !show;
+  if (btn) btn.setAttribute("aria-expanded", String(show));
+}
+function closeMenus(e) {
+  if (!panel) return;
+  ["more", "plus"].forEach((role) => {
+    const m = panel.querySelector(`[data-role="${role}"]`);
+    if (!m || m.hidden) return;
+    if (e && e.target.closest(`[data-role="${role}"], [data-act="${role}"]`)) return;
+    m.hidden = true;
+    const b = panel.querySelector(`[data-act="${role}"]`);
+    if (b) b.setAttribute("aria-expanded", "false");
+  });
 }
 
 function startMessages(id) {
@@ -732,8 +842,9 @@ function drawMessages(msgs, first) {
   const ids = new Set(msgs.map((m) => m.id));
   const local = [];
   pendingSends.forEach((p, id) => {
-    if (ids.has(id)) {
-      if (p.sent) { if (p.img && p.img.url) URL.revokeObjectURL(p.img.url); pendingSends.delete(id); }
+    if (ids.has(id)) {   // the saved copy is here
+      if (p.img && p.img.url) URL.revokeObjectURL(p.img.url);
+      pendingSends.delete(id);
       return;
     }
     if (p.chatId !== openId) return;
@@ -742,42 +853,116 @@ function drawMessages(msgs, first) {
       image: p.img ? { local: p.img.url, path: p.img.path || "", w: p.img.w, h: p.img.h } : null });
   });
   const all = msgs.concat(local);
+  const newOnes = box._ids ? msgs.filter((m) => !box._ids.has(m.id) && m.byUid !== me.uid).length : 0;
+  box._ids = ids;
   if (!all.length) return;
   const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
-  let prevDay = "";
-  let prev = null;
-  box.innerHTML = all.map((m) => {
+  const showBy = !!current && current.kind !== "dm";   // names only where it isn't obvious who's who
+  const now = Date.now();
+  // The same person, the same day, within 5 minutes: one run
+  const linked = (a, b) => !!a && !!b && a.byUid === b.byUid && !!a.at && !!b.at
+    && keyOf(a.at) === keyOf(b.at) && b.at - a.at < 5 * 60000;
+
+  const html = all.map((m, i) => {
+    const prev = all[i - 1];
+    const next = all[i + 1];
     const mine = m.byUid === me.uid;
-    const day = m.at ? keyOf(m.at) : prevDay;
-    const divider = day && day !== prevDay ? `<p class="ch-day"><span>${esc(dayLabel(m.at))}</span></p>` : "";
-    // Several in a row from the same person, within 5 minutes: one name above them
-    const run = !divider && prev && prev.byUid === m.byUid && m.at && prev.at && m.at - prev.at < 5 * 60000;
-    prevDay = day;
-    prev = m;
+    const divider = m.at && (!prev || !prev.at || keyOf(prev.at) !== keyOf(m.at))
+      ? `<p class="ch-day"><span>${esc(dayLabel(m.at))}</span></p>` : "";
+    const runStart = !!divider || !linked(prev, m);
+    const runEnd = !linked(m, next);
+    const pos = runStart && runEnd ? "" : runStart ? " is-first" : runEnd ? " is-last" : " is-mid";
     const canAct = mine && canWriteNow && !m.deleted && !m.local;
     const text = String(m.text || "").trim();
     const pic = m.image && !m.deleted ? imgHtml(m, canAct) : "";
+    // Hover any bubble for its exact time
+    const tipText = m.at ? m.at.toLocaleString("en-AU", { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })
+      + (m.edited && !m.deleted ? " · edited" : "") : "";
+    const tip = tipText ? ` title="${esc(tipText)}"` : "";
     const bubble = m.deleted
-      ? '<div class="ch-m-b is-deleted">Message deleted</div>'
+      ? `<div class="ch-m-b is-deleted"${tip}>Message deleted</div>`
       : `<div class="ch-m-b${pic ? " is-img" : onlyEmoji(text) ? " is-emoji" : ""}"${canAct
-        ? ` data-mine="${esc(m.id)}" role="button" tabindex="0" title="Tap to edit or delete"` : ""}>${pic}${
-          pic ? (text ? `<span class="ch-m-cap">${esc(m.text)}</span>` : "") : esc(m.text)}</div>`;
-    const acts = canAct ? `<span class="ch-m-acts" hidden>
-        <button type="button" data-act="medit" data-mid="${esc(m.id)}">Edit</button>
-        <button type="button" class="is-danger" data-act="mdel" data-mid="${esc(m.id)}">Delete</button></span>` : "";
+        ? ` data-mine="${esc(m.id)}" role="button" tabindex="0"` : ""}${tip}>${pic}${
+          pic ? (text ? `<span class="ch-m-cap">${linkify(m.text)}</span>` : "") : linkify(m.text)}</div>`;
+    const acts = canAct ? `<span class="ch-m-acts">
+        <button type="button" data-act="medit" data-mid="${esc(m.id)}" aria-label="Edit" title="Edit">${I.edit}</button>
+        <button type="button" class="is-danger" data-act="mdel" data-mid="${esc(m.id)}" aria-label="Delete" title="Delete">${I.trash}</button></span>` : "";
+    const stuck = m.pending && m.at && now - m.at.getTime() > 20000;
     const status = m.failed
       ? `<button type="button" class="ch-m-retry" data-act="retry" data-mid="${esc(m.id)}">Not sent · Tap to retry</button>
          · <button type="button" class="ch-m-retry" data-act="discard" data-mid="${esc(m.id)}">Remove</button>`
+      : stuck ? '<span class="ch-m-slow">Still sending… check your connection</span>'
       : m.pending ? "Sending…" : esc(timeOf(m.at));
-    return `${divider}<div class="ch-m${mine ? " is-me" : ""}${run ? " is-run" : ""}${m.pending ? " is-pending" : ""}${m.failed ? " is-failed" : ""}">
-      ${mine || run ? "" : `<small class="ch-m-by">${esc(m.by)}</small>`}
+    const page = m.page && !m.deleted ? `<a href="${esc(m.page.hash)}">${I.link} ${esc(m.page.label || "Page")}</a> · ` : "";
+    const showMeta = runEnd || m.failed || m.pending || !!page;   // the time once per run
+    return `${divider}<div class="ch-m${mine ? " is-me" : ""}${pos}${m.pending ? " is-pending" : ""}${m.failed ? " is-failed" : ""}${
+      m.id === actsOpen ? " is-acts" : ""}" data-mid="${esc(m.id)}">
+      ${!mine && showBy && runStart ? `<small class="ch-m-by">${esc(m.by)}</small>` : ""}
       ${bubble}${acts}
-      <small class="ch-m-meta">${m.page && !m.deleted ? `<a href="${esc(m.page.hash)}">${I.link} ${esc(m.page.label || "Page")}</a> · ` : ""}${status}${m.edited && !m.deleted ? " · edited" : ""}</small>
+      ${showMeta ? `<small class="ch-m-meta">${page}${status}${m.edited && !m.deleted ? " · edited" : ""}</small>` : ""}
     </div>`;
   }).join("") + '<p class="ch-seen" data-role="seen" hidden></p>';
+
+  // Only redrawn when something on screen changed: no flicker, and the Edit / Delete buttons stay put
+  if (html !== box._html) {
+    box._html = html;
+    box.innerHTML = html;
+    loadImages(box);
+  }
   updateSeen();
-  loadImages(box);
-  if (first || atBottom) box.scrollTop = box.scrollHeight;
+  applySearch(0, false);
+  if (first || atBottom) { box.scrollTop = box.scrollHeight; setJump(0); }
+  else if (newOnes) setJump(jumpCount + newOnes);
+}
+
+// "↓ 2 new messages" while you're scrolled up
+function setJump(n) {
+  jumpCount = n;
+  const b = panel && panel.querySelector('[data-role="jump"]');
+  if (!b) return;
+  b.hidden = !n;
+  b.querySelector("span").textContent = n === 1 ? "1 new message" : `${n} new messages`;
+}
+
+/* ---------- Search this chat ---------- */
+function openSearch() {
+  const bar = panel && panel.querySelector('[data-role="search"]');
+  if (!bar) return;
+  bar.hidden = false;
+  const q = bar.querySelector("input");
+  q.focus();
+  q.select();
+  applySearch(0, true);
+}
+function closeSearch() {
+  const bar = panel && panel.querySelector('[data-role="search"]');
+  if (!bar) return;
+  bar.hidden = true;
+  searchQ = "";
+  hitIdx = -1;
+  bar.querySelector("input").value = "";
+  panel.querySelectorAll(".ch-m.is-hit").forEach((el) => el.classList.remove("is-hit", "is-hit-on"));
+}
+// move: -1 older, +1 newer, 0 stay. Starts at the newest match.
+function applySearch(move = 0, scroll = false) {
+  const box = panel && panel.querySelector('[data-role="msgs"]');
+  const bar = panel && panel.querySelector('[data-role="search"]');
+  if (!box || !bar || bar.hidden) return;
+  const q = searchQ.trim().toLowerCase();
+  const els = [...box.querySelectorAll(".ch-m")];
+  els.forEach((el) => el.classList.remove("is-hit", "is-hit-on"));
+  const hits = q ? els.filter((el) => {
+    const b = el.querySelector(".ch-m-b");
+    return b && !b.classList.contains("is-deleted") && b.textContent.toLowerCase().includes(q);
+  }) : [];
+  const out = bar.querySelector('[data-role="shits"]');
+  if (!hits.length) { hitIdx = -1; out.textContent = q ? "No matches" : ""; return; }
+  if (hitIdx < 0 || hitIdx >= hits.length) hitIdx = hits.length - 1;
+  hitIdx = (hitIdx + move + hits.length) % hits.length;
+  hits.forEach((el) => el.classList.add("is-hit"));
+  hits[hitIdx].classList.add("is-hit-on");
+  out.textContent = `${hitIdx + 1} of ${hits.length}`;
+  if (scroll) hits[hitIdx].scrollIntoView({ block: "center", behavior: "smooth" });
 }
 
 const redrawMessages = (toBottom = false) => { if (view === "thread") drawMessages(msgList, toBottom); };
@@ -858,12 +1043,15 @@ async function send(form) {
     return;
   }
   // A new message: on screen straight away, saved in the background
-  const withPage = !!(panel.querySelector('[data-role="withpage"]') || {}).checked;
+  const withPage = linkPage;
   const img = attach;
   attach = null;          // the picture now belongs to the message being sent (not revoked here)
   drawAttach();
   ta.value = "";
   ta.style.height = "";
+  draftText.delete(current.id);
+  const hint = panel.querySelector('[data-role="hint"]');
+  if (hint) hint.hidden = true;
   if (!isTouch()) ta.focus();
   deliver(current, newMessageId(current.id), text, withPage ? pageInfo() : null, img);
 }
@@ -872,6 +1060,8 @@ async function send(form) {
 async function deliver(chat, id, text, page, img = null) {
   pendingSends.set(id, { chatId: chat.id, text, page, img, at: new Date(), failed: false, sent: false });
   if (openId === chat.id) redrawMessages(true);
+  // Not gone after 20 seconds: say so, instead of "Sending…" forever
+  const slow = setTimeout(() => { if (openId === chat.id) redrawMessages(); }, 20500);
   try {
     if (img && !img.path) Object.assign(img, await uploadChatImage(chat.id, id, img));
     await sendMessage(chat, text, page, me, id, img);
@@ -885,6 +1075,7 @@ async function deliver(chat, id, text, page, img = null) {
     if (p) p.failed = true;
     showToast(sendErr(err));
   }
+  clearTimeout(slow);
   if (openId === chat.id) redrawMessages();
 }
 
@@ -899,13 +1090,14 @@ function quickReply(text) {
 }
 /* ---------- My own messages: edit and delete ---------- */
 
-// Tapping one of my messages shows Edit / Delete under it
+// Tapping one of my messages shows Edit / Delete beside it (on desktop they show on hover)
 function toggleMsgActs(bubble) {
-  const acts = bubble.parentElement && bubble.parentElement.querySelector(".ch-m-acts");
-  if (!acts) return;
-  const show = acts.hidden;
-  panel.querySelectorAll(".ch-m-acts").forEach((a) => { a.hidden = true; });
-  acts.hidden = !show;
+  const m = bubble.closest(".ch-m");
+  if (!m || !m.querySelector(".ch-m-acts")) return;
+  const show = !m.classList.contains("is-acts");
+  panel.querySelectorAll(".ch-m.is-acts").forEach((x) => x.classList.remove("is-acts"));
+  m.classList.toggle("is-acts", show);
+  actsOpen = show ? m.dataset.mid : "";
 }
 
 function startEdit(mid) {
@@ -919,7 +1111,8 @@ function startEdit(mid) {
   ta.dispatchEvent(new Event("input", { bubbles: true }));   // grows the box to fit
   ta.focus();
   ta.setSelectionRange(ta.value.length, ta.value.length);
-  panel.querySelectorAll(".ch-m-acts").forEach((a) => { a.hidden = true; });
+  panel.querySelectorAll(".ch-m.is-acts").forEach((x) => x.classList.remove("is-acts"));
+  actsOpen = "";
 }
 
 function stopEdit() {
@@ -927,7 +1120,11 @@ function stopEdit() {
   const bar = panel && panel.querySelector('[data-role="editing"]');
   if (bar) bar.hidden = true;
   const ta = panel && panel.querySelector(".ch-comp textarea");
-  if (ta) { ta.value = ""; ta.style.height = ""; }
+  if (ta) {
+    ta.value = draftText.get(openId) || "";
+    ta.style.height = "";
+    if (ta.value) ta.dispatchEvent(new Event("input", { bubbles: true }));
+  }
 }
 
 async function removeMsg(mid) {
@@ -1158,8 +1355,10 @@ async function submitAway(form) {
 
 async function onClick(e) {
   if (!e.target.closest('.ch-emo, [data-act="emoji"]')) hideEmoji();   // a tap anywhere else closes the emoji panel
-  // A tap on the header (not one of its buttons) folds it down or opens it again
-  if (e.target.closest(".ch-hd") && !e.target.closest("button, a, input, label")) { setMin(!minimized); return; }
+  closeMenus(e);
+  // A tap on the header (not one of its buttons or menus) folds it down or opens it again
+  if (e.target.closest(".ch-hd") && !e.target.closest("button, a, input, label, .ch-menu")) { setMin(!minimized); return; }
+  if (e.target.closest(".ch-m-b a")) return;   // a link in a message just opens
   const t = e.target.closest("[data-act],[data-open],[data-dm],[data-pick],[data-back],[data-emo],[data-mine],[data-reply],[data-zoom]");
   if (!t || !me) return;
   if (t.dataset.zoom !== undefined) { zoomImage(t); return; }
@@ -1176,8 +1375,31 @@ async function onClick(e) {
       break;
     case "close": hidePanel(); break;
     case "min": setMin(!minimized); break;
+    case "more": toggleMenu("more", t); break;
+    case "plus": toggleMenu("plus", t); break;
+    case "cmute": {
+      if (!current) break;
+      const on = !chatMuted(current.id);
+      try { localStorage.setItem(chatMuteKey(current.id), on ? "1" : "0"); } catch { /* ignore */ }
+      t.innerHTML = `${on ? I.bell : I.bellOff}<span>${on ? "Unmute this chat" : "Mute this chat"}</span>`;
+      closeMenus();
+      showToast(on ? "Chat muted. It still shows in the red count." : "Sound back on for this chat");
+      break;
+    }
+    case "search": closeMenus(); openSearch(); break;
+    case "sprev": applySearch(-1, true); break;
+    case "snext": applySearch(1, true); break;
+    case "sclose": closeSearch(); break;
+    case "linkpage": linkPage = !linkPage; paintLink(); closeMenus(); break;
+    case "unlink": linkPage = false; paintLink(); break;
+    case "jump": {
+      const box = panel.querySelector('[data-role="msgs"]');
+      if (box) box.scrollTo({ top: box.scrollHeight, behavior: "smooth" });
+      setJump(0);
+      break;
+    }
     case "back": clearAttach(); stopMessages(); drawList(); break;
-    case "attach": { const f = panel.querySelector('[data-role="file"]'); if (f) f.click(); break; }
+    case "attach": { closeMenus(); const f = panel.querySelector('[data-role="file"]'); if (f) f.click(); break; }
     case "unattach": clearAttach(); break;
     case "new": drawNew(); break;
     case "group": drawGroup(); break;
@@ -1225,7 +1447,7 @@ async function onClick(e) {
       redrawMessages();
       break;
     }
-    case "hide": hideThread(); break;
+    case "hide": closeMenus(); hideThread(); break;
     case "mute":
       try { localStorage.setItem(muteKey(), muted() ? "0" : "1"); } catch { /* ignore */ }
       if (!muted()) chime();   // a sample of the sound when it's turned on
@@ -1259,6 +1481,9 @@ function onSubmit(e) {
 
 function onKey(e) {
   if (e.key === "Escape" && isOpen() && !minimized) {
+    if (panel.querySelector(".ch-menu:not([hidden])")) { closeMenus(); return; }
+    const sb = panel.querySelector('[data-role="search"]');
+    if (sb && !sb.hidden) { closeSearch(); return; }
     const emo = panel.querySelector('[data-role="emo"]');
     if (emo && !emo.hidden) { emo.hidden = true; return; }
     if (editing) { stopEdit(); return; }
@@ -1274,19 +1499,36 @@ function onKey(e) {
   }
   // Enter sends, Shift + Enter starts a new line. On phones and iPads Enter is a new line (the Send button sends).
   // Not while a word is still being typed (predictive text, accents).
+  // Search: Enter for the next older match, Shift + Enter for newer
+  if (e.key === "Enter" && e.target.dataset.role === "sq") {
+    e.preventDefault();
+    applySearch(e.shiftKey ? 1 : -1, true);
+    return;
+  }
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !isTouch() && e.target.matches(".ch-comp textarea")) {
     e.preventDefault();
+    if (e.target.value.trim()) usedHint();
     e.target.form.requestSubmit();
   }
 }
 
 function onInput(e) {
   if (e.target.matches(".ch-comp textarea")) {
-    // Grows as you type, up to about 7 lines; a scrollbar only after that
-    const MAX = 180;
+    // Grows as you type, up to about 6 lines; a scrollbar only after that
+    const MAX = 160;
     e.target.style.height = "";
     e.target.style.height = `${Math.min(MAX, e.target.scrollHeight + 2)}px`;
     e.target.style.overflowY = e.target.scrollHeight > MAX ? "auto" : "hidden";
+    // Kept as a draft for this chat (not while editing an old message)
+    if (!editing) {
+      if (e.target.value) draftText.set(openId, e.target.value); else draftText.delete(openId);
+    }
+    const hint = panel.querySelector('[data-role="hint"]');
+    if (hint) hint.hidden = !(e.target.value.trim() && hintsLeft());
+  } else if (e.target.dataset.role === "sq") {
+    searchQ = e.target.value;
+    hitIdx = -1;
+    applySearch(0, true);
   } else if (e.target.dataset.role === "find") {
     drawPeople(e.target.value.trim().toLowerCase());
   } else if (e.target.dataset.role === "gfind") {
