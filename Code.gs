@@ -13243,7 +13243,7 @@ function recallPatients_(cfg) {
   const byId = Object.create(null);
   const byPtt = Object.create(null);
   fsListAll_(cfg, 'patient_list', ['PttID', 'Patient Name', 'First Name', 'Last Name', 'Mobile', 'Email', 'MergedInto',
-    'Marketing OK', 'Marketing Consent'])
+    'Marketing OK', 'Marketing Consent', 'Spend'])
     .forEach(function (d) {
       const f = fromFields_(d.fields || {});
       const id = d.name.split('/').pop();
@@ -13259,6 +13259,7 @@ function recallPatients_(cfg) {
   return {
     find: function (ptt) { const id = byPtt[String(ptt || '').trim().toLowerCase()]; return id ? kept(id) : ''; },
     doc: function (id) { return byId[id] || null; },
+    ids: function () { return Object.keys(byId); },
   };
 }
 
@@ -13346,6 +13347,8 @@ function recallCheck_(cfg, set, today, force) {
   const spendOf = function (pid) { return spend.by[pid] || SPEND_NONE_; };
   try { fsPatch_(cfg, RECALL_SET_ + '/spend_status', spend.status); }
   catch (e) { console.warn('Spend summary not saved: ' + e); }
+  try { spendPatients_(cfg, pts, spend.by, ctx.todayKey); }
+  catch (e) { console.warn('Spend not saved on the patient records: ' + e); }
   const pidOf = Object.create(null);
   const groups = Object.create(null);
   const skipped = Object.create(null);   // patient|treatment → past days that had a skipped service
@@ -14786,6 +14789,26 @@ function recallSpend_(ctx, rows, pts, opt) {
       counts: counts,
     },
   };
+}
+
+// Every patient record: 'Spend' { tier, m12, all, visits12, at } from the appointment book, or null.
+// Only records whose spend changed are written. The patient page shows it in the patient bar.
+function spendPatients_(cfg, pts, by, todayKey) {
+  const writes = [];
+  pts.ids().forEach(function (id) {
+    const d = pts.doc(id);
+    if (!d || d.MergedInto) return;
+    const s = by[id];
+    const want = s && (s.spendAll > 0 || s.spendTier)
+      ? { tier: s.spendTier, m12: s.spend12, all: s.spendAll, visits12: s.spendVisits12 } : null;
+    const h = d.Spend && typeof d.Spend === 'object' ? d.Spend : null;
+    const same = !want ? !h : !!h && String(h.tier || '') === want.tier && Number(h.m12) === want.m12 &&
+      Number(h.all) === want.all && Number(h.visits12) === want.visits12;
+    if (same) return;
+    writes.push(patchWrite_(cfg, 'patient_list/' + id, { Spend: want ? Object.assign({ at: todayKey }, want) : null }));
+  });
+  if (writes.length) commitWrites_(cfg, writes, 200);
+  return writes.length;
 }
 
 // Run from the editor: works out spend tiers now (and the rest of Recall's daily check)

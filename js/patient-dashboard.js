@@ -227,6 +227,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   let reminderCount = 0;       // for the chips on the collapsed Pre-Consultation header
   let allergies = null;        // { known, items } from Clinical History; null until read
   let mentions = [];           // chat messages that link this patient
+  let extras = null;           // from the patient record, written by Apps Script: spend tier and "opted out of texts"
   let restMounted = false;     // Skincare, Records, Other forms, History, Tasks, Billing
   let mountRest = () => {};    // set once the page is drawn (sections opened early call it straight away)
   // Skin script (SSP): the tile and the Skincare section's "Create new SSP" open the builder in a new tab.
@@ -502,7 +503,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   };
   window.addEventListener("scroll", onScroll, { passive: true });
   function renderTop() {
-    bar.innerHTML = barHtml(patient, todayAppts, preData, allergies, mentions);
+    bar.innerHTML = barHtml(patient, todayAppts, preData, allergies, mentions, extras);
   }
 
   function openEdit(focus = "") {
@@ -574,6 +575,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   loadTranscriptSections();
   mountClinicalHistory(root, patient, staff);   // also sends the allergies to the patient bar
   loadMentions();
+  loadExtras();
 
   // The rest once the page has drawn, or straight away if a section is opened first
   mountRest = () => {
@@ -681,7 +683,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     btn.classList.add("is-loading");
     clearPageCache();   // Refresh means read again
     await Promise.allSettled([
-      loadToday(), loadPreconsultData(), loadReminders(), loadTranscriptSections(), loadPastForms(), loadMentions(),
+      loadToday(), loadPreconsultData(), loadReminders(), loadTranscriptSections(), loadPastForms(), loadMentions(), loadExtras(),
       notesView ? notesView.reload() : null,
       tasksView ? tasksView.reload() : null,
       recordsView ? recordsView.reload() : null,
@@ -689,6 +691,22 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     if (btn.isConnected) {
       btn.disabled = false;
       btn.classList.remove("is-loading");
+    }
+  }
+
+  // Spend tier and "opted out of texts", straight from the patient record
+  async function loadExtras() {
+    try {
+      const s = await getDoc(doc(db, "patient_list", patient.id));
+      if (!root.isConnected) return;
+      const x = s.exists() ? s.data() : {};
+      extras = {
+        spend: x.Spend && typeof x.Spend === "object" ? x.Spend : null,
+        smsStop: x["SMS Opt Out"] && typeof x["SMS Opt Out"] === "object" ? x["SMS Opt Out"] : null,
+      };
+      renderTop();
+    } catch (err) {
+      console.warn("Spend and opt-outs not loaded:", err);
     }
   }
 
@@ -1090,7 +1108,7 @@ function mentionChipHtml(list) {
     </div></details>`;
 }
 
-function barHtml(p, today = [], pre = null, allergies = null, mentions = []) {
+function barHtml(p, today = [], pre = null, allergies = null, mentions = [], extras = null) {
   const age = calcAge(p.dobKey);
   const dob = p.dobKey ? parseDateKey(p.dobKey) : null;
   const dobText = dob ? dob.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : (p.dob || "");
@@ -1110,9 +1128,11 @@ function barHtml(p, today = [], pre = null, allergies = null, mentions = []) {
   // Today's appointment | things to watch for | other notes
   const groups = [
     today.length ? todayPillHtml(today) : "",
-    [allergyChipHtml(allergies), pre && pre.overdue && overdueChipHtml(pre.overdue), p.marketingOk === false && dncChipHtml(p)]
+    [allergyChipHtml(allergies), pre && pre.overdue && overdueChipHtml(pre.overdue), p.marketingOk === false && dncChipHtml(p),
+      extras && extras.smsStop && smsStopChipHtml(extras.smsStop)]
       .filter(Boolean).join(""),
     [
+      extras && extras.spend && tierChipHtml(extras.spend),
       mentionChipHtml(mentions),
       birthdayChipHtml(dob),
       p.mergedIds && p.mergedIds.length &&
@@ -1188,6 +1208,29 @@ function dncChipHtml(p) {
   const title = `On the do-not-contact list${bits ? ` (${bits})` : ""}${c.note ? `: ${c.note}` : ""}. ` +
     "No marketing or recall emails and texts. Messages about their appointments and care are fine.";
   return `<span class="chip chip-dnc" title="${escapeHtml(title)}">Do not contact · marketing & recall</span>`;
+}
+
+// Spend tier (Code.gs → recallSpend_): the last 12 months, from Day Sheet prices.
+// The dollars show on hover only for people with Recall settings or billing access.
+const TIER_NAMES = { platinum: "Platinum", gold: "Gold", silver: "Silver" };
+function tierChipHtml(s) {
+  const name = TIER_NAMES[s.tier];
+  if (!name) return "";
+  const money = (n) => `$${Math.round(Number(n) || 0).toLocaleString("en-AU")}`;
+  const v = Number(s.visits12) || 0;
+  const title = can("recall.manage") || can("billing.view")
+    ? `${name}: ${money(s.m12)} in the last 12 months · ${money(s.all)} all time · ${v} visit${v === 1 ? "" : "s"} in 12 months. From Day Sheet prices.`
+    : `${name}: one of the clinic's top patients by spend in the last 12 months.`;
+  return `<span class="chip chip-tier is-${escapeHtml(s.tier)}" title="${escapeHtml(title)}">${escapeHtml(name)}</span>`;
+}
+
+// "No texts": the mobile replied STOP, or is on Textmagic's opt-out list (Code.gs → smsOptoutPatients_)
+function smsStopChipHtml(s) {
+  const d = s.at ? new Date(s.at) : null;
+  const when = d && !isNaN(d) ? ` on ${d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" })}` : "";
+  const how = s.source === "Textmagic" ? "Opted out of texts in Textmagic" : "Replied STOP to a text";
+  return `<span class="chip chip-nosms" title="${escapeHtml(`${how}${when}. No recall or marketing texts go to this mobile.`)}">${
+    ICONS.sms}<span>No texts</span></span>`;
 }
 
 // "Overdue treatments" chip with a bubble listing what's due (hover on desktop, tap on iPad)

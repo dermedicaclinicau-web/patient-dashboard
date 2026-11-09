@@ -78,6 +78,7 @@ export function normRecallSettings(x = {}) {
     .map((r) => ({ label: String((r && r.label) || "").trim().slice(0, 60), askDate: !!(r && r.askDate), dnc: !!(r && r.dnc) }))
     .filter((r) => r.label).slice(0, 20);
   const sm = x.sms && typeof x.sms === "object" ? x.sms : {};
+  const sp = x.spend && typeof x.spend === "object" ? x.spend : {};
   return {
     categories, maxAgeMonths: int(x.maxAgeMonths, 3, 60, 24), leadDays: int(x.leadDays, 0, 60, 0),
     anyFuturePauses: x.anyFuturePauses === true,
@@ -85,6 +86,11 @@ export function normRecallSettings(x = {}) {
     perDay: int(x.perDay, 1, 100, 15), skipLeave: x.skipLeave !== false,
     reasons: reasons.length ? reasons : RECALL_REASONS.slice(),
     skipServices: skipWords(Array.isArray(x.skipServices) ? x.skipServices : RECALL_SKIP),
+    // Spend tiers (Code.gs → recallSpend_): the top X% by spend in the last 12 months
+    spend: {
+      platinum: int(sp.platinum, 1, 50, 10), gold: int(sp.gold, 1, 60, 20), silver: int(sp.silver, 1, 80, 30),
+      shareFirst: sp.shareFirst !== false,
+    },
     sms: {
       on: sm.on === true,
       template: String(sm.template || RECALL_SMS_TEMPLATE).slice(0, 560),
@@ -112,15 +118,17 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
   root.innerHTML = '<div class="skeleton" style="height:420px;border-radius:14px"></div>';
   container.replaceChildren(root);
 
-  let set, status, people;
+  let set, status, people, spendStatus;
   try {
-    const [a, b, c] = await Promise.all([
+    const [a, b, c, d] = await Promise.all([
       getDoc(doc(db, "recall_settings", "config")),
       getDoc(doc(db, "recall_settings", "status")),
       callApi({ action: "staffList" }).catch(() => ({ staff: [] })),
+      getDoc(doc(db, "recall_settings", "spend_status")).catch(() => null),
     ]);
     set = normRecallSettings(a.exists() ? a.data() : {});
     status = b.exists() ? b.data() : null;
+    spendStatus = d && d.exists() ? d.data() : null;
     people = (c && Array.isArray(c.staff) ? c.staff : []).filter((s) => s && s.id);
   } catch (err) {
     console.error("Recall settings failed:", err);
@@ -139,6 +147,16 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
       `${Number(status.visited || 0)} came in, ${Number(status.paused || 0)} paused (appointment booked), ${Number(status.texted || 0)} texted, ${Number(status.assigned || 0)} shared out.`
     : 'Not checked yet. Run installRecall once in Apps Script, or press "Check for due patients now".');
 
+  const money = (n) => `$${Math.round(Number(n) || 0).toLocaleString("en-AU")}`;
+  const spendText = () => {
+    const s = spendStatus;
+    if (!s || !s.at) return 'Not worked out yet. Press "Check for due patients now".';
+    const c = s.counts || {}, f = s.from || {};
+    const part = (k, l) => (c[k] ? `${l} from ${money(f[k])} (${Number(c[k]).toLocaleString()} patients)` : `${l}: nobody yet`);
+    return `Last worked out ${when(s.at)}: ${part("platinum", "Platinum")} · ${part("gold", "Gold")} · ${part("silver", "Silver")}, ` +
+      `out of ${Number(s.patients || 0).toLocaleString()} patients who spent anything in the last 12 months.`;
+  };
+
   // What's on screen. keepEmpty keeps a new reason row while it's being typed.
   function collect(keepEmpty) {
     const seen = new Set();
@@ -153,6 +171,10 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
       team: [...root.querySelectorAll("[data-team]")].filter((i) => i.checked).map((i) => i.dataset.team),
       perDay: Number($("perDay").value) || 15,
       skipLeave: $("skipLeave").checked,
+      spend: {
+        platinum: Number($("spPlat").value) || 10, gold: Number($("spGold").value) || 20,
+        silver: Number($("spSilver").value) || 30, shareFirst: $("spFirst").checked,
+      },
       skipServices: [...root.querySelectorAll("[data-skip]")].map((el) => el.dataset.skip),
       reasons: [...root.querySelectorAll("[data-reason]")].map((r) => ({
         label: r.querySelector('[data-f="label"]').value.replace(/\s+/g, " ").trim().slice(0, 60),
@@ -356,6 +378,24 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
         </section>
 
         <section class="tb-card">
+          <h4 class="mc-h">Spend tiers</h4>
+          <p class="fe-note">Each patient's spend is added up from the Day Sheet price of every appointment they came to in the
+            last 12 months, leaving out cancellations, no-shows and future bookings, then everyone is ranked. It's the listed price,
+            so discounts, products and packages aren't exact. The tiers update with the daily check.</p>
+          <div class="rs-opts">
+            <label class="rs-opt"><span>Platinum: the top</span>
+              <select class="fb-select" data-role="spPlat">${opts([5, 10, 15, 20], set.spend.platinum, (n) => `${n}%`)}</select></label>
+            <label class="rs-opt"><span>Gold: the next</span>
+              <select class="fb-select" data-role="spGold">${opts([10, 15, 20, 25, 30], set.spend.gold, (n) => `${n}%`)}</select></label>
+            <label class="rs-opt"><span>Silver: the next</span>
+              <select class="fb-select" data-role="spSilver">${opts([20, 25, 30, 40, 50], set.spend.silver, (n) => `${n}%`)}</select></label>
+            <label class="fe-check rs-opt-check"><input type="checkbox" data-role="spFirst"${set.spend.shareFirst ? " checked" : ""} />
+              <span>Share out higher tiers first, so Platinum patients reach someone's calls before Gold and Silver.</span></label>
+          </div>
+          <p class="fe-note">${esc(spendText())}</p>
+        </section>
+
+        <section class="tb-card">
           <h4 class="mc-h">Texts</h4>
           <p class="fe-note" data-role="smsStatus"></p>
           <p class="fe-note">This is the message staff start from when they press Send text on a card. Automatic texts and emails
@@ -453,6 +493,9 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
       else {
         status = { ...res, at: new Date().toISOString() };
         $("status").textContent = statusText();
+        getDoc(doc(db, "recall_settings", "spend_status"))
+          .then((s) => { if (s.exists()) spendStatus = s.data(); if (root.isConnected && !dirty) draw(); })
+          .catch(() => {});
         showToast(`Done: ${Number(res.made || 0)} new cards, ${Number(res.texted || 0)} texted, ${Number(res.assigned || 0)} shared out`);
       }
     } catch (err) {
