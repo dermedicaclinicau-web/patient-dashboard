@@ -1020,7 +1020,7 @@ function startMessages(id, keep = false) {
     (err) => console.warn("Chat messages failed:", err), msgLimit);
 }
 
-function drawMessages(msgs, first) {function drawMessages(msgs, first) {
+function drawMessages(msgs, first) {
   const box = panel && panel.querySelector('[data-role="msgs"]');
   if (!box || view !== "thread") return;
   msgList = msgs;

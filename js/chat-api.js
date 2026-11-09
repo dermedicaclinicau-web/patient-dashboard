@@ -110,9 +110,10 @@ export async function listAllChats() {
   return s.docs.map(normChat);
 }
 
-// The latest 150 messages of one conversation, live, oldest first. pending: not saved on the server yet.
-export function watchMessages(chatId, onChange, onError = () => {}) {
-  return onSnapshot(query(collection(db, "chats", chatId, "messages"), orderBy("at"), limitToLast(150)),
+// The latest messages of one conversation (150, or more after "Load earlier"), live, oldest first.
+// pending: not saved on the server yet.
+export function watchMessages(chatId, onChange, onError = () => {}, limit = 150) {
+  return onSnapshot(query(collection(db, "chats", chatId, "messages"), orderBy("at"), limitToLast(limit)),
     { includeMetadataChanges: true }, (s) => {
       onChange(s.docs.map((d) => {
         const x = d.data({ serverTimestamps: "estimate" }) || {};

@@ -1327,27 +1327,60 @@ match /inv_count_drafts/{id} {
             && img.w is int && img.h is int
             && img.type in ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
         }
+        // A linked patient: name, ID and today's appointment, nothing else
+        function okPatient(p) {
+          return p is map
+            && p.keys().hasOnly(['id', 'name', 'pttId', 'apptKey', 'apptTime'])
+            && p.id is string && p.id.size() > 0 && p.id.size() <= 120
+            && p.name is string && p.name.size() <= 120
+            && p.pttId is string && p.pttId.size() <= 40
+            && p.apptKey is string && p.apptKey.size() <= 10
+            && p.apptTime is string && p.apptTime.size() <= 20;
+        }
+        // A quoted reply: who wrote it and the first few words
+        function okReply(r) {
+          return r is map
+            && r.keys().hasOnly(['id', 'by', 'byUid', 'text', 'image'])
+            && r.id is string && r.id.size() > 0 && r.id.size() <= 120
+            && r.by is string && r.by.size() <= 120
+            && r.byUid is string && r.byUid.size() <= 128
+            && r.text is string && r.text.size() <= 140
+            && r.image is bool;
+        }
         allow read: if isStaff() && (isAdmin()
           || request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.members);
+        // A message needs words, a picture or a patient card
         allow create: if isStaff()
           && request.resource.data.byUid == request.auth.uid
           && request.resource.data.text is string && request.resource.data.text.size() <= 4000
           && (request.resource.data.get('image', null) == null || okImage(request.resource.data.image))
-          && (request.resource.data.text.size() > 0 || request.resource.data.get('image', null) != null)
+          && (request.resource.data.get('patient', null) == null || okPatient(request.resource.data.patient))
+          && (request.resource.data.get('replyTo', null) == null || okReply(request.resource.data.replyTo))
+          && (request.resource.data.text.size() > 0
+            || request.resource.data.get('image', null) != null
+            || request.resource.data.get('patient', null) != null)
           && (request.auth.uid in getAfter(/databases/$(database)/documents/chats/$(chatId)).data.members
             || (isAdmin() && getAfter(/databases/$(database)/documents/chats/$(chatId)).data.kind == 'help'));
-        // Edit or delete: only the person who sent it. The picture can't be swapped; deleting removes it.
+        // Edit or delete: only the person who sent it. The picture, patient card and quote can't be swapped;
+        // deleting clears all of them.
         allow update: if isStaff()
           && resource.data.byUid == request.auth.uid
           && resource.data.get('deleted', false) != true
           && request.resource.data.diff(resource.data).affectedKeys()
-               .hasOnly(['text', 'page', 'edited', 'editedAt', 'deleted', 'deletedAt', 'image'])
+               .hasOnly(['text', 'page', 'edited', 'editedAt', 'deleted', 'deletedAt', 'image', 'patient', 'replyTo'])
           && request.resource.data.text is string && request.resource.data.text.size() <= 4000
-          && ((request.resource.data.get('deleted', false) == true && request.resource.data.text == ''
-                && request.resource.data.get('image', null) == null)
+          && ((request.resource.data.get('deleted', false) == true
+                && request.resource.data.text == ''
+                && request.resource.data.get('image', null) == null
+                && request.resource.data.get('patient', null) == null
+                && request.resource.data.get('replyTo', null) == null)
             || (request.resource.data.get('deleted', false) != true
                 && request.resource.data.get('image', null) == resource.data.get('image', null)
-                && (request.resource.data.text.size() > 0 || resource.data.get('image', null) != null)))
+                && request.resource.data.get('patient', null) == resource.data.get('patient', null)
+                && request.resource.data.get('replyTo', null) == resource.data.get('replyTo', null)
+                && (request.resource.data.text.size() > 0
+                  || resource.data.get('image', null) != null
+                  || resource.data.get('patient', null) != null)))
           && (request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.members
             || (isAdmin() && get(/databases/$(database)/documents/chats/$(chatId)).data.kind == 'help'));
         allow delete: if false;
