@@ -874,7 +874,8 @@ export function mountRecall(container, { staff = null } = {}) {
       else if (isMail) out.push({ type: "mail", dir: "out", at: l.at, subject: w.replace(/^Email sent:\s*/, ""), text: "", by: l.by, auto: !l.byUid });
       else out.push({ type: "ev", at: l.at, what: w, note: l.note, by: l.by, kind: l.kind });
     });
-    if (haveTexts) d.texts.forEach((m) => out.push({ type: "sms", dir: m.dir, at: m.at, text: m.text, by: m.by, src: m.src, kind: m.kind, auto: tlAuto(m.by) }));
+    if (haveTexts) d.texts.forEach((m) => out.push({ type: "sms", dir: m.dir, at: m.at, text: m.text, by: m.by, src: m.src,
+      kind: m.kind, status: m.status || "", auto: tlAuto(m.by) }));
     if (haveMail) d.emails.forEach((m) => out.push({ type: "mail", ...m }));
     return out.sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
   }
@@ -887,7 +888,9 @@ export function mountRecall(container, { staff = null } = {}) {
         ? `<span class="rc-tl-tag is-${esc(x.kind)}">${esc(REPLY_TAG[x.kind] || "")}</span>` : "";
       return `<div class="rc-tl-msg is-${x.dir}"><span class="rc-tl-ic">${I.msg}</span><div class="rc-tl-body">
         <div class="rc-tl-bubble">${esc(x.text)}</div>
-        ${meta([x.dir === "in" ? "Text received" : "Text sent", who, x.src && x.src !== "Recall" ? x.src : "", tlTime(x.at)])}${tag}</div></div>`;
+        ${meta([x.dir === "in" ? "Text received" : "Text sent", who, x.src && x.src !== "Recall" ? x.src : "", tlTime(x.at)])}${
+          x.dir === "out" && x.status ? `<span class="rc-tl-st is-${x.status === "Failed" ? "bad" : x.status === "Delivered" ? "ok" : "wait"}">${
+            x.status === "Failed" ? I.x : x.status === "Delivered" ? I.check : I.clock}${esc(x.status)}</span>` : ""}${tag}</div></div>`;
     }
     if (x.type === "mail") {
       const key = x.id || `${x.at}|${x.subject}`;

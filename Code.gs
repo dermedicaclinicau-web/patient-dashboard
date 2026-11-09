@@ -15864,9 +15864,82 @@ function smsThread_(cfg, doc) {
     });
   }
   items.sort(function (a, b) { return a.at.localeCompare(b.at); });
+  let merged = items;
+  try { merged = smsMergeTm_(items, phone); }
+  catch (e) { console.warn('Textmagic conversation not read for ' + phone + ': ' + e); }
   return {
-    ok: true, ready: !!tmAuth_(), mobile: phone, items: items.slice(-60), blocked: smsBlock_(cfg, doc),
+    ok: true, ready: !!tmAuth_(), mobile: phone, items: merged.slice(-80), blocked: smsBlock_(cfg, doc),
   };
+}
+
+// Textmagic's message statuses → what staff see
+const TM_STATUS_ = { d: 'Delivered', f: 'Failed', e: 'Failed', j: 'Failed', r: 'Failed', q: 'Sending', s: 'Sent', a: 'Sent', b: 'Sent', u: 'Sent' };
+
+// Every text to and from one mobile in Textmagic (its chat for that number), up to 200
+function tmChat_(phone04) {
+  const auth = tmAuth_();
+  const p61 = recallPhone61_(phone04);
+  if (!auth || !p61) return [];
+  const out = [];
+  for (let page = 1; page <= 2; page++) {
+    let r;
+    try { r = tmFetch_(auth, 'get', '/chats/' + p61 + '?page=' + page + '&limit=100'); }
+    catch (e) { if (e && e.code === 404) break; throw e; }   // no conversation with this number yet
+    const list = Array.isArray(r.resources) ? r.resources : [];
+    list.forEach(function (m) {
+      const text = String(m.text || '').trim();
+      if (!text) return;
+      const d = String(m.direction || '').toLowerCase();
+      const inbound = d ? /^i/.test(d) : recallPhone04_(m.sender) === phone04;
+      out.push({
+        dir: inbound ? 'in' : 'out', at: tmTime_(m.messageTime || m.createdAt || m.sendingTime), text: text,
+        status: inbound ? '' : (TM_STATUS_[String(m.status || '').toLowerCase()] || ''), tmId: String(m.id || ''),
+      });
+    });
+    if (list.length < 100 || page >= Number(r.pageCount || page)) break;
+  }
+  return out.filter(function (m) { return m.at; });
+}
+
+// The portal's texts and replies, with Textmagic's conversation added. A text the portal sent is matched to its
+// Textmagic copy (same direction and words, within 20 minutes), so it keeps who sent it and gets its delivery status.
+function smsMergeTm_(items, phone04) {
+  const tm = tmChat_(phone04);
+  if (!tm.length) return items;
+  const words = function (s) {
+    return String(s || '').toLowerCase().replace(/reply\s+stop\s+to\s+opt\s+out\.?/g, '').replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 80);
+  };
+  const out = items.slice();
+  const used = {};
+  tm.forEach(function (m) {
+    const t = Date.parse(m.at);
+    const k = words(m.text);
+    let hit = -1;
+    for (let i = 0; i < out.length; i++) {
+      const x = out[i];
+      if (used[i] || x.tmId || x.dir !== m.dir) continue;
+      if (Math.abs((Date.parse(x.at) || 0) - t) > 20 * 60000) continue;
+      const xk = words(x.text);
+      if (xk === k || (xk && k && (xk.indexOf(k) === 0 || k.indexOf(xk) === 0))) { hit = i; break; }
+    }
+    if (hit >= 0) {
+      used[hit] = true;
+      out[hit] = Object.assign({}, out[hit], { status: m.status, tmId: m.tmId });
+    } else if (m.dir === 'in') {
+      out.push({ dir: 'in', at: m.at, text: m.text, kind: recallReplyKind_(m.text), tmId: m.tmId });
+    } else {
+      out.push({ dir: 'out', at: m.at, text: m.text, by: '', src: 'Textmagic website', status: m.status, tmId: m.tmId });
+    }
+  });
+  return out.sort(function (a, b) { return a.at.localeCompare(b.at); });
+}
+
+// Run from the editor: shows the first messages Textmagic has with one mobile (to check the field names)
+function testTextmagicChat() {
+  const mobile = 'PASTE_A_MOBILE';   // e.g. 0412 345 678
+  const r = tmFetch_(tmAuth_(), 'get', '/chats/' + recallPhone61_(mobile) + '?page=1&limit=3');
+  console.log(JSON.stringify((r.resources || []).slice(0, 3), null, 2));
+  console.log(JSON.stringify(tmChat_(recallPhone04_(mobile)).slice(0, 5), null, 2));
 }
 
 function smsSend_(cfg, doc, body, session) {
