@@ -15,6 +15,9 @@ const ICONS = {
   edit: svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'),
   x: svg('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
   sparkle: svg('<path d="M12 3l1.9 5.8L20 10l-6.1 1.2L12 17l-1.9-5.8L4 10l6.1-1.2z"/>'),
+  check: svg('<polyline points="20 6 9 17 4 12"/>'),
+  plus: svg('<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>'),
+  clock: svg('<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>'),
 };
 
 // Heading aliases are tried in order (plural first)
@@ -39,6 +42,42 @@ const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
 // For matching items: "- Smoker: No." == "smoker: no"
 export const normItem = (s) => norm(String(s || "").replace(/^\s*[-•*]\s*/, "")).replace(/[.;,\s]+$/, "");
 const newId = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+
+const DAY = 86400000;
+const STALE_MS = 365 * DAY;   // older than this: "check it's still current"
+const NEW_MS = 14 * DAY;      // items added within this get a "New" tag
+const validDate = (d) => d instanceof Date && !isNaN(d);
+
+function agoText(d) {
+  if (!validDate(d)) return "";
+  const days = Math.floor((Date.now() - d.getTime()) / DAY);
+  if (days < 1) return "today";
+  if (days < 2) return "yesterday";
+  if (days < 30) return `${days} days ago`;
+  const m = Math.floor(days / 30.44);
+  if (m < 12) return `${m} mo ago`;
+  const y = Math.floor(m / 12);
+  return `${y} yr${y === 1 ? "" : "s"} ago`;
+}
+
+// "· 3 mo ago", or an amber pill when it's over a year old
+function ageHtml(d) {
+  const a = agoText(d);
+  if (!a) return "";
+  return Date.now() - d.getTime() > STALE_MS
+    ? `<span class="hx-stale" title="Over a year ago. Check it's still current.">${ICONS.clock}${escapeHtml(a)}</span>`
+    : `<span class="hx-ago">· ${escapeHtml(a)}</span>`;
+}
+
+const isNewItem = (it) => {
+  const t = Date.parse(it.addedAt || "");
+  return !!t && Date.now() - t < NEW_MS;
+};
+const addedTitle = (it) => [
+  it.addedBy && `Added by ${it.addedBy}`,
+  it.addedAt && fmtDate(new Date(it.addedAt)),
+  it.source === "consultation" && "from a consultation",
+].filter(Boolean).join(" · ");
 
 /* ===================== Per-page state ===================== */
 
@@ -193,6 +232,11 @@ function publishAllergies(root) {
   }
   const items = (texts || []).map((t) => String(t).replace(/^\s*[-•*]\s*/, "").replace(/[.;,\s]+$/, "").trim())
     .filter((t) => t && !NONE_RE.test(t));
+  const card = root.querySelector('.hx-card[data-hx="allergies"]');
+  if (card) {
+    card.classList.toggle("has-alert", items.length > 0);
+    card.classList.toggle("is-unknown", texts === null);
+  }
   root.dispatchEvent(new CustomEvent("allergies-ready", { detail: { known: texts !== null, items } }));
 }
 
@@ -232,7 +276,7 @@ function renderCard(root, card) {
   } else {
     st.suggestions[key] = [];
     countEl.textContent = list.length;
-    body.innerHTML = list.length ? bodyHtml(key, list) : `<p class="rc-empty pad">${escapeHtml(s.empty)}</p>`;
+    body.innerHTML = list.length ? bodyHtml(key, list) : emptyHtml(st, key);
   }
 }
 
@@ -389,7 +433,8 @@ async function saveEdit(root, key, btn) {
   btn.textContent = "Saving…";
   try {
     await saveClinicalSection(st.patient, key, next, st.staff);
-    st.profile = { ...(st.profile || {}), [key]: next };
+    // The page's copy gets the save time too, so "Updated" is right without a reload
+    st.profile = { ...(st.profile || {}), [key]: { ...next, updatedAt: now, updatedBy: by } };
     st.editing = null;
     st.draft = [];
     st.seed = null;
@@ -439,7 +484,7 @@ async function applySuggestions(root, key, sugs, mode) {
   st.busy = true;
   try {
     await saveClinicalSection(st.patient, key, next, st.staff);
-    st.profile = { ...st.profile, [key]: next };
+    st.profile = { ...st.profile, [key]: { ...next, updatedAt: now, updatedBy: by } };
     renderAll(root);
     showToast(mode === "add"
       ? (sugs.length === 1 ? "Added to the list" : `${sugs.length} items added`)
@@ -470,6 +515,7 @@ function syncPreconsultSocial(root) {
   card.querySelector(".sub-body").innerHTML = `
     <p class="hx-meta"><span class="hx-tag edited">Current</span>
       <strong>Updated ${escapeHtml(fmtDate(d))}</strong>
+      ${ageHtml(d)}
       ${section.updatedBy ? `<span>· ${escapeHtml(section.updatedBy)}</span>` : ""}</p>
     ${n ? `<ul class="hx-list">${section.items.map((it) => `<li>${labelled(it.text)}</li>`).join("")}</ul>`
         : `<p class="empty-note">No social history recorded.</p>`}
@@ -478,11 +524,12 @@ function syncPreconsultSocial(root) {
 
 /* ===================== Templates ===================== */
 
-function metaHtml(r, extra = "") {
+function metaHtml(r, extra = "", showAge = false) {
   return `
     <p class="hx-meta">
       ${extra}
       <strong>${escapeHtml(fmt(r))}</strong>
+      ${showAge ? ageHtml(r.date) : ""}
       ${r.staff ? `<span>· ${escapeHtml(r.staff)}</span>` : ""}
       ${r.matchedByName ? `<span class="task-flag neutral">Matched by name</span>` : ""}
     </p>`;
@@ -494,22 +541,52 @@ function labelled(text) {
   return m ? `<b>${escapeHtml(m[1])}:</b> ${escapeHtml(m[2])}` : escapeHtml(text);
 }
 
+// "NKDA" / "Nil": a green tick, so it reads as checked rather than missing
+function noneHtml(key, text) {
+  return key === "allergies"
+    ? `<div class="hx-chips"><span class="hx-chip ok">${ICONS.check}${escapeHtml(text)}</span></div>`
+    : `<span class="hx-none">${ICONS.check}${escapeHtml(text)}</span>`;
+}
+
 function itemsHtml(key, text) {
   const bullets = toBullets(text);
   if (!bullets.length) return "";
-
-  if (bullets.length === 1 && NONE_RE.test(bullets[0])) {
-    return `<span class="hx-none">${escapeHtml(bullets[0])}</span>`;
-  }
+  if (bullets.length === 1 && NONE_RE.test(bullets[0])) return noneHtml(key, bullets[0]);
 
   if (key === "allergies") {
-    return `<div class="hx-chips">${bullets.map((b) =>
-      `<span class="hx-chip${NONE_RE.test(b) ? " none" : ""}">${escapeHtml(b)}</span>`).join("")}</div>`;
+    return `<div class="hx-chips">${bullets.map((b) => NONE_RE.test(b)
+      ? `<span class="hx-chip ok">${ICONS.check}${escapeHtml(b)}</span>`
+      : `<span class="hx-chip">${ICONS.allergies}${escapeHtml(b)}</span>`).join("")}</div>`;
   }
-
   return `<ul class="hx-list">${bullets.map((b) => `<li>${labelled(b)}</li>`).join("")}</ul>`;
 }
 
+// The team's list: same look, plus who added each item and a "New" tag
+function curatedItemsHtml(key, items) {
+  if (items.length === 1 && NONE_RE.test(items[0].text)) return noneHtml(key, items[0].text);
+  const tag = (it) => (isNewItem(it) ? `<span class="hx-new">New</span>` : "");
+
+  if (key === "allergies") {
+    return `<div class="hx-chips">${items.map((it) => {
+      const ok = NONE_RE.test(it.text);
+      return `<span class="hx-chip${ok ? " ok" : ""}" title="${escapeHtml(addedTitle(it))}">${ok ? ICONS.check : ICONS.allergies}${escapeHtml(it.text)}${tag(it)}</span>`;
+    }).join("")}</div>`;
+  }
+  return `<ul class="hx-list">${items.map((it) =>
+    `<li title="${escapeHtml(addedTitle(it))}">${labelled(it.text)}${tag(it)}</li>`).join("")}</ul>`;
+}
+
+function emptyHtml(st, key) {
+  const s = SECTIONS[key];
+  const canEdit = st.profile !== null && !st.profileError;
+  const warn = key === "allergies";
+  return `
+    <div class="hx-empty${warn ? " warn" : ""}">
+      <span class="hx-empty-ic">${ICONS[key]}</span>
+      <p>${warn ? "Allergies haven't been recorded yet. Check with the patient." : escapeHtml(s.empty)}</p>
+      ${canEdit ? `<button type="button" class="hx-empty-add" data-hx-act="edit">${ICONS.plus}Add ${escapeHtml(s.item)}</button>` : ""}
+    </div>`;
+}
 // Before anyone has edited: latest consultation + earlier ones
 function bodyHtml(key, list) {
   const [latest, ...older] = list;
@@ -526,7 +603,7 @@ function bodyHtml(key, list) {
 
   return `
     <div class="hx-latest">
-      ${metaHtml(latest, `<span class="hx-tag">Latest</span>`)}
+      ${metaHtml(latest, `<span class="hx-tag">Latest</span>`, true)}
       ${itemsHtml(key, latest.text)}
     </div>
     ${older.length ? `
@@ -539,15 +616,17 @@ function bodyHtml(key, list) {
 // After editing: the team's Current list
 function curatedHtml(key, section) {
   const d = section.updatedAt ? new Date(section.updatedAt) : null;
-  const texts = section.items.map((it) => it.text);
   return `
     <div class="hx-latest">
       <p class="hx-meta">
         <span class="hx-tag edited">Current</span>
         <strong>Updated ${escapeHtml(fmtDate(d))}</strong>
+        ${ageHtml(d)}
         ${section.updatedBy ? `<span>· ${escapeHtml(section.updatedBy)}</span>` : ""}
       </p>
-      ${texts.length ? itemsHtml(key, texts.join("\n")) : `<p class="rc-empty">${escapeHtml(SECTIONS[key].empty)}</p>`}
+      ${section.items.length
+        ? curatedItemsHtml(key, section.items)
+        : `<p class="rc-empty">${escapeHtml(SECTIONS[key].empty)}</p>`}
     </div>`;
 }
 

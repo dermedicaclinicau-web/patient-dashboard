@@ -12205,3 +12205,77 @@ body.no-patients-edit .pb-add-alt { display: inline; }
 /* Link a patient: search all patients */
 .ch-pp-q { width: 100%; height: 36px; margin: 0 0 .4rem; box-sizing: border-box; }
 .ch-pp-sec { margin: .2rem .35rem .25rem; font-size: .68rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+
+/* ===================== Clinical History refresh ===================== */
+.hx-card { --c: #0d9488; --cd: #0f766e; --cs: #ccfbf1; box-shadow: inset 0 3px 0 var(--c); transition: background .2s; }
+.hx-card.hx-teal  { --c: #0d9488; --cd: #0f766e; --cs: #ccfbf1; }
+.hx-card.hx-blue  { --c: #2563eb; --cd: #1d4ed8; --cs: #dbeafe; }
+.hx-card.hx-amber { --c: #d97706; --cd: #b45309; --cs: #fef3c7; }
+.hx-card.hx-red   { --c: #dc2626; --cd: #b91c1c; --cs: #fee2e2; }
+
+.hx-card[open] > summary { background: linear-gradient(135deg, var(--cs), transparent 75%); }
+.hx-card .hx-icon {
+  display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 9px; flex: none;
+  background: linear-gradient(135deg, var(--c), var(--cd)); color: #fff;
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--c) 35%, transparent);
+}
+.hx-card .hx-icon svg { width: 15px; height: 15px; }
+.hx-card .hx-count { background: var(--cs); color: var(--cd); font-weight: 700; }
+
+/* Allergies: known = red, never recorded = amber */
+.hx-card.has-alert { background: linear-gradient(180deg, #fff5f5, transparent 60%); }
+.hx-card.has-alert .hx-count { background: var(--c); color: #fff; }
+.hx-card.is-unknown { --c: #f59e0b; --cd: #d97706; --cs: #fef3c7; }
+
+/* Latest / Current tags, how old it is */
+.hx-card .hx-tag { background: var(--cs); color: var(--cd); border-radius: 999px; padding: .1rem .5rem; font-size: .68rem; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; }
+.hx-card .hx-tag.edited { background: linear-gradient(135deg, var(--c), var(--cd)); color: #fff; }
+.hx-ago { color: var(--muted); font-size: .78rem; }
+.hx-stale {
+  display: inline-flex; align-items: center; gap: .25rem; padding: .08rem .5rem; border-radius: 999px;
+  background: #fef3c7; color: #92400e; border: 1px solid #fde68a; font-size: .72rem; font-weight: 600;
+}
+.hx-stale svg { width: 12px; height: 12px; }
+
+/* Lists and chips */
+.hx-card .hx-list li::marker { color: var(--c); }
+.hx-new {
+  display: inline-block; margin-left: .4rem; padding: 0 .4rem; border-radius: 999px; vertical-align: 1px;
+  background: var(--c, #0d9488); color: #fff; font-size: .62rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+}
+.hx-card .hx-chips { display: flex; flex-wrap: wrap; gap: .4rem; }
+.hx-card .hx-chip {
+  display: inline-flex; align-items: center; gap: .35rem; padding: .3rem .7rem; border-radius: 999px;
+  background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; font-size: .84rem; font-weight: 600;
+}
+.hx-card .hx-chip svg { width: 13px; height: 13px; flex: none; }
+.hx-card .hx-chip .hx-new { background: #dc2626; }
+.hx-card .hx-chip.ok, .hx-card .hx-chip.none { background: #dcfce7; color: #166534; border-color: #bbf7d0; }
+.hx-none { display: inline-flex; align-items: center; gap: .35rem; color: #166534; font-weight: 600; }
+.hx-none svg { width: 14px; height: 14px; }
+
+/* Empty */
+.hx-empty { display: flex; flex-direction: column; align-items: center; gap: .45rem; padding: 1.1rem .8rem; text-align: center; }
+.hx-empty p { margin: 0; color: var(--muted); font-size: .88rem; }
+.hx-empty-ic { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; background: var(--cs); color: var(--cd); }
+.hx-empty-ic svg { width: 18px; height: 18px; }
+.hx-empty.warn { margin: .6rem; border: 1px dashed #f59e0b; border-radius: 12px; background: #fffbeb; }
+.hx-empty.warn p { color: #92400e; font-weight: 600; }
+.hx-empty-add {
+  display: inline-flex; align-items: center; gap: .3rem; padding: .35rem .8rem; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--c); background: #fff; color: var(--cd); font-weight: 600; font-size: .82rem;
+}
+.hx-empty-add:hover { background: var(--cs); }
+.hx-empty-add svg { width: 13px; height: 13px; }
+
+/* Earlier records: a quiet timeline */
+.hx-card .hx-older-list .hx-entry { border-left: 2px solid var(--cs); padding-left: .7rem; margin-left: .2rem; }
+
+/* New from consultations */
+.hx-card .hx-suggest { border: 1px solid #ddd6fe; background: linear-gradient(135deg, #f5f3ff, #fff); border-radius: 12px; }
+.hx-card .hx-suggest-head { color: #6d28d9; }
+.hx-card .hx-sug-add, .hx-card .hx-sug-all { background: linear-gradient(135deg, #8b5cf6, #6d28d9); color: #fff; border: 0; }
+
+/* Editing */
+.hx-card .hx-input:focus { outline: none; border-color: var(--c); box-shadow: 0 0 0 3px color-mix(in srgb, var(--c) 18%, transparent); }
+.hx-card .hx-add { color: var(--cd); }
