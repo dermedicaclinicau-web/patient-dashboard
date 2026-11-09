@@ -12795,3 +12795,23 @@ dialog.lh-dialog.ae-dlg { width: min(520px, calc(100vw - 2rem)); }
 .rs-saved { display: grid; gap: 10px; margin-bottom: 6px; }
 .rs-saved-row { display: grid; gap: 6px; padding: 10px; border: 1px solid var(--border, #e5e7eb); border-radius: 10px; }
 .rs-saved-row .rc-row .fe-input { flex: 1; }
+
+/* Recall: opted out of texts */
+.rc-dnc.is-sms { background: #fff7ed; color: #9a3412; border-color: #fed7aa; }
+.rc-dnc-note.is-sms { background: #fff7ed; color: #7c2d12; border-color: #fed7aa; }
+
+.rc-oo { width: min(640px, 94vw); max-height: 86vh; padding: 18px 20px; border: none; border-radius: 16px;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, .25); overflow: auto; }
+.rc-oo::backdrop { background: rgba(15, 23, 42, .45); }
+.rc-oo-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.rc-oo-head h3 { margin: 0; font-size: 18px; }
+.rc-oo-bar { display: flex; gap: 8px; margin: 12px 0; }
+.rc-oo-bar input { flex: 1; min-width: 0; }
+.rc-oo-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.rc-oo-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid #e5e7eb; border-radius: 12px; }
+.rc-oo-row[hidden] { display: none; }
+.rc-oo-main { flex: 1; min-width: 0; display: grid; }
+.rc-oo-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-oo-main small { color: #64748b; }
+.rc-oo-cards { font-size: 12px; color: #0f766e; white-space: nowrap; }
+@media (max-width: 560px) { .rc-oo-bar { flex-direction: column; } .rc-oo-cards { display: none; } }

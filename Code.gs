@@ -5369,6 +5369,7 @@ function runNotifications() {
   try { chatHelpReminders_(cfg); } catch (e) { console.error('Chat reminders: ' + (e && e.stack ? e.stack : e)); }
   try { eodReminders_(cfg, now); } catch (e) { console.error('End of day reminders: ' + (e && e.stack ? e.stack : e)); }
   try { recallReplies_(cfg); } catch (e) { console.error('Recall replies: ' + (e && e.stack ? e.stack : e)); }
+  try { tmUnsubSync_(cfg, false); } catch (e) { console.error('Textmagic opt-outs: ' + (e && e.stack ? e.stack : e)); }
   try { scanJobsSweep_(cfg); } catch (e) { console.error('Scan jobs: ' + (e && e.stack ? e.stack : e)); }
   try { prosImport_(cfg, 30, 14); } catch (e) { console.error('Prospect emails: ' + (e && e.stack ? e.stack : e)); }
   try { prosContactCheck_(cfg); } catch (e) { console.error('Prospect contact check: ' + (e && e.stack ? e.stack : e)); }
@@ -11555,10 +11556,12 @@ function mktSetConsent_(cfg, pid, yes, meta) {
       if (cur && cur.reason !== 'bounced') writes.push(deleteWrite_(cfg, path));
     }
   }
-  // Saying yes (staff told, with a note, or the patient resubscribed) also lifts a STOP on their mobile
+  // Saying yes also lifts a STOP on their mobile, unless it's on Textmagic's own list (that can't be undone)
+  let liftedSms = false;
   if (yes && pdoc) {
     const mk = recallPhone04_(pdoc.Mobile);
-    if (mk && smsSuppressed_(cfg, mk)) writes.push(deleteWrite_(cfg, SMS_SUPPRESS_ + '/' + mk));
+    const ss = mk ? smsSuppressed_(cfg, mk) : null;
+    if (ss && ss.tm !== true && ss.reason !== 'unknown') { writes.push(deleteWrite_(cfg, SMS_SUPPRESS_ + '/' + mk)); liftedSms = true; }
   }
   writes.push(updateWrite_(cfg, MKT_LOG_ + '/c_' + Date.now() + '_' + Utilities.getUuid().slice(0, 8), {
     patientId: patientId, patientName: pdoc ? flowWho_(pdoc).name : '',
@@ -11573,6 +11576,7 @@ function mktSetConsent_(cfg, pid, yes, meta) {
     try {
       const dn = yes ? { dnc: false, dncWhy: '' }
         : { dnc: true, dncWhy: [source, recLongDate_(now.slice(0, 10))].filter(Boolean).join(' · ') };
+      if (liftedSms) dn.smsStop = null;
       const cw = fsQuery_(cfg, RECALL_COL_, 'patientId', 'EQUAL', patientId, 50)
         .filter(function (c) { return c.status !== 'closed'; })
         .map(function (c) { return patchWrite_(cfg, RECALL_COL_ + '/' + c._id, dn); });
@@ -13320,6 +13324,17 @@ function recallCheck_(cfg, set, today, force) {
   set.categories.forEach(function (c) { catOf[c.key.toLowerCase()] = c; });
   const skip = recallSkipFn_(set.skipServices);
   const pts = recallPatients_(cfg);
+  // Mobiles that replied STOP or opted out in Textmagic: marked on their cards (no texts)
+  const stops = {};
+  let stopsOk = true;
+  try {
+    fsListAll_(cfg, SMS_SUPPRESS_, ['at', 'tm', 'source']).forEach(function (d) {
+      const f = fromFields_(d.fields || {});
+      stops[d.name.split('/').pop()] = { at: String(f.at || ''),
+        source: f.tm === true && f.source !== 'Replied STOP to a text' ? 'Textmagic' : 'Replied STOP' };
+    });
+  } catch (e) { stopsOk = false; console.warn('Recall: opt-outs not read, cards left as they are: ' + e); }
+  const stopOf = function (m) { return stops[recallPhone04_(m)] || null; };
   const pidOf = Object.create(null);
   const groups = Object.create(null);
   const skipped = Object.create(null);   // patient|treatment → past days that had a skipped service
@@ -13372,12 +13387,15 @@ function recallCheck_(cfg, set, today, force) {
       const nextAppt = anyFuture[c.patientId] || '';
       const apptFix = typeof c.hasAppt !== 'boolean' || c.hasAppt !== !!nextAppt || String(c.nextAppt || '') !== nextAppt
         ? { nextAppt: nextAppt, hasAppt: !!nextAppt } : null;
+      const stopNow = stopOf(c.mobileKey || c.mobile);
+      const smsFix = stopsOk && JSON.stringify(c.smsStop || null) !== JSON.stringify(stopNow) ? { smsStop: stopNow } : null;
       let touched = false;
       const put = function (patch, what) {
         touched = true;
         if (fix) Object.assign(patch, fix);
         if (dncFix) Object.assign(patch, dncFix);
         if (apptFix) Object.assign(patch, apptFix);
+        if (smsFix) Object.assign(patch, smsFix);
         patch.log = add(c, what);
         patch.updatedAt = now;
         writes.push(patchWrite_(cfg, path, patch));
@@ -13451,8 +13469,8 @@ function recallCheck_(cfg, set, today, force) {
           sum.back++;
         }
       })();
-      if (!touched && (fix || dncFix || apptFix)) {
-        writes.push(patchWrite_(cfg, path, Object.assign({}, fix || {}, dncFix || {}, apptFix || {})));
+      if (!touched && (fix || dncFix || apptFix || smsFix)) {
+        writes.push(patchWrite_(cfg, path, Object.assign({}, fix || {}, dncFix || {}, apptFix || {}, smsFix || {})));
       }
     });
 
@@ -13496,7 +13514,7 @@ function recallCheck_(cfg, set, today, force) {
       closeReason: '', closedAt: '', closedBy: '',
       log: [{ at: now, by: 'Recall', byUid: '', kind: 'auto', what: 'Due for ' + w.g.cat.key + ' (last visit ' + recLongDate_(w.g.last) + ')', note: '' }],
       createdAt: now, updatedAt: now,
-    }, recallKeys_(who.name, doc.Mobile, doc.Email), recallDncOf_(doc))));
+    }, recallKeys_(who.name, doc.Mobile, doc.Email), recallDncOf_(doc), { smsStop: stopOf(doc.Mobile) })));
     sum.made++;
   });
 
@@ -13598,6 +13616,10 @@ function handleRecall_(body) {
     if (op === 'flowTest') {
       if (!manage) return { ok: false, error: 'FORBIDDEN' };
       return recallFlowTest_(body, session);
+    }
+    if (op === 'smsOptouts') {   // anyone with Recall access can see it; syncing now is for Recall settings
+      if (body.sync === true && !manage) return { ok: false, error: 'FORBIDDEN' };
+      return recallOptoutList_(body.sync === true);
     }
     if (op === 'smsStatus' || op === 'smsTest') {
       if (!manage) return { ok: false, error: 'FORBIDDEN' };
@@ -13861,7 +13883,12 @@ function tmSend_(auth, phone61, text) {
 
 // Why they can't be texted, or ''
 function recallTextBlocked_(cfg, pid, mobile) {
-  if (mobile && smsSuppressed_(cfg, mobile)) return 'This mobile replied STOP to a text.';
+  const ss = mobile ? smsSuppressed_(cfg, mobile) : null;
+  if (ss) {
+    return ss.reason === 'unknown' ? "This mobile can't be checked right now, so it isn't texted."
+      : ss.tm === true && ss.source !== 'Replied STOP to a text' ? 'This mobile has opted out of texts in Textmagic.'
+      : 'This mobile replied STOP to a text.';
+  }
   const p = pid ? fsGetDoc_(cfg, 'patient_list/' + encodeURIComponent(pid)) : null;
   if (p && p['Marketing OK'] === false) return "They're on the do-not-contact list.";
   const e = p ? mktEmail_(p.Email) : '';
@@ -14109,7 +14136,7 @@ function recallStop_(cfg, phone, text, at, pid, cards, portal) {
     if (c.status === 'closed') return;
     const mine = !!pid && String(c.patientId) === pid;
     const log = (Array.isArray(c.log) ? c.log : []).slice();
-    const p = { updatedAt: now };
+    const p = { updatedAt: now, smsStop: { at: at, source: 'Replied STOP' } };
     if (mine) {
       log.push({ at: at, by: 'Patient', byUid: '', kind: 'reply', note: text.slice(0, 500),
         what: c.status === 'open' ? 'Replied STOP · recall stopped (Textmagic)' : 'Replied STOP (already booked, so the card stays)' });
@@ -14130,6 +14157,126 @@ function recallStop_(cfg, phone, text, at, pid, cards, portal) {
   if (writes.length) commitWrites_(cfg, writes);
   console.log('Recall: STOP from ' + (key || phone) + ' · ' + writes.length + ' card(s) updated · ' +
     ids.length + ' patient(s) with this number');
+}
+
+// Textmagic's times ("2026-11-09T10:20:30+0000") → ISO, or ""
+function tmTime_(s) {
+  const t = Date.parse(String(s || '').replace(/([+-]\d{2})(\d{2})$/, '$1:$2'));
+  return isFinite(t) ? new Date(t).toISOString() : '';
+}
+
+// Textmagic's unsubscribe list → the portal's do-not-text list (sms_suppress), and a marker on their recall cards.
+// Hourly from runNotifications, or now with force. Only adds: Textmagic doesn't let an unsubscribe be undone.
+function tmUnsubSync_(cfg, force) {
+  const auth = tmAuth_();
+  if (!auth) return { ok: false, why: "Textmagic isn't set up" };
+  if (CacheService.getScriptCache().get('recall_run')) return { later: true };   // Recall is saving its cards right now
+  const props = PropertiesService.getScriptProperties();
+  if (!force && Date.now() - Number(props.getProperty('TM_UNSUB_AT') || 0) < 60 * 60000) return { skipped: true };
+  props.setProperty('TM_UNSUB_AT', String(Date.now()));
+  const t0 = Date.now();
+  const now = new Date().toISOString();
+
+  // 1. Everyone on Textmagic's list (Australian mobiles only: they're the only ones the portal texts)
+  const tm = {};
+  let partial = false;
+  for (let page = 1; page <= 50; page++) {
+    if (Date.now() - t0 > 90000) { partial = true; break; }
+    const r = tmFetch_(auth, 'get', '/unsubscribers?page=' + page + '&limit=100');
+    const list = Array.isArray(r.resources) ? r.resources : [];
+    list.forEach(function (x) {
+      const k = recallPhone04_(x.phone || x.number || x.receiver);
+      if (!k) return;
+      const at = tmTime_(x.unsubscribeTime || x.unsubscribedAt || x.createdAt);
+      if (!tm[k] || (at && at < tm[k].at)) {
+        tm[k] = { at: at, id: String(x.id || ''), name: [x.firstName, x.lastName].filter(Boolean).join(' ').trim() };
+      }
+    });
+    if (list.length < 100 || page >= Number(r.pageCount || page)) break;
+  }
+
+  // 2. New numbers go on the portal's list; ones already there (they replied STOP) are noted as on Textmagic's too
+  const have = {};
+  fsListAll_(cfg, SMS_SUPPRESS_, ['tm']).forEach(function (d) { have[d.name.split('/').pop()] = fromFields_(d.fields || {}); });
+  const writes = [];
+  const fresh = [];
+  Object.keys(tm).forEach(function (k) {
+    const cur = have[k];
+    if (cur && cur.tm === true) return;
+    if (cur) { writes.push(patchWrite_(cfg, SMS_SUPPRESS_ + '/' + k, { tm: true, tmId: tm[k].id, tmAt: tm[k].at })); return; }
+    writes.push(updateWrite_(cfg, SMS_SUPPRESS_ + '/' + k, {
+      phone: k, at: tm[k].at || now, source: 'Textmagic unsubscribe list', tm: true,
+      tmId: tm[k].id, tmAt: tm[k].at, tmName: tm[k].name, syncedAt: now,
+    }));
+    fresh.push(k);
+  });
+  if (writes.length) commitWrites_(cfg, writes, 200);
+
+  // 3. The new numbers' open recall cards: the marker, and a History line
+  let flagged = 0;
+  for (let i = 0; i < fresh.length && Date.now() - t0 < 200000; i += 300) {
+    const chunk = fresh.slice(i, i + 300);
+    const specs = [];
+    for (let j = 0; j < chunk.length; j += 30) specs.push([RECALL_COL_, 'mobileKey', 'IN', chunk.slice(j, j + 30), 300]);
+    const cw = [];
+    fsQueryMany_(cfg, specs).forEach(function (list) {
+      list.forEach(function (c) {
+        if (c.status === 'closed' || c.smsStop) return;
+        const t = tm[c.mobileKey] || {};
+        cw.push(patchWrite_(cfg, RECALL_COL_ + '/' + c._id, {
+          smsStop: { at: t.at || now, source: 'Textmagic' }, updatedAt: now,
+          log: (Array.isArray(c.log) ? c.log : []).concat([{ at: now, by: 'Recall', byUid: '', kind: 'auto', note: '',
+            what: 'Opted out of texts in Textmagic' + (t.at ? ' on ' + recLongDate_(t.at.slice(0, 10)) : '') +
+              ': no recall texts to this mobile. Calls and emails are still fine.' }]).slice(-80),
+        }));
+      });
+    });
+    if (cw.length) { commitWrites_(cfg, cw, 100); flagged += cw.length; }
+  }
+
+  const status = { at: now, count: Object.keys(tm).length, added: fresh.length, flagged: flagged, partial: partial, ms: Date.now() - t0 };
+  fsPatch_(cfg, RECALL_SET_ + '/sms_optouts', status);
+  if (fresh.length) console.log('Textmagic opt-outs: ' + JSON.stringify(status));
+  return status;
+}
+
+// Recall → the do-not-text list: every number, who has it, and their recall cards. sync: read Textmagic first.
+function recallOptoutList_(sync) {
+  const cfg = getConfig_();
+  if (sync) {
+    try { tmUnsubSync_(cfg, true); }
+    catch (e) { return { ok: true, problem: "Textmagic's opt-out list couldn't be read: " + String(e && e.message ? e.message : e).slice(0, 200) }; }
+  }
+  const rows = fsListAll_(cfg, SMS_SUPPRESS_).map(function (d) {
+    const f = fromFields_(d.fields || {});
+    return { phone: d.name.split('/').pop(), at: String(f.at || ''), tm: f.tm === true,
+      source: f.tm === true && f.source !== 'Replied STOP to a text' ? 'Textmagic' : 'Replied STOP',
+      name: String(f.tmName || ''), patientId: String(f.patientId || ''), open: 0, booked: 0 };
+  }).sort(function (a, b) { return b.at.localeCompare(a.at); }).slice(0, 3000);
+
+  // Names and links from their recall cards, otherwise the name on the Patient List
+  const byKey = {};
+  rows.forEach(function (r) { byKey[r.phone] = r; });
+  const keys = Object.keys(byKey);
+  const specs = [];
+  for (let j = 0; j < keys.length; j += 30) specs.push([RECALL_COL_, 'mobileKey', 'IN', keys.slice(j, j + 30), 300]);
+  fsQueryMany_(cfg, specs).forEach(function (list) {
+    list.forEach(function (c) {
+      const r = byKey[c.mobileKey];
+      if (!r) return;
+      if (c.status === 'open') r.open++;
+      if (c.status === 'booked') r.booked++;
+      if (!r.patientId && c.patientId) { r.patientId = String(c.patientId); r.name = String(c.patientName || r.name); }
+    });
+  });
+  try {
+    ptFsEntries_().list.forEach(function (p) {
+      const r = byKey[recallPhone04_(p[2])];
+      if (r && !r.patientId && !r.fromList) { r.name = p[1][0]; r.fromList = true; }
+    });
+  } catch (e) { /* the names from Textmagic are used */ }
+
+  return { ok: true, rows: rows, status: fsGetDoc_(cfg, RECALL_SET_ + '/sms_optouts') || null };
 }
 
 /* ---------- Recall settings: status and a test text ---------- */
@@ -14259,7 +14406,7 @@ function recallFlowSend_(cfg, set, s, c, test) {
   const what = s.type === 'text' ? 'Text' : 'Email';
   if (!test) {
     const b = recallTextBlocked_(cfg, c.patientId, s.type === 'text' ? c.mobile : '');
-    if (b) return { sent: false, what: what + ' skipped: on the do-not-contact list' };
+    if (b) return { sent: false, what: what + ' skipped: ' + (b.charAt(0).toLowerCase() + b.slice(1)).replace(/\.$/, '') };
   }
   if (s.type === 'text') {
     const auth = tmAuth_();
@@ -15447,7 +15594,9 @@ function smsBlock_(cfg, doc) {
   const when = String((sup && sup.at) || c.at || '').slice(0, 10);
   return {
     dnc: true, stop: stop,
-    why: stop ? 'This mobile replied STOP to a text' + (when ? ' on ' + recLongDate_(when) : '') + '.'
+    why: stop ? (sup && sup.tm === true && sup.source !== 'Replied STOP to a text'
+      ? 'This mobile opted out of texts in Textmagic' : 'This mobile replied STOP to a text') +
+      (when ? ' on ' + recLongDate_(when) : '') + '.'
       : "They're on the do-not-contact list" + (c.source ? ' (' + c.source + ')' : '') + '.',
   };
 }
@@ -20833,4 +20982,11 @@ function testRecallStop() {
   const mobile = 'PASTE_A_TEST_MOBILE';   // e.g. your own number, on a test patient
   const cfg = getConfig_();
   recallOneReply_(cfg, recallSettings_(cfg), { id: 0, from: mobile, text: 'STOP', at: new Date().toISOString() }, {});
+}
+
+// Run from the editor: shows the first person on Textmagic's list (to check the field names), then syncs now
+function testTextmagicOptouts() {
+  const r = tmFetch_(tmAuth_(), 'get', '/unsubscribers?page=1&limit=3');
+  console.log('First on the list: ' + JSON.stringify((r.resources || [])[0] || 'nobody'));
+  console.log(JSON.stringify(tmUnsubSync_(getConfig_(), true)));
 }

@@ -132,6 +132,12 @@ const errText = (err, fallback) => (err && err.code === "permission-denied"
   : (err && err.message) || fallback);
 const dncTitle = (c) => `On the do-not-contact list${c.dncWhy ? ` (${c.dncWhy})` : ""}. ` +
   "No recall texts or emails. Calls and messages about their care are fine.";
+// "3 Nov 2026" from an ISO time
+const dayYear = (iso) => { const d = new Date(iso || ""); return isNaN(d) ? "" : d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }); };
+// Opted out of texts: Textmagic's list, or they replied STOP (Code.gs → tmUnsubSync_ / recallStop_)
+const smsStopText = (c) => (!c.smsStop ? ""
+  : `${c.smsStop.source === "Textmagic" ? "Opted out of texts in Textmagic" : "Replied STOP to a text"}${
+    c.smsStop.at ? ` on ${dayYear(c.smsStop.at)}` : ""}. No texts to this mobile. Calls${c.dnc ? " about their care" : " and emails"} are still fine.`);
 const getPref = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v === "1"; } catch { return d; } };
 const setPref = (k, v) => { try { localStorage.setItem(k, v ? "1" : "0"); } catch { /* not essential */ } };
 // The note box grows with what's typed (up to 240px, then it scrolls)
@@ -193,6 +199,8 @@ function norm(snap) {
     flowState: s("flowState"), flowDueAt: Number(x.flowDueAt) || 0,
     joinedCat: s("joinedCat"), alsoDue: Array.isArray(x.alsoDue) ? x.alsoDue.map(String) : [],
     dnc: x.dnc === true, dncWhy: s("dncWhy"), nextAppt: s("nextAppt"), callBackDue: s("callBackDue"),
+    smsStop: x.smsStop && typeof x.smsStop === "object"
+      ? { at: String(x.smsStop.at || ""), source: String(x.smsStop.source || "") } : null,
     log: Array.isArray(x.log) ? x.log : [], updatedAt: s("updatedAt"),
   };
 }
@@ -203,6 +211,7 @@ export function mountRecall(container, { staff = null } = {}) {
   root.innerHTML = `
     <div class="rc-top"><h2>Recall</h2><span class="inv-spacer"></span>
       <button type="button" class="rc-start" data-act="session-start" hidden title="Work through My calls one patient at a time">${I.headset}<span>Start calling</span></button>
+      <button type="button" class="lh-btn is-quiet" data-act="optouts" title="Mobiles that opted out of texts">Opted out</button>
       <a class="lh-btn is-quiet" href="#/recall/messages">Texts & emails</a>
       ${can(staff, "recall.manage") ? '<a class="lh-btn is-quiet" href="#/recall/results">Results</a>' : ""}
       ${can(staff, "recall.manage") ? '<a class="lh-btn is-quiet" href="#/settings/recall">Recall settings</a>' : ""}</div>
@@ -573,7 +582,8 @@ export function mountRecall(container, { staff = null } = {}) {
     return `<div class="rc-item ${rail(c, t)}${on ? " is-on" : ""}" data-card="${esc(c.id)}" role="button" tabindex="0" aria-expanded="${on}">
         <span class="rc-av h${hue(c.category)}" aria-hidden="true">${esc(initials(c.patientName))}</span>
         <span class="rc-main"><strong>${esc(c.patientName || "Unknown patient")}${c.dnc
-          ? ` <span class="rc-dnc" title="${esc(dncTitle(c))}">Do not contact</span>` : ""}</strong><small>${meta}</small></span>
+          ? ` <span class="rc-dnc" title="${esc(dncTitle(c))}">Do not contact</span>`
+          : c.smsStop ? ` <span class="rc-dnc is-sms" title="${esc(smsStopText(c))}">No texts</span>` : ""}</strong><small>${meta}</small></span>
         ${tag}
         ${side ? `<span class="rc-side">${esc(side)}</span>` : ""}
         ${contact}
@@ -692,7 +702,8 @@ export function mountRecall(container, { staff = null } = {}) {
   function noticesHtml(c) {
     return (c.reply ? `<div class="rc-reply${c.replyOpen ? " is-open" : ""}"><strong>${esc(REPLY_TAG[c.reply.kind] || "Replied")} · ${esc(when(c.reply.at))}</strong>
         <p>${esc(c.reply.text)}</p></div>` : "") +
-      (c.dnc ? `<div class="rc-dnc-note"><strong>Do not contact</strong> · ${esc(dncTitle(c))}</div>` : "");
+      (c.dnc ? `<div class="rc-dnc-note"><strong>Do not contact</strong> · ${esc(dncTitle(c))}</div>`
+        : c.smsStop ? `<div class="rc-dnc-note is-sms"><strong>No texts</strong> · ${esc(smsStopText(c))}</div>` : "");
   }
   function ctxHtml(c, t) {
     const lastCall = c.log.slice().reverse().find((l) => /no answer|voicemail|spoke|booked/i.test(String(l.what || "")));
@@ -700,7 +711,8 @@ export function mountRecall(container, { staff = null } = {}) {
       ["Last visit", c.lastVisit ? `${nice(c.lastVisit)}${c.lastStaff ? ` with ${c.lastStaff}` : ""}` : "Not known"],
       ["Had", c.lastServices.join(", ") || "–"],
       ["Calls so far", c.attempts ? `${c.attempts}${lastCall ? ` · ${String(lastCall.what).toLowerCase()} ${dayOf(lastCall.at)}` : ""}` : "None yet"],
-      ["Last text", c.lastTextAt ? `${dayOf(c.lastTextAt)}${c.texts > 1 ? ` · ${c.texts} so far` : ""}` : "None yet"],
+      ["Last text", c.smsStop ? `Opted out${c.lastTextAt ? ` · last texted ${dayOf(c.lastTextAt)}` : ""}`
+        : c.lastTextAt ? `${dayOf(c.lastTextAt)}${c.texts > 1 ? ` · ${c.texts} so far` : ""}` : "None yet"],
       ["Upcoming", c.nextAppt && c.nextAppt >= t ? short(c.nextAppt) : "Nothing booked"],
       ["Due", nice(c.dueDate) || "–"],
     ];
@@ -712,8 +724,8 @@ export function mountRecall(container, { staff = null } = {}) {
     return `<div class="rc-contact">
       ${withCall ? (tel ? `<a class="rc-call is-main" href="tel:${esc(tel)}" data-call="${esc(c.id)}">${I.phone}<span>Call ${esc(mobileText(c.mobile))}</span></a>`
         : '<span class="rc-nomob">No mobile on file</span>') : ""}
-      ${tel && c.status !== "closed" ? (c.dnc
-        ? `<button type="button" class="lh-btn" disabled title="${esc(dncTitle(c))}">${I.msg}<span>Text</span></button>`
+      ${tel && c.status !== "closed" ? (c.dnc || c.smsStop
+        ? `<button type="button" class="lh-btn" disabled title="${esc(c.dnc ? dncTitle(c) : smsStopText(c))}">${I.msg}<span>Text</span></button>`
         : `<button type="button" class="lh-btn" data-act="sms">${I.msg}<span>Text</span></button>`) : ""}
       ${c.email ? (c.dnc
         ? `<button type="button" class="lh-btn" disabled title="${esc(dncTitle(c))}">${I.mail}<span>Email</span></button>`
@@ -1066,8 +1078,9 @@ export function mountRecall(container, { staff = null } = {}) {
         return { skip: days < 1 ? "Texted today, so no text is offered." : `Texted ${plural(days, "day")} ago, so no text is offered.` };
       }
     }
-    if (isMobile(c.mobile)) return { kind: "sms", text: fillSms(c, settings.sms.missedTemplate), auto: mode === "auto" };
-    if (c.email) return { kind: "email", auto: false };
+    if (isMobile(c.mobile) && !c.smsStop) return { kind: "sms", text: fillSms(c, settings.sms.missedTemplate), auto: mode === "auto" };
+    if (c.email) return { kind: "email", auto: false, why: c.smsStop ? "They've opted out of texts." : "No mobile on file." };
+    if (c.smsStop) return { skip: "They've opted out of texts, so no text is offered." };
     return { skip: "No mobile or email on file, so there's nothing to send." };
   }
 
@@ -1220,7 +1233,7 @@ export function mountRecall(container, { staff = null } = {}) {
           <button type="button" class="lh-btn is-quiet" data-act="offer-no">${o.auto ? "Don't send" : "Not now"}</button>
         </div></div>`;
     } else if (o && o.kind === "email") {
-      off = `<div class="rc-ub-offer"><strong>No mobile on file. Email ${esc(o.first)} instead?</strong>
+      off = `<div class="rc-ub-offer"><strong>${esc(o.why || "No mobile on file.")} Email ${esc(o.first)} instead?</strong>
         <div class="rc-ub-acts"><button type="button" class="rc-ub-send" data-act="offer-email">${I.mail}<span>Write an email</span></button>
           <span class="inv-spacer"></span><button type="button" class="lh-btn is-quiet" data-act="offer-no">Not now</button></div></div>`;
     }
@@ -1234,6 +1247,75 @@ export function mountRecall(container, { staff = null } = {}) {
         if (bar === b && !offer && !pend) { bar = null; quietNote = ""; drawUndo(); }
       }, b.state === "failed" ? 8000 : 4500);
     }
+  }
+
+  /* ---------- Opted out of texts: Textmagic's list and STOP replies ---------- */
+  function ooRow(r) {
+    const mob = mobileText(r.phone);
+    const src = r.source === "Textmagic" ? "Opted out in Textmagic" : "Replied STOP";
+    const cards = [r.open ? plural(r.open, "open recall") : "", r.booked ? `${r.booked} booked` : ""].filter(Boolean).join(" · ");
+    return `<li class="rc-oo-row" data-q="${esc(`${r.name || ""} ${r.phone} ${mob}`.toLowerCase())}">
+      <div class="rc-oo-main"><strong>${esc(r.name || mob)}</strong>
+        <small>${esc([r.name ? mob : "", src, dayYear(r.at)].filter(Boolean).join(" · "))}</small></div>
+      ${cards ? `<span class="rc-oo-cards">${esc(cards)}</span>` : ""}
+      ${r.patientId ? `<a class="lh-btn is-quiet" href="#/patient/${encodeURIComponent(r.patientId)}">${I.user}<span>Patient</span></a>` : ""}
+    </li>`;
+  }
+
+  async function showOptouts(sync = false) {
+    let dlg = root.querySelector("dialog.rc-oo");
+    if (!dlg) {
+      dlg = document.createElement("dialog");
+      dlg.className = "rc-oo";
+      dlg.setAttribute("aria-label", "Opted out of texts");
+      root.appendChild(dlg);
+      dlg.addEventListener("click", (e) => {
+        if (e.target === dlg || e.target.closest('[data-oo="close"]')) { dlg.close(); return; }
+        const sb = e.target.closest('[data-oo="sync"]');
+        if (sb && !sb.disabled) showOptouts(true);
+      });
+      dlg.addEventListener("input", (e) => {
+        if (e.target.dataset.oo !== "q") return;
+        const q = e.target.value.trim().toLowerCase();
+        const digits = q.replace(/\D/g, "");
+        let n = 0;
+        dlg.querySelectorAll(".rc-oo-row").forEach((li) => {
+          const hit = !q || li.dataset.q.includes(q) || (digits.length >= 3 && li.dataset.q.replace(/\D/g, "").includes(digits));
+          li.hidden = !hit;
+          if (hit) n++;
+        });
+        const none = dlg.querySelector('[data-oo="none"]');
+        if (none) { none.hidden = n > 0; none.textContent = "No match."; }
+      });
+    }
+    const head = `<div class="rc-oo-head"><h3>Opted out of texts</h3><span class="inv-spacer"></span>
+      <button type="button" class="rc-x" data-oo="close" aria-label="Close">${I.x}</button></div>`;
+    dlg.innerHTML = `${head}<p class="fe-note">${sync ? "Checking Textmagic…" : "Loading…"}</p>
+      <div class="skeleton" style="height:220px;border-radius:12px"></div>`;
+    if (!dlg.open) dlg.showModal();
+
+    let res;
+    try { res = await callApi({ action: "recall", op: "smsOptouts", sync }); }
+    catch (err) { res = { problem: errText(err, "Couldn't load the list. Try again.") }; }
+    if (!dlg.isConnected || !dlg.open) return;
+    if (!res || res.problem) {
+      dlg.innerHTML = `${head}<p class="rc-empty">${esc((res && res.problem) || "Couldn't load the list. Try again.")}</p>`;
+      return;
+    }
+    const rows = Array.isArray(res.rows) ? res.rows : [];
+    const st = res.status || {};
+    const fromTm = rows.filter((r) => r.source === "Textmagic").length;
+    dlg.innerHTML = `${head}
+      <p class="fe-note">No recall texts go to these mobiles. Calls are still fine, and emails too unless they're on the
+        do-not-contact list. ${esc(plural(rows.length, "mobile"))}: ${fromTm} from Textmagic's list, ${rows.length - fromTm} replied STOP${
+        st.at ? `. Textmagic last checked ${esc(when(st.at))}` : ""}.</p>
+      <div class="rc-oo-bar">
+        <input type="search" class="fe-input" data-oo="q" placeholder="Find a name or mobile" aria-label="Find a name or mobile" />
+        ${can(staff, "recall.manage") ? '<button type="button" class="lh-btn" data-oo="sync">Check Textmagic now</button>' : ""}
+      </div>
+      ${rows.length ? `<ul class="rc-oo-list">${rows.map(ooRow).join("")}</ul>` : ""}
+      <p class="rc-empty" data-oo="none"${rows.length ? " hidden" : ""}>Nobody has opted out of texts.</p>`;
+    if (sync) showToast(st.added ? `${plural(st.added, "new opt-out")} from Textmagic` : "Up to date with Textmagic");
   }
 
   /* ---------- Events ---------- */
@@ -1400,6 +1482,7 @@ export function mountRecall(container, { staff = null } = {}) {
     const b = e.target.closest("[data-act]");
     if (!b) return;
     const a = b.dataset.act;
+    if (a === "optouts") { showOptouts(false); return; }
     if (a === "session-start") { startSession(); return; }
     if (a === "session-end") { endSession(); return; }
     if (a === "session-pause") { if (session) { session.paused = true; drawPanel(true); } return; }
