@@ -14,7 +14,8 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
 const MAX_BYTES = 1024 * 1024 * 1024; // 1 GB
 const KEEP = 13;                      // columns A–M
 const HEAD_ROWS = 300;                // rows that keep every column (to find the header and the notes column)
-const BATCH = 8000;                   // Day Sheet rows per request
+const BATCH = 8000;                   // Day Sheet / invoice history rows per request
+const SALES_DAILY_MAX = 20000;        // more lines than this: use Load invoice history
 const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const num = (n) => Number(n || 0).toLocaleString("en-AU");
 const when = (iso) => {
@@ -26,7 +27,7 @@ const day = (key) => {
   return isNaN(d) ? key : d.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
 };
 const pause = () => new Promise((r) => setTimeout(r, 0));
-// The invoice date as YYYY-MM-DD: 2026-10-21, 21/10/2026 (Australian day first), 21-10-26 or 21 Oct 2026. "" when unreadable.
+// The invoice date as YYYY-MM-DD: 2026-10-21, 21/10/2026 (Australian day first), 21-10-26, 21 Oct 2026 or 21-Oct-26. "" when unreadable.
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 function invDay(v) {
   const t = String(v || "").trim();
@@ -39,18 +40,38 @@ function invDay(v) {
   if (m) return mk(+m[1], +m[2], +m[3]);
   m = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})\b/.exec(t);
   if (m) return mk(+m[3] < 100 ? 2000 + +m[3] : +m[3], +m[2], +m[1]);
-  m = /^(\d{1,2})\s+([A-Za-z]{3,9})\.?\s+(\d{4})/.exec(t);
-  if (m) { const mo = MONTHS.indexOf(m[2].slice(0, 3).toLowerCase()); return mo < 0 ? "" : mk(+m[3], mo + 1, +m[1]); }
+  m = /^(\d{1,2})[\s-]+([A-Za-z]{3,9})\.?[\s-]+(\d{4}|\d{2})\b/.exec(t);
+  if (m) {
+    const mo = MONTHS.indexOf(m[2].slice(0, 3).toLowerCase());
+    return mo < 0 ? "" : mk(+m[3] < 100 ? 2000 + +m[3] : +m[3], mo + 1, +m[1]);
+  }
   return "";
 }
 const KINDS = [
   { key: "daysheet", title: "Day Sheet (all time)", ready: true, sniff: [/status/, /service/],
     blurb: "Every appointment from Timely, including cancelled. Replaces everything in alltimeappts, then fills in the PCN category (N), Patient ID (O) and Appointment notes (P)." },
   { key: "invoices", title: "Invoice Record (yesterday)", ready: true, sniff: [/invoice/, /customer/, /description|product/],
-    blurb: "Yesterday's invoices from Timely. Added to the bottom of INVOICE RECORD (invoices already there are skipped), with Patient IDs and tidy product names." },
+    blurb: "Yesterday's invoices from Timely, every type. Products go to the bottom of INVOICE RECORD (invoices already there are skipped), with Patient IDs and tidy product names. Every line also goes to SALES RECORD, which the spend tiers use." },
   { key: "packages", title: "Customer Packages", ready: true, sniff: [/customer/, /package/],
     blurb: "Patients' packages from Timely. Replaces everything in customer_packages (A to M), then fills in the Patient ID (M)." },
 ];
+
+/* ---------- Invoice export columns ---------- */
+// Found by their header, so a different column order still works (Timely: F Type, H UnitPrice, I Quantity,
+// J TaxAmount, K PackageLiabilityAmount). Quantity1, TaxAmount1… are report totals and are never picked.
+const isInvHeader = (r) => /invoice/i.test(r[0] || "") && /customer/i.test(r[2] || "") && /description|product/i.test(r[6] || "");
+function invCols(headRow) {
+  const head = (headRow || []).map((c) => String(c || "").toLowerCase().replace(/[^a-z]/g, ""));
+  const at = (re) => { const i = head.findIndex((c) => re.test(c)); return i >= 0 && i < KEEP ? i : -1; };
+  return {
+    type: at(/^type$/), unit: at(/^unitprice$/), qty: at(/^(qty|quantity|units|unitssold|qtysold)$/),
+    tax: at(/^taxamount$/), liab: at(/^packageliabilityamount$/),
+  };
+}
+const isProductType = (t) => /^\s*products?\b/i.test(String(t || ""));
+// One line for SALES RECORD: CSV A, B, C, E, Type, G, UnitPrice, Quantity, TaxAmount, PackageLiabilityAmount
+const salesRow = (r, c) => [r[0], r[1], r[2], r[4], r[c.type], r[6], r[c.unit],
+  c.qty >= 0 ? r[c.qty] : "1", c.tax >= 0 ? r[c.tax] : "0", c.liab >= 0 ? r[c.liab] : ""].map((v) => String(v ?? "").trim());
 
 /* ---------- Appointment notes ---------- */
 // Timely puts several kinds of notes in one cell: "Alerts: … Appointment notes: … Customer notes: …".
@@ -231,6 +252,18 @@ function lastLine(d, k) {
   return `Last uploaded ${when(d.at)}${d.by ? ` by ${d.by}` : ""} · ${what}${d.unmatchedNames ? ` · ${num(d.unmatchedNames)} patients not matched` : ""}`;
 }
 
+// The Invoice Record card also says when SALES RECORD was last updated
+function salesLine(d) {
+  if (!d) return " · SALES RECORD: not loaded yet (use Load invoice history).";
+  if (d.status === "running" && d.startedAt && (!d.at || d.startedAt > d.at)) {
+    return Date.now() - Date.parse(d.startedAt) > 15 * 60000
+      ? " · ⚠ The last invoice history load didn't finish. Load it again."
+      : " · SALES RECORD: an upload is running.";
+  }
+  if (!d.at) return " · SALES RECORD: not loaded yet (use Load invoice history).";
+  return ` · SALES RECORD updated ${when(d.at)}${d.kind === "salesHistory" ? ` (history loaded, ${num(d.rows)} lines)` : ""}`;
+}
+
 /* ---------- Names that weren't matched: link them to a patient ---------- */
 
 const SHEETS = { daysheet: "alltimeappts", invoices: "INVOICE RECORD", packages: "customer_packages" };
@@ -356,6 +389,28 @@ function wireFix(box, onRefill) {
     clearTimeout(timer);
     timer = setTimeout(() => fixSearch(q.closest("li[data-name]"), q.value), 300);
   });
+}
+
+/* ---------- SALES RECORD result (part of the Invoice Record result) ---------- */
+
+function salesHtml(s, info) {
+  if (!info.hasType) {
+    return `<div class="du-warn">This file has no Type column, so SALES RECORD (used for spend tiers) wasn't updated.
+      Export the invoice report with every type.</div>`;
+  }
+  if (!info.canSales) return '<div class="du-warn">No UnitPrice column was found, so SALES RECORD wasn\'t updated.</div>';
+  if (!s) return "";
+  if (s.problem) return `<div class="du-warn">SALES RECORD wasn't updated: ${esc(s.problem)} INVOICE RECORD was still updated.</div>`;
+  if (s.nothingNew) return '<div class="muted">SALES RECORD already had every invoice in this file.</div>';
+  const bits = [
+    s.added ? plural(s.added, "new invoice") : "",
+    s.updated ? `${plural(s.updated, "invoice")} changed` : "",
+    s.removed ? `${plural(s.removed, "voided invoice")} removed` : "",
+  ].filter(Boolean).join(", ");
+  return `
+    <div><strong>SALES RECORD:</strong> ${plural(s.rows, "line")} of every type, for spend tiers${bits ? ` · ${esc(bits)}` : ""}.</div>
+    <div class="muted">Patient IDs filled in for ${num(s.matched)} of ${num(s.rows)} lines.</div>
+    ${s.badDates ? `<div class="du-warn">${plural(s.badDates, "line")} had a date that couldn't be read, so it was kept as text.</div>` : ""}`;
 }
 
 /* ---------- 4) Run PCN update ---------- */
@@ -534,6 +589,7 @@ function wirePcn(card) {
 function cardHtml(k, i) {
   const head = `<h4><span class="tb-num">${i + 1}</span>${esc(k.title)}${k.ready ? "" : ' <small class="muted du-soon">Coming next</small>'}</h4>`;
   if (!k.ready) return `<section class="tb-card du-card is-soon">${head}<p class="muted">${esc(k.blurb)}</p></section>`;
+  const history = k.key === "invoices";
   return `
     <section class="tb-card du-card" data-kind="${k.key}">
       ${head}
@@ -543,9 +599,11 @@ function cardHtml(k, i) {
         <strong data-role="fname">Choose the CSV, or drop it here</strong>
         <small>The file is read here and written to the sheet. It isn't saved anywhere.</small>
       </label>
+      ${history ? '<input type="file" accept=".csv,text/csv" data-history hidden />' : ""}
       <div class="du-acts">
         <button type="button" class="ff-btn is-primary" data-act="run" disabled>Upload and run</button>
         <button type="button" class="ff-btn" data-act="refill">Fill in missing Patient IDs</button>
+        ${history ? '<button type="button" class="ff-btn is-quiet" data-act="history" title="Replaces SALES RECORD from an all-time invoice export (every type). Used for spend tiers.">Load invoice history</button>' : ""}
       </div>
       <div class="du-bar" data-role="bar" hidden><span></span></div>
       <p class="du-msg" data-role="msg" aria-live="polite"></p>
@@ -560,6 +618,8 @@ function wire(card, k, staff) {
   const fname = card.querySelector('[data-role="fname"]');
   const btn = card.querySelector('[data-act="run"]');
   const refillBtn = card.querySelector('[data-act="refill"]');
+  const histBtn = card.querySelector('[data-act="history"]');
+  const histInput = card.querySelector("[data-history]");
   const bar = card.querySelector('[data-role="bar"]');
   const msg = card.querySelector('[data-role="msg"]');
   const result = card.querySelector('[data-role="result"]');
@@ -570,9 +630,22 @@ function wire(card, k, staff) {
   const setMsg = (t, bad = false) => { msg.textContent = t || ""; msg.classList.toggle("is-bad", bad); };
   const setBar = (p) => { bar.hidden = p === null; if (p !== null) bar.firstElementChild.style.width = `${Math.round(p * 100)}%`; };
   const guard = (e) => { e.preventDefault(); e.returnValue = ""; };
-  const showLast = () => getDoc(doc(db, "data_uploads", k.key))
-    .then((s) => { if (card.isConnected) lastEl.textContent = s.exists() ? lastLine(s.data(), k) : "Not uploaded from the portal yet."; })
+  const showLast = () => Promise.all([
+    getDoc(doc(db, "data_uploads", k.key)),
+    k.key === "invoices" ? getDoc(doc(db, "data_uploads", "sales")).catch(() => null) : Promise.resolve(null),
+  ])
+    .then(([s, sa]) => {
+      if (!card.isConnected) return;
+      lastEl.textContent = (s.exists() ? lastLine(s.data(), k) : "Not uploaded from the portal yet.") +
+        (k.key === "invoices" ? salesLine(sa && sa.exists() ? sa.data() : null) : "");
+    })
     .catch(() => { lastEl.textContent = ""; });
+  const setBusy = (on) => {
+    btn.disabled = on || !file;
+    refillBtn.disabled = on;
+    input.disabled = on;
+    if (histBtn) histBtn.disabled = on;
+  };
   const clearFile = () => {
     file = null; input.value = "";
     fname.textContent = "Choose the CSV, or drop it here";
@@ -609,11 +682,11 @@ function wire(card, k, staff) {
     }
   }
 
-  async function readFile(share, pickExtra = null) {
+  async function readFile(share, pickExtra = null, f = file) {
     setMsg("Reading the file…");
     setBar(0);
-    const delim = await sniffDelim(file);
-    const all = await readCsv(file, delim, (p) => { setBar(p * share); setMsg(`Reading the file… ${Math.round(p * 100)}%`); }, pickExtra);
+    const delim = await sniffDelim(f);
+    const all = await readCsv(f, delim, (p) => { setBar(p * share); setMsg(`Reading the file… ${Math.round(p * 100)}%`); }, pickExtra);
     return { all, delim };
   }
   /* ---------- 1) Day Sheet ---------- */
@@ -698,51 +771,59 @@ function wire(card, k, staff) {
     showToast("Day Sheet uploaded to alltimeappts");
   }
   
-  /* ---------- 2) Invoice Record ---------- */
+  /* ---------- 2) Invoice Record (products → INVOICE RECORD and stock; every line → SALES RECORD) ---------- */
 
   async function runInvoices() {
     const { all, delim } = await readFile(0.4);
-    const isHeader = (r) => /invoice/i.test(r[0] || "") && /customer/i.test(r[2] || "") && /description|product/i.test(r[6] || "");
-    const h = all.slice(0, 30).findIndex(isHeader);
+    const h = all.slice(0, 30).findIndex(isInvHeader);
     if (h < 0) throw headerError(all, delim, "InvoiceIdSequential in A, CustomerName in C, Description in G");
+    const cols = invCols(all[h]);
+    const hasType = cols.type >= 0;
+    const canSales = hasType && cols.unit >= 0;
+    const lines = all.slice(h + 1).filter((r) => r.some((c) => String(c ?? "").trim()));
+    all.length = 0;
+    if (!lines.length) throw new Error("The file has no invoices in it.");
+
+    // Products only (an older products-only export has no Type column: every line is a product)
+    const prodLines = hasType ? lines.filter((r) => isProductType(r[cols.type])) : lines;
     // CSV A, B, C, E, G → INVOICE RECORD A, B, C, E, F (D, the Patient ID, is filled in by Apps Script)
-    const rows = all.slice(h + 1)
+    const rows = prodLines
       .map((r) => [r[0], r[1], r[2], r[4], r[6]].map((c) => String(c ?? "").trim()))
       .filter((r) => r.some(Boolean));
-    if (!rows.length) throw new Error("The file has no invoices in it.");
+    const salesRows = canSales ? lines.map((r) => salesRow(r, cols)) : [];
+    const info = { hasType, canSales, products: rows.length, lines: lines.length, noQty: cols.qty < 0, noDate: 0, unlinked: [] };
 
-    // The same lines for stock. A quantity column is used when there is one in A–M (later columns aren't kept).
-    const head = (all[h] || []).map((c) => String(c || "").toLowerCase().replace(/[^a-z]/g, ""));
-    const qi = head.findIndex((c) => /^(qty|quantity|units|unitssold|qtysold)$/.test(c));
-    const qtyCol = qi >= 0 && qi < KEEP ? qi : -1;
-    let noDate = 0;
-    const sold = all.slice(h + 1).map((r) => {
+    // The same product lines for stock
+    const sold = prodLines.map((r) => {
       const product = String(r[6] ?? "").trim();
       const invoiceId = String(r[0] ?? "").trim();
       if (!product || !invoiceId) return null;
       const date = invDay(r[1]);
-      if (!date) { noDate++; return null; }
+      if (!date) { info.noDate++; return null; }
       return { invoiceId, date, patientName: String(r[2] ?? "").trim(), staffName: String(r[4] ?? "").trim(), product,
-        qty: qtyCol >= 0 ? String(r[qtyCol] ?? "").replace(/[,\s]/g, "") : "" };
+        qty: cols.qty >= 0 ? String(r[cols.qty] ?? "").replace(/[,\s]/g, "") : "" };
     }).filter(Boolean);
-    all.length = 0;
 
-    setMsg(`Found ${num(rows.length)} lines. Adding the new ones to INVOICE RECORD…`);
-    setBar(0.5);
-    const packed = await packJson(rows);
-    const payload = { action: "upload", op: "invoices", fileName: file.name, gzip: packed.gzip, data: packed.data };
-    let res = await send(payload);
-    if (res.needsForce) {
-      const ok = await confirmDialog({ title: "Add these invoices?", message: res.problem, confirmLabel: "Add them", tone: "warning" });
-      if (!ok) { setMsg("Nothing was changed."); setBar(null); return; }
-      res = await send(Object.assign({}, payload, { force: true }));
+    // INVOICE RECORD (products)
+    let res = { rows: 0 };
+    if (rows.length) {
+      setMsg(`Found ${plural(rows.length, "product line")}. Adding the new ones to INVOICE RECORD…`);
+      setBar(0.5);
+      const packed = await packJson(rows);
+      const payload = { action: "upload", op: "invoices", fileName: file.name, gzip: packed.gzip, data: packed.data };
+      res = await send(payload);
+      if (res.needsForce) {
+        const ok = await confirmDialog({ title: "Add these invoices?", message: res.problem, confirmLabel: "Add them", tone: "warning" });
+        if (!ok) { setMsg("Nothing was changed."); setBar(null); return; }
+        res = await send(Object.assign({}, payload, { force: true }));
+      }
+      if (res.problem) throw new Error(res.problem);
     }
-    if (res.problem) throw new Error(res.problem);
 
     res.synced = "none";
     if (res.rows) {
       setMsg("Updating the portal's skincare records…");
-      setBar(0.7);
+      setBar(0.65);
       try {
         const s = await send({ action: "upload", op: "invoicesSync" });
         res.synced = s.later ? "later" : "done";
@@ -752,16 +833,44 @@ function wire(card, k, staff) {
       }
     }
 
-    // Retail stock: every line, every time. Invoices already applied are skipped, so nothing comes off twice.
-    setMsg("Taking sold products off the Shelf…");
-    setBar(0.85);
-    lastSold = { rows: sold, noQty: qtyCol < 0, noDate, unlinked: [] };
-    const st = await applyStock(sold, (d, t) => setMsg(`Taking sold products off the Shelf… ${d} of ${t}`));
-    lastSold.unlinked = st.unlinked || [];
+    // SALES RECORD (every line, for spend). Never stops the upload: INVOICE RECORD is already done.
+    let salesRes = null;
+    if (canSales) {
+      if (salesRows.length > SALES_DAILY_MAX) {
+        salesRes = { problem: `this file has ${num(salesRows.length)} lines, too many for a daily upload. Use "Load invoice history" for a big file.` };
+      } else {
+        setMsg("Adding every line to SALES RECORD (for spend tiers)…");
+        setBar(0.75);
+        try {
+          const sp = await packJson(salesRows);
+          const sPayload = { action: "upload", op: "sales", fileName: file.name, gzip: sp.gzip, data: sp.data };
+          salesRes = await send(sPayload);
+          if (salesRes.needsForce) {
+            const ok = await confirmDialog({ title: "Remove voided invoices from SALES RECORD?", message: salesRes.problem,
+              confirmLabel: "Remove them", tone: "warning" });
+            salesRes = ok ? await send(Object.assign({}, sPayload, { force: true }))
+              : { problem: "you chose not to remove the voided invoices, so nothing was changed there." };
+          }
+        } catch (err) {
+          console.error("SALES RECORD upload failed:", err);
+          salesRes = { problem: errText(err) };
+        }
+      }
+    }
+
+    // Retail stock: every product line, every time. Invoices already applied are skipped, so nothing comes off twice.
+    let st = null;
+    if (sold.length) {
+      setMsg("Taking sold products off the Shelf…");
+      setBar(0.85);
+      lastSold = Object.assign({ rows: sold }, info);
+      st = await applyStock(sold, (d, t) => setMsg(`Taking sold products off the Shelf… ${d} of ${t}`));
+      lastSold.unlinked = (st && st.unlinked) || [];
+    }
 
     setMsg("");
     setBar(null);
-    doneInvoices(res, st);
+    doneInvoices(res, st, salesRes, info);
     clearFile();
   }
 
@@ -829,29 +938,33 @@ function wire(card, k, staff) {
     return `<div class="du-stock">${parts.join("")}</div>`;
   }
 
-  function doneInvoices(res, st) {
+  function doneInvoices(res, st, salesRes, info) {
     const range = res.from ? (res.from === res.to ? day(res.from) : `${day(res.from)} to ${day(res.to)}`) : "";
     const sync = {
       done: "The portal's skincare records are updated, so purchases and Email Flows can see them now.",
       later: "Another job was running, so the portal will pick these up at the next sync.",
       failed: "The portal couldn't be updated just now. The daily sync will pick these up.",
     }[res.synced] || "";
+    // Names to link: SALES RECORD covers every patient on these invoices, so its list is used when it has one
+    const fx = salesRes && !salesRes.problem && salesRes.unmatched ? salesRes : res;
     result.innerHTML = `
       <div class="du-result">
-        ${res.rows
-          ? `<strong>Done. ${plural(res.rows, "product line")} added to INVOICE RECORD (rows ${num(res.startRow)}–${num(res.endRow)}).</strong>`
-          : "<strong>Nothing new to add. Every invoice in this file is already in INVOICE RECORD.</strong>"}
+        ${!info.products
+          ? "<strong>No products were sold on these invoices, so INVOICE RECORD and stock weren't changed.</strong>"
+          : res.rows
+            ? `<strong>Done. ${plural(res.rows, "product line")} added to INVOICE RECORD (rows ${num(res.startRow)}–${num(res.endRow)}).</strong>`
+            : "<strong>No new product lines. Every invoice in this file is already in INVOICE RECORD.</strong>"}
         ${range ? `<div>Invoices from ${esc(range)}.</div>` : ""}
         ${res.skippedInvoices ? `<div>${plural(res.skippedInvoices, "invoice")} already in the sheet, so skipped.</div>` : ""}
-        ${res.noProduct ? `<div class="muted">${plural(res.noProduct, "line")} had no product (services and the like), so left out.</div>` : ""}
         ${res.badDates ? `<div class="du-warn">${plural(res.badDates, "line")} had a date that couldn't be read, so it was kept as text.</div>` : ""}
-        ${res.rows ? `<div>Patient IDs filled in for ${num(res.matched)} of ${num(res.rows)} lines.</div>` : ""}
-        ${fixLists({ amb: res.ambiguous?.sample, ambN: res.ambiguous?.names || 0, un: res.unmatched?.sample, unN: res.unmatched?.names || 0 })}
+        ${res.rows ? `<div>Patient IDs filled in for ${num(res.matched)} of ${num(res.rows)} product lines.</div>` : ""}
+        ${salesHtml(salesRes, info)}
+        ${fixLists({ amb: fx.ambiguous?.sample, ambN: fx.ambiguous?.names || 0, un: fx.unmatched?.sample, unN: fx.unmatched?.names || 0 })}
         ${refillBar()}
         ${sync ? `<div class="muted">${esc(sync)}</div>` : ""}
         <div data-role="stock">${stockHtml(st, lastSold)}</div>
       </div>`;
-    showToast(res.rows ? "Invoices added to INVOICE RECORD" : "No new invoices to add");
+    showToast(res.rows ? "Invoices added" : salesRes && !salesRes.problem && !salesRes.nothingNew ? "SALES RECORD updated" : "No new invoices to add");
   }
 
   // "Link them": save the links, then take the newly linked products off straight away
@@ -874,6 +987,89 @@ function wire(card, k, staff) {
       btn.disabled = !file;
     }
   });
+
+  /* ---------- 2b) Load invoice history: replaces SALES RECORD, in batches ---------- */
+
+  async function runHistory(f) {
+    if (running || !f) return;
+    if (!/\.csv$/i.test(f.name)) { setMsg("Choose the CSV file Timely exported (its name ends in .csv).", true); return; }
+    if (f.size > MAX_BYTES) { setMsg("That file is over 1 GB. Check it's the right export.", true); return; }
+    const ok0 = await confirmDialog({
+      title: "Load the invoice history?",
+      message: "This replaces everything in SALES RECORD with this file. Use the invoice export for all time (or at least the last 13 months), with every type. INVOICE RECORD, stock and skincare aren't changed.",
+      confirmLabel: "Load it", tone: "warning",
+    });
+    if (!ok0) return;
+    running = true;
+    setBusy(true);
+    result.innerHTML = "";
+    window.addEventListener("beforeunload", guard);
+    let started = false;
+    try {
+      const { all, delim } = await readFile(0.3, null, f);
+      const h = all.slice(0, 30).findIndex(isInvHeader);
+      if (h < 0) throw headerError(all, delim, "InvoiceIdSequential in A, CustomerName in C, Description in G");
+      const cols = invCols(all[h]);
+      if (cols.type < 0 || cols.unit < 0) {
+        throw new Error("This file has no Type or UnitPrice column. Export the invoice report with every type, then try again. Nothing was changed.");
+      }
+      const rows = all.slice(h + 1).filter((r) => r.some((c) => String(c ?? "").trim())).map((r) => salesRow(r, cols));
+      all.length = 0;
+      if (!rows.length) throw new Error("The file has no invoices in it.");
+
+      setMsg(`Found ${num(rows.length)} invoice lines. Getting SALES RECORD ready…`);
+      let start = await send({ action: "upload", op: "salesStart", total: rows.length, fileName: f.name });
+      if (start.needsForce) {
+        const ok = await confirmDialog({ title: "Replace SALES RECORD?", message: start.problem, confirmLabel: "Replace it", tone: "warning" });
+        if (!ok) { setMsg("Nothing was changed."); setBar(null); return; }
+        start = await send({ action: "upload", op: "salesStart", total: rows.length, fileName: f.name, force: true });
+      }
+      if (start.problem) throw new Error(start.problem);
+      started = true;
+
+      const sum = { unmatched: {}, ambiguous: {}, badDates: 0 };
+      for (let i = 0; i < rows.length; i += BATCH) {
+        const part = rows.slice(i, i + BATCH);
+        setMsg(`Writing ${num(Math.min(i + part.length, rows.length))} of ${num(rows.length)}… keep this page open.`);
+        const packed = await packJson(part);
+        const res = await send({ action: "upload", op: "salesChunk", token: start.token, offset: i, gzip: packed.gzip, data: packed.data });
+        if (res.problem) throw new Error(res.problem);
+        sum.badDates += Number(res.badDates || 0);
+        Object.entries(res.unmatched || {}).forEach(([n, c]) => { sum.unmatched[n] = (sum.unmatched[n] || 0) + Number(c || 0); });
+        Object.entries(res.ambiguous || {}).forEach(([n, c]) => { sum.ambiguous[n] = (sum.ambiguous[n] || 0) + Number(c || 0); });
+        setBar(0.3 + 0.7 * ((i + part.length) / rows.length));
+      }
+      const unmatchedNames = Object.keys(sum.unmatched).length + Object.keys(sum.ambiguous).length;
+      const fin = await send({ action: "upload", op: "salesFinish", token: start.token,
+        summary: { badDates: sum.badDates, unmatchedNames } });
+      if (fin.problem) throw new Error(fin.problem);
+      setMsg("");
+      setBar(null);
+      result.innerHTML = `
+        <div class="du-result">
+          <strong>Done. ${num(fin.rows)} invoice lines are in SALES RECORD.</strong>
+          <div>Took ${Math.max(1, Math.round((fin.ms || 0) / 1000))} seconds${fin.before ? ` · it had ${num(fin.before)} rows before` : ""}.</div>
+          ${sum.badDates ? `<div class="du-warn">${plural(sum.badDates, "line")} had a date that couldn't be read, so it was kept as text.</div>` : ""}
+          ${fixLists({ amb: sampleOf(sum.ambiguous), ambN: Object.keys(sum.ambiguous).length,
+            un: sampleOf(sum.unmatched), unN: Object.keys(sum.unmatched).length })}
+          ${refillBar()}
+          <div class="muted">Spend tiers are worked out from SALES RECORD at the next hourly Recall check.
+            To do it now, run recallSpendNow in Apps Script.</div>
+        </div>`;
+      showToast("Invoice history loaded into SALES RECORD");
+    } catch (err) {
+      console.error("Invoice history failed:", err);
+      setBar(null);
+      setMsg(errText(err) + (started ? " SALES RECORD is only partly filled, so load the file again." : ""), true);
+    } finally {
+      running = false;
+      setBusy(false);
+      if (histInput) histInput.value = "";
+      window.removeEventListener("beforeunload", guard);
+      showLast();
+    }
+  }
+
   /* ---------- 3) Customer Packages ---------- */
 
   async function runPackages() {
@@ -904,8 +1100,6 @@ function wire(card, k, staff) {
   }
 
   function donePackages(res) {
-    const list = (o) => ((o && o.sample) || []).map((x) => `<li>${esc(x.name)} <small class="muted">(${num(x.rows)})</small></li>`).join("");
-    const plural = (n, w) => `${num(n)} ${w}${n === 1 ? "" : "s"}`;
     result.innerHTML = `
       <div class="du-result">
         <strong>Done. ${plural(res.rows, "package line")} are in customer_packages.</strong>
@@ -923,11 +1117,9 @@ function wire(card, k, staff) {
   async function runRefill() {
     if (running) return;
     running = true;
-    btn.disabled = true;
-    refillBtn.disabled = true;
-    input.disabled = true;
+    setBusy(true);
     refillBtn.textContent = "Filling in…";
-    setMsg(`Filling in missing Patient IDs in ${SHEETS[k.key]}… keep this page open.`);
+    setMsg(`Filling in missing Patient IDs in ${SHEETS[k.key]}${k.key === "invoices" ? " and SALES RECORD" : ""}… keep this page open.`);
     try {
       const res = await send({ action: "upload", op: "refill", kind: k.key });
       if (res.problem) throw new Error(res.problem);
@@ -935,13 +1127,22 @@ function wire(card, k, staff) {
         try { await send({ action: "upload", op: "invoicesSync" }); } catch (e) { console.warn("Skincare sync after refill failed:", e); }
       }
       setMsg("");
-      const still = (res.unmatched?.names || 0) + (res.ambiguous?.names || 0);
+      // Invoices: SALES RECORD has every patient, so its list of names still to link is shown when it's the longer one
+      const n = (u, a) => (u?.names || 0) + (a?.names || 0);
+      const useSales = k.key === "invoices" && n(res.salesUnmatched, res.salesAmbiguous) > n(res.unmatched, res.ambiguous);
+      const un = useSales ? res.salesUnmatched : res.unmatched;
+      const am = useSales ? res.salesAmbiguous : res.ambiguous;
+      const still = n(un, am);
+      const filledAny = (res.filled || 0) + (res.salesFilled || 0);
       result.innerHTML = `
         <div class="du-result">
-          <strong>${res.filled ? `Filled in ${plural(res.filled, "Patient ID")} in ${SHEETS[k.key]}.` : "No more Patient IDs could be filled in."}</strong>
+          <strong>${filledAny
+            ? `Filled in ${plural(res.filled || 0, "Patient ID")} in ${SHEETS[k.key]}${k.key === "invoices" ? ` and ${num(res.salesFilled || 0)} in SALES RECORD` : ""}.`
+            : "No more Patient IDs could be filled in."}</strong>
           <div>${still ? `${plural(still, "name")} still need a patient. Link them below, then fill in again.` : "Every patient name is matched."}</div>
+          ${res.salesProblem ? `<div class="du-warn">SALES RECORD: ${esc(res.salesProblem)}</div>` : ""}
           ${res.skipped ? `<div class="muted">${plural(res.skipped, "staff booking")} left out (not patients).</div>` : ""}
-          ${fixLists({ amb: res.ambiguous?.sample, ambN: res.ambiguous?.names || 0, un: res.unmatched?.sample, unN: res.unmatched?.names || 0, open: true })}
+          ${fixLists({ amb: am?.sample, ambN: am?.names || 0, un: un?.sample, unN: un?.names || 0, open: true })}
           ${refillBar()}
           ${k.key === "daysheet" && res.filled ? '<div class="muted">Run PCN update so the portal shows them.</div>' : ""}
         </div>`;
@@ -950,9 +1151,7 @@ function wire(card, k, staff) {
       setMsg(errText(err), true);
     } finally {
       running = false;
-      input.disabled = false;
-      btn.disabled = !file;
-      refillBtn.disabled = false;
+      setBusy(false);
       refillBtn.textContent = "Fill in missing Patient IDs";
       showLast();
     }
@@ -964,10 +1163,8 @@ function wire(card, k, staff) {
     if (!file || running) return;
     running = true;
     wroteSome = false;
-    btn.disabled = true;
-    input.disabled = true;
+    setBusy(true);
     btn.textContent = "Working…";
-    refillBtn.disabled = true;
     result.innerHTML = "";
     window.addEventListener("beforeunload", guard);
     try {
@@ -980,10 +1177,8 @@ function wire(card, k, staff) {
       setMsg(errText(err) + (wroteSome ? " alltimeappts is only partly filled, so upload the file again." : ""), true);
     } finally {
       running = false;
-      input.disabled = false;
+      setBusy(false);
       btn.textContent = "Upload and run";
-      btn.disabled = !file;
-      refillBtn.disabled = false;
       window.removeEventListener("beforeunload", guard);
       showLast();
     }
@@ -999,6 +1194,10 @@ function wire(card, k, staff) {
   });
   btn.addEventListener("click", run);
   refillBtn.addEventListener("click", runRefill);
+  if (histBtn && histInput) {
+    histBtn.addEventListener("click", () => { if (!running) histInput.click(); });
+    histInput.addEventListener("change", () => runHistory(histInput.files[0]));
+  }
   wireFix(result, runRefill);
   showLast();
 }
