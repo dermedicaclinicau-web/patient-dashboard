@@ -4,11 +4,13 @@
 import { fetchStaffList } from "./task-types.js";
 import { isAdmin } from "./perms.js";
 import { confirmDialog } from "./dialog.js";
-import { escapeHtml, getInitials, hueFromString, showToast } from "./utils.js";
+import { escapeHtml, getInitials, hueFromString, showToast, toDateKey } from "./utils.js";
+import { getPatient, patientIds } from "./patients.js";
+import { fetchDayAppointments } from "./appointments.js";
 import {
   watchChats, watchMessages, sendMessage, markRead, setChatStatus, listAllChats, isUnread, isHiddenFor, helpId, dmId,
   newGroupId, watchAway, saveAway, editMessage, deleteMessage, hideChat, newMessageId,
-  uploadChatImage, chatImageUrl, cachedImageUrl,
+  uploadChatImage, chatImageUrl, cachedImageUrl, countUnread,
 } from "./chat-api.js";
 import { startPresence, stopPresence, watchPresence } from "./presence.js";
 import { requestRefresh } from "./force-refresh.js";
@@ -39,6 +41,8 @@ const I = {
   edit: svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'),
   photo: svg('<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>'),
   userPlus: svg('<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/>'),
+  reply: svg('<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>'),
+  chevR: svg('<polyline points="9 18 15 12 9 6"/>'),
 };
 
 // The emoji panel in the message box
@@ -180,6 +184,14 @@ let actsOpen = "";           // my message whose Edit / Delete is showing (survi
 let searchQ = "";            // Search this chat
 let hitIdx = -1;
 let jumpCount = 0;           // new messages below while you're scrolled up
+let replyTo = null;          // the message being answered: { id, by, byUid, text, image }
+let linkPt = null;           // the patient linked to the next message
+const PAGE = 150;            // messages loaded at a time
+let msgLimit = PAGE;
+const unreadN = new Map();   // chat id → { key, n }: how many unread
+const counting = new Set();
+const ptCache = new Map();   // patient id → promise of the patient
+let apptJob = null;          // today's bookings, read once a day
 
 /* ---------- Pictures ---------- */
 // Shrunk to about 1600px before sending. Screenshots stay PNG (sharp text); photos become JPEG. GIFs are sent as they are.
@@ -315,6 +327,163 @@ function zoomImage(btn) {
   d.showModal();
 }
 
+/* ---------- Patients in chat ---------- */
+const recentKey = () => `chat:recentPts:${me.uid}`;
+// The patient whose page, form or consultation is open, from the address
+function currentPatientId() {
+  const m = /^#\/(?:patient|fill|consult\/new)\/([^/?#]+)/.exec(location.hash || "");
+  if (!m) return "";
+  try { return decodeURIComponent(m[1]); } catch { return ""; }
+}
+// Patients you open are remembered on this device (newest first, 8 at most)
+function rememberPatient() {
+  const id = currentPatientId();
+  if (!id || !me) return;
+  try {
+    const list = JSON.parse(localStorage.getItem(recentKey()) || "[]").filter((x) => x !== id);
+    list.unshift(id);
+    localStorage.setItem(recentKey(), JSON.stringify(list.slice(0, 8)));
+  } catch { /* ignore */ }
+}
+function ptFull(id) {
+  if (!ptCache.has(id)) ptCache.set(id, getPatient(id).then((p) => p || null).catch(() => null));
+  return ptCache.get(id);
+}
+function todaysAppts() {
+  const k = keyOf(new Date());
+  if (!apptJob || apptJob.k !== k) {
+    apptJob = { k, p: fetchDayAppointments(toDateKey()).then((d) => (d && d.appointments) || []).catch(() => []) };
+  }
+  return apptJob.p;
+}
+// Their time today ("9:15 am"), or ""
+async function apptFor(p) {
+  const list = await todaysAppts();
+  const ids = patientIds(p).map((s) => String(s).toLowerCase());
+  const name = String(p.name || "").toLowerCase();
+  const a = list.filter((x) => (x.patientId ? ids.includes(String(x.patientId).toLowerCase())
+    : String(x.patientName || "").toLowerCase() === name))
+    .sort((x, y) => (x.sortMinutes || 0) - (y.sortMinutes || 0))[0];
+  return a && a.time ? a.time : "";
+}
+// "Appt today 9:15 am", or "Appt 9 Nov, 9:15 am" on later days
+function apptText(p) {
+  if (!p.apptKey || !p.apptTime) return "";
+  if (p.apptKey === keyOf(new Date())) return `Appt today ${p.apptTime}`;
+  const [y, mo, d] = p.apptKey.split("-").map(Number);
+  return `Appt ${new Date(y, mo - 1, d).toLocaleDateString("en-AU", { day: "numeric", month: "short" })}, ${p.apptTime}`;
+}
+const ptCardHtml = (p) => `<a class="ch-pt" href="#/patient/${encodeURIComponent(p.id)}" title="Open ${esc(p.name)}'s page">
+    <span class="ch-pt-av" style="--h:${hueFromString(p.name)}">${esc(getInitials(p.name))}</span>
+    <span class="ch-pt-t"><b>${esc(p.name)}</b><small>${esc([p.pttId && `ID ${p.pttId}`, apptText(p)].filter(Boolean).join(" · ") || "Open their page")}</small></span>
+    ${I.chevR}</a>`;
+
+async function openPtPick() {
+  const box = panel && panel.querySelector('[data-role="ptpick"]');
+  if (!box) return;
+  closeMenus();
+  const top = `<div class="ch-pp-head"><strong>Link a patient</strong>
+    <button type="button" class="ch-ic" data-act="ptclose" aria-label="Close">${I.x}</button></div>`;
+  box.hidden = false;
+  box.innerHTML = `${top}<p class="ch-none">Loading…</p>`;
+  const here = currentPatientId();
+  let ids = [];
+  try { ids = JSON.parse(localStorage.getItem(recentKey()) || "[]"); } catch { ids = []; }
+  ids = [...new Set([here, ...ids].filter(Boolean))].slice(0, 8);
+  const pts = (await Promise.all(ids.map(ptFull))).filter(Boolean);
+  if (box.hidden || !box.isConnected) return;
+  box.innerHTML = top + (pts.length ? `<div class="ch-pp-list">${pts.map((p) => `
+      <button type="button" class="ch-pp-row" data-ptpick="${esc(p.id)}">
+        <span class="ch-pt-av" style="--h:${hueFromString(p.name)}">${esc(getInitials(p.name))}</span>
+        <span class="ch-pt-t"><b>${esc(p.name)}</b><small>${esc(p.pttId ? `ID ${p.pttId}` : "")}</small></span>
+        ${p.id === here ? "<em>This page</em>" : ""}</button>`).join("")}</div>
+      <p class="ch-pp-note">Patients you've opened recently. Open someone's page to add them here.</p>`
+    : '<p class="ch-none">Open a patient\'s page first. The patients you open show here.</p>');
+}
+function closePtPick() {
+  const box = panel && panel.querySelector('[data-role="ptpick"]');
+  if (box) { box.hidden = true; box.innerHTML = ""; }
+}
+async function pickPatient(id) {
+  const p = await ptFull(id);
+  if (!p) { showToast("Couldn't load that patient."); return; }
+  linkPt = { id: p.id, name: p.name || "Patient", pttId: p.pttId || "", apptKey: "", apptTime: "" };
+  closePtPick();
+  paintPt();
+  const ta = panel.querySelector(".ch-comp textarea");
+  if (ta && !isTouch()) ta.focus();
+  const t = await apptFor(p);   // added when today's bookings have been read
+  if (t && linkPt && linkPt.id === p.id) { linkPt.apptKey = keyOf(new Date()); linkPt.apptTime = t; paintPt(); }
+}
+function paintPt() {
+  const chip = panel && panel.querySelector('[data-role="ptchip"]');
+  if (!chip) return;
+  chip.hidden = !linkPt;
+  if (linkPt) chip.querySelector("span").textContent = [linkPt.name, apptText(linkPt)].filter(Boolean).join(" · ");
+}
+
+/* ---------- Replies ---------- */
+function startReply(mid) {
+  const m = msgList.find((x) => x.id === mid);
+  if (!m || m.deleted) return;
+  if (editing) stopEdit();
+  replyTo = { id: m.id, by: m.by, byUid: m.byUid, image: !!m.image,
+    text: String(m.text || (m.patient ? `👤 ${m.patient.name}` : "")).slice(0, 140) };
+  panel.querySelectorAll(".ch-m.is-acts").forEach((x) => x.classList.remove("is-acts"));
+  actsOpen = "";
+  paintReply();
+  const ta = panel.querySelector(".ch-comp textarea");
+  if (ta) ta.focus();
+}
+function paintReply() {
+  const bar = panel && panel.querySelector('[data-role="replybar"]');
+  if (!bar) return;
+  bar.hidden = !replyTo;
+  bar.innerHTML = replyTo ? `<span><b>Replying to ${esc(replyTo.byUid === me.uid ? "yourself" : replyTo.by)}</b>
+      <small>${esc(replyTo.text || (replyTo.image ? "📷 Photo" : "Message"))}</small></span>
+    <button type="button" class="ch-ic" data-act="unreply" aria-label="Cancel reply" title="Cancel reply">${I.x}</button>` : "";
+}
+// Tapping a quote: to the original message, with a short highlight
+function jumpTo(mid) {
+  const el = panel && panel.querySelector(`.ch-m[data-mid="${CSS.escape(mid)}"]`);
+  if (!el) {
+    showToast(msgList.length >= msgLimit ? "That message is further back. Tap Load earlier messages." : "That message isn't here any more.");
+    return;
+  }
+  el.scrollIntoView({ block: "center", behavior: "smooth" });
+  el.classList.remove("is-flash");
+  void el.offsetWidth;
+  el.classList.add("is-flash");
+}
+
+/* ---------- Unread counts in the list ---------- */
+function refreshCounts() {
+  if (!me) return;
+  myChats().forEach((c) => {
+    if (!isUnread(c, me.uid)) { unreadN.delete(c.id); return; }
+    const since = c.readAt[me.uid] || null;
+    const key = `${c.lastAt ? c.lastAt.getTime() : 0}:${since ? since.getTime() : 0}`;
+    const have = unreadN.get(c.id);
+    if ((have && have.key === key) || counting.has(c.id)) return;
+    counting.add(c.id);
+    countUnread(c.id, since)
+      .then((n) => {
+        unreadN.set(c.id, { key, n });
+        if (isOpen() && !minimized && view === "list") redrawList();
+      })
+      .catch((err) => console.warn("Unread count failed:", err))
+      .finally(() => counting.delete(c.id));
+  });
+}
+// The chat list again, keeping where it was scrolled to
+function redrawList() {
+  const sc = panel.querySelector(".ch-list");
+  const top = sc ? sc.scrollTop : 0;
+  drawList();
+  const sc2 = panel.querySelector(".ch-list");
+  if (sc2) sc2.scrollTop = top;
+}
+
 /* ---------- Start and stop ---------- */
 
 export function initChat(staff) {
@@ -333,6 +502,7 @@ export function initChat(staff) {
   presUnsub = watchPresence((m) => { presence = m; onPresence(); }, (err) => console.warn("Presence failed to load:", err));
   loadStaff().then(render);
   checkChatLink();
+  rememberPatient();
 }
 
 export function teardownChat() {
@@ -363,6 +533,8 @@ export function teardownChat() {
   document.removeEventListener("pointerdown", unlockAudio);
   document.removeEventListener("visibilitychange", readIfViewing);
   window.removeEventListener("hashchange", checkChatLink);
+  window.removeEventListener("hashchange", rememberPatient);
+  unreadN.clear();
   pendingOpen = "";
   if (baseTitle) document.title = baseTitle;
 }
@@ -399,6 +571,7 @@ function build() {
   document.addEventListener("pointerdown", unlockAudio);        // browsers only allow sound after a click
   document.addEventListener("visibilitychange", readIfViewing);
   window.addEventListener("hashchange", checkChatLink);
+  window.addEventListener("hashchange", rememberPatient);
 }
 
 // "#/home/chat/<id>" (the button in the reminder email): open that conversation once it has loaded
@@ -654,7 +827,11 @@ const row = (c) => {
       <span class="ch-row-top"><strong>${esc(titleOf(c))}${quiet}</strong><small>${esc(when(c.lastAt))}</small></span>
       <small class="ch-row-last${draft ? " is-draft" : ""}">${last}</small>
       ${admin && c.kind === "help" && c.status === "sorted" ? '<span class="ch-tag">Sorted</span>' : ""}
-    </span>${unread ? '<span class="ch-dot" aria-label="Unread"></span>' : ""}</button>`;
+    </span>${unread ? (() => {
+      const n = (unreadN.get(c.id) || {}).n;
+      return n ? `<span class="ch-count" aria-label="${n} unread">${n > 9 ? "9+" : n}</span>`
+        : '<span class="ch-dot" aria-label="Unread"></span>';
+    })() : ""}</button>`;
 };
 // The faces of everyone on the portal now (online first). Tap one to message them.
 function hereHtml() {
@@ -702,8 +879,9 @@ function drawList() {
       ${admin ? '<button type="button" class="lh-btn" data-act="all">All staff chats</button>' : ""}
     </footer>
     ${admin ? '<button type="button" class="ch-refresh" data-act="refreshall">↻ Update everyone\'s portal</button>' : ""}
-    <p class="ch-note"></p>`;
-}
+    <p class="ch-note">${admin ? "" : "Chats between staff can be seen by Admins."}</p>`;
+  refreshCounts();
+} 
 
 function openThread(id) {
   const c = chatFor(id);
@@ -719,6 +897,9 @@ function openThread(id) {
   searchQ = "";
   hitIdx = -1;
   jumpCount = 0;
+  replyTo = null;
+  linkPt = null;
+  msgLimit = PAGE;
   clearAttach();
   const isMember = c.members.includes(me.uid);
   const canWrite = isMember || (admin && c.kind === "help");
@@ -760,7 +941,11 @@ function openThread(id) {
         <button type="button" class="rc-link" data-act="canceledit">Cancel</button></div>
       ${adminHelp ? `<div class="ch-replies">${QUICK_REPLIES.map((q) =>
         `<button type="button" class="ch-chip" data-reply="${esc(q)}">${esc(q)}</button>`).join("")}</div>` : ""}
+      <div class="ch-replybar" data-role="replybar" hidden></div>
+      <div class="ch-ptpick" data-role="ptpick" hidden></div>
       <div class="ch-att" data-role="att" hidden></div>
+      <div class="ch-linkchip ch-ptchip" data-role="ptchip" hidden>${I.userPlus}<span></span>
+        <button type="button" class="ch-ic" data-act="ptunlink" aria-label="Remove the patient" title="Remove">${I.x}</button></div>
       <div class="ch-linkchip" data-role="linkchip" hidden>${I.link}<span></span>
         <button type="button" class="ch-ic" data-act="unlink" aria-label="Don't link this page" title="Don't link this page">${I.x}</button></div>
       <form class="ch-comp" novalidate>
@@ -768,7 +953,7 @@ function openThread(id) {
         <div class="ch-menu ch-plus" data-role="plus" hidden>
           <button type="button" data-act="attach">${I.photo}<span>Add a picture</span></button>
           <button type="button" data-act="linkpage">${I.link}<span data-role="lptext">Link this page</span><small>${esc(pageInfo().label)}</small></button>
-          <button type="button" disabled title="Coming soon">${I.userPlus}<span>Link a patient</span><small>Soon</small></button>
+          <button type="button" data-act="ptlink">${I.userPlus}<span>Link a patient</span></button>
         </div>
         <button type="button" class="ch-ic ch-plus-btn" data-act="plus" aria-label="Add a picture or link" aria-haspopup="true" aria-expanded="false" title="Add">${I.plus}</button>
         <input type="file" accept="image/*" data-role="file" hidden />
@@ -827,14 +1012,15 @@ function closeMenus(e) {
   });
 }
 
-function startMessages(id) {
+// keep: loading earlier messages (stay on the same message instead of jumping to the bottom)
+function startMessages(id, keep = false) {
   stopMessages();
-  let first = true;
+  let first = !keep;
   msgUnsub = watchMessages(id, (msgs) => { drawMessages(msgs, first); first = false; },
-    (err) => console.warn("Chat messages failed:", err));
+    (err) => console.warn("Chat messages failed:", err), msgLimit);
 }
 
-function drawMessages(msgs, first) {
+function drawMessages(msgs, first) {function drawMessages(msgs, first) {
   const box = panel && panel.querySelector('[data-role="msgs"]');
   if (!box || view !== "thread") return;
   msgList = msgs;
@@ -850,6 +1036,7 @@ function drawMessages(msgs, first) {
     if (p.chatId !== openId) return;
     local.push({ id, text: p.text, by: me.name, byUid: me.uid, at: p.at, page: p.page,
       local: true, failed: p.failed, pending: !p.failed && !p.sent,
+      patient: (p.extra && p.extra.patient) || null, replyTo: (p.extra && p.extra.replyTo) || null,
       image: p.img ? { local: p.img.url, path: p.img.path || "", w: p.img.w, h: p.img.h } : null });
   });
   const all = msgs.concat(local);
@@ -857,13 +1044,19 @@ function drawMessages(msgs, first) {
   box._ids = ids;
   if (!all.length) return;
   const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+  const fromBottom = box.scrollHeight - box.scrollTop;
+  const grewAbove = !!box._firstId && all[0].id !== box._firstId && msgs.length > (box._n || 0);   // "Load earlier" arrived
+  box._firstId = all[0].id;
+  box._n = msgs.length;
   const showBy = !!current && current.kind !== "dm";   // names only where it isn't obvious who's who
   const now = Date.now();
   // The same person, the same day, within 5 minutes: one run
   const linked = (a, b) => !!a && !!b && a.byUid === b.byUid && !!a.at && !!b.at
     && keyOf(a.at) === keyOf(b.at) && b.at - a.at < 5 * 60000;
+  const more = msgs.length >= msgLimit
+    ? '<button type="button" class="ch-earlier" data-act="earlier">Load earlier messages</button>' : "";
 
-  const html = all.map((m, i) => {
+  const html = more + all.map((m, i) => {
     const prev = all[i - 1];
     const next = all[i + 1];
     const mine = m.byUid === me.uid;
@@ -873,20 +1066,28 @@ function drawMessages(msgs, first) {
     const runEnd = !linked(m, next);
     const pos = runStart && runEnd ? "" : runStart ? " is-first" : runEnd ? " is-last" : " is-mid";
     const canAct = mine && canWriteNow && !m.deleted && !m.local;
+    const canReply = canWriteNow && !m.deleted && !m.local && !m.pending;
     const text = String(m.text || "").trim();
     const pic = m.image && !m.deleted ? imgHtml(m, canAct) : "";
+    const quote = m.replyTo && !m.deleted ? `<button type="button" class="ch-q" data-jump="${esc(m.replyTo.id)}" title="Go to the message">
+        <b>${esc(m.replyTo.byUid === me.uid ? "You" : (m.replyTo.by || "Message"))}</b>
+        <span>${esc(m.replyTo.text || (m.replyTo.image ? "📷 Photo" : "…"))}</span></button>` : "";
+    const card = m.patient && !m.deleted ? ptCardHtml(m.patient) : "";
+    const plain = !pic && !quote && !card;
+    const textHtml = !text ? "" : pic ? `<span class="ch-m-cap">${linkify(m.text)}</span>`
+      : plain ? linkify(m.text) : `<span class="ch-m-txt">${linkify(m.text)}</span>`;
     // Hover any bubble for its exact time
     const tipText = m.at ? m.at.toLocaleString("en-AU", { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })
       + (m.edited && !m.deleted ? " · edited" : "") : "";
     const tip = tipText ? ` title="${esc(tipText)}"` : "";
     const bubble = m.deleted
       ? `<div class="ch-m-b is-deleted"${tip}>Message deleted</div>`
-      : `<div class="ch-m-b${pic ? " is-img" : onlyEmoji(text) ? " is-emoji" : ""}"${canAct
-        ? ` data-mine="${esc(m.id)}" role="button" tabindex="0"` : ""}${tip}>${pic}${
-          pic ? (text ? `<span class="ch-m-cap">${linkify(m.text)}</span>` : "") : linkify(m.text)}</div>`;
-    const acts = canAct ? `<span class="ch-m-acts">
+      : `<div class="ch-m-b${pic ? " is-img" : ""}${card ? " has-pt" : ""}${plain && onlyEmoji(text) ? " is-emoji" : ""}"${
+          canReply || canAct ? ' data-acts="1" role="button" tabindex="0"' : ""}${tip}>${quote}${pic}${textHtml}${card}</div>`;
+    const acts = canReply || canAct ? `<span class="ch-m-acts">${canReply
+        ? `<button type="button" data-act="mreply" data-mid="${esc(m.id)}" aria-label="Reply" title="Reply">${I.reply}</button>` : ""}${canAct ? `
         <button type="button" data-act="medit" data-mid="${esc(m.id)}" aria-label="Edit" title="Edit">${I.edit}</button>
-        <button type="button" class="is-danger" data-act="mdel" data-mid="${esc(m.id)}" aria-label="Delete" title="Delete">${I.trash}</button></span>` : "";
+        <button type="button" class="is-danger" data-act="mdel" data-mid="${esc(m.id)}" aria-label="Delete" title="Delete">${I.trash}</button>` : ""}</span>` : "";
     const stuck = m.pending && m.at && now - m.at.getTime() > 20000;
     const status = m.failed
       ? `<button type="button" class="ch-m-retry" data-act="retry" data-mid="${esc(m.id)}">Not sent · Tap to retry</button>
@@ -903,7 +1104,7 @@ function drawMessages(msgs, first) {
     </div>`;
   }).join("") + '<p class="ch-seen" data-role="seen" hidden></p>';
 
-  // Only redrawn when something on screen changed: no flicker, and the Edit / Delete buttons stay put
+  // Only redrawn when something on screen changed: no flicker, and the buttons stay put
   if (html !== box._html) {
     box._html = html;
     box.innerHTML = html;
@@ -911,9 +1112,15 @@ function drawMessages(msgs, first) {
   }
   updateSeen();
   applySearch(0, false);
-  if (first || atBottom) { box.scrollTop = box.scrollHeight; setJump(0); }
-  else if (newOnes) setJump(jumpCount + newOnes);
+  if (first || atBottom) {
+    box.scrollTop = box.scrollHeight;
+    setJump(0);
+  } else {
+    if (grewAbove) box.scrollTop = box.scrollHeight - fromBottom;   // older messages added above: stay on the same one
+    if (newOnes) setJump(jumpCount + newOnes);
+  }
 }
+
 
 // "↓ 2 new messages" while you're scrolled up
 function setJump(n) {
@@ -1036,7 +1243,7 @@ async function send(form) {
     ta.focus();
     return;
   }
-  if (!text && !attach) return;
+  if (!text && !attach && !linkPt) return;
   // A brand-new group is made by its first message, so it starts with words
   if (attach && current.kind === "group" && !chats.some((c) => c.id === current.id)) {
     showToast("Send a message first to start the group, then add pictures.");
@@ -1053,18 +1260,24 @@ async function send(form) {
   const hint = panel.querySelector('[data-role="hint"]');
   if (hint) hint.hidden = true;
   if (!isTouch()) ta.focus();
-  deliver(current, newMessageId(current.id), text, withPage ? pageInfo() : null, img);
+  const extra = { patient: linkPt, replyTo };
+  linkPt = null;
+  replyTo = null;
+  paintPt();
+  paintReply();
+  deliver(current, newMessageId(current.id), text, withPage ? pageInfo() : null, img, extra);
 }
 
 // img: { blob, url, w, h, type } (+ path once uploaded, so a retry doesn't upload it again)
-async function deliver(chat, id, text, page, img = null) {
-  pendingSends.set(id, { chatId: chat.id, text, page, img, at: new Date(), failed: false, sent: false });
+// extra: { patient, replyTo }
+async function deliver(chat, id, text, page, img = null, extra = {}) {
+  pendingSends.set(id, { chatId: chat.id, text, page, img, extra, at: new Date(), failed: false, sent: false });
   if (openId === chat.id) redrawMessages(true);
   // Not gone after 20 seconds: say so, instead of "Sending…" forever
   const slow = setTimeout(() => { if (openId === chat.id) redrawMessages(); }, 20500);
   try {
     if (img && !img.path) Object.assign(img, await uploadChatImage(chat.id, id, img));
-    await sendMessage(chat, text, page, me, id, img);
+    await sendMessage(chat, text, page, me, id, img, extra);
     const p = pendingSends.get(id);
     if (p) p.sent = true;
     // A brand-new chat: start listening now it exists
@@ -1105,6 +1318,7 @@ function startEdit(mid) {
   const ta = panel.querySelector(".ch-comp textarea");
   const bar = panel.querySelector('[data-role="editing"]');
   if (!m || m.deleted || !ta || !bar) return;
+  if (replyTo) { replyTo = null; paintReply(); }
   editing = mid;
   bar.hidden = false;
   ta.value = m.text;
@@ -1358,8 +1572,10 @@ async function onClick(e) {
   closeMenus(e);
   // A tap on the header (not one of its buttons or menus) folds it down or opens it again
   if (e.target.closest(".ch-hd") && !e.target.closest("button, a, input, label, .ch-menu")) { setMin(!minimized); return; }
-  if (e.target.closest(".ch-m-b a")) return;   // a link in a message just opens
-  const t = e.target.closest("[data-act],[data-open],[data-dm],[data-pick],[data-back],[data-emo],[data-mine],[data-reply],[data-zoom]");
+  // A link in a message just opens. Portal links (and patient cards) fold the chat down so the page shows.
+  const msgLink = e.target.closest(".ch-m-b a");
+  if (msgLink) { if ((msgLink.getAttribute("href") || "").startsWith("#/")) setMin(true); return; }
+  const t = e.target.closest("[data-act],[data-open],[data-dm],[data-pick],[data-back],[data-emo],[data-acts],[data-reply],[data-zoom],[data-jump],[data-ptpick]");
   if (!t || !me) return;
   if (t.dataset.zoom !== undefined) { zoomImage(t); return; }
   if (t.dataset.emo) { insertEmoji(t.dataset.emo); return; }
@@ -1367,7 +1583,9 @@ async function onClick(e) {
   if (t.dataset.dm) { startDm(t.dataset.dm); return; }
   if (t.dataset.pick) { pickMany(t.dataset.pick); return; }
   if (t.dataset.back) { const f = panel.querySelector('[name="back"]'); if (f) f.value = t.dataset.back; return; }
-  if (t.dataset.mine) { toggleMsgActs(t); return; }
+  if (t.dataset.jump) { jumpTo(t.dataset.jump); return; }
+  if (t.dataset.ptpick) { pickPatient(t.dataset.ptpick); return; }
+  if (t.dataset.acts) { toggleMsgActs(t); return; }
   if (t.dataset.reply) { quickReply(t.dataset.reply); return; }
   switch (t.dataset.act) {
     case "toggle":
@@ -1375,6 +1593,12 @@ async function onClick(e) {
       break;
     case "close": hidePanel(); break;
     case "min": setMin(!minimized); break;
+    case "mreply": startReply(t.dataset.mid); break;
+    case "unreply": replyTo = null; paintReply(); break;
+    case "ptlink": openPtPick(); break;
+    case "ptclose": closePtPick(); break;
+    case "ptunlink": linkPt = null; paintPt(); break;
+    case "earlier": msgLimit += PAGE; startMessages(openId, true); break;
     case "more": toggleMenu("more", t); break;
     case "plus": toggleMenu("plus", t); break;
     case "cmute": {
@@ -1437,7 +1661,7 @@ async function onClick(e) {
     case "retry": {
       const p = pendingSends.get(t.dataset.mid);
       const chat = p && chatFor(p.chatId);
-      if (chat) deliver(chat, t.dataset.mid, p.text, p.page, p.img);
+      if (chat) deliver(chat, t.dataset.mid, p.text, p.page, p.img, p.extra);
       break;
     }
     case "discard": {
@@ -1484,6 +1708,9 @@ function onKey(e) {
     if (panel.querySelector(".ch-menu:not([hidden])")) { closeMenus(); return; }
     const sb = panel.querySelector('[data-role="search"]');
     if (sb && !sb.hidden) { closeSearch(); return; }
+    const pp = panel.querySelector('[data-role="ptpick"]');
+    if (pp && !pp.hidden) { closePtPick(); return; }
+    if (replyTo) { replyTo = null; paintReply(); return; }
     const emo = panel.querySelector('[data-role="emo"]');
     if (emo && !emo.hidden) { emo.hidden = true; return; }
     if (editing) { stopEdit(); return; }
@@ -1492,7 +1719,7 @@ function onKey(e) {
     return;
   }
   // Keyboard: Enter on one of my messages shows Edit / Delete
-  if (e.key === "Enter" && e.target.matches("[data-mine]")) {
+  if (e.key === "Enter" && e.target.matches("[data-acts]")) {
     e.preventDefault();
     toggleMsgActs(e.target);
     return;

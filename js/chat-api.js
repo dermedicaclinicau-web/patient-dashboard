@@ -5,6 +5,7 @@
 import { db, auth } from "./firebase-config.js";
 import {
   collection, doc, getDocs, onSnapshot, query, where, orderBy, limitToLast, writeBatch, updateDoc, setDoc, serverTimestamp,
+  getCountFromServer,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { getStorage, ref as sRef, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 
@@ -48,7 +49,18 @@ export async function uploadChatImage(chatId, msgId, img) {
   try { urlCache.set(path, await getDownloadURL(r)); } catch { /* fetched when shown */ }
   return { path, w: Math.round(img.w) || 0, h: Math.round(img.h) || 0, type: img.type };
 }
-const previewText = (body, hasImage) => (hasImage ? (body ? `📷 ${body}` : "📷 Photo") : body).slice(0, 200);
+const previewText = (body, hasImage, pt = null) =>
+  (hasImage ? (body ? `📷 ${body}` : "📷 Photo") : body || (pt ? `👤 ${pt.name}` : "")).slice(0, 200);
+
+// A linked patient and a quoted reply, kept to known fields and sizes
+const cleanPt = (p) => (p && typeof p.id === "string" && p.id ? {
+  id: p.id.slice(0, 120), name: String(p.name || "Patient").slice(0, 120), pttId: String(p.pttId || "").slice(0, 40),
+  apptKey: /^\d{4}-\d{2}-\d{2}$/.test(p.apptKey || "") ? p.apptKey : "", apptTime: String(p.apptTime || "").slice(0, 20),
+} : null);
+const cleanReply = (r) => (r && typeof r.id === "string" && r.id ? {
+  id: r.id.slice(0, 120), by: String(r.by || "").slice(0, 120), byUid: String(r.byUid || "").slice(0, 128),
+  text: String(r.text || "").slice(0, 140), image: r.image === true,
+} : null);
 
 export const helpId = (staffUid) => `help__${staffUid}`;
 export const dmId = (a, b) => `dm__${[a, b].sort().join("__")}`;
@@ -108,28 +120,33 @@ export function watchMessages(chatId, onChange, onError = () => {}) {
           at: toDate(x.at), page: safePage(x.page), edited: x.edited === true, deleted: x.deleted === true,
           image: x.image && typeof x.image.path === "string"
             ? { path: x.image.path, w: Number(x.image.w) || 0, h: Number(x.image.h) || 0 } : null,
+          patient: cleanPt(x.patient), replyTo: cleanReply(x.replyTo),
           pending: d.metadata.hasPendingWrites };
       }));
     }, onError);
 }
 // The conversation (created on the first message) and the message, together. image: { path, w, h, type } (already uploaded)
-export async function sendMessage(chat, text, page, staff, msgId = "", image = null) {
+// extra: { patient, replyTo }
+export async function sendMessage(chat, text, page, staff, msgId = "", image = null, extra = {}) {
   const me = uid();
   const by = String((staff && staff.name) || "").slice(0, 120);
   const body = String(text || "").trim().slice(0, 4000);
   const img = image && image.path ? { path: image.path, w: image.w, h: image.h, type: image.type } : null;
-  if (!body && !img) throw new Error("Type a message first.");
+  const patient = cleanPt(extra && extra.patient);
+  const replyTo = cleanReply(extra && extra.replyTo);
+  if (!body && !img && !patient) throw new Error("Type a message first.");
   const cRef = doc(db, "chats", chat.id);
   const b = writeBatch(db);
   b.set(cRef, {
     kind: chat.kind, members: chat.members, names: { ...(chat.names || {}), [me]: by },
-    lastText: previewText(body, !!img), lastAt: serverTimestamp(), lastBy: me, lastByName: by,
+    lastText: previewText(body, !!img, patient), lastAt: serverTimestamp(), lastBy: me, lastByName: by,
     readAt: { [me]: serverTimestamp() }, updatedAt: serverTimestamp(),
     ...(chat.kind === "help" && chat.members[0] === me ? { status: "open" } : {}),   // a new Help message reopens it
     ...(chat.kind === "group" ? { name: String(chat.name || "").slice(0, 60), createdByUid: chat.createdByUid } : {}),
   }, { merge: true });
   const mRef = msgId ? doc(cRef, "messages", msgId) : doc(collection(cRef, "messages"));
-  b.set(mRef, { text: body, by, byUid: me, at: serverTimestamp(), page: safePage(page), ...(img ? { image: img } : {}) });
+  b.set(mRef, { text: body, by, byUid: me, at: serverTimestamp(), page: safePage(page),
+    ...(img ? { image: img } : {}), ...(patient ? { patient } : {}), ...(replyTo ? { replyTo } : {}) });
   await b.commit();
 }
 // My own message, changed. If it's the latest one, the chat list preview changes too
@@ -148,7 +165,7 @@ export async function deleteMessage(chatId, msgId, isLast, imagePath = "") {
   uid();
   const b = writeBatch(db);
   b.update(doc(db, "chats", chatId, "messages", msgId),
-    { text: "", page: null, image: null, deleted: true, deletedAt: serverTimestamp() });
+    { text: "", page: null, image: null, patient: null, replyTo: null, deleted: true, deletedAt: serverTimestamp() });
   if (isLast) b.update(doc(db, "chats", chatId), { lastText: "Message deleted", updatedAt: serverTimestamp() });
   await b.commit();
   if (imagePath) deleteObject(sRef(getStorage(), imagePath)).catch((err) => console.warn("Chat picture not removed:", err));
@@ -160,6 +177,13 @@ export async function hideChat(chatId) {
     [`hiddenAt.${me}`]: serverTimestamp(),
     [`readAt.${me}`]: serverTimestamp(),
   });
+}
+
+// How many messages arrived after I last read the chat (one count query, read on the server)
+export async function countUnread(chatId, since) {
+  const col = collection(db, "chats", chatId, "messages");
+  const s = await getCountFromServer(since ? query(col, where("at", ">", since)) : col);
+  return s.data().count;
 }
 
 export async function markRead(chatId) {
