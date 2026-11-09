@@ -4,8 +4,8 @@
 import { fetchStaffList } from "./task-types.js";
 import { isAdmin } from "./perms.js";
 import { confirmDialog } from "./dialog.js";
-import { escapeHtml, getInitials, hueFromString, showToast, toDateKey } from "./utils.js";
-import { getPatient, patientIds } from "./patients.js";
+import { escapeHtml, getInitials, hueFromString, showToast, toDateKey, formatDobLong } from "./utils.js";
+import { getPatient, patientIds, fetchPatients, findPatientsById, searchPatientsByPhone } from "./patients.js";
 import { fetchDayAppointments } from "./appointments.js";
 import {
   watchChats, watchMessages, sendMessage, markRead, setChatStatus, listAllChats, isUnread, isHiddenFor, helpId, dmId,
@@ -191,6 +191,8 @@ let msgLimit = PAGE;
 const unreadN = new Map();   // chat id → { key, n }: how many unread
 const counting = new Set();
 const ptCache = new Map();   // patient id → promise of the patient
+let ptSearchTimer = 0;       // Link a patient: search waits until typing pauses
+let ptSearchSeq = 0;         // only the latest search's results are shown
 let apptJob = null;          // today's bookings, read once a day
 let pendingJump = "";        // a message to go to once the chat has loaded (from a patient's page)
 
@@ -383,24 +385,78 @@ async function openPtPick() {
   const box = panel && panel.querySelector('[data-role="ptpick"]');
   if (!box) return;
   closeMenus();
-  const top = `<div class="ch-pp-head"><strong>Link a patient</strong>
-    <button type="button" class="ch-ic" data-act="ptclose" aria-label="Close">${I.x}</button></div>`;
   box.hidden = false;
-  box.innerHTML = `${top}<p class="ch-none">Loading…</p>`;
+  box.innerHTML = `<div class="ch-pp-head"><strong>Link a patient</strong>
+      <button type="button" class="ch-ic" data-act="ptclose" aria-label="Close">${I.x}</button></div>
+    <input type="search" class="fe-input ch-pp-q" data-role="ptq" placeholder="Search by surname, mobile or ID"
+      aria-label="Search all patients" autocomplete="off" />
+    <div data-role="ptres" hidden></div>
+    <div data-role="ptrecent"><p class="ch-none">Loading recent patients…</p></div>`;
+  const q = box.querySelector('[data-role="ptq"]');
+  if (q && !isTouch()) q.focus();
+  // Recent: the patient whose page you're on, then the ones you opened lately
   const here = currentPatientId();
   let ids = [];
   try { ids = JSON.parse(localStorage.getItem(recentKey()) || "[]"); } catch { ids = []; }
   ids = [...new Set([here, ...ids].filter(Boolean))].slice(0, 8);
   const pts = (await Promise.all(ids.map(ptFull))).filter(Boolean);
-  if (box.hidden || !box.isConnected) return;
-  box.innerHTML = top + (pts.length ? `<div class="ch-pp-list">${pts.map((p) => `
-      <button type="button" class="ch-pp-row" data-ptpick="${esc(p.id)}">
-        <span class="ch-pt-av" style="--h:${hueFromString(p.name)}">${esc(getInitials(p.name))}</span>
-        <span class="ch-pt-t"><b>${esc(p.name)}</b><small>${esc(p.pttId ? `ID ${p.pttId}` : "")}</small></span>
-        ${p.id === here ? "<em>This page</em>" : ""}</button>`).join("")}</div>
-      <p class="ch-pp-note">Patients you've opened recently. Open someone's page to add them here.</p>`
-    : '<p class="ch-none">Open a patient\'s page first. The patients you open show here.</p>');
+  const rec = box.querySelector('[data-role="ptrecent"]');
+  if (box.hidden || !rec || !rec.isConnected) return;
+  rec.innerHTML = pts.length
+    ? `<p class="ch-pp-sec">Recent</p><div class="ch-pp-list">${pts.map((p) => ptRowHtml(p, p.id === here ? "This page" : "")).join("")}</div>`
+    : '<p class="ch-pp-note">The patients you open will also show here.</p>';
 }
+
+// One patient in the picker: name, ID and date of birth (to tell two people with the same name apart)
+const ptRowHtml = (p, tag = "") => `<button type="button" class="ch-pp-row" data-ptpick="${esc(p.id)}">
+    <span class="ch-pt-av" style="--h:${hueFromString(p.name)}">${esc(getInitials(p.name))}</span>
+    <span class="ch-pt-t"><b>${esc(p.name)}</b><small>${esc([p.pttId && `ID ${p.pttId}`,
+      p.dobKey && formatDobLong(p.dobKey) && `born ${formatDobLong(p.dobKey)}`].filter(Boolean).join(" · "))}</small></span>
+    ${tag ? `<em>${esc(tag)}</em>` : ""}</button>`;
+
+// The whole patient list: a mobile number, a surname (or full name, either order), and an ID if there's a number in it
+async function searchAllPatients(t) {
+  const compact = t.replace(/[\s+()-]/g, "");
+  const isPhone = /^\d{4,}$/.test(compact);
+  const jobs = [isPhone ? searchPatientsByPhone(t) : fetchPatients({ mode: "name", term: t }).then((r) => r.patients)];
+  if (/\d/.test(t) && /^[\w-]{2,64}$/.test(t.trim())) jobs.push(findPatientsById(t.trim()));
+  const res = await Promise.allSettled(jobs);
+  if (res.every((r) => r.status === "rejected")) throw res[0].reason;
+  const out = new Map();
+  res.forEach((r) => {
+    if (r.status === "fulfilled") r.value.forEach((p) => { if (!p.mergedInto) out.set(p.id, p); });
+  });
+  return [...out.values()].slice(0, 20);
+}
+
+function onPtSearch(value) {
+  clearTimeout(ptSearchTimer);
+  const box = panel && panel.querySelector('[data-role="ptres"]');
+  const recent = panel && panel.querySelector('[data-role="ptrecent"]');
+  const t = String(value || "").trim();
+  if (recent) recent.hidden = !!t;
+  if (!box) return;
+  if (t.length < 2) { box.hidden = true; box.innerHTML = ""; return; }
+  box.hidden = false;
+  box.innerHTML = '<p class="ch-none">Searching…</p>';
+  const seq = ++ptSearchSeq;
+  ptSearchTimer = setTimeout(async () => {
+    let list;
+    try {
+      list = await searchAllPatients(t);
+    } catch (err) {
+      console.warn("Patient search failed:", err);
+      if (seq === ptSearchSeq && box.isConnected) box.innerHTML = '<p class="ch-none">Couldn\'t search. Check your connection and try again.</p>';
+      return;
+    }
+    if (seq !== ptSearchSeq || !box.isConnected) return;   // they've typed more since
+    list.forEach((p) => ptCache.set(p.id, Promise.resolve(p)));   // picking one doesn't load them again
+    box.innerHTML = list.length
+      ? `<div class="ch-pp-list">${list.map((p) => ptRowHtml(p)).join("")}</div>`
+      : '<p class="ch-none">No patients match. Try their surname, mobile or ID.</p>';
+  }, 280);
+}
+
 function closePtPick() {
   const box = panel && panel.querySelector('[data-role="ptpick"]');
   if (box) { box.hidden = true; box.innerHTML = ""; }
@@ -1736,6 +1792,15 @@ function onKey(e) {
   }
   // Enter sends, Shift + Enter starts a new line. On phones and iPads Enter is a new line (the Send button sends).
   // Not while a word is still being typed (predictive text, accents).
+  // Link a patient: Enter picks the top one
+  if (e.key === "Enter" && e.target.dataset.role === "ptq") {
+    e.preventDefault();
+    const box = e.target.closest('[data-role="ptpick"]');
+    const res = box && box.querySelector('[data-role="ptres"]');
+    const first = box && box.querySelector(res && !res.hidden ? '[data-role="ptres"] .ch-pp-row' : '[data-role="ptrecent"] .ch-pp-row');
+    if (first) first.click();
+    return;
+  }
   // Search: Enter for the next older match, Shift + Enter for newer
   if (e.key === "Enter" && e.target.dataset.role === "sq") {
     e.preventDefault();
@@ -1762,6 +1827,8 @@ function onInput(e) {
     }
     const hint = panel.querySelector('[data-role="hint"]');
     if (hint) hint.hidden = !(e.target.value.trim() && hintsLeft());
+  } else if (e.target.dataset.role === "ptq") {
+    onPtSearch(e.target.value);
   } else if (e.target.dataset.role === "sq") {
     searchQ = e.target.value;
     hitIdx = -1;
