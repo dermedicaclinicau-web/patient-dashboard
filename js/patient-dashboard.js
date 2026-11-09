@@ -34,7 +34,9 @@ import { showSoapPanel } from "./soap-panel.js";
 import { fetchPatientRecords } from "./records.js";
 import { openTaskPanel, statusPillHtml } from "./task-panel.js";
 import { myUid } from "./inventory-api.js";
-import { can } from "./perms.js";
+import { can, isAdmin } from "./perms.js";
+import { fetchMentions } from "./chat-api.js";
+import { openChat } from "./chat.js";
 import { openSmsDialog } from "./sms-dialog.js";
 import { db } from "./firebase-config.js";
 import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -224,6 +226,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   let recordsView = null;      // Treatment Records + Consent Records
   let reminderCount = 0;       // for the chips on the collapsed Pre-Consultation header
   let allergies = null;        // { known, items } from Clinical History; null until read
+  let mentions = [];           // chat messages that link this patient
   let restMounted = false;     // Skincare, Records, Other forms, History, Tasks, Billing
   let mountRest = () => {};    // set once the page is drawn (sections opened early call it straight away)
   // Skin script (SSP): the tile and the Skincare section's "Create new SSP" open the builder in a new tab.
@@ -256,6 +259,13 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
         if (target.tagName === "DETAILS") target.open = true;
         target.scrollIntoView({ behavior: "smooth", block: "center" });
       }
+      return;
+    }
+    const mnRow = t.closest("[data-mention]");
+    if (mnRow) {
+      const d = mnRow.closest("details");
+      if (d) d.open = false;
+      openChat(mnRow.dataset.mention, mnRow.dataset.msg);
       return;
     }
     if (t.closest("[data-action='go-allergies']")) {
@@ -359,7 +369,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   // Close any open record-badge menu (e.g. "Tx Record ×2") when clicking elsewhere
   const closeBadgeMenus = (e) => {
     if (!root.isConnected) { document.removeEventListener("click", closeBadgeMenus); return; } // left this patient
-    root.querySelectorAll(".pa-bdg-menu[open]").forEach((m) => { if (!m.contains(e.target)) m.open = false; });
+    root.querySelectorAll(".pa-bdg-menu[open], .pb-mn[open]").forEach((m) => { if (!m.contains(e.target)) m.open = false; });
   };
   // The notes panel can update the master plan too: refresh the bar when it does
   const onPlanUpdated = (e) => {
@@ -492,7 +502,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   };
   window.addEventListener("scroll", onScroll, { passive: true });
   function renderTop() {
-    bar.innerHTML = barHtml(patient, todayAppts, preData, allergies);
+    bar.innerHTML = barHtml(patient, todayAppts, preData, allergies, mentions);
   }
 
   function openEdit(focus = "") {
@@ -563,6 +573,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   notesView = mountPersonalNotes(root, patient, staff);
   loadTranscriptSections();
   mountClinicalHistory(root, patient, staff);   // also sends the allergies to the patient bar
+  loadMentions();
 
   // The rest once the page has drawn, or straight away if a section is opened first
   mountRest = () => {
@@ -670,7 +681,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     btn.classList.add("is-loading");
     clearPageCache();   // Refresh means read again
     await Promise.allSettled([
-      loadToday(), loadPreconsultData(), loadReminders(), loadTranscriptSections(), loadPastForms(),
+      loadToday(), loadPreconsultData(), loadReminders(), loadTranscriptSections(), loadPastForms(), loadMentions(),
       notesView ? notesView.reload() : null,
       tasksView ? tasksView.reload() : null,
       recordsView ? recordsView.reload() : null,
@@ -678,6 +689,16 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     if (btn.isConnected) {
       btn.disabled = false;
       btn.classList.remove("is-loading");
+    }
+  }
+
+  // Chat messages that link this patient (for the chip in the patient bar)
+  async function loadMentions() {
+    try {
+      mentions = await fetchMentions(patient.id, myUid(), isAdmin());
+      if (root.isConnected) renderTop();
+    } catch (err) {
+      console.warn("Chat mentions not loaded:", err);
     }
   }
 
@@ -1052,7 +1073,24 @@ function todayPillHtml(list) {
     <b>Today</b><span>${what}</span>${list.length > 1 ? `<em>+${list.length - 1} more</em>` : ""}</button>`;
 }
 
-function barHtml(p, today = [], pre = null, allergies = null) {
+// "Mentioned in 2 chats": the list of who linked this patient, and where. A red dot if one is from thef last 2 days.
+function mentionChipHtml(list) {
+  if (!list || !list.length) return "";
+  const n = new Set(list.map((m) => m.chatId)).size;
+  const fresh = list.some((m) => m.at && Date.now() - m.at.getTime() < 2 * 864e5);
+  const day = (d) => (d ? d.toLocaleDateString("en-AU", { day: "numeric", month: "short" }) : "");
+  return `<details class="pb-mn">
+    <summary class="chip chip-chat${fresh ? " is-new" : ""}" title="Chats that link this patient">${ICONS.sms}<span>Mentioned in ${n} chat${n === 1 ? "" : "s"}</span></summary>
+    <div class="pb-mn-pop">
+      <strong>Linked in chat</strong>
+      ${list.slice(0, 8).map((m) => `<button type="button" class="pb-mn-row" data-mention="${escapeHtml(m.chatId)}" data-msg="${escapeHtml(m.msgId)}">
+        <span class="pb-mn-av" style="--h:${hueFromString(m.by)}">${escapeHtml(getInitials(m.by))}</span>
+        <span class="pb-mn-t"><b>${escapeHtml(m.by)}${m.kind === "help" ? " · Help" : ""}</b><small>${escapeHtml(m.text || "Linked this patient")}</small></span>
+        <em>${escapeHtml(day(m.at))}</em></button>`).join("")}
+    </div></details>`;
+}
+
+function barHtml(p, today = [], pre = null, allergies = null, mentions = []) {
   const age = calcAge(p.dobKey);
   const dob = p.dobKey ? parseDateKey(p.dobKey) : null;
   const dobText = dob ? dob.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : (p.dob || "");
@@ -1075,6 +1113,7 @@ function barHtml(p, today = [], pre = null, allergies = null) {
     [allergyChipHtml(allergies), pre && pre.overdue && overdueChipHtml(pre.overdue), p.marketingOk === false && dncChipHtml(p)]
       .filter(Boolean).join(""),
     [
+      mentionChipHtml(mentions),
       birthdayChipHtml(dob),
       p.mergedIds && p.mergedIds.length &&
         `<button type="button" class="chip chip-merged" data-action="merge-info">Merged · ${p.mergedIds.length} other ID${p.mergedIds.length > 1 ? "s" : ""}</button>`,

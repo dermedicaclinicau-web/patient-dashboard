@@ -192,6 +192,7 @@ const unreadN = new Map();   // chat id → { key, n }: how many unread
 const counting = new Set();
 const ptCache = new Map();   // patient id → promise of the patient
 let apptJob = null;          // today's bookings, read once a day
+let pendingJump = "";        // a message to go to once the chat has loaded (from a patient's page)
 
 /* ---------- Pictures ---------- */
 // Shrunk to about 1600px before sending. Screenshots stay PNG (sharp text); photos become JPEG. GIFs are sent as they are.
@@ -582,6 +583,14 @@ function checkChatLink() {
   history.replaceState(null, "", "#/home");
   openPending();
 }
+// From elsewhere in the portal (a patient's page): open a conversation, and go to one message in it
+export function openChat(id, msgId = "") {
+  if (!me || !root || !id) return;
+  pendingJump = msgId || "";
+  if (chatFor(id)) openThread(id);
+  else { pendingOpen = id; openPending(); }
+}
+
 function openPending() {
   if (!pendingOpen || !root) return;
   if (!chats.some((c) => c.id === pendingOpen)) return;   // not loaded yet: tried again on the next update
@@ -1119,6 +1128,7 @@ function drawMessages(msgs, first) {
     if (grewAbove) box.scrollTop = box.scrollHeight - fromBottom;   // older messages added above: stay on the same one
     if (newOnes) setJump(jumpCount + newOnes);
   }
+  if (pendingJump) { const j = pendingJump; pendingJump = ""; jumpTo(j); }
 }
 
 
@@ -1353,7 +1363,7 @@ async function removeMsg(mid) {
   if (editing === mid) stopEdit();
   try {
     const m = msgList.find((x) => x.id === mid);
-    await deleteMessage(current.id, mid, isLastMsg(mid), m && m.image ? m.image.path : "");
+    await deleteMessage(current.id, mid, isLastMsg(mid), m && m.image ? m.image.path : "", !!(m && m.patient));
   } catch (err) {
     console.error("Delete message failed:", err);
     showToast(err && err.code === "permission-denied"

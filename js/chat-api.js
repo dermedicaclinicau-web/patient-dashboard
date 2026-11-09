@@ -5,7 +5,7 @@
 import { db, auth } from "./firebase-config.js";
 import {
   collection, doc, getDocs, onSnapshot, query, where, orderBy, limitToLast, writeBatch, updateDoc, setDoc, serverTimestamp,
-  getCountFromServer,
+  getCountFromServer, limit,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { getStorage, ref as sRef, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 
@@ -148,6 +148,13 @@ export async function sendMessage(chat, text, page, staff, msgId = "", image = n
   const mRef = msgId ? doc(cRef, "messages", msgId) : doc(collection(cRef, "messages"));
   b.set(mRef, { text: body, by, byUid: me, at: serverTimestamp(), page: safePage(page),
     ...(img ? { image: img } : {}), ...(patient ? { patient } : {}), ...(replyTo ? { replyTo } : {}) });
+  // The patient's page finds the chats that link them through this (members only, like the chat itself)
+  if (patient) {
+    b.set(doc(db, "patient_mentions", `${chat.id}__${mRef.id}`), {
+      patientId: patient.id, chatId: chat.id, msgId: mRef.id, kind: chat.kind, members: chat.members,
+      by, byUid: me, text: body.slice(0, 140), at: serverTimestamp(), deleted: false,
+    });
+  }
   await b.commit();
 }
 // My own message, changed. If it's the latest one, the chat list preview changes too
@@ -162,9 +169,10 @@ export async function editMessage(chatId, msgId, text, isLast, hasImage = false)
   await b.commit();
 }
 // My own message, deleted for everyone. It keeps its place as "Message deleted", and its picture is removed.
-export async function deleteMessage(chatId, msgId, isLast, imagePath = "") {
+export async function deleteMessage(chatId, msgId, isLast, imagePath = "", hadPatient = false) {
   uid();
   const b = writeBatch(db);
+  if (hadPatient) b.update(doc(db, "patient_mentions", `${chatId}__${msgId}`), { deleted: true });
   b.update(doc(db, "chats", chatId, "messages", msgId),
     { text: "", page: null, image: null, patient: null, replyTo: null, deleted: true, deletedAt: serverTimestamp() });
   if (isLast) b.update(doc(db, "chats", chatId), { lastText: "Message deleted", updatedAt: serverTimestamp() });
@@ -185,6 +193,23 @@ export async function countUnread(chatId, since) {
   const col = collection(db, "chats", chatId, "messages");
   const s = await getCountFromServer(since ? query(col, where("at", ">", since)) : col);
   return s.data().count;
+}
+
+// The chat messages that link this patient, newest first: chats I'm in, and Help chats for Admins
+export async function fetchMentions(patientId, me, admin) {
+  if (!patientId || !me) return [];
+  const col = collection(db, "patient_mentions");
+  const qs = [query(col, where("patientId", "==", patientId), where("members", "array-contains", me), limit(50))];
+  if (admin) qs.push(query(col, where("patientId", "==", patientId), where("kind", "==", "help"), limit(50)));
+  const snaps = await Promise.all(qs.map((q) => getDocs(q)));
+  const out = new Map();
+  snaps.forEach((s) => s.docs.forEach((d) => {
+    const x = d.data({ serverTimestamps: "estimate" }) || {};
+    if (x.deleted === true) return;
+    out.set(d.id, { chatId: String(x.chatId || ""), msgId: String(x.msgId || ""), kind: String(x.kind || ""),
+      by: String(x.by || "Staff"), byUid: String(x.byUid || ""), text: String(x.text || ""), at: toDate(x.at) });
+  }));
+  return [...out.values()].sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0));
 }
 
 export async function markRead(chatId) {

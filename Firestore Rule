@@ -1690,7 +1690,28 @@ match /inv_count_drafts/{id} {
     }
         // Overview drill-downs (Seo11.gs): searches, landing pages and AI assistant visits for 7, 28 and 90 days
     match /seo_windows/{id} { allow read: if can('menu.seo'); allow write: if false; }
-    
+      // A patient linked in a chat message: lets the patient's page find the chats that mention them.
+    // Written with the message itself; only people in that chat (and Admins) can see it.
+    match /patient_mentions/{id} {
+      allow read: if isStaff() && (isAdmin() || request.auth.uid in resource.data.members);
+      allow create: if isStaff()
+        && request.resource.data.keys().hasOnly(['patientId', 'chatId', 'msgId', 'kind', 'members', 'by', 'byUid', 'text', 'at', 'deleted'])
+        && id == request.resource.data.chatId + '__' + request.resource.data.msgId
+        && request.resource.data.byUid == request.auth.uid
+        && request.resource.data.deleted == false
+        && request.resource.data.by is string && request.resource.data.by.size() <= 120
+        && request.resource.data.text is string && request.resource.data.text.size() <= 140
+        && request.resource.data.members == getAfter(/databases/$(database)/documents/chats/$(request.resource.data.chatId)).data.members
+        && request.resource.data.kind == getAfter(/databases/$(database)/documents/chats/$(request.resource.data.chatId)).data.kind
+        && getAfter(/databases/$(database)/documents/chats/$(request.resource.data.chatId)/messages/$(request.resource.data.msgId)).data.patient.id
+             == request.resource.data.patientId;
+      // Deleting the message hides its mention (the sender only)
+      allow update: if isStaff() && resource.data.byUid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deleted'])
+        && request.resource.data.deleted == true;
+      allow delete: if false;
+    }
+      
     // ===================== Safety net =====================
     // Anything not allowed by a rule above stays locked
     // (this includes staff_roles and staff_audit, which only Apps Script writes)
