@@ -30,6 +30,8 @@ export const RECALL_SMS_NAMES = {
 };
 export const RECALL_SMS_TEMPLATE = "Hi {First name}, it's Dermedica. It's been about {Months} months since your {Treatment}, " +
   "so you're due for your next one. Reply YES and we'll call you to book.";
+// Offered on the Recall page straight after a call is logged as No answer or Left voicemail
+export const RECALL_MISSED_TEMPLATE = "Hi {First name}, it's Dermedica. Sorry we missed you. You're due for your next {Treatment}. Reply YES to book.";
 const SMS_TOKENS = ["{First name}", "{Treatment}", "{Months}", "{Clinic phone}"];
 // The Settings | Flow | Email templates tabs (recall-flow.js and recall-emails.js use them too)
 export const recallTabsHtml = (active) => `<nav class="mk-tabs" aria-label="Recall settings">${[
@@ -89,6 +91,9 @@ export function normRecallSettings(x = {}) {
       phone: String(sm.phone || "").slice(0, 30),
       waitDays: int(sm.waitDays, 1, 30, 7),
       perDay: int(sm.perDay, 1, 300, 30),
+      missedMode: ["ask", "auto", "off"].includes(sm.missedMode) ? sm.missedMode : "ask",
+      missedTemplate: String(sm.missedTemplate || RECALL_MISSED_TEMPLATE).slice(0, 560),
+      missedQuiet: int(sm.missedQuiet, 1, 60, 7),
     },
   };
 }
@@ -123,6 +128,7 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
   let services = null;      // the appointment book's services, loaded when asked
   let servicesBusy = false;
   let smsState = { text: "Checking Textmagic…", ok: null };
+  let lastTpl = "smsTpl";   // the message box the blanks go into
   const $ = (r) => root.querySelector(`[data-role="${r}"]`);
 
   const statusText = () => (status && status.at
@@ -155,6 +161,9 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
         phone: $("smsPhone").value.replace(/[^\d +()-]/g, "").trim().slice(0, 30),
         waitDays: set.sms.waitDays,
         perDay: set.sms.perDay,
+        missedMode: $("missedMode").value,
+        missedTemplate: $("missedTpl").value.slice(0, 560) || RECALL_MISSED_TEMPLATE,
+        missedQuiet: Number($("missedQuiet").value) || 7,
       },
     };
   }
@@ -166,8 +175,8 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
   }
 
   /* ---------- Texts ---------- */
-  function smsSample() {
-    const tpl = $("smsTpl") ? $("smsTpl").value : set.sms.template;
+  function smsSample(role = "smsTpl") {
+    const tpl = $(role) ? $(role).value : role === "missedTpl" ? set.sms.missedTemplate : set.sms.template;
     const phone = $("smsPhone") ? $("smsPhone").value.trim() : set.sms.phone;
     const firstOn = set.categories.find((c) => c.on) || set.categories[0];
     const nameInput = firstOn && root.querySelector(`[data-cat="${CSS.escape(firstOn.key)}"] [data-f="smsName"]`);
@@ -182,9 +191,12 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     return { text: t, info: `${t.length} characters · ${parts} text${parts === 1 ? "" : "s"} each` };
   }
   function drawPreview() {
-    const p = smsSample();
-    const el = $("smsPreview");
-    if (el) el.innerHTML = `<strong>Preview:</strong> ${esc(p.text)}<br><small>${esc(p.info)}</small>`;
+    [["smsTpl", "smsPreview"], ["missedTpl", "missedPreview"]].forEach(([tpl, out]) => {
+      const el = $(out);
+      if (!el) return;
+      const p = smsSample(tpl);
+      el.innerHTML = `<strong>Preview:</strong> ${esc(p.text)}<br><small>${esc(p.info)}</small>`;
+    });
   }
   function drawSmsState() {
     const el = $("smsStatus");
@@ -222,7 +234,7 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     }
   }
   function insertTok(tok) {
-    const ta = $("smsTpl");
+    const ta = $(lastTpl) || $("smsTpl");
     const a = ta.selectionStart ?? ta.value.length;
     const b = ta.selectionEnd ?? a;
     ta.value = ta.value.slice(0, a) + tok + ta.value.slice(b);
@@ -349,6 +361,20 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
           <p class="fe-note" data-role="smsPreview"></p>
           <div class="rc-row"><input class="fe-input" data-role="smsTestTo" maxlength="20" placeholder="Your mobile, 04…" aria-label="Send a test to" />
             <button type="button" class="lh-btn" data-act="sms-test">Send a test</button></div>
+
+          <h4 class="mc-h rs-subhead">After a missed call</h4>
+          <label class="lh-field"><span class="lh-label">When a call is logged as No answer or Left voicemail</span>
+            <select class="fb-select" data-role="missedMode">${[["ask", "Offer a text (staff press Send)"],
+              ["auto", "Send the text automatically (Undo stops it)"], ["off", "Don't offer a text"]].map(([v, l]) =>
+              `<option value="${v}"${set.sms.missedMode === v ? " selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+          <label class="lh-field"><span class="lh-label">The message</span>
+            <textarea class="fe-input" data-role="missedTpl" rows="4" maxlength="560">${esc(set.sms.missedTemplate)}</textarea></label>
+          <p class="fe-note" data-role="missedPreview"></p>
+          <label class="lh-field"><span class="lh-label">Not offered if they were texted in the last</span>
+            <select class="fb-select" data-role="missedQuiet">${opts([1, 3, 7, 14, 30], set.sms.missedQuiet,
+              (d) => `${d} day${d === 1 ? "" : "s"}`)}</select></label>
+          <p class="fe-note">Never offered to anyone on the do-not-contact list. With no mobile on file, staff are offered an email
+            instead. The blanks above work here too: click in this message first, then on a blank.</p>
         </section>
 
         <section class="tb-card">
@@ -420,12 +446,16 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     }
   }
 
+  root.addEventListener("focusin", (e) => {
+    const r = e.target.dataset.role;
+    if (r === "smsTpl" || r === "missedTpl") lastTpl = r;
+  });
   root.addEventListener("input", (e) => {
     if (e.target.dataset.role === "smsTestTo") return;   // not a setting
     dirty = true;
     setState();
     const r = e.target.dataset.role;
-    if (r === "smsTpl" || r === "smsPhone" || e.target.dataset.f === "smsName") drawPreview();
+    if (r === "smsTpl" || r === "missedTpl" || r === "smsPhone" || e.target.dataset.f === "smsName") drawPreview();
   });
   root.addEventListener("change", (e) => {
     if (e.target.dataset.role === "smsTestTo") return;
