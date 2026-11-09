@@ -13196,6 +13196,7 @@ function recallSettings_(cfg) {
     return { label: String((r && r.label) || '').trim().slice(0, 60), askDate: !!(r && r.askDate), dnc: !!(r && r.dnc) };
   }).filter(function (r) { return r.label; }).slice(0, 20);
   const sm = d.sms && typeof d.sms === 'object' ? d.sms : {};
+  const sp = d.spend && typeof d.spend === 'object' ? d.spend : {};
   return {
     categories: cats,
     maxAgeMonths: int(d.maxAgeMonths, 3, 60, 24),
@@ -13214,6 +13215,11 @@ function recallSettings_(cfg) {
       phone: String(sm.phone || '').replace(/[^\d +()-]/g, '').trim().slice(0, 30),
       waitDays: int(sm.waitDays, 1, 30, 7),
       perDay: int(sm.perDay, 1, 300, 30),
+    },
+    // Spend tiers: the top X% by spend in the last 12 months, and whether sharing out gives them first
+    spend: {
+      platinum: int(sp.platinum, 1, 50, 10), gold: int(sp.gold, 1, 60, 20), silver: int(sp.silver, 1, 80, 30),
+      shareFirst: sp.shareFirst !== false,
     },
     updatedAt: String(d.updatedAt || ''),
   };
@@ -13335,6 +13341,11 @@ function recallCheck_(cfg, set, today, force) {
     });
   } catch (e) { stopsOk = false; console.warn('Recall: opt-outs not read, cards left as they are: ' + e); }
   const stopOf = function (m) { return stops[recallPhone04_(m)] || null; };
+  // Spend from the appointment book, on every card
+  const spend = recallSpend_(ctx, rows, pts, set.spend);
+  const spendOf = function (pid) { return spend.by[pid] || SPEND_NONE_; };
+  try { fsPatch_(cfg, RECALL_SET_ + '/spend_status', spend.status); }
+  catch (e) { console.warn('Spend summary not saved: ' + e); }
   const pidOf = Object.create(null);
   const groups = Object.create(null);
   const skipped = Object.create(null);   // patient|treatment → past days that had a skipped service
@@ -13389,6 +13400,9 @@ function recallCheck_(cfg, set, today, force) {
         ? { nextAppt: nextAppt, hasAppt: !!nextAppt } : null;
       const stopNow = stopOf(c.mobileKey || c.mobile);
       const smsFix = stopsOk && JSON.stringify(c.smsStop || null) !== JSON.stringify(stopNow) ? { smsStop: stopNow } : null;
+      const spNow = spendOf(c.patientId);
+      const spendFix = typeof c.spendTier !== 'string' || c.spendTier !== spNow.spendTier || Number(c.spend12) !== spNow.spend12 ||
+        Number(c.spendAll) !== spNow.spendAll || Number(c.spendVisits12) !== spNow.spendVisits12 ? spNow : null;
       let touched = false;
       const put = function (patch, what) {
         touched = true;
@@ -13396,6 +13410,7 @@ function recallCheck_(cfg, set, today, force) {
         if (dncFix) Object.assign(patch, dncFix);
         if (apptFix) Object.assign(patch, apptFix);
         if (smsFix) Object.assign(patch, smsFix);
+        if (spendFix) Object.assign(patch, spendFix);
         patch.log = add(c, what);
         patch.updatedAt = now;
         writes.push(patchWrite_(cfg, path, patch));
@@ -13469,8 +13484,8 @@ function recallCheck_(cfg, set, today, force) {
           sum.back++;
         }
       })();
-      if (!touched && (fix || dncFix || apptFix || smsFix)) {
-        writes.push(patchWrite_(cfg, path, Object.assign({}, fix || {}, dncFix || {}, apptFix || {}, smsFix || {})));
+      if (!touched && (fix || dncFix || apptFix || smsFix || spendFix)) {
+        writes.push(patchWrite_(cfg, path, Object.assign({}, fix || {}, dncFix || {}, apptFix || {}, smsFix || {}, spendFix || {})));
       }
     });
 
@@ -13514,7 +13529,7 @@ function recallCheck_(cfg, set, today, force) {
       closeReason: '', closedAt: '', closedBy: '',
       log: [{ at: now, by: 'Recall', byUid: '', kind: 'auto', what: 'Due for ' + w.g.cat.key + ' (last visit ' + recLongDate_(w.g.last) + ')', note: '' }],
       createdAt: now, updatedAt: now,
-    }, recallKeys_(who.name, doc.Mobile, doc.Email), recallDncOf_(doc), { smsStop: stopOf(doc.Mobile) })));
+    }, recallKeys_(who.name, doc.Mobile, doc.Email), recallDncOf_(doc), { smsStop: stopOf(doc.Mobile) }, spendOf(w.g.pid))));
     sum.made++;
   });
 
@@ -13522,67 +13537,120 @@ function recallCheck_(cfg, set, today, force) {
   return Object.assign(sum, { rows: rows.length, ms: Date.now() - t0 });
 }
 
-// Shares waiting cards between the recall team: oldest due first, to whoever has had the fewest today,
-// up to each person's daily limit. Cards held by someone no longer active go back to waiting.
+// Shares waiting cards between the recall team: most recently due first, to whoever has had the fewest patients today,
+// up to each person's daily limit. One person has all of a patient's recalls: if someone already has one, the rest go
+// to them too (not counted as new). Cards held by someone no longer active go back to waiting.
 function recallAssign_(cfg, set, today) {
   const all = getStaffDocs_();
   const active = {};
-  all.forEach(function (s) { if (s.active !== false) active[s.id] = true; });
+  all.forEach(function (s) { if (s.active !== false) active[s.id] = s; });
   const team = all.filter(function (s) {
     return set.team.indexOf(s.id) !== -1 && s.active !== false && (!set.skipLeave || recallAvailable_(s, today));
   });
   const open = fsQuery_(cfg, RECALL_COL_, 'status', 'EQUAL', 'open', 10000);
   const now = new Date().toISOString();
   const writes = [];
+  const pk = function (c) { return String(c.patientId || '') || 'card:' + c._id; };
+  const size = function (o) { return Object.keys(o).length; };
+  const logOf = function (c, what) {
+    return (Array.isArray(c.log) ? c.log : []).concat([{ at: now, by: 'Recall', byUid: '', kind: 'auto', what: what, note: '' }]).slice(-80);
+  };
+  const give = function (c, s, what) {
+    writes.push(patchWrite_(cfg, RECALL_COL_ + '/' + c._id, {
+      stage: c.stage === 'later' ? 'later' : 'call', assignedToId: s.id, assignedToName: String(s.name || ''),
+      assignedDay: today, updatedAt: now, log: logOf(c, what),
+    }));
+    c._done = true;
+  };
+  const backToWaiting = function (c) {
+    writes.push(patchWrite_(cfg, RECALL_COL_ + '/' + c._id, {
+      assignedToId: '', assignedToName: '', assignedDay: '', stage: c.stage === 'later' ? 'later' : 'due', updatedAt: now,
+      log: logOf(c, 'Back to waiting (the person it was given to is no longer active)'),
+    }));
+  };
+
+  // How many patients each person has: given today, and waiting to be called (a patient with 3 recalls counts once)
   const load = {};
-  team.forEach(function (s) { load[s.id] = { s: s, today: 0, open: 0 }; });
-  const waiting = [];
+  team.forEach(function (s) { load[s.id] = { s: s, today: {}, open: {} }; });
+  const owner = {};   // patient → the person who has one of their recalls
+  const loose = [];   // nobody has these yet (or the person who had them has left)
   open.forEach(function (c) {
-    if (c.assignedToId && !active[c.assignedToId]) {   // left, or turned off: back to waiting
+    if (c.assignedToId && !active[c.assignedToId]) {
       c.assignedToId = '';
       if (c.stage === 'call') c.stage = 'due';
       c._freed = true;
     }
-    const l = load[c.assignedToId];
-    if (l) { if (c.assignedDay === today) l.today++; if (c.stage === 'call') l.open++; }
-    // Waiting for an automatic text, or for a reply to one: not shared out yet
-    const held = (c.textHoldUntil && String(c.textHoldUntil) > today && !c.replyOpen) || recallWantsText_(c, set, today)
-      || ['run', 'wait', 'queued', 'cycle', 'joined', 'released'].indexOf(String(c.flowState || '')) !== -1;   // the Recall flow has it
-    if (c._freed && held) {
-      writes.push(patchWrite_(cfg, RECALL_COL_ + '/' + c._id, { assignedToId: '', assignedToName: '', assignedDay: '', stage: 'due', updatedAt: now,
-        log: (Array.isArray(c.log) ? c.log : []).concat([{ at: now, by: 'Recall', byUid: '', kind: 'auto', what: 'Back to waiting (the person it was given to is no longer active)', note: '' }]).slice(-80) }));
+    const k = pk(c);
+    if (c.assignedToId) {
+      if (!owner[k] || c.stage === 'call') owner[k] = active[c.assignedToId];
+      const l = load[c.assignedToId];
+      if (l) { if (c.assignedDay === today) l.today[k] = true; if (c.stage === 'call') l.open[k] = true; }
+      return;
     }
-    if (!c.assignedToId && c.stage !== 'later' && !held) waiting.push(c);
+    // Waiting for an automatic text, a reply to one, or the Recall flow has it: not shared out yet
+    const held = (c.textHoldUntil && String(c.textHoldUntil) > today && !c.replyOpen) || recallWantsText_(c, set, today)
+      || ['run', 'wait', 'queued', 'cycle', 'joined', 'released'].indexOf(String(c.flowState || '')) !== -1;
+    if (held) { if (c._freed) backToWaiting(c); return; }
+    loose.push(c);
   });
-  // Most recently due first (they're the likeliest to book), then anyone due soon (Recall settings → lead days)
+
+  // 1. A patient someone already has: their other recalls go to the same person
+  loose.forEach(function (c) {
+    const s = owner[pk(c)];
+    if (!s) return;
+    give(c, s, 'Given to ' + s.name + " (they already have this patient's other recall)");
+    if (load[s.id] && c.stage !== 'later') load[s.id].open[pk(c)] = true;
+  });
+
+  // 2. Everyone else waiting: shared in turn, most recently due first (then anyone due soon). A patient's recalls go together.
+  const waiting = loose.filter(function (c) { return !c._done && c.stage !== 'later'; });
+  // Due now before due soon; higher spend tier first (Recall settings → spend → shareFirst); then most recently due
+  const tierRank = function (c) {
+    if (!(set.spend && set.spend.shareFirst)) return 0;
+    const r = { platinum: 0, gold: 1, silver: 2 }[c.spendTier];
+    return r === undefined ? 3 : r;
+  };
   waiting.sort(function (a, b) {
     const fa = String(a.dueDate) > today ? 1 : 0;
     const fb = String(b.dueDate) > today ? 1 : 0;
-    return fa - fb || (fa ? String(a.dueDate).localeCompare(String(b.dueDate)) : String(b.dueDate).localeCompare(String(a.dueDate)));
+    return fa - fb || tierRank(a) - tierRank(b) ||
+      (fa ? String(a.dueDate).localeCompare(String(b.dueDate)) : String(b.dueDate).localeCompare(String(a.dueDate)));
   });
+  const byPt = {};
+  waiting.forEach(function (c) { (byPt[pk(c)] = byPt[pk(c)] || []).push(c); });
   waiting.forEach(function (c) {
-    const pick = Object.keys(load).map(function (k) { return load[k]; })
-      // Up to the daily number of new calls, and never more than two days' worth waiting to be made
-      .filter(function (l) { return l.today < set.perDay && l.open < set.perDay * 2; })
-      .sort(function (a, b) { return a.today - b.today || a.open - b.open || String(a.s.name).localeCompare(String(b.s.name)); })[0];
-    const log = Array.isArray(c.log) ? c.log : [];
-    if (!pick) {
-      if (c._freed) {
-        writes.push(patchWrite_(cfg, RECALL_COL_ + '/' + c._id, { assignedToId: '', assignedToName: '', assignedDay: '', stage: 'due', updatedAt: now,
-          log: log.concat([{ at: now, by: 'Recall', byUid: '', kind: 'auto', what: 'Back to waiting (the person it was given to is no longer active)', note: '' }]).slice(-80) }));
-      }
-      return;
-    }
-    pick.today++;
-    pick.open++;
-    writes.push(patchWrite_(cfg, RECALL_COL_ + '/' + c._id, {
-      stage: 'call', assignedToId: pick.s.id, assignedToName: String(pick.s.name || ''), assignedDay: today, updatedAt: now,
-      log: log.concat([{ at: now, by: 'Recall', byUid: '', kind: 'auto', what: 'Given to ' + pick.s.name + ' (shared in turn)', note: '' }]).slice(-80),
-    }));
+    if (c._done) return;
+    const k = pk(c);
+    const pick = Object.keys(load).map(function (id) { return load[id]; })
+      // Up to the daily number of new patients, and never more than two days' worth waiting to be called
+      .filter(function (l) { return size(l.today) < set.perDay && size(l.open) < set.perDay * 2; })
+      .sort(function (a, b) {
+        return size(a.today) - size(b.today) || size(a.open) - size(b.open) || String(a.s.name).localeCompare(String(b.s.name));
+      })[0];
+    if (!pick) return;
+    pick.today[k] = true;
+    pick.open[k] = true;
+    owner[k] = pick.s;
+    byPt[k].forEach(function (x, i) {
+      give(x, pick.s, i === 0 ? 'Given to ' + pick.s.name + ' (shared in turn)'
+        : 'Given to ' + pick.s.name + ' (with their ' + (c.category || 'other') + ' recall)');
+    });
   });
+
+  // 3. Call-backs for a patient just shared out go with them
+  loose.forEach(function (c) {
+    if (c._done || c.stage !== 'later') return;
+    const s = owner[pk(c)];
+    if (s) give(c, s, 'Given to ' + s.name + " (they have this patient's other recall)");
+  });
+
+  // Cards whose person has left and that nobody picked up: back to waiting
+  loose.forEach(function (c) { if (c._freed && !c._done) backToWaiting(c); });
+
   if (writes.length) commitWrites_(cfg, writes, 100);
   return writes.length;
 }
+
 
 /* ---------- From the portal ---------- */
 
@@ -13684,6 +13752,7 @@ function recallAction_(op, id, body, session) {
     if (!c.assignedToId && (out || remind)) {
       Object.assign(patch, { assignedToId: uid, assignedToName: who, assignedDay: today });
       if (!patch.stage && out !== 'booked') patch.stage = 'call';
+      extraWrites = recallFollowWrites_(cfg, c, id, uid, who, '', who, uid);
     }
     if (out) patch.replyOpen = false;   // a reply has been followed up
   } else if (op === 'text') {
@@ -13709,6 +13778,7 @@ function recallAction_(op, id, body, session) {
     patch = { lastTextAt: now, lastTextBy: uid, lastTextByName: who, texts: Number(c.texts || 0) + 1, replyOpen: false };
     if (c.status === 'open' && !c.assignedToId) {
       Object.assign(patch, { assignedToId: uid, assignedToName: who, assignedDay: today, stage: c.stage === 'later' ? 'later' : 'call' });
+      extraWrites = recallFollowWrites_(cfg, c, id, uid, who, '', who, uid);
     }
   } else if (op === 'assign') {
     const toId = String(body.toId || '');
@@ -13722,6 +13792,7 @@ function recallAction_(op, id, body, session) {
       add('status', 'Given to ' + s.name, false);
       patch = { assignedToId: s.id, assignedToName: String(s.name || ''), assignedDay: today, stage: c.stage === 'later' ? 'later' : 'call' };
     }
+    extraWrites = recallFollowWrites_(cfg, c, id, patch.assignedToId, patch.assignedToName, String(c.assignedToId || ''), who, uid);
   } else if (op === 'close') {
     if (c.status === 'closed') return { ok: true, already: true };
     const r = recallSettings_(cfg).reasons.filter(function (x) { return x.label === String(body.reason || ''); })[0];
@@ -14317,13 +14388,15 @@ function recallOptoutList_(sync) {
   return { ok: true, rows: rows, status: fsGetDoc_(cfg, RECALL_SET_ + '/sms_optouts') || null };
 }
 
-// Mobiles on Textmagic's opt-out list that still have an open recall card: recall stops for them, the same as
-// replying STOP (recallStop_). Each mobile is done once (recallDone). dry: only lists them.
+// Mobiles that opted out (on Textmagic's list, or a past STOP reply copied from Textmagic) that still have an open
+// recall card: recall stops for them, the same as replying STOP (recallStop_). Each mobile is done once. dry: only lists them.
 function recallStopPending_(cfg, deadline, dry) {
   const sup = {};
-  fsListAll_(cfg, SMS_SUPPRESS_, ['tm', 'tmAt', 'at', 'recallDone']).forEach(function (d) {
+  fsListAll_(cfg, SMS_SUPPRESS_, ['tm', 'tmAt', 'at', 'text', 'needsRecall', 'recallDone']).forEach(function (d) {
     const f = fromFields_(d.fields || {});
-    if (f.tm === true && f.recallDone !== true) sup[d.name.split('/').pop()] = String(f.tmAt || f.at || '');
+    if ((f.tm === true || f.needsRecall === true) && f.recallDone !== true) {
+      sup[d.name.split('/').pop()] = { at: String(f.tmAt || f.at || ''), tm: f.tm === true, text: String(f.text || '') };
+    }
   });
   const byKey = {};
   if (Object.keys(sup).length) {
@@ -14337,6 +14410,7 @@ function recallStopPending_(cfg, deadline, dry) {
   for (let i = 0; i < keys.length; i++) {
     if (Date.now() > deadline) { out.left = keys.length - i; break; }
     const k = keys[i];
+    const s = sup[k];
     const list = byKey[k];
     const pids = uniq_(list.map(function (c) { return String(c.patientId || ''); }).filter(Boolean));
     const line = { mobile: k, name: String(list[0].patientName || ''),
@@ -14344,8 +14418,10 @@ function recallStopPending_(cfg, deadline, dry) {
     (pids.length > 1 ? out.shared : out.stopped).push(line);
     if (dry) continue;
     try {
-      recallStop_(cfg, k, "On Textmagic's unsubscribe list (opted out of texts)", sup[k] || new Date().toISOString(), '', list, null);
-      fsPatch_(cfg, SMS_SUPPRESS_ + '/' + k, { tm: true, tmAt: sup[k], recallDone: true });
+      recallStop_(cfg, k, s.tm ? "On Textmagic's unsubscribe list (opted out of texts)" : (s.text || 'STOP'),
+        s.at || new Date().toISOString(), '', list, null);
+      // recallStop_ rewrites the entry: what it was is put back, and it's marked as done
+      fsPatch_(cfg, SMS_SUPPRESS_ + '/' + k, Object.assign({ recallDone: true, needsRecall: false }, s.tm ? { tm: true, tmAt: s.at } : {}));
     } catch (e) { console.warn('Recall not stopped for ' + k + ': ' + e); }
   }
   return out;
@@ -14519,6 +14595,204 @@ function recallMailOf_(email) {
   return out.sort(function (a, b) { return b.at.localeCompare(a.at); }).slice(0, 30);
 }
 
+// RUN FROM THE EDITOR: copies every past reply from Textmagic into recall_replies, with the patient who has that mobile.
+// Run it again until the log says "All done" (it carries on where it stopped, and skips any already copied).
+// Past STOP replies go on the do-not-text list, and their open recalls stop at the next hourly check.
+function textmagicCopyPastReplies() {
+  const cfg = getConfig_();
+  const auth = tmAuth_();
+  if (!auth) { console.log("Textmagic isn't set up."); return; }
+  const props = PropertiesService.getScriptProperties();
+  let page = Number(props.getProperty('TM_REPLY_BACKFILL_PAGE') || 1);
+  const t0 = Date.now();
+
+  // Who has each mobile (records merged into another are left out)
+  const who = {};
+  fsListAll_(cfg, 'patient_list', ['Mobile', 'MergedInto', 'Patient Name', 'First Name', 'Last Name']).forEach(function (d) {
+    const f = fromFields_(d.fields || {});
+    if (f.MergedInto) return;
+    const k = recallPhone04_(f.Mobile);
+    if (k) (who[k] = who[k] || []).push({ id: d.name.split('/').pop(), name: flowWho_(f).name });
+  });
+  const sup = {};
+  fsListAll_(cfg, SMS_SUPPRESS_, ['at']).forEach(function (d) { sup[d.name.split('/').pop()] = true; });
+
+  let copied = 0, skipped = 0, stops = 0, done = false;
+  while (Date.now() - t0 < 270000) {
+    const r = tmFetch_(auth, 'get', '/replies?page=' + page + '&limit=100&orderBy=id&direction=asc');
+    const list = (Array.isArray(r.resources) ? r.resources : []).filter(function (x) { return x && x.id; });
+    if (!list.length) { done = true; break; }
+    const have = fsBatchGet_(cfg, list.map(function (x) { return RECALL_REPLIES_ + '/r_' + x.id; }));
+    const now = new Date().toISOString();
+    const writes = [];
+    list.forEach(function (x) {
+      if (have[RECALL_REPLIES_ + '/r_' + x.id]) { skipped++; return; }   // already in the portal
+      const phone = recallPhone04_(x.sender);
+      const text = String(x.text || '').slice(0, 1000);
+      const kind = recallReplyKind_(text);
+      const at = tmTime_(x.messageTime) || now;
+      const pts = phone ? (who[phone] || []) : [];
+      const one = pts.length === 1 ? pts[0] : null;
+      writes.push(updateWrite_(cfg, RECALL_REPLIES_ + '/r_' + x.id, {
+        tmId: String(x.id), phone: phone || String(x.sender || ''), text: text, at: at, kind: kind,
+        cardId: '', patientId: one ? one.id : '', patientName: one ? one.name : '',
+        patientIds: pts.map(function (p) { return p.id; }).slice(0, 10),
+        seenAt: now, toPortal: false, backfill: true,
+      }));
+      copied++;
+      if (kind === 'stop' && phone && !sup[phone]) {
+        sup[phone] = true;
+        writes.push(updateWrite_(cfg, SMS_SUPPRESS_ + '/' + phone, {
+          phone: phone, at: at, text: text.slice(0, 200), source: 'Replied STOP to a text',
+          patientId: one ? one.id : '', patientIds: pts.map(function (p) { return p.id; }).slice(0, 10),
+          needsRecall: true, fromPast: true,
+        }));
+        stops++;
+      }
+    });
+    if (writes.length) commitWrites_(cfg, writes, 200);
+    const last = list.length < 100 || (Number(r.pageCount || 0) && page >= Number(r.pageCount));
+    if (last) { done = true; break; }   // the last page is checked again next time (new replies land on it)
+    page++;
+    props.setProperty('TM_REPLY_BACKFILL_PAGE', String(page));
+  }
+  console.log(copied + ' past repl' + (copied === 1 ? 'y' : 'ies') + ' copied, ' + skipped + ' already in the portal, ' +
+    stops + ' STOP repl' + (stops === 1 ? 'y' : 'ies') + ' put on the do-not-text list.' +
+    (done ? ' All done.' : ' More left: run it again.'));
+}
+
+// A patient's other open recalls follow the one given to someone (or back to waiting), so one person has them all.
+// Only cards that were with the same person (or nobody). Cards riding along in the flow, or waiting to try again, are left.
+function recallFollowWrites_(cfg, c, id, toId, toName, fromId, who, uid) {
+  if (!c.patientId) return [];
+  const now = new Date().toISOString();
+  const today = flowKey_(Date.now());
+  return fsQuery_(cfg, RECALL_COL_, 'patientId', 'EQUAL', String(c.patientId), 50)
+    .filter(function (x) {
+      return x._id !== id && x.status === 'open' && String(x.assignedToId || '') === String(fromId || '') &&
+        ['joined', 'cycle'].indexOf(String(x.flowState || '')) === -1;
+    })
+    .map(function (x) {
+      const p = {
+        assignedToId: toId || '', assignedToName: toName || '', assignedDay: toId ? today : '',
+        stage: x.stage === 'later' ? 'later' : (toId ? 'call' : 'due'), updatedAt: now,
+      };
+      const what = (toId ? 'Given to ' + toName : 'Back to waiting') + ' (with their ' + (c.category || 'other') + ' recall)';
+      const entries = [{ at: now, by: who, byUid: uid, kind: 'status', what: what, note: '' }];
+      // The flow was about to text them: it stops, so they aren't texted while being called
+      if (toId && ['run', 'wait', 'queued', 'released'].indexOf(String(x.flowState || '')) !== -1) {
+        Object.assign(p, { flowState: 'done', flowNext: '' });
+        entries.push({ at: now, by: 'Recall flow', byUid: '', kind: 'flow', what: 'The flow stopped: ' + toName + ' has it now', note: '' });
+      }
+      p.log = (Array.isArray(x.log) ? x.log : []).concat(entries).slice(-80);
+      return patchWrite_(cfg, RECALL_COL_ + '/' + x._id, p);
+    });
+}
+
+// One-off: patients whose recalls are split between people. They all go to the person who called them most recently
+// (otherwise whoever had them first).
+function recallGroupSplitRun_(dry) {
+  const cfg = getConfig_();
+  const active = {};
+  getStaffDocs_().forEach(function (s) { if (s.active !== false) active[s.id] = s; });
+  const byPt = {};
+  fsQuery_(cfg, RECALL_COL_, 'status', 'EQUAL', 'open', 10000).forEach(function (c) {
+    if (c.patientId && c.assignedToId && active[c.assignedToId] && ['joined', 'cycle'].indexOf(String(c.flowState || '')) === -1) {
+      (byPt[c.patientId] = byPt[c.patientId] || []).push(c);
+    }
+  });
+  const now = new Date().toISOString();
+  const writes = [];
+  Object.keys(byPt).forEach(function (pid) {
+    const list = byPt[pid];
+    if (uniq_(list.map(function (c) { return c.assignedToId; })).length < 2) return;
+    const keep = list.slice().sort(function (a, b) {
+      return String(b.lastCallAt || '').localeCompare(String(a.lastCallAt || '')) ||
+        String(a.assignedDay || '9').localeCompare(String(b.assignedDay || '9'));
+    })[0];
+    const s = active[keep.assignedToId];
+    list.forEach(function (c) {
+      if (c.assignedToId === keep.assignedToId) return;
+      console.log((dry ? 'Would give ' : 'Gave ') + c.patientName + ' · ' + c.category + ': ' + c.assignedToName + ' → ' + s.name);
+      if (dry) return;
+      writes.push(patchWrite_(cfg, RECALL_COL_ + '/' + c._id, {
+        assignedToId: s.id, assignedToName: String(s.name || ''), updatedAt: now,
+        log: (Array.isArray(c.log) ? c.log : []).concat([{ at: now, by: 'Recall', byUid: '', kind: 'auto', note: '',
+          what: 'Given to ' + s.name + ' (with their ' + keep.category + ' recall, so one person has them all)' }]).slice(-80),
+      }));
+    });
+  });
+  if (writes.length) commitWrites_(cfg, writes, 100);
+  return writes.length;
+}
+function recallGroupSplitPreview() { recallGroupSplitRun_(true); }
+function recallGroupSplit() { console.log(recallGroupSplitRun_(false) + ' recall card(s) moved.'); }
+
+// Spend tiers: every recall card shows its patient's spend (Recall → badges, the Spend filter, sharing out)
+const SPEND_NONE_ = { spendTier: '', spend12: 0, spendAll: 0, spendVisits12: 0 };
+
+// From the appointment book (alltimeappts M, the listed price), per patient: the last 12 months and all time.
+// Cancelled, no-shows and future appointments don't count. Tiers by rank on the last 12 months, among patients
+// who spent anything: Platinum = top 10%, Gold = next 20%, Silver = next 30% (recall_settings/config → spend).
+// Patients on the same amount at a boundary get the higher tier.
+function recallSpend_(ctx, rows, pts, opt) {
+  opt = opt || { platinum: 10, gold: 20, silver: 30 };
+  const from = flowAddMonthsKey_(ctx.todayKey, -12);
+  const acc = Object.create(null);
+  const keyOf = Object.create(null);
+  rows.forEach(function (r) {
+    if (!pcnIsDate_(r[0]) || r[0].getTime() >= ctx.today || !pcnStatusOk_(r[7], 'full')) return;
+    if (REP_NOT_VISIT_.test(String(r[9] == null ? '' : r[9]))) return;
+    const ptt = String(r[14] == null ? '' : r[14]).trim();
+    if (!ptt) return;
+    if (!(ptt in keyOf)) keyOf[ptt] = pts.find(ptt);
+    const pid = keyOf[ptt];
+    if (!pid) return;
+    const dk = Utilities.formatDate(r[0], ctx.tz, 'yyyy-MM-dd');
+    const raw = r[12];
+    const price = typeof raw === 'number' ? raw : Number(String(raw == null ? '' : raw).replace(/[$,\s]/g, ''));
+    const x = acc[pid] || (acc[pid] = { m12: 0, all: 0, days: Object.create(null) });
+    if (isFinite(price) && price > 0) { x.all += price; if (dk >= from) x.m12 += price; }
+    if (dk >= from) x.days[dk] = true;
+  });
+
+  const by = Object.create(null);
+  Object.keys(acc).forEach(function (pid) {
+    const x = acc[pid];
+    by[pid] = { spendTier: '', spend12: Math.round(x.m12), spendAll: Math.round(x.all), spendVisits12: Object.keys(x.days).length };
+  });
+  const ranked = Object.keys(by).filter(function (pid) { return by[pid].spend12 > 0; })
+    .sort(function (a, b) { return by[b].spend12 - by[a].spend12; });
+  const n = ranked.length;
+  const c1 = Math.ceil(n * opt.platinum / 100);
+  const c2 = c1 + Math.ceil(n * opt.gold / 100);
+  const c3 = c2 + Math.ceil(n * opt.silver / 100);
+  const cut = function (k) { return k > 0 && n ? by[ranked[Math.min(k, n) - 1]].spend12 : Infinity; };
+  const t = { platinum: cut(c1), gold: cut(c2), silver: cut(c3) };
+  const counts = { platinum: 0, gold: 0, silver: 0 };
+  ranked.forEach(function (pid) {
+    const v = by[pid].spend12;
+    const tier = v >= t.platinum ? 'platinum' : v >= t.gold ? 'gold' : v >= t.silver ? 'silver' : '';
+    by[pid].spendTier = tier;
+    if (tier) counts[tier]++;
+  });
+  const fin = function (v) { return isFinite(v) ? v : 0; };
+  return {
+    by: by,
+    status: {
+      at: new Date().toISOString(), patients: n, basis: 'Day Sheet prices, last 12 months',
+      pct: { platinum: opt.platinum, gold: opt.gold, silver: opt.silver },
+      from: { platinum: fin(t.platinum), gold: fin(t.gold), silver: fin(t.silver) },
+      counts: counts,
+    },
+  };
+}
+
+// Run from the editor: works out spend tiers now (and the rest of Recall's daily check)
+function recallSpendNow() {
+  console.log(JSON.stringify(recallRun_(true)));
+}
+
 /* ---------- Recall settings: status and a test text ---------- */
 
 function recallSmsAdmin_(op, body, session) {
@@ -14680,6 +14954,13 @@ function recallFlowSend_(cfg, set, s, c, test) {
 function recallFlowPerson_(cfg, set, k, c, memo) {
   const active = getStaffDocs_().filter(function (s) { return s.active !== false; });
   if (k.who === 'person') return active.filter(function (s) { return s.id === String(k.personId || ''); })[0] || null;
+  // Someone already has another of this patient's recalls: it goes to them
+  if (c.patientId) {
+    const other = recallPatientCards_(cfg, c.patientId, memo)
+      .filter(function (x) { return x._id !== c._id && x.status === 'open' && x.assignedToId; })[0];
+    const owner = other && active.filter(function (s) { return s.id === other.assignedToId; })[0];
+    if (owner) return owner;
+  }
   if (k.who === 'last') {
     const n = flowNorm_(c.lastStaff);
     const hit = n && active.filter(function (s) {

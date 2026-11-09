@@ -29,6 +29,12 @@ const GROUPS = [["just", "Just due · last 30 days", (d) => d <= 30], ["over", "
 const LV_OPTS = [["", "Any time"], ["3", "Past 3 months"], ["3-6", "3 to 6 months ago"],
   ["6-12", "6 to 12 months ago"], ["12+", "Over a year ago"], ["custom", "Choose dates…"]];
 const APPT_OPTS = [["", "Any"], ["yes", "Has one booked"], ["no", "None booked"]];
+// Spend tiers (Code.gs → recallSpend_): from the Day Sheet, the last 12 months
+const TIERS = { platinum: "Platinum", gold: "Gold", silver: "Silver" };
+const TIER_RANK = { platinum: 0, gold: 1, silver: 2 };
+const SPEND_OPTS = [["", "Any"], ["platinum", "Platinum"], ["gold", "Gold"], ["silver", "Silver"],
+  ["pg", "Platinum or Gold"], ["none", "No tier"]];
+const money = (n) => `$${Math.round(Number(n) || 0).toLocaleString("en-AU")}`;
 const PICKS = [["Tomorrow", (t) => addDays(t, 1)], ["Next week", (t) => addDays(t, 7)],
   ["2 weeks", (t) => addDays(t, 14)], ["1 month", (t) => addMonths(t, 1)]];
 const SESSION_KEYS = [["N", "No answer"], ["V", "Voicemail"], ["S", "Spoke"], ["B", "Booked"], ["C", "Call"],
@@ -201,6 +207,8 @@ function norm(snap) {
     flowState: s("flowState"), flowDueAt: Number(x.flowDueAt) || 0,
     joinedCat: s("joinedCat"), alsoDue: Array.isArray(x.alsoDue) ? x.alsoDue.map(String) : [],
     dnc: x.dnc === true, dncWhy: s("dncWhy"), nextAppt: s("nextAppt"), callBackDue: s("callBackDue"),
+    spendTier: s("spendTier"), spend12: Number(x.spend12) || 0, spendAll: Number(x.spendAll) || 0,
+    spendVisits12: Number(x.spendVisits12) || 0,
     smsStop: x.smsStop && typeof x.smsStop === "object"
       ? { at: String(x.smsStop.at || ""), source: String(x.smsStop.source || "") } : null,
     log: Array.isArray(x.log) ? x.log : [], updatedAt: s("updatedAt"),
@@ -228,6 +236,11 @@ export function mountRecall(container, { staff = null } = {}) {
           <label class="rc-f-row"><span>Upcoming visit</span>
             <select class="fb-select" data-role="appt" aria-label="Upcoming visit">${APPT_OPTS.map(([k, l]) =>
               `<option value="${k}">${esc(l)}</option>`).join("")}</select></label>
+          <label class="rc-f-row"><span>Spend</span>
+            <select class="fb-select" data-role="spend" aria-label="Spend">${SPEND_OPTS.map(([k, l]) =>
+              `<option value="${k}">${esc(l)}</option>`).join("")}</select></label>
+          <label class="fe-check rc-f-row rc-f-tick"><input type="checkbox" data-role="spendFirst" />
+            <span>My calls: higher spend first</span></label>
         </div>
       </details>
       <span class="inv-spacer"></span>
@@ -243,8 +256,13 @@ export function mountRecall(container, { staff = null } = {}) {
   container.replaceChildren(root);
   const $ = (r) => root.querySelector(`[data-role="${r}"]`);
 
-  const ui = { tab: "mine", who: "mine", cat: "", q: "", lv: "", lvFrom: "", lvTo: "", appt: "" };
-  const apptWhere = () => (ui.appt ? [where("hasAppt", "==", ui.appt === "yes")] : []);
+  const ui = { tab: "mine", who: "mine", cat: "", q: "", lv: "", lvFrom: "", lvTo: "", appt: "", spend: "" };
+  // Upcoming visit and Spend: both added to every list and count
+  const apptWhere = () => [
+    ...(ui.appt ? [where("hasAppt", "==", ui.appt === "yes")] : []),
+    ...(ui.spend === "pg" ? [where("spendTier", "in", ["platinum", "gold"])]
+      : ui.spend ? [where("spendTier", "==", ui.spend === "none" ? "" : ui.spend)] : []),
+  ];
   let settings = normRecallSettings({});
   let people = [];
   let sections = [];
@@ -260,6 +278,23 @@ export function mountRecall(container, { staff = null } = {}) {
   let draft = blank();
   const saving = new Map();   // card id → what's being saved ("Saving: No answer")
   let autoNext = getPref("rc_autonext", true);
+  let spendFirst = getPref("rc_spendfirst", false);
+  let spendInfo = null;   // recall_settings/spend_status: where each tier starts
+  const showMoney = can(staff, "recall.manage");
+  const tierTitle = (c) => {
+    const name = TIERS[c.spendTier] || "";
+    if (showMoney) {
+      return `${name}: ${money(c.spend12)} in the last 12 months · ${money(c.spendAll)} all time · ` +
+        `${plural(c.spendVisits12, "visit")} in 12 months. From Day Sheet prices.`;
+    }
+    const from = spendInfo && spendInfo.from && spendInfo.from[c.spendTier];
+    return `${name}: one of the clinic's top patients by spend in the last 12 months${from ? ` (${money(from)} or more)` : ""}.`;
+  };
+  const tierPill = (c, cls = "") => (TIERS[c.spendTier]
+    ? ` <span class="rc-tier is-${esc(c.spendTier)}${cls}" title="${esc(tierTitle(c))}">${esc(TIERS[c.spendTier])}</span>` : "");
+  // My calls: higher spend first within each group (when ticked), otherwise as loaded (most recently due first)
+  const bySpend = (list) => (!spendFirst ? list : list.slice().sort((a, b) =>
+    (TIER_RANK[a.spendTier] ?? 9) - (TIER_RANK[b.spendTier] ?? 9) || b.spend12 - a.spend12));
   let countTimer = 0, countSeq = 0, searchTimer = 0, searchSeq = 0;
   let jumpTo = "";            // a group to scroll to once My calls has loaded ("replies", "callbacks")
 
@@ -477,7 +512,7 @@ export function mountRecall(container, { staff = null } = {}) {
 
   /* ---------- Drawing ---------- */
   // My calls fully loaded with no filters: the numbers come straight from the list, so they're exact
-  const exactMine = () => (ui.tab === "mine" && ui.who === "mine" && !ui.cat && !ui.appt && !lvRange()
+  const exactMine = () => (ui.tab === "mine" && ui.who === "mine" && !ui.cat && !ui.appt && !ui.spend && !lvRange()
     ? sections.find((s) => s.key === "mine" && s.loaded && !s.more && !s.error) : null);
 
   function drawStats() {
@@ -529,6 +564,8 @@ export function mountRecall(container, { staff = null } = {}) {
 
   function drawLv() {
     $("appt").value = ui.appt;
+    $("spend").value = ui.spend;
+    $("spendFirst").checked = spendFirst;
     const t = todayKey();
     $("lvbox").innerHTML = `<select class="fb-select" data-role="lv" aria-label="Last visit">${LV_OPTS.map(([k, l]) =>
       `<option value="${k}"${k === ui.lv ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>` +
@@ -554,6 +591,7 @@ export function mountRecall(container, { staff = null } = {}) {
         : `Last visit: ${(LV_OPTS.find(([k]) => k === ui.lv) || ["", ""])[1].toLowerCase()}`]);
     }
     if (ui.appt) active.push(["appt", ui.appt === "yes" ? "Has an upcoming visit" : "No upcoming visit"]);
+    if (ui.spend) active.push(["spend", `Spend: ${(SPEND_OPTS.find(([k]) => k === ui.spend) || ["", ""])[1]}`]);
     $("fcount").textContent = active.length ? ` · ${active.length}` : "";
     $("filters").classList.toggle("is-on", !!active.length);
     $("active").innerHTML = searchingNow ? "" : active.map(([k, l]) =>
@@ -604,7 +642,7 @@ export function mountRecall(container, { staff = null } = {}) {
         : `<span class="rc-nomob">${c.email ? "No mobile" : "No mobile or email"}</span>`;
     return `<div class="rc-item ${rail(c, t)}${on ? " is-on" : ""}" data-card="${esc(c.id)}" role="button" tabindex="0" aria-expanded="${on}">
         <span class="rc-av h${hue(c.category)}" aria-hidden="true">${esc(initials(c.patientName))}</span>
-        <span class="rc-main"><strong>${esc(c.patientName || "Unknown patient")}${c.dnc
+        <span class="rc-main"><strong>${esc(c.patientName || "Unknown patient")}${tierPill(c)}${c.dnc
           ? ` <span class="rc-dnc" title="${esc(dncTitle(c))}">Do not contact</span>`
           : c.smsStop ? ` <span class="rc-dnc is-sms" title="${esc(smsStopText(c))}">No texts</span>` : ""}</strong><small>${meta}</small></span>
         ${tag}
@@ -621,7 +659,7 @@ export function mountRecall(container, { staff = null } = {}) {
     const rest = rows.filter((c) => !c.replyOpen && !isCallBack(c));
     return block("replies", "Replied · follow up first", rows.filter((c) => c.replyOpen)) +
       block("callbacks", "Call back today · as promised", callBacks(rows)) +
-      GROUPS.map(([g, title, test]) => block(g, title, rest.filter((c) => test(daysFrom(c.dueDate, t))))).join("");
+      GROUPS.map(([g, title, test]) => block(g, title, bySpend(rest.filter((c) => test(daysFrom(c.dueDate, t)))))).join("");
   }
   function scrollGroup(g) {
     if (!g) return;
@@ -631,6 +669,7 @@ export function mountRecall(container, { staff = null } = {}) {
   }
 
   function emptyText(sec) {
+    if (ui.spend) return "Nobody here in that spend tier.";
     if (ui.appt) return ui.appt === "yes" ? "Nobody here with an upcoming visit." : "Nobody here without an upcoming visit.";
     if (lvRange()) return ui.cat ? `Nobody here for ${ui.cat} with a last visit in those dates.` : "Nobody here with a last visit in those dates.";
     if (ui.cat) return `Nobody here for ${ui.cat}.`;
@@ -680,9 +719,8 @@ export function mountRecall(container, { staff = null } = {}) {
       if (s.key === "mine") {
         s.rows.forEach((c) => { if (c.replyOpen) out.push(c.id); });
         callBacks(s.rows).forEach((c) => out.push(c.id));
-        GROUPS.forEach(([, , test]) => s.rows.forEach((c) => {
-          if (!c.replyOpen && !isCallBack(c) && test(daysFrom(c.dueDate, t))) out.push(c.id);
-        }));
+        GROUPS.forEach(([, , test]) => bySpend(s.rows.filter((c) =>
+          !c.replyOpen && !isCallBack(c) && test(daysFrom(c.dueDate, t)))).forEach((c) => out.push(c.id)));
       }
       else s.rows.forEach((c) => out.push(c.id));
     });
@@ -717,6 +755,7 @@ export function mountRecall(container, { staff = null } = {}) {
   function chipsHtml(c, t) {
     const dueCls = rail(c, t).replace("r-", "is-");
     return [
+      TIERS[c.spendTier] ? `<span class="rc-pill rc-tier is-${esc(c.spendTier)}" title="${esc(tierTitle(c))}">${esc(TIERS[c.spendTier])}</span>` : "",
       c.category ? `<span class="rc-pill is-cat">${esc(c.category)}</span>` : "",
       `<span class="rc-pill ${dueCls}">${esc(dueText(c, t))}</span>`,
       c.alsoDue.length ? `<span class="rc-pill is-also">Also due: ${esc(c.alsoDue.join(", "))}</span>` : "",
@@ -738,6 +777,9 @@ export function mountRecall(container, { staff = null } = {}) {
         : c.lastTextAt ? `${dayOf(c.lastTextAt)}${c.texts > 1 ? ` · ${c.texts} so far` : ""}` : "None yet"],
       ["Upcoming", c.nextAppt && c.nextAppt >= t ? short(c.nextAppt) : "Nothing booked"],
       ["Due", nice(c.dueDate) || "–"],
+      ...(c.spendAll || c.spendTier ? [["Spent", showMoney
+        ? `${money(c.spend12)} in 12 months · ${money(c.spendAll)} all time`
+        : TIERS[c.spendTier] ? `${TIERS[c.spendTier]} tier` : "–"]] : []),
     ];
     return `<div class="rc-ctx">${items.map(([a, b]) => `<div><small>${esc(a)}</small><span>${esc(b)}</span></div>`).join("")}</div>`;
   }
@@ -1462,6 +1504,8 @@ export function mountRecall(container, { staff = null } = {}) {
     const r = el.dataset.role;
     if (r === "who") { ui.who = el.value; sel = ""; build(); return; }
     if (r === "appt") { ui.appt = el.value; sel = ""; build(); return; }
+    if (r === "spend") { ui.spend = el.value; sel = ""; build(); return; }
+    if (r === "spendFirst") { spendFirst = el.checked; setPref("rc_spendfirst", spendFirst); drawList(); return; }
     if (r === "lv") {
       ui.lv = el.value;
       sel = "";
@@ -1566,6 +1610,7 @@ export function mountRecall(container, { staff = null } = {}) {
       if (k === "who") ui.who = "mine";
       if (k === "lv") { ui.lv = ""; ui.lvFrom = ""; ui.lvTo = ""; }
       if (k === "appt") ui.appt = "";
+      if (k === "spend") ui.spend = "";
       sel = "";
       build();
       return;
@@ -1724,6 +1769,9 @@ export function mountRecall(container, { staff = null } = {}) {
     .then((s) => { settings = normRecallSettings(s.exists() ? s.data() : {}); drawWho(); drawChips(); drawStats(); drawPanel(true); scheduleCounts(0); })
     .catch(() => {});
   callApi({ action: "staffList" }).then((r) => { people = (r && r.staff) || []; drawWho(); drawFilters(); drawPanel(true); }).catch(() => {});
+  getDoc(doc(db, "recall_settings", "spend_status"))
+    .then((s) => { spendInfo = s.exists() ? s.data() : null; drawList(); drawPanel(true); })
+    .catch(() => {});
   drawStats();
   build();
 }

@@ -12873,3 +12873,12 @@ dialog.lh-dialog.ae-dlg { width: min(520px, calc(100vw - 2rem)); }
 .rc-tl-st.is-ok { color: #15803d; }
 .rc-tl-st.is-bad { color: #b91c1c; }
 .rc-tl-st.is-wait { color: #94a3b8; }
+
+/* Recall: spend tiers */
+.rc-tier { display: inline-flex; align-items: center; margin-left: 6px; padding: 1px 8px; border-radius: 999px;
+  border: 1px solid transparent; font-size: 11px; font-weight: 700; letter-spacing: .02em; vertical-align: middle; white-space: nowrap; }
+.rc-tier.is-platinum { background: linear-gradient(135deg, #334155, #0f172a); color: #f8fafc; border-color: #1e293b; }
+.rc-tier.is-gold { background: linear-gradient(135deg, #fde68a, #fbbf24); color: #78350f; border-color: #f59e0b; }
+.rc-tier.is-silver { background: linear-gradient(135deg, #f8fafc, #e2e8f0); color: #475569; border-color: #cbd5e1; }
+.rc-pill.rc-tier { margin-left: 0; }
+.rc-f-tick { display: flex; align-items: center; gap: 8px; }
