@@ -1506,9 +1506,12 @@ match /inv_count_drafts/{id} {
     }
 
     // Bookings added on the calendar, shown until the next Day Sheet upload has them. Removed, never deleted.
+    // Bookings added on the calendar, and changes to Day Sheet bookings (moved, given to someone else,
+    // cancelled, a note). Shown until the next Day Sheet upload has them. Removed, never deleted.
     match /manual_appts/{id} {
       function okAppt(d) {
-        return d.dateKey is string && d.dateKey.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        return d.get('kind', 'booking') == 'booking'
+          && d.dateKey is string && d.dateKey.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
           && d.staff is string && d.staff.size() > 0 && d.staff.size() <= 80
           && d.patientId is string && d.patientId.size() <= 80
           && d.patientName is string && d.patientName.size() > 0 && d.patientName.size() <= 120
@@ -1519,17 +1522,34 @@ match /inv_count_drafts/{id} {
           && d.note is string && d.note.size() <= 500
           && d.status in ['active', 'removed'];
       }
+      function okChange(d) {
+        return d.kind == 'change'
+          && d.dateKey is string && d.dateKey.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+          && d.staff is string && d.staff.size() > 0 && d.staff.size() <= 80
+          && d.toStaff is string && d.toStaff.size() > 0 && d.toStaff.size() <= 80
+          && d.patientId is string && d.patientId.size() <= 80
+          && d.patientName is string && d.patientName.size() > 0 && d.patientName.size() <= 120
+          && d.fromMins is list && d.fromMins.size() > 0 && d.fromMins.size() <= 12
+          && d.toMin is int && d.toMin >= 0 && d.toMin < 1440
+          && d.shiftMin is int && d.shiftMin > -1440 && d.shiftMin < 1440
+          && d.cancel in ['', 'cancelled', 'no-show']
+          && d.note is string && d.note.size() <= 500
+          && d.status in ['active', 'removed'];
+      }
       allow read: if isStaff();
-      allow create: if can('calendar.book') && okAppt(request.resource.data)
+      allow create: if can('calendar.book')
+        && (okAppt(request.resource.data) || okChange(request.resource.data))
         && request.resource.data.status == 'active'
         && request.resource.data.createdByUid == request.auth.uid;
-      allow update: if can('calendar.book') && okAppt(request.resource.data)
+      allow update: if can('calendar.book')
+        && (okAppt(request.resource.data) || okChange(request.resource.data))
+        && request.resource.data.get('kind', 'booking') == resource.data.get('kind', 'booking')
         && request.resource.data.createdByUid == resource.data.createdByUid
         && request.resource.data.createdAt == resource.data.createdAt
         && request.resource.data.updatedByUid == request.auth.uid;
       allow delete: if false;
     }
-
+    
     // ===================== SEO =====================
     // Search data, Site health, audience and the WordPress page list are written by Apps Script only
     // (the service account bypasses these rules). Staff with the SEO menu read them.

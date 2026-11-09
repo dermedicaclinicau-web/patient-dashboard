@@ -12504,3 +12504,26 @@ body.no-billing-view .bp-head, body.no-clinical-view .hx-head { display: none !i
 .patient-page .pc-card .sub-card.is-empty .sum-icon { width: auto; height: auto; border-radius: 0; background: none; color: var(--c); }
 .patient-page .pc-card .sub-card.is-empty .sum-icon { color: #94a3b8; }
 .patient-page .pc-card .sub-card .sum-icon svg { width: 17px; height: 17px; }
+
+/* Calendar: change a Day Sheet booking */
+dialog.lh-dialog.ae-dlg { width: min(520px, calc(100vw - 2rem)); }
+.ae-was { margin: 0; padding: .6rem .8rem; border-radius: 10px; background: var(--surface-2); font-size: .88rem; color: #334155; }
+.ae-warn { margin: 0; padding: .6rem .8rem; border: 1px solid #fecaca; border-radius: 10px; background: #fef2f2; color: #991b1b; font-size: .86rem; line-height: 1.45; }
+.ae-two { display: grid; grid-template-columns: 1fr 1.4fr; gap: .75rem; }
+.ae-quick { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: -.35rem; }
+.ae-quick button { height: 30px; padding: 0 .7rem; border: 1px solid var(--border); border-radius: 999px; background: #fff;
+  color: #334155; font: inherit; font-size: .8rem; font-weight: 600; cursor: pointer; }
+.ae-quick button:hover { border-color: var(--primary); color: var(--primary); }
+.ae-tip { margin: 0; font-size: .8rem; color: var(--muted); }
+.lh-actions .ae-sp { flex: 1; }
+.lh-btn.ae-undo { color: #b45309; }
+
+/* On the calendar card */
+.ae-tags { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .4rem; }
+.ae-tag { display: inline-flex; align-items: center; padding: .1rem .5rem; border-radius: 999px;
+  background: #e0f2fe; color: #075985; font-size: .7rem; font-weight: 700; }
+.ae-tag.is-warn { background: #fef3c7; color: #92400e; }
+.ae-tag.is-bad { background: #fee2e2; color: #b91c1c; }
+.appt.is-changed { box-shadow: inset 3px 0 0 #0284c7; }
+.appt.is-conflict { box-shadow: inset 3px 0 0 #dc2626; }
+@media (max-width: 520px) { .ae-two { grid-template-columns: 1fr; } }
