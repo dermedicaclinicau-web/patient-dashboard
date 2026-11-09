@@ -1623,10 +1623,10 @@ export function mountRecall(container, { staff = null } = {}) {
 
   root.addEventListener("click", async (e) => {
     // Calling: the phone dials (if it can) and the card turns into "On a call"
-    const tl = e.target.closest('a[href^="tel:"]');
-    if (tl) {
-      const row = tl.closest(".rc-item");
-      const id = tl.dataset.call || (row && row.dataset.card) || sel;
+    const telA = e.target.closest('a[href^="tel:"]');
+    if (telA) {
+      const row = telA.closest(".rc-item");
+      const id = telA.dataset.call || (row && row.dataset.card) || sel;
       if (id) setTimeout(() => startCall(id), 0);
       return;
     }

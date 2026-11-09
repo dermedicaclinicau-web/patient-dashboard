@@ -597,8 +597,8 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
       draw();
       return;
     }
-    const st = e.target.closest('[data-act="save-tags"]');
-    if (st) { saveTags(st); return; }
+    const stg = e.target.closest('[data-act="save-tags"]');
+    if (stg) { saveTags(stg); return; }
     if (e.target.closest('[data-act="save"]')) { save(); return; }
     if (e.target.closest('[data-act="add-skip"]')) { addSkip(); return; }
     if (e.target.closest('[data-act="load-svcs"]')) { loadServices(); return; }
