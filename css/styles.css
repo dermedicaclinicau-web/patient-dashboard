@@ -12483,102 +12483,24 @@ body.no-billing-view .bp-head, body.no-clinical-view .hx-head { display: none !i
   .bp-date b { font-size: 1.1rem; }
 }
 
-/* ===================== Calm patient page =====================
-   One accent colour (teal), grey line icons, no gradients, one border per card.
-   Colour only where it means something: allergies, today, reminders due, overdue, SSP status.
-   Delete this block to go back to the colourful version. */
+/* ===================== Patient page: lighter icons =====================
+   Section colours stay. Icons on the card bars lose their gradient tiles and become
+   plain line icons in the card's own colour. Section headings keep their tile. */
 
-/* Section bars: all white */
-.patient-page .pc-card,
-.patient-page .tp-card,
-.patient-page .hv-section { background: #fff; border-color: var(--border); box-shadow: 0 1px 2px rgba(15, 23, 42, .04); }
-.patient-page .hv-section > summary, .patient-page .hv-body { background: #fff; }
-.patient-page .hv-section[open] > summary { border-bottom-color: var(--border); }
-.patient-page .pc-card .pc-refresh { border-color: var(--border); }
-.patient-page .pc-card .visits-label { color: var(--muted); }
+/* Clinical History cards */
+.patient-page .hx-card .hx-icon { width: auto; height: auto; border-radius: 0; background: none; box-shadow: none; color: var(--c); }
+.patient-page .hx-card .hx-icon svg { width: 17px; height: 17px; }
 
-/* Section icons: small and grey, no gradient tile */
-.patient-page :is(.pc-head-ic, .tp-head-ic, .hv-icon, .hx-head-ic, .sec-head-ic) {
-  width: 28px; height: 28px; border-radius: 8px; background: var(--surface-2); color: #475569; box-shadow: none; }
-.patient-page :is(.pc-head-ic, .tp-head-ic, .hv-icon, .hx-head-ic, .sec-head-ic) svg { width: 15px; height: 15px; }
-.patient-page :is(.hv-count, .tp-count) { background: var(--surface-2) !important; color: #475569 !important; box-shadow: none; }
-.patient-page :is(.sec-head, .hx-head):hover .pc-title { color: var(--primary); }
+/* Skin Care cards */
+.patient-page .sk-ic { width: auto; height: auto; border-radius: 0; background: none; box-shadow: none; color: var(--c); }
+.patient-page .sk-ic svg { width: 17px; height: 17px; }
 
-/* Cards: one border, no inner box, no coloured top line */
-.patient-page .rc-card, .patient-page .sk-card.sk-card { padding: 0; overflow: hidden; border-color: var(--border); border-radius: 14px;
-  background: #fff; box-shadow: 0 1px 2px rgba(15, 23, 42, .04); }
-.patient-page :is(.rc-card, .sk-card) > summary { min-height: 52px; padding: .7rem 1rem; border: 0; border-radius: 0;
-  background: #fff; box-shadow: none; filter: none; }
-.patient-page :is(.rc-card, .sk-card) > summary:hover { background: #fafbfc; }
-.patient-page :is(.rc-card, .sk-card)[open] > summary { background: #fff; border-bottom: 1px solid var(--border); }
-.patient-page .rc-card .rc-body { margin: 0; border: 0; border-radius: 0; background: #fff; }
-.patient-page .sk-card .sk-body { padding: .85rem; }
-.patient-page :is(.rc-title, .sk-title), .patient-page :is(.rc-title, .sk-title) .sum-chev { color: var(--text); font-weight: 600; }
+/* Billing & Prescriptions cards (and the "Soon" ones) */
+.patient-page .bp-card .bp-icon { width: auto; height: auto; border-radius: 0; background: none; box-shadow: none; color: var(--c); }
+.patient-page .bp-card .bp-icon svg { width: 17px; height: 17px; }
 
-/* Card icons: plain grey line icons */
-.patient-page :is(.hx-icon, .sk-ic, .bp-icon) { width: 18px; height: 18px; border-radius: 0; background: none; color: #94a3b8; box-shadow: none; }
-.patient-page :is(.hx-icon, .sk-ic, .bp-icon) svg { width: 16px; height: 16px; }
-
-/* Counts: grey (allergies stay red) */
-.patient-page :is(.hx-card, .rc-card, .sk-card, .bp-card) .sk-badge,
-.patient-page .hx-card .hx-count { background: var(--surface-2); color: #475569; box-shadow: none; font-weight: 600; }
-
-/* Buttons in card bars: quiet outline */
-.patient-page :is(.rc-card, .sk-card) summary :is(.rc-link, .sk-btn, .hx-edit-btn) { height: 30px; padding: 0 .7rem;
-  border: 1px solid var(--border); border-radius: 8px; background: #fff; color: #334155; font-size: .8rem; font-weight: 600;
-  box-shadow: none; filter: none; }
-.patient-page :is(.rc-card, .sk-card) summary :is(.rc-link, .sk-btn, .hx-edit-btn):hover { border-color: var(--primary);
-  color: var(--primary); background: #fff; text-decoration: none; }
-.patient-page .sk-card summary .sk-btn-ic { width: 30px; padding: 0; }
-.patient-page .sk-empty .sk-btn.is-primary { background: var(--primary); box-shadow: none; }
-
-/* Empty cards: not faded, just a quieter title */
-.patient-page details.is-empty:not([open]) > summary { opacity: 1; }
-.patient-page details.is-empty:not([open]) :is(.rc-title, .sk-title, .sum-label) { color: #64748b; font-weight: 500; }
-
-/* Pre-Consultation cards: teal accent, reminders stay amber */
-.patient-page .pc-card .sub-card:not(.visit-card) { --c: #0f766e; --cs: #f1f5f9; border-color: var(--border); }
-.patient-page .pc-card .sub-card[data-key="reminders"] { --c: #d97706; --cs: #fef3c7; }
-.patient-page .pc-card .sub-card:not(.visit-card)[open] > summary { background: #fff; }
-.patient-page .pc-card .sub-card .sum-icon { width: auto; height: auto; background: none; color: #94a3b8; }
-.patient-page .pc-card .visit-card { background: #fff; border-color: var(--border); }
-.patient-page .pc-card .visit-card .hint { background: var(--surface-2); color: #475569; }
-
-/* Clinical History: teal accent, allergies keep a red edge */
-.patient-page .hx-grid .hx-card { --c: #0f766e; --cd: #0f766e; --cs: #f1f5f9; }
-.patient-page .hx-grid .hx-card.has-alert { background: #fff; box-shadow: inset 3px 0 0 #dc2626; }
-.patient-page .hx-grid .hx-card.has-alert .hx-count { background: #dc2626; color: #fff; }
-
-/* Skin Care: teal accent */
-.patient-page .sk-grid .sk-card.sk-card { --c: #0f766e; --cd: #0f766e; --cs: #f1f5f9; --ci: var(--text); }
-.patient-page .ssp-latest { background: var(--primary); }
-.patient-page .sk-grid .ssp-protocol { border-color: var(--border); box-shadow: none; }
-.patient-page .sk-grid .ssp-protocol.is-latest { box-shadow: inset 3px 0 0 var(--primary); }
-.patient-page .sk-grid .ssp-protocol > summary:hover { background: #fafbfc; }
-.patient-page .sk-grid .ssp-protocol[open] > summary { background: #fff; border-bottom-color: var(--border); }
-.patient-page .sk-grid .ssp-btn svg { color: #64748b; }
-.patient-page .sk-grid .ssp-btn:hover { border-color: var(--primary); background: #fff; color: var(--primary); }
-.patient-page .sk-grid .ssp-table { border-color: var(--border); }
-.patient-page .sk-grid .ssp-table th { background: var(--surface-2); color: #475569; border-bottom-color: var(--border); }
-.patient-page .sk-grid .ssp-table td, .patient-page .sk-grid .ssp-table th + th, .patient-page .sk-grid .ssp-table td + td { border-color: #f1f5f9; }
-.patient-page .sk-grid :is(.pur-chip, .pur-stat, .pur-list, .sk-empty) { border-color: var(--border); }
-.patient-page .sk-grid .pur-chip { color: #334155; }
-.patient-page .sk-grid .pur-year { background: var(--surface-2); color: #64748b; border-bottom-color: var(--border); }
-.patient-page .sk-grid .pur-row:hover { background: #fafbfc; }
-.patient-page .sk-grid .pur-more { border-color: var(--border); color: var(--primary); }
-
-/* Treatment + Consent Records: no more orange */
-.patient-page .rc-grid .rc-cat > summary { background: var(--surface-2); }
-.patient-page .rc-grid .rc-cat > summary:hover { background: #f1f5f9; }
-.patient-page .rc-grid .rc-cat-name { color: #334155; }
-.patient-page .rc-grid .rc-body .rc-link { color: var(--primary); }
-.patient-page .rc-grid .rc-item { border-color: var(--border); }
-.patient-page .rc-grid .rc-item:hover { border-color: #cbd5e1; }
-.patient-page .rc-grid .rc-cat[open] > summary .rc-chev { color: var(--primary); }
-
-/* Billing & Prescriptions: teal accent, "Soon" cards plain */
-.patient-page :is(.bp-grid, .ir-grid, .ph-grid) .bp-card { --c: #0f766e; --cd: #0f766e; --cs: #f1f5f9; --ci: var(--text); }
-.patient-page .bp-card.is-soon { border-style: solid; background: #fff; }
-.patient-page .bp-card.is-soon .rc-title { color: #64748b; font-weight: 500; }
-.patient-page .bp-card.is-soon .bp-icon { background: none; color: #cbd5e1; }
-.patient-page .bp-card .ph-badge { background: var(--surface-2); color: #64748b; }
+/* Pre-Consultation cards (Reminders, Personal notes, Social history…) */
+.patient-page .pc-card .sub-card .sum-icon,
+.patient-page .pc-card .sub-card.is-empty .sum-icon { width: auto; height: auto; border-radius: 0; background: none; color: var(--c); }
+.patient-page .pc-card .sub-card.is-empty .sum-icon { color: #94a3b8; }
+.patient-page .pc-card .sub-card .sum-icon svg { width: 17px; height: 17px; }
