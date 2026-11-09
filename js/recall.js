@@ -432,11 +432,14 @@ export function mountRecall(container, { staff = null } = {}) {
     const replies = mine ? mine.rows.filter((c) => c.replyOpen).length : counts.replies;
     const cbs = mine ? callBacks(mine.rows).length : counts.callBacks;
     $("stats").innerHTML = `
-      <button type="button" class="rc-stat2" data-go="mine"><small>Called today</small>
-        <strong>${v(done)} <em>of ${target}</em></strong><span class="rc-prog"><i style="width:${pct}%"></i></span></button>
-      <button type="button" class="rc-stat2${replies ? " is-accent" : ""}" data-go="replies"><small>Replies waiting</small><strong>${v(replies)}</strong></button>
-      <button type="button" class="rc-stat2${cbs ? " is-warn" : ""}" data-go="callbacks"><small>Call-backs due</small><strong>${v(cbs)}</strong></button>
-      <button type="button" class="rc-stat2 is-good" data-go="booked"><small>Booked this month</small><strong>${v(counts.bookedMonth)}</strong></button>`;
+      <button type="button" class="rc-stat2" data-go="mine"><strong>${v(done)}<em>/${target}</em></strong>
+        <span class="rc-stat2-txt"><small>Called today</small><span class="rc-prog"><i style="width:${pct}%"></i></span></span></button>
+      <button type="button" class="rc-stat2${replies ? " is-accent" : ""}" data-go="replies"><strong>${v(replies)}</strong>
+        <span class="rc-stat2-txt"><small>Replies waiting</small></span></button>
+      <button type="button" class="rc-stat2${cbs ? " is-warn" : ""}" data-go="callbacks"><strong>${v(cbs)}</strong>
+        <span class="rc-stat2-txt"><small>Call-backs due</small></span></button>
+      <button type="button" class="rc-stat2 is-good" data-go="booked"><strong>${v(counts.bookedMonth)}</strong>
+        <span class="rc-stat2-txt"><small>Booked this month</small></span></button>`;
   }
 
   function drawTabs() {
@@ -672,8 +675,8 @@ export function mountRecall(container, { staff = null } = {}) {
       ${c.email ? (c.dnc
         ? `<button type="button" class="lh-btn" disabled title="${esc(dncTitle(c))}">${I.mail}<span>Email</span></button>`
         : `<a class="lh-btn" href="mailto:${esc(c.email)}" data-card="${esc(c.id)}">${I.mail}<span>Email</span></a>`) : ""}
-      ${c.patientId ? `<a class="lh-btn is-quiet rc-icon-btn" href="#/patient/${encodeURIComponent(c.patientId)}" aria-label="Patient page" title="Patient page">${I.user}</a>` : ""}
-    </div>`;
+      ${c.patientId ? `<a class="lh-btn" href="#/patient/${encodeURIComponent(c.patientId)}" title="Open their patient page">${I.user}<span>Patient</span></a>` : ""}
+       </div>`;
 
     const smsBox = draft.sms == null ? "" : `<div class="rc-sms">
       <textarea class="fe-input" data-role="sms" rows="4" maxlength="560" aria-label="Text message">${esc(draft.sms)}</textarea>
@@ -682,6 +685,7 @@ export function mountRecall(container, { staff = null } = {}) {
         <button type="button" class="btn-primary" data-act="sms-send">Send to ${esc(mobileText(c.mobile))}</button></div>
     </div>`;
 
+    const ownDate = !!draft.remind && !PICKS.some(([, fn]) => fn(t) === draft.remind);   // picked from the calendar
     let work;
     if (c.status === "closed") {
       work = `<div class="rc-state">Closed: ${esc(c.closeReason)}${c.closedBy ? ` · ${esc(c.closedBy)}` : ""}${c.closedAt ? ` · ${esc(when(c.closedAt))}` : ""}</div>
@@ -698,13 +702,18 @@ export function mountRecall(container, { staff = null } = {}) {
           ${TILE_ICON[k]}<span>${esc(l)}</span><kbd>${key}</kbd></button>`).join("")}</div>
         <textarea class="fe-input rc-note" data-role="note" rows="2" maxlength="1000"
           placeholder="Add a note or call-back first if you like, then tap what happened">${esc(draft.note)}</textarea>
-        <div class="rc-cb"><span>Call back</span>${PICKS.map(([l, fn], i) =>
+        <div class="rc-cb"><small class="rc-cb-lbl">Call back</small><div class="rc-cb-picks">${PICKS.map(([l, fn], i) =>
           `<button type="button" class="rc-chip${draft.remind === fn(t) ? " is-on" : ""}" data-pick="${i}">${esc(l)}</button>`).join("")}
-          <input type="date" class="fe-input" data-role="remind" min="${addDays(t, 1)}" value="${esc(draft.remind)}" aria-label="Call back on" /></div>
+          <span class="rc-cb-date">
+            <button type="button" class="rc-chip rc-cb-pick${ownDate ? " is-on" : ""}" data-act="pick-date" title="Choose a date"
+              aria-label="${ownDate ? `Call back ${esc(short(draft.remind))}. Change the date` : "Choose a date"}">${I.cal}${
+              ownDate ? `<span>${esc(short(draft.remind))}</span>` : ""}</button>
+            <input type="date" class="rc-cb-input" data-remind min="${addDays(t, 1)}" value="${esc(draft.remind)}" tabindex="-1" aria-hidden="true" />
+          </span></div></div>
         <div class="rc-work-foot">
           <label class="fe-check rc-auto"><input type="checkbox" data-role="auto"${autoNext ? " checked" : ""} /> Open the next patient after</label>
           <span class="inv-spacer"></span>
-          <button type="button" class="lh-btn is-quiet" data-act="save">Save note or call-back</button>
+          <button type="button" class="lh-btn is-quiet" data-act="save">${draft.remind ? "Save call-back" : "Save note"}</button>
         </div>`;
     }
 
@@ -1025,7 +1034,7 @@ export function mountRecall(container, { staff = null } = {}) {
     }
     if (r === "lvFrom" || r === "lvTo") { ui[r] = el.value; sel = ""; build(); return; }
     if (r === "auto") { autoNext = el.checked; setPref("rc_autonext", autoNext); return; }
-    if (r === "remind") { draft.remind = el.value; drawPanel(true); return; }
+    if (el.matches("[data-remind]")) { draft.remind = el.value; el.blur(); drawPanel(true); return; }   // blur: N, V, S, B keep working
     if (r === "until") { draft.until = el.value; return; }
     if (r === "reason") { draft.reason = el.value; drawPanel(true); return; }
     if (r === "assign" && !(await act("assign", { toId: el.value }, { label: "Saving", btn: el }))) drawPanel(true);
@@ -1152,6 +1161,11 @@ export function mountRecall(container, { staff = null } = {}) {
       offer = null;
       drawUndo();
       if (o && o.email) openRecallEmail({ email: o.email, cardId: o.id });
+      return;
+    }
+    if (a === "pick-date") {
+      const inp = $("panel").querySelector("[data-remind]");
+      if (inp) { try { inp.showPicker(); } catch { inp.focus(); inp.click(); } }
       return;
     }
     if (a === "deselect") { sel = ""; drawList(); drawPanel(true); return; }
