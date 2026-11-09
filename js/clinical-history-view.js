@@ -18,6 +18,7 @@ const ICONS = {
   check: svg('<polyline points="20 6 9 17 4 12"/>'),
   plus: svg('<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>'),
   clock: svg('<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>'),
+  pulse: svg('<path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/><path d="M3.22 12H9.5l.5-1 2 4.5 2-7 1.5 3.5h5.27"/>'),
 };
 
 // Heading aliases are tried in order (plural first)
@@ -112,7 +113,14 @@ function isOpenSaved(key, fallback) {
 /* ===================== Layout ===================== */
 
 export function clinicalHistorySectionHtml() {
-  return ROWS.map(([a, b, rowKey]) => {
+  // The heading sits beside the rows, not around them: the dashboard's Expand all / Collapse all finds the cards one level down
+  const head = `
+    <button type="button" class="hx-head" data-hx-act="toggle-all" aria-expanded="false" title="Open or close all four">
+      ${ICONS.chev}<span class="hx-head-ic">${ICONS.pulse}</span>
+      <span class="pc-title">Clinical History</span>
+      <span class="hx-head-sum"></span>
+    </button>`;
+  return head + ROWS.map(([a, b, rowKey]) => {
     const open = isOpenSaved(rowKey, true) ? "open" : "";
     return `<div class="hx-grid">${cardHtml(a, rowKey, open)}${cardHtml(b, rowKey, open)}</div>`;
   }).join("");
@@ -149,6 +157,19 @@ export function mountClinicalHistory(root, patient, staff) {
       cards.forEach((c) => { if (c !== card && c.open !== card.open) c.open = card.open; });
     }, true);
   });
+
+  // Heading chevron: open when all four are open (also after Expand all / Collapse all)
+  const head = root.querySelector(".hx-head");
+  const syncHead = () => {
+    if (!head) return;
+    const all = [...root.querySelectorAll(".hx-card")].every((c) => c.open);
+    head.classList.toggle("is-open", all);
+    head.setAttribute("aria-expanded", String(all));
+  };
+  root.addEventListener("toggle", (e) => {
+    if (e.target.classList && e.target.classList.contains("hx-card")) syncHead();
+  }, true);
+  syncHead();
 
   root.addEventListener("click", (e) => onClick(root, e));
   root.addEventListener("input", (e) => {
@@ -218,6 +239,24 @@ function renderAll(root) {
   root.querySelectorAll(".hx-card").forEach((card) => renderCard(root, card));
   syncPreconsultSocial(root);
   publishAllergies(root);
+  renderHead(root);
+}
+
+// The newest date across the four lists: a team edit or a consultation
+function renderHead(root) {
+  const st = stateFor(root);
+  const el = root.querySelector(".hx-head-sum");
+  if (!el) return;
+  const times = Object.keys(SECTIONS).flatMap((k) => {
+    const sec = curatedFor(st, k);
+    const latest = entriesFor(st, k)[0];
+    return [sec && sec.updatedAt ? new Date(sec.updatedAt) : null, latest && latest.date];
+  }).filter(validDate).map((d) => d.getTime());
+  if (!times.length) { el.innerHTML = ""; return; }
+  const newest = new Date(Math.max(...times));
+  const stale = Date.now() - newest.getTime() > STALE_MS;
+  el.innerHTML = `<span class="${stale ? "hx-stale" : "hx-ago"}"${stale ? ' title="Over a year ago. Check it\'s still current."' : ""}>${
+    stale ? ICONS.clock : ""}Last updated ${escapeHtml(agoText(newest))}</span>`;
 }
 
 // Tells the patient bar what's known about allergies: the team's Current list first, otherwise the latest consultation
@@ -306,6 +345,12 @@ function suggestionsFor(section, list) {
 async function onClick(root, e) {
   const btn = e.target.closest("[data-hx-act]");
   if (!btn) return;
+  if (btn.dataset.hxAct === "toggle-all") {
+    const cards = [...root.querySelectorAll(".hx-card")];
+    const open = cards.some((c) => !c.open);   // any closed: open them all
+    cards.forEach((c) => { c.open = open; });
+    return;
+  }
   const card = btn.closest(".hx-card");
   if (!card || !root.contains(card)) return;
   if (btn.closest("summary")) e.preventDefault();

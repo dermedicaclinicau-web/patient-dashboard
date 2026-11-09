@@ -12279,3 +12279,22 @@ body.no-patients-edit .pb-add-alt { display: inline; }
 /* Editing */
 .hx-card .hx-input:focus { outline: none; border-color: var(--c); box-shadow: 0 0 0 3px color-mix(in srgb, var(--c) 18%, transparent); }
 .hx-card .hx-add { color: var(--cd); }
+
+/* Clinical History heading */
+.hx-head {
+  display: flex; align-items: center; gap: .55rem; width: 100%; margin: .9rem 0 .5rem; padding: .35rem .2rem;
+  background: none; border: 0; cursor: pointer; text-align: left; color: inherit; font: inherit;
+}
+.hx-head .sum-chev { width: 18px; height: 18px; color: var(--muted); transform: rotate(-90deg); transition: transform .2s; flex: none; }
+.hx-head.is-open .sum-chev { transform: none; }
+.hx-head-ic {
+  display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 10px; flex: none;
+  background: linear-gradient(135deg, #f43f5e, #be123c); color: #fff;
+  box-shadow: 0 2px 8px rgba(225, 29, 72, .3);
+}
+.hx-head-ic svg { width: 16px; height: 16px; }
+.hx-head-sum { margin-left: auto; font-size: .78rem; }
+.hx-head-sum .hx-ago { font-size: .78rem; }
+.hx-head:hover .pc-title { color: #be123c; }
+.hx-head:focus-visible { outline: 2px solid #f43f5e; outline-offset: 2px; border-radius: 10px; }
+@media (max-width: 640px) { .hx-head-sum { display: none; } }
