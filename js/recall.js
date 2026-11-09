@@ -214,7 +214,6 @@ export function mountRecall(container, { staff = null } = {}) {
     <div class="rc-top"><h2>Recall</h2><span class="inv-spacer"></span>
       <button type="button" class="rc-start" data-act="session-start" hidden title="Work through My calls one patient at a time">${I.headset}<span>Start calling</span></button>
       <button type="button" class="lh-btn is-quiet" data-act="optouts" title="Mobiles that opted out of texts">Opted out</button>
-      <a class="lh-btn is-quiet" href="#/recall/messages">Texts & emails</a>
       ${can(staff, "recall.manage") ? '<a class="lh-btn is-quiet" href="#/recall/results">Results</a>' : ""}
       ${can(staff, "recall.manage") ? '<a class="lh-btn is-quiet" href="#/settings/recall">Recall settings</a>' : ""}</div>
     <div class="rc-stats2" data-role="stats"></div>
