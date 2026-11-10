@@ -1,7 +1,7 @@
 // Treatment plan settings: concern colours/names, and which concerns each appointment service treats (+ downtime).
 import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { CATEGORIES, canonicalCategory } from "./plan-editor.js";
+import { BUILT_IN_CATEGORIES, PATTERNS, canonicalCategory, setCategories, catKey } from "./plan-editor.js";
 import { serviceKey } from "./inventory-api.js";
 import { callApi } from "./appointments.js";
 
@@ -41,30 +41,82 @@ export function cleanServiceRow(r = {}) {
   };
 }
 
-// { concerns: [{ name, label, colour }] (always the 9, in order), services: [...] }
+const EXTRA_COLOURS = ["#0F766E", "#9333EA", "#DB2777", "#0891B2", "#CA8A04", "#4F46E5"];
+
+// Saved rows → the full list: the clinic's order, the built-in 9 always present, no duplicates.
+// hidden: removed in settings (kept so older plans still show its name and colour). custom: added by the clinic.
+function concernList(saved) {
+  const seen = new Set();
+  const out = [];
+  const add = (x, builtIn) => {
+    const name = builtIn || clip(x && x.name, 60).replace(/\s+/g, " ");
+    const k = catKey(name);
+    if (!k || seen.has(k) || (!builtIn && out.length >= 40)) return;
+    seen.add(k);
+    out.push({
+      name,
+      label: clip(x && x.label, 60) || name,
+      colour: HEX.test((x && x.colour) || "") ? x.colour
+        : CONCERN_COLOURS[name] || EXTRA_COLOURS[out.length % EXTRA_COLOURS.length],
+      hidden: !!(x && x.hidden === true),
+      custom: !BUILT_IN_CATEGORIES.includes(name),
+    });
+  };
+  (Array.isArray(saved) ? saved : []).forEach((x) =>
+    add(x, BUILT_IN_CATEGORIES.find((b) => catKey(b) === catKey(x && x.name)) || ""));
+  BUILT_IN_CATEGORIES.forEach((b) => add({}, b));   // a built-in that hasn't been saved yet
+  return out;
+}
+const registerConcerns = (list) =>
+  setCategories(list.filter((x) => !x.hidden).map((x) => x.name), list.map((x) => x.name));
+
+// One treatment in a concern's list (System configuration → Treatment plans)
+export function cleanTreatment(t = {}) {
+  const list = (v, n, max) => [...new Set((Array.isArray(v) ? v : []).map((s) => clip(s, n)).filter(Boolean))].slice(0, max);
+  const pattern = PATTERNS.includes(t.pattern) ? t.pattern : "unknown";
+  return {
+    id: /^[a-z0-9]{6,24}$/.test(String(t.id || "")) ? t.id
+      : Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4),
+    concern: canonicalCategory(t.concern),
+    name: clip(t.name, 120),
+    services: list(t.services, 150, 20),   // appointment services that count as this treatment
+    areas: list(t.areas, 60, 12),          // the areas it's offered for
+    quote: clip(t.quote, 200),             // e.g. "$899 per session"
+    pattern,
+    sessions: pattern === "course" ? intIn(t.sessions, 1, 52) : 0,
+    intervalWeeks: pattern === "once" ? 0 : intIn(t.intervalWeeks, 0, 520),
+    hidden: t.hidden === true,
+  };
+}
+
+// { concerns: [{ name, label, colour, hidden, custom }], services: [...], treatments: [...] }
 export async function getPlanSettings() {
-  const [c, s] = await Promise.all([
+  const [c, s, t] = await Promise.all([
     getDoc(doc(db, "plan_settings", "concerns")),
     getDoc(doc(db, "plan_settings", "services")),
+    getDoc(doc(db, "plan_settings", "treatments")).catch(() => null),
   ]);
-  const saved = c.exists() && Array.isArray(c.data().concerns) ? c.data().concerns : [];
-  const concerns = CATEGORIES.map((name) => {
-    const x = saved.find((y) => canonicalCategory(y && y.name) === name) || {};
-    return { name, label: clip(x.label, 60) || name, colour: HEX.test(x.colour || "") ? x.colour : CONCERN_COLOURS[name] };
-  });
+  const concerns = concernList(c.exists() ? c.data().concerns : []);
+  registerConcerns(concerns);   // before the services and treatments are read: they name concerns
   const services = (s.exists() && Array.isArray(s.data().services) ? s.data().services : [])
     .map(cleanServiceRow).filter((r) => r.service);
-  return { concerns, services };
+  const treatments = (t && t.exists() && Array.isArray(t.data().treatments) ? t.data().treatments : [])
+    .map(cleanTreatment).filter((x) => x.name && x.concern);
+  return { concerns, services, treatments };
 }
 
+// The whole list, in order (hidden ones included). Built-in concerns can be hidden, never removed.
 export async function savePlanConcerns(concerns, staff) {
-  const clean = CATEGORIES.map((name) => {
-    const x = (concerns || []).find((y) => y.name === name) || {};
-    return { name, label: clip(x.label, 60) || name, colour: HEX.test(x.colour || "") ? x.colour : CONCERN_COLOURS[name] };
-  });
+  const clean = concernList(concerns).map(({ name, label, colour, hidden }) => ({ name, label, colour, hidden }));
   await setDoc(doc(db, "plan_settings", "concerns"), { concerns: clean, ...stamp(staff) });
+  registerConcerns(concernList(clean));
 }
 
+export async function savePlanTreatments(rows, staff) {
+  const clean = (rows || []).map(cleanTreatment).filter((t) => t.name && t.concern).slice(0, 300);
+  await setDoc(doc(db, "plan_settings", "treatments"), { treatments: clean, ...stamp(staff) });
+  return clean;
+}
 // Only services that have been set up are saved (concerns, "not a treatment", or a downtime)
 export async function saveServiceConcerns(rows, staff) {
   const seen = new Set();

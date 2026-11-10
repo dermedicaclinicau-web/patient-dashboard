@@ -63,7 +63,7 @@ export function cleanLine(l = {}) {
 }
 export function cleanConcern(c = {}) {
   return {
-    key: canonicalCategory(c.key),
+    key: canonicalCategory(c.key) || clip(c.key, 80),   // a concern saved on a plan is never dropped, even if it was later removed in settings
     status: CONCERN_STATUS[c.status] ? c.status : "active",
     priority: /^[a-z0-9]{2,24}$/.test(String(c.priority || "")) ? c.priority : "",
     description: clip(c.description, 600),

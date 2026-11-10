@@ -1120,7 +1120,7 @@ match /inv_count_drafts/{id} {
     // Treatment plan settings: concern colours/names, services → concerns + downtime
     match /plan_settings/{id} {
       allow read: if isStaff();
-      allow write: if isAdmin() && id in ['concerns', 'services', 'document', 'workflow']
+      allow write: if isAdmin() && id in ['concerns', 'services', 'document', 'workflow', 'treatments']
         && request.resource.data.updatedByUid == request.auth.uid;
     }
 
@@ -1549,7 +1549,7 @@ match /inv_count_drafts/{id} {
         && request.resource.data.updatedByUid == request.auth.uid;
       allow delete: if false;
     }
-    
+
     // ===================== SEO =====================
     // Search data, Site health, audience and the WordPress page list are written by Apps Script only
     // (the service account bypasses these rules). Staff with the SEO menu read them.

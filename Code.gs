@@ -5359,13 +5359,16 @@ function handleNotify_(body) {
 function runNotifications() {
   const cfg = getConfig_();
   const now = Date.now();
-  const rules = notifyRules_(cfg);
+  let rules = null;   // null = not read: the outbox waits for the next run instead of being marked done
+  try { rules = notifyRules_(cfg); } catch (e) { console.error('Notification rules: ' + (e && e.stack ? e.stack : e)); }
   try { loginSeenFlush_(cfg); } catch (e) { console.warn('Last logins: ' + e); }
   try { staffTaskMailRun_(cfg); } catch (e) { console.error('Task emails: ' + (e && e.stack ? e.stack : e)); }
-  try { notifyProcessPending_(cfg, 20, rules, true); } catch (e) { console.error('Outbox: ' + (e && e.stack ? e.stack : e)); }
-  try { notifyLowScan_(cfg, rules); } catch (e) { console.error('Low stock scan: ' + (e && e.stack ? e.stack : e)); }
-  try { notifyRunDigests_(cfg, rules, now); } catch (e) { console.error('Digests: ' + (e && e.stack ? e.stack : e)); }
-  try { notifyCountCheck_(cfg, rules, now); } catch (e) { console.error('Count check: ' + (e && e.stack ? e.stack : e)); }
+  if (rules) {
+    try { notifyProcessPending_(cfg, 20, rules, true); } catch (e) { console.error('Outbox: ' + (e && e.stack ? e.stack : e)); }
+    try { notifyLowScan_(cfg, rules); } catch (e) { console.error('Low stock scan: ' + (e && e.stack ? e.stack : e)); }
+    try { notifyRunDigests_(cfg, rules, now); } catch (e) { console.error('Digests: ' + (e && e.stack ? e.stack : e)); }
+    try { notifyCountCheck_(cfg, rules, now); } catch (e) { console.error('Count check: ' + (e && e.stack ? e.stack : e)); }
+  }
   try { chatHelpReminders_(cfg); } catch (e) { console.error('Chat reminders: ' + (e && e.stack ? e.stack : e)); }
   try { eodReminders_(cfg, now); } catch (e) { console.error('End of day reminders: ' + (e && e.stack ? e.stack : e)); }
   try { recallReplies_(cfg); } catch (e) { console.error('Recall replies: ' + (e && e.stack ? e.stack : e)); }
@@ -5376,6 +5379,7 @@ function runNotifications() {
   try { prosDaily_(cfg, now); } catch (e) { console.error('Prospect reminders: ' + (e && e.stack ? e.stack : e)); }
   try { prosFollowDue_(cfg, now); } catch (e) { console.error('Prospect follow-up times: ' + (e && e.stack ? e.stack : e)); }
 }
+
 
 // Run ONCE from the editor to start notifications
 function installNotifications() {
@@ -11313,6 +11317,8 @@ function upDateKey_(raw) {
   if (m && MONTHS_[m[2].slice(0, 3).toLowerCase()]) return ok(m[3], MONTHS_[m[2].slice(0, 3).toLowerCase()], m[1]);
   m = /^(?:[A-Za-z]{3,9},?\s+)?([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})/.exec(s);
   if (m && MONTHS_[m[1].slice(0, 3).toLowerCase()]) return ok(m[3], MONTHS_[m[1].slice(0, 3).toLowerCase()], m[2]);
+  m = /^(\d{1,2})[\s\/.-]([A-Za-z]{3,9})\.?[\s\/.,-]+(\d{4}|\d{2})\b/.exec(s);
+  if (m && MONTHS_[m[2].slice(0, 3).toLowerCase()]) return ok(m[3], MONTHS_[m[2].slice(0, 3).toLowerCase()], m[1]);
   return '';
 }
 
@@ -11697,6 +11703,8 @@ function upRefill_(body, session) {
     try {
       const s = upRefillOne_('sales', session);
       res.salesFilled = s.filled || 0;
+      res.salesUnmatched = s.unmatched || null;
+      res.salesAmbiguous = s.ambiguous || null;
       if (s.problem) res.salesProblem = s.problem;
     } catch (e) { console.warn('SALES RECORD Patient IDs not filled: ' + e); }
   }
@@ -15975,7 +15983,6 @@ function recallFlowTest_(body, session) {
 }
 
 // ===================== Recall: emailing a patient from a card (the compose window) =====================
-// ===================== Recall: emailing a patient from a card (the compose window) =====================
 // Problems come back as { ok: true, problem } so callApi passes the message through to the window.
 function recallSendEmail_(body, session) {
   const cfg = getConfig_();
@@ -16016,7 +16023,42 @@ function recallSendEmail_(body, session) {
       kind: 'email', what: 'Email sent: ' + subject, note: 'To ' + to }]).slice(-80),
   });
   recallLogEmail_(cfg, Object.assign({}, card, { _id: id }), to, subject, String((me && me.name) || 'Staff'), session.uid, false);
-  return { ok: true };
+  let saved = false;
+  if (body.saveEmail === true && card.patientId) {
+    if (!can_(session, 'patients.edit') && !can_(session, 'recall.manage')) {
+      return { ok: true, saved: false, note: "The email was sent, but you can't change patient details, so their record wasn't updated." };
+    }
+    try { saved = recallSaveEmail_(cfg, card, to, session); }
+    catch (e) { console.warn('Email sent, but the new address was not saved: ' + e); }
+  }
+  return { ok: true, saved: saved };
+}
+
+// The new address on the patient record and their open recall cards, with a History line
+function recallSaveEmail_(cfg, card, to, session) {
+  const em = mktEmail_(to);
+  const p = flowPatient_(cfg, String(card.patientId));
+  if (!p || mktEmail_(p.Email) === em) return false;
+  const was = String(p.Email || '');
+  const now = new Date();
+  const iso = now.toISOString();
+  const who = String(session.name || 'Staff');
+  const uid = String(session.uid || '');
+  fsPatch_(cfg, 'patient_list/' + encodeURIComponent(p._id), {
+    Email: em, EmailKey: em, UpdatedAt: now, UpdatedBy: who, UpdatedByUid: uid,
+  });
+  CacheService.getScriptCache().remove(PT_CACHE_);
+  const writes = fsQuery_(cfg, RECALL_COL_, 'patientId', 'EQUAL', p._id, 50)
+    .filter(function (c) { return c.status !== 'closed'; })
+    .map(function (c) {
+      return patchWrite_(cfg, RECALL_COL_ + '/' + c._id, {
+        email: em, emailKey: em, updatedAt: iso,
+        log: (Array.isArray(c.log) ? c.log : []).concat([{ at: iso, by: who, byUid: uid, kind: 'note',
+          what: 'Email address changed: ' + (was || '(none)') + ' → ' + em, note: '' }]).slice(-80),
+      });
+    });
+  if (writes.length) commitWrites_(cfg, writes);
+  return true;
 }
 
 // ===================== Recall flow: who's in it, and who's next (Flow tab → Who's in the flow) =====================
@@ -16747,16 +16789,18 @@ function smsThread_(cfg, doc) {
 // Textmagic's message statuses → what staff see
 const TM_STATUS_ = { d: 'Delivered', f: 'Failed', e: 'Failed', j: 'Failed', r: 'Failed', q: 'Sending', s: 'Sent', a: 'Sent', b: 'Sent', u: 'Sent' };
 
-// Every text to and from one mobile in Textmagic (its chat for that number), up to 200
+// Every text to and from one mobile in Textmagic, up to 200: find the chat by number, then read its messages
 function tmChat_(phone04) {
   const auth = tmAuth_();
   const p61 = recallPhone61_(phone04);
   if (!auth || !p61) return [];
+  let chatId = '';
+  try { chatId = String((tmFetch_(auth, 'get', '/chats/' + p61 + '/by/phone?upsert=0') || {}).id || ''); }
+  catch (e) { if (e && e.code === 404) return []; throw e; }   // no conversation with this number yet
+  if (!chatId) return [];
   const out = [];
   for (let page = 1; page <= 2; page++) {
-    let r;
-    try { r = tmFetch_(auth, 'get', '/chats/' + p61 + '?page=' + page + '&limit=100'); }
-    catch (e) { if (e && e.code === 404) break; throw e; }   // no conversation with this number yet
+    const r = tmFetch_(auth, 'get', '/chats/' + chatId + '/message?page=' + page + '&limit=100');
     const list = Array.isArray(r.resources) ? r.resources : [];
     list.forEach(function (m) {
       const text = String(m.text || '').trim();
@@ -16806,11 +16850,18 @@ function smsMergeTm_(items, phone04) {
   return out.sort(function (a, b) { return a.at.localeCompare(b.at); });
 }
 
-// Run from the editor: shows the first messages Textmagic has with one mobile (to check the field names)
+// Run from the editor: shows the first messages Textmagic has with one mobile
 function testTextmagicChat() {
   const mobile = 'PASTE_A_MOBILE';   // e.g. 0412 345 678
-  const r = tmFetch_(tmAuth_(), 'get', '/chats/' + recallPhone61_(mobile) + '?page=1&limit=3');
-  console.log(JSON.stringify((r.resources || []).slice(0, 3), null, 2));
+  const p61 = recallPhone61_(mobile);
+  if (!p61) { console.log('Not an Australian mobile.'); return; }
+  try {
+    const chat = tmFetch_(tmAuth_(), 'get', '/chats/' + p61 + '/by/phone?upsert=0');
+    console.log('Chat id: ' + chat.id);
+  } catch (e) {
+    console.log(e && e.code === 404 ? 'No conversation with this number in Textmagic yet.' : 'Error: ' + e);
+    return;
+  }
   console.log(JSON.stringify(tmChat_(recallPhone04_(mobile)).slice(0, 5), null, 2));
 }
 
@@ -17444,7 +17495,7 @@ function repCachePut_(key, val, secs) {
 }
 
 // A Drive file ID, or a photo link (e.g. a Firebase Storage link from a saved scan)
-const SCAN_TEST_FILE_ID_ = 'https://firebasestorage.googleapis.com/v0/b/disco-serenity-428708-t8.firebasestorage.app/o/scans%2Fbilling%2F2026-10-24%2FYFsn6NSYpHJ08pZm8A6R.jpg?alt=media&token=21a3fd22-2fdc-4322-8de3-d58b6e6c86b9';
+const SCAN_TEST_FILE_ID_ = '';
 
 function testScanner() {
   const p = PropertiesService.getScriptProperties();

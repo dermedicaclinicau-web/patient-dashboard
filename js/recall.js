@@ -15,6 +15,7 @@ import { showToast } from "./utils.js";
 import { normRecallSettings } from "./recall-settings.js";
 import { installRecallEmail, openRecallEmail } from "./recall-email.js"; installRecallEmail();
 import { loadTagLib, tagChipsHtml, openTagPicker } from "./patient-tags.js";
+import { toRowHtml, wireToRow, readToRow } from "./recall-email-to.js";
 
 const COL = "recalls";
 const PAGE = 50;

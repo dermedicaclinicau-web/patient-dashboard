@@ -5,7 +5,7 @@ import { parsePlan, parseTimeline } from "./transcripts.js";
 
 // The recorder's 9 canonical concern categories (must match exactly)
 // The master plan's 9 concerns. Must match PLAN_CONCERNS in Soap.gs exactly.
-export const CATEGORIES = [
+export const BUILT_IN_CATEGORIES = [
   "Expression Lines & Wrinkles",
   "Volume Loss",
   "Skin Laxity",
@@ -17,6 +17,10 @@ export const CATEGORIES = [
   "Acne & Acne Scarring",
 ];
 
+// The concerns plans can use right now, in the clinic's order. Starts as the built-in 9;
+// setCategories() (called by plan-api.js) adds the clinic's own and takes out hidden ones.
+export const CATEGORIES = [...BUILT_IN_CATEGORIES];
+
 export const catKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 
 // Names older consultations used → today's names
@@ -27,10 +31,21 @@ const LEGACY_CATEGORIES = {
   "Redness / Sensitive Skin": "Redness & Vascular Concerns",
   "Active Acne": "Acne & Acne Scarring",
 };
-const CAT_LOOKUP = new Map([
-  ...CATEGORIES.map((c) => [catKey(c), c]),
-  ...Object.entries(LEGACY_CATEGORIES).map(([old, now]) => [catKey(old), now]),
-]);
+const CAT_LOOKUP = new Map();
+function rebuildLookup(known) {
+  CAT_LOOKUP.clear();
+  known.forEach((c) => CAT_LOOKUP.set(catKey(c), c));
+  Object.entries(LEGACY_CATEGORIES).forEach(([old, now]) => {
+    if (!CAT_LOOKUP.has(catKey(old))) CAT_LOOKUP.set(catKey(old), now);
+  });
+}
+rebuildLookup(BUILT_IN_CATEGORIES);
+
+// active: shown in pickers, in order. known: every concern ever set up (hidden ones too), so older plans still read.
+export function setCategories(active, known = active) {
+  CATEGORIES.splice(0, CATEGORIES.length, ...active);
+  rebuildLookup([...new Set([...BUILT_IN_CATEGORIES, ...known])]);
+}
 
 // Any spelling, old or new → today's name ("" if it isn't one of the 9)
 export const canonicalCategory = (s) => CAT_LOOKUP.get(catKey(s)) || "";

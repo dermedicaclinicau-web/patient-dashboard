@@ -107,6 +107,26 @@ function priceOf(c, l) {
   return m ? m[0].replace(/\s/g, "") : "";
 }
 
+// Area and quote are kept on the concern. A treatment's own area and quote are added to them (never twice);
+// a quote line that already starts with this treatment's name is replaced.
+function addToConcern(pc, treatment, area, quote) {
+  if (area) {
+    const have = String(pc.area || "").split(/\s*,\s*/).filter(Boolean);
+    area.split(/\s*,\s*/).filter(Boolean).forEach((a) => {
+      if (!have.some((h) => h.toLowerCase() === a.toLowerCase())) have.push(a);
+    });
+    pc.area = have.join(", ");
+  }
+  if (quote) {
+    const line = sharesWord(quote, treatment) ? quote : `${treatment} - ${quote}`;
+    const lines = String(pc.quote || "").split(/\n+/).filter(Boolean);
+    const i = lines.findIndex((q) => q.toLowerCase().startsWith(`${treatment.toLowerCase()} - `));
+    if (i > -1) lines[i] = line;
+    else if (!lines.some((q) => q.toLowerCase() === line.toLowerCase())) lines.push(line);
+    pc.quote = lines.join("\n");
+  }
+}
+
 // ctx = { patient, staff, pre(), today(), consults(), recordsOn(dateKey), latestConsult(), applyLatest(), onReminder() }
 export function createPlanOverview(el, ctx) {
   const { patient, staff } = ctx;
@@ -703,7 +723,8 @@ export function createPlanOverview(el, ctx) {
           <label class="fe-check"><input type="radio" name="cstatus" value="${v}"${v === c.status ? " checked" : ""} /> ${l}</label>`).join("")}</div>
         <small class="fe-note">Resolved and Not pursuing hide it from Needs action. When every concern is one of these, the plan is Completed.</small></div>
       ${c.comments ? `<div class="lh-field"><span class="lh-label">Clinician's notes</span><p class="pv-notes-full">${esc(c.comments).replace(/\n/g, "<br>")}</p></div>` : ""}
-      <div class="po-slot-btns"><button type="button" class="lh-btn" data-act="add">+ Add a treatment</button></div>
+      <div class="po-slot-btns"><button type="button" class="lh-btn" data-act="add">+ Add a treatment</button>
+        <button type="button" class="lh-btn" data-act="details">Edit area, quote and notes</button></div>
       <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="close">Close</button></div>`);
     const form = dlg.querySelector("form");
     form.addEventListener("submit", (e) => e.preventDefault());
@@ -716,8 +737,43 @@ export function createPlanOverview(el, ctx) {
       const b = e.target.closest("[data-act]");
       if (!b || b.disabled) return;
       if (b.dataset.act === "add") { dlg.close(); editLine(c, null); }
+      else if (b.dataset.act === "details") { dlg.close(); editConcern(c); }
       else if (b.dataset.act === "up" || b.dataset.act === "down") { dlg.close(); moveConcern(c, b.dataset.act === "up" ? -1 : 1); }
       else if (b.dataset.act === "close") dlg.close();
+    });
+  }
+
+  // A concern's own wording: description, area, quote and the clinician's notes
+  function editConcern(c) {
+    const dlg = openDlg(`
+      <div class="lh-dialog-head"><h3>${esc(con(c.key).label)}</h3><p>The area, quote and notes shown for this concern.</p></div>
+      <label class="lh-field"><span class="lh-label">Description</span>
+        <input name="description" maxlength="600" value="${esc(c.description)}" /></label>
+      <label class="lh-field"><span class="lh-label">Area</span>
+        <input name="area" maxlength="200" value="${esc(c.area)}" placeholder="e.g. Full face, Neck" /></label>
+      <label class="lh-field"><span class="lh-label">Quote</span>
+        <textarea name="quote" rows="4" maxlength="1500" placeholder="One line per treatment, e.g. Rejuran - $899">${esc(c.quote)}</textarea>
+        <small class="fe-note">One line per treatment. The price beside each treatment comes from the line that names it.</small></label>
+      <label class="lh-field"><span class="lh-label">Clinician's notes</span>
+        <textarea name="comments" rows="3" maxlength="1500">${esc(c.comments)}</textarea></label>
+      <div class="lh-actions">
+        <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+        <button type="submit" class="lh-btn is-primary">Save</button>
+      </div>`);
+    const form = dlg.querySelector("form");
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const f = form.elements;
+      const vals = { description: f.description.value.trim(), area: f.area.value.trim(),
+        quote: f.quote.value.trim(), comments: f.comments.value.trim() };
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      const ok = await commit((p) => {
+        const x = p.concerns.find((y) => y.key === c.key);
+        if (x) Object.assign(x, vals);
+      }, "Edited a concern's details", con(c.key).label);
+      if (ok) dlg.close(); else btn.disabled = false;
     });
   }
 
@@ -966,13 +1022,20 @@ export function createPlanOverview(el, ctx) {
     const isNew = !l;
     const x = l || { treatment: "", pattern: "course", sessions: 3, intervalWeeks: 4, startMonth: "", countFrom: "", services: [], overrides: {} };
     const linked = new Set(x.services.map(serviceKey));
+    // This concern's treatments from System configuration → Treatment plans
+    const catalogue = (st.settings.treatments || []).filter((t) => t.concern === c.key && !t.hidden);
     const cands = [...new Map([
       ...st.settings.services.filter((r) => r.concerns.includes(c.key)).map((r) => r.service),
+      ...catalogue.flatMap((t) => t.services),
       ...x.services,
     ].map((s) => [serviceKey(s), s])).values()].sort((a, b) => a.localeCompare(b, "en-AU"));
     const tracked = !isNew && Object.keys(x.overrides || {}).length > 0;
     const dlg = openDlg(`
       <div class="lh-dialog-head"><h3>${isNew ? "Add a treatment" : "Edit treatment"}</h3><p>${chip(c.key)}</p></div>
+      ${catalogue.length ? `<label class="lh-field"><span class="lh-label">${isNew ? "Choose from the treatment list" : "Fill in from the treatment list"}</span>
+        <select class="fb-select" name="preset"><option value="">${isNew ? "Type my own" : "Keep as it is"}</option>${
+          catalogue.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}${t.quote ? ` · ${esc(t.quote)}` : ""}</option>`).join("")}</select>
+        <small class="fe-note">Fills in everything below. You can still change any of it.</small></label>` : ""}
       <label class="lh-field"><span class="lh-label">Treatment</span>
         <input name="treatment" maxlength="300" value="${esc(x.treatment)}" placeholder="e.g. Skin Needling, full face" /></label>
       <div class="inv-two">
@@ -995,6 +1058,14 @@ export function createPlanOverview(el, ctx) {
             <input type="checkbox" name="svc" value="${esc(s)}"${linked.has(serviceKey(s)) ? " checked" : ""} /> ${esc(s)}</label>`).join("")}</div>`
           : '<p class="tb-none">No services are set up for this concern yet (Inventory → Treatment plans).</p>'}
         <small class="fe-note">None ticked: visits for this concern are matched by the treatment's name.</small></div>
+      <div class="inv-two">
+        <label class="lh-field"><span class="lh-label">Area (optional)</span>
+          <input name="area" maxlength="200" list="po-area-list" placeholder="e.g. Full face" />
+          <datalist id="po-area-list"></datalist></label>
+        <label class="lh-field"><span class="lh-label">Quote (optional)</span>
+          <input name="quote" maxlength="200" placeholder="e.g. $899 per session" /></label>
+      </div>
+      <small class="fe-note">Type anything. They're added to this concern's area and quote${isNew ? "" : "; leave them empty to keep those as they are"}.</small>
       <p class="lh-error" role="alert" hidden></p>
       <div class="lh-actions">
         ${isNew ? "" : '<button type="button" class="lh-btn is-quiet po-danger" data-act="remove">Remove</button>'}
@@ -1010,6 +1081,29 @@ export function createPlanOverview(el, ctx) {
     };
     sync();
     form.elements.pattern.addEventListener("change", sync);
+    const preset = form.elements.preset;
+    if (preset) {
+      preset.addEventListener("change", () => {
+        const t = catalogue.find((y) => y.id === preset.value);
+        if (!t) return;
+        const f = form.elements;
+        f.treatment.value = t.name;
+        f.pattern.value = t.pattern;
+        f.sessions.value = t.sessions || "";
+        f.interval.value = t.intervalWeeks || "";
+        if (t.services.length) {
+          const want = new Set(t.services.map(serviceKey));
+          form.querySelectorAll('[name="svc"]').forEach((b) => {
+            b.checked = want.has(serviceKey(b.value));
+            b.closest("[data-find]").hidden = false;
+          });
+        }
+        f.quote.value = t.quote;
+        f.area.value = t.areas.length === 1 ? t.areas[0] : "";   // several areas: choose from the suggestions
+        dlg.querySelector("#po-area-list").innerHTML = t.areas.map((a) => `<option value="${esc(a)}"></option>`).join("");
+        sync();
+      });
+    }
     const find = dlg.querySelector('[data-role="svcfind"]');
     if (find) {
       find.addEventListener("input", () => {
@@ -1053,6 +1147,8 @@ export function createPlanOverview(el, ctx) {
         startMonth: start, countFrom: f.from.value,
         services: [...form.querySelectorAll('[name="svc"]:checked')].map((y) => y.value),
       };
+      const area = f.area.value.trim();
+      const quote = f.quote.value.trim();
       const btn = form.querySelector('[type="submit"]');
       btn.disabled = true;
       const ok = await commit((p) => {
@@ -1063,6 +1159,7 @@ export function createPlanOverview(el, ctx) {
           const i = pc.lines.findIndex((y) => y.id === l.id);
           if (i > -1) pc.lines[i] = cleanLine({ ...pc.lines[i], ...fields });
         }
+        addToConcern(pc, treatment, area, quote);
       }, isNew ? "Added a treatment" : "Edited a treatment", `${con(c.key).label}: ${treatment}`);
       if (ok) dlg.close(); else btn.disabled = false;
     });
