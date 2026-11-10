@@ -13328,3 +13328,12 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 .inv-q.is-count.is-diff { background: #fffbeb; }
 .inv-q.is-count.is-diff b { color: #b45309; }
 .inv-q.is-count.is-none b { color: #94a3b8; }
+
+/* Product window: Shelf counted | Shelf digital | JT storage digital */
+.inv-pd-qty.has-count { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.inv-pd-loc.is-count { background: #f0fdfa; border-color: #99f6e4; }
+.inv-pd-loc.is-count.is-diff { background: #fffbeb; border-color: #fde68a; }
+.inv-pd-loc.is-count.is-none { background: #f8fafc; border-color: #e2e8f0; }
+.inv-pd-loc.is-count.is-none strong { color: #94a3b8; }
+.inv-pd-loc.is-count small { display: block; }
+@media (max-width: 640px) { .inv-pd-qty.has-count { grid-template-columns: 1fr; } }

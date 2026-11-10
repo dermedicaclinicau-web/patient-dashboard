@@ -2526,6 +2526,26 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     return `<small class="ivx-cl is-ok">Counted ${c.counted} on ${esc(d)} ✓ matched</small>`;
   }
 
+  // The product window: the latest opening count of the Shelf, as its own card
+  function shelfCountCard(p) {
+    const c = st.lastCounts.get(`${p.id}|shelf`);
+    const inCount = (p.countFreq || "never") !== "never" && p.countWhere !== "jt";
+    if (!c) {
+      return `<div class="inv-pd-loc is-count is-none"><span>Shelf · counted</span><strong>—</strong>
+        <small>${inCount ? "No opening count yet" : "Not in the opening count"}</small></div>`;
+    }
+    const matched = c.counted === c.system;
+    const inv = c.invIds.map((iid) => st.invs.find((v) => v.id === iid)).find(Boolean);
+    const [tone, state] = matched ? ["ok", "✓ Matched"]
+      : inv ? ["bad", `<a href="#/inventory/investigations/${esc(inv.id)}">Investigating</a>`]
+      : c.statuses.includes("open") ? ["warn", "Difference to review"]
+      : ["", "Difference resolved"];
+    return `<div class="inv-pd-loc is-count${matched ? "" : " is-diff"}"><span>Shelf · counted</span>
+      <strong>${esc(qtyText(p, c.counted))}</strong>
+      <small>Last count ${esc(countDay(c.dateKey))}${c.by ? ` by ${esc(c.by)}` : ""}</small>
+      <small class="ivx-cl${tone ? ` is-${tone}` : ""}">${matched ? "" : `Digital said ${c.system} then · `}${state}</small></div>`;
+  }
+
   /* ---------- A product's stock window ---------- */
   function openProduct(id) {
     const dlg = openDialog("inv-dlg inv-pdlg", '<div class="lh-form" data-role="pd"></div>');
@@ -3175,11 +3195,13 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             <p class="muted">${esc([catLabel(p.category), p.brand, packText(p), p.tracked ? "Batch & expiry tracked" : ""].filter(Boolean).join(" · "))}</p></div>
           <button type="button" class="ib-tool" data-act="close" aria-label="Close" title="Close">×</button>
         </div>
-        <div class="inv-pd-qty">${LOCATIONS.map((l) => `
+        <div class="inv-pd-qty has-count">
+          ${shelfCountCard(p)}
+          ${LOCATIONS.map((l) => `
           <div class="inv-pd-loc${lowAt(p, l.key) ? " is-low" : ""}"><span>${esc(l.label)} · digital</span>
             <strong>${esc(qtyText(p, p.stock[l.key]))}</strong>
             ${p.reorder[l.key] !== null ? `<small>${lowAt(p, l.key) ? "Low · " : ""}reorder at ${p.reorder[l.key]}</small>` : ""}
-            ${countLine(p.id, l.key)}</div>`).join("")}</div>
+            ${l.key === "jt" ? countLine(p.id, "jt") : ""}</div>`).join("")}</div>
           ${canMove || canRequest ? `<div class="inv-pd-acts">
           ${canManage ? '<button type="button" class="lh-btn is-primary" data-stock="add">Add stock</button>' : ""}
           ${canMove ? '<button type="button" class="lh-btn" data-stock="move">Move Shelf ⇄ JT</button>' : ""}
