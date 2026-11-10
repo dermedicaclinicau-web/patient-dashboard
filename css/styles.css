@@ -13403,3 +13403,65 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 @media (prefers-reduced-motion: reduce) {
   .hx-card.has-alert:not(.is-seen) { animation: none; box-shadow: 0 0 0 3px rgba(220, 38, 38, .3); }
 }
+
+/* Live forms: ticked boxes and chosen circles are red, so answers are easy to see at a glance */
+.fe-field input[type="checkbox"],
+.fe-field input[type="radio"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  flex-shrink: 0;
+  display: inline-grid;
+  place-content: center;
+  vertical-align: middle;
+  border: 2px solid #94a3b8;
+  background: #fff;
+  cursor: pointer;
+  transition: border-color .12s, background-color .12s, box-shadow .12s;
+  -webkit-print-color-adjust: exact;   /* keeps the red on printed and PDF copies */
+  print-color-adjust: exact;
+}
+.fe-field input[type="checkbox"] { border-radius: 5px; }
+.fe-field input[type="radio"] { border-radius: 50%; }
+
+/* The white tick and dot, shown when chosen */
+.fe-field input[type="checkbox"]::before {
+  content: "";
+  width: 11px;
+  height: 11px;
+  background: #fff;
+  clip-path: polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%);
+  transform: scale(0);
+  transition: transform .12s;
+}
+.fe-field input[type="radio"]::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #fff;
+  transform: scale(0);
+  transition: transform .12s;
+}
+.fe-field input[type="checkbox"]:checked,
+.fe-field input[type="radio"]:checked {
+  background: #dc2626;
+  border-color: #dc2626;
+}
+.fe-field input[type="checkbox"]:checked::before,
+.fe-field input[type="radio"]:checked::before { transform: scale(1); }
+
+.fe-field input[type="checkbox"]:hover:not(:disabled),
+.fe-field input[type="radio"]:hover:not(:disabled) { border-color: #dc2626; }
+.fe-field input[type="checkbox"]:focus-visible,
+.fe-field input[type="radio"]:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(220, 38, 38, .25); }
+
+/* Saved records: the same red, not faded */
+.fe-field input[type="checkbox"]:disabled,
+.fe-field input[type="radio"]:disabled { opacity: 1; cursor: default; }
+
+/* The chosen answer's wording turns red too */
+.fe-field label:has(input[type="checkbox"]:checked),
+.fe-field label:has(input[type="radio"]:checked) { color: #b91c1c; }
