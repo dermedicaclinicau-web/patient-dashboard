@@ -124,6 +124,7 @@ export function trackPlan(master, { visits, services, fromOf, waiting = () => fa
   const out = new Map();
   master.concerns.forEach((c) => {
     const hits = new Map(c.lines.map((l) => [l.id, { past: new Set(), future: new Set() }]));
+    const twins = master.concerns.filter((x) => x !== c && x.key === c.key);   // the same concern listed again (e.g. now and later)
     let unmatched = 0;
     visits.forEach((v) => {
       const ids = new Set();
@@ -135,7 +136,10 @@ export function trackPlan(master, { visits, services, fromOf, waiting = () => fa
         if (!line) {
           const set = serviceSetup(services, s);
           if (!set || set.notTreatment || !set.concerns.includes(c.key)) return;
-          line = c.lines.find((l) => sharesWord(l.treatment, s)) || (c.lines.length === 1 ? c.lines[0] : null);
+          // A lone treatment takes any visit for its concern, unless the visit clearly belongs to the concern's other entry
+          line = c.lines.find((l) => sharesWord(l.treatment, s))
+            || (c.lines.length === 1 && !twins.some((t) => t.lines.some((l) =>
+              l.services.some((x) => serviceKey(x) === k) || sharesWord(l.treatment, s))) ? c.lines[0] : null);
           if (!line) { miss = true; return; }
         }
         ids.add(line.id);
@@ -146,7 +150,7 @@ export function trackPlan(master, { visits, services, fromOf, waiting = () => fa
       });
       if (miss && !ids.size && v.dateKey >= (fromOf(c, null) || "")) unmatched++;
     });
-    out.set(c.key, {
+    out.set(c.id || c.key, {
       unmatched,
       lines: new Map(c.lines.map((l) => [l.id,
         trackLine(l, [...hits.get(l.id).past].sort(), [...hits.get(l.id).future].sort(), waiting(c))])),

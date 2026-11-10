@@ -72,6 +72,8 @@ export function cleanConcern(c = {}) {
     comments: clip(c.comments, 1500),
     lines: (Array.isArray(c.lines) ? c.lines : []).map(cleanLine).filter((l) => l.treatment).slice(0, 10),
     sourceRecordId: clip(c.sourceRecordId, 80),
+    // A plan can hold the same concern twice (e.g. now and later). Older plans: the id is the concern's name.
+    id: clip(c.id, 120) || canonicalCategory(c.key) || clip(c.key, 80),
   };
 }
 export function cleanEvent(e = {}) {
@@ -84,13 +86,23 @@ export function cleanEvent(e = {}) {
   };
 }
 
+// No two concerns in a plan share an id
+function uniqueIds(concerns) {
+  const seen = new Set();
+  return concerns.map((c) => {
+    const id = c.id && !seen.has(c.id) ? c.id : `${c.key}#${newId()}`;
+    seen.add(id);
+    return id === c.id ? c : { ...c, id };
+  });
+}
+
 function normalisePlan(id, x = {}) {
   return {
     patientId: id,
     patientPttId: String(x.patientPttId || ""),
     patientName: String(x.patientName || ""),
     status: PLAN_STATUS[x.status] ? x.status : "proposed",
-    concerns: (Array.isArray(x.concerns) ? x.concerns : []).map(cleanConcern).filter((c) => c.key),
+    concerns: uniqueIds((Array.isArray(x.concerns) ? x.concerns : []).map(cleanConcern).filter((c) => c.key)),
     events: (Array.isArray(x.events) ? x.events : []).map(cleanEvent).filter((e) => e.name),
     sources: Array.isArray(x.sources) ? x.sources.map(String) : [],
     version: Number(x.version) || 0,
@@ -157,17 +169,44 @@ export function planChanges(master, consult, { recordId = "", services = [], fro
   const cur = master ? master.concerns : [];
   const tl = consult.timeline || [];
   const sig = (x) => [x.lines.map((l) => `${normTx(l.treatment)}/${l.pattern}/${l.sessions}/${l.intervalWeeks}`).join("|"), normTx(x.quote)].join("#");
-  const items = (consult.concerns || []).map((c) => {
+  const drafts = (consult.concerns || []).map((c) => {
     const key = canonicalCategory(c.concern_category);
     const start = tl.filter((t) => t.concern && t.concern === c.key).map((t) => monthKey(t.date)).filter(Boolean).sort()[0] || "";
     const after = cleanConcern({
       key: key || CATEGORIES[0], description: c.description, area: c.area, quote: c.quote, comments: c.comments,
       lines: linesFrom(c, start, key, services, fromKey), sourceRecordId: recordId,
     });
-    if (!key) return { kind: "uncategorised", key: "", before: null, after: { ...after, key: "" } };
-    const before = cur.find((x) => x.key === key) || null;
-    if (!before) return { kind: "new", key, before, after };
-    return { kind: sig(before) === sig(after) ? "same" : "changed", key, before, after };
+    return { key, after, before: null };
+  });
+
+  // Which entry already in the plan each one updates:
+  // 1) the entry for that concern that shares a treatment with it
+  // 2) if the consultation has the concern once, the plan's first entry for it that nothing else is updating
+  // Anything else is a new entry: the same concern can be listed more than once.
+  const perKey = new Map();
+  drafts.forEach((d) => { if (d.key) perKey.set(d.key, (perKey.get(d.key) || 0) + 1); });
+  const taken = new Set();
+  drafts.forEach((d) => {
+    if (!d.key) return;
+    const mine = new Set(d.after.lines.map((l) => normTx(l.treatment)));
+    const hit = cur.find((x) => x.key === d.key && !taken.has(x.id) && x.lines.some((l) => mine.has(normTx(l.treatment))));
+    if (hit) { d.before = hit; taken.add(hit.id); }
+  });
+  drafts.forEach((d) => {
+    if (!d.key || d.before || perKey.get(d.key) !== 1) return;
+    const hit = cur.find((x) => x.key === d.key && !taken.has(x.id));
+    if (hit) { d.before = hit; taken.add(hit.id); }
+  });
+
+  const listed = new Set(cur.map((x) => x.key));   // concerns the plan (or an item above) already has
+  const items = drafts.map(({ key, after, before }) => {
+    if (!key) return { kind: "uncategorised", key: "", before: null, after: { ...after, key: "" }, targetId: "", again: false };
+    if (!before) {
+      const again = listed.has(key);
+      listed.add(key);
+      return { kind: "new", key, before: null, after, targetId: "", again };
+    }
+    return { kind: sig(before) === sig(after) ? "same" : "changed", key, before, after, targetId: before.id, again: false };
   });
   const have = new Set((master ? master.events : []).map((e) => `${normTx(e.name)}|${e.month}`));
   const events = (consult.patient_events || [])
@@ -176,12 +215,16 @@ export function planChanges(master, consult, { recordId = "", services = [], fro
   return { items, events };
 }
 
-// The plan after applying the ticked items and events
+// The plan after applying the ticked items and events. targetId = the entry a pick updates ("" = a new entry).
 export function applyChanges(master, picks, events) {
   const concerns = (master ? master.concerns : []).map((c) => ({ ...c, lines: c.lines.map((l) => ({ ...l })) }));
-  picks.forEach(({ key, after }) => {
-    const i = concerns.findIndex((c) => c.key === key);
-    if (i === -1) { concerns.push({ ...after, key }); return; }
+  picks.forEach(({ key, after, targetId }) => {
+    const i = targetId ? concerns.findIndex((c) => c.id === targetId) : -1;
+    if (i === -1) {
+      // The first entry for a concern is known by the concern's name; another one gets its own id
+      concerns.push({ ...after, key, id: concerns.some((c) => c.id === key) ? `${key}#${newId()}` : key });
+      return;
+    }
     const old = concerns[i];
     const lines = after.lines.map((l) => {
       const prev = old.lines.find((o) => normTx(o.treatment) === normTx(l.treatment));
@@ -192,11 +235,12 @@ export function applyChanges(master, picks, events) {
     old.lines.forEach((o) => {
       if (Object.keys(o.overrides || {}).length && !lines.some((l) => l.id === o.id)) lines.push(o);
     });
-    concerns[i] = { ...old, ...after, key, lines, priority: old.priority || after.priority,
+    concerns[i] = { ...old, ...after, key, id: old.id, lines, priority: old.priority || after.priority,
       status: ["resolved", "not_pursuing"].includes(old.status) ? "active" : old.status };
   });
   return { status: master ? master.status : "proposed", concerns, events: [...(master ? master.events : []), ...events] };
 }
+
 /* ---------- Saving (one numbered version at a time, with history) ---------- */
 
 // meta = { action, summary, recordId, expectedVersion } (expectedVersion 0 = creating it)
@@ -218,7 +262,7 @@ export async function saveMasterPlan(patient, next, meta, staff) {
       patientPttId: clip(patient.pttId, 80),
       patientName: clip(patient.name, 150),
       status: PLAN_STATUS[next.status] ? next.status : "proposed",
-      concerns: (next.concerns || []).map(cleanConcern).filter((c) => c.key),
+      concerns: uniqueIds((next.concerns || []).map(cleanConcern).filter((c) => c.key)),
       events: (next.events || []).map(cleanEvent).filter((e) => e.name),
       sources: [...new Set([...((cur && cur.sources) || []), meta.recordId].filter(Boolean))].slice(-100),
       version: v,

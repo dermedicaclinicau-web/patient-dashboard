@@ -39,7 +39,7 @@ function openDlg(html) {
 
 // Change one session's override inside a plan copy (empty values are removed)
 function setOv(plan, ck, lid, n, patch) {
-  const c = plan.concerns.find((x) => x.key === ck);
+  const c = plan.concerns.find((x) => x.id === ck);
   const l = c && c.lines.find((x) => x.id === lid);
   if (!l) return;
   l.overrides = l.overrides || {};
@@ -138,7 +138,7 @@ export function createPlanOverview(el, ctx) {
   };
   const con = (k) => st.settings.concerns.find((c) => c.name === k) || { label: k, colour: "#888780" };
   const chip = (k) => `<span class="ps-chip" style="--c:${esc(con(k).colour)}">${esc(con(k).label)}</span>`;
-  const attrs = (c, l, n) => `data-c="${esc(c.key)}"${l ? ` data-l="${esc(l.id)}"` : ""}${n ? ` data-n="${n}"` : ""}`;
+  const attrs = (c, l, n) => `data-c="${esc(c.id)}"${l ? ` data-l="${esc(l.id)}"` : ""}${n ? ` data-n="${n}"` : ""}`;
   const sectionHint = () => {
     const card = el.closest(".tp-card");
     return card ? card.querySelector(".tp-count") : null;
@@ -197,7 +197,7 @@ export function createPlanOverview(el, ctx) {
     if (m.concerns.length && (!live.length || (!st.wf.waitingKeepsOpen && !live.some((c) => !isWaiting(c))))) return "completed";
     if (["proposed", "sent", "accepted"].includes(m.status)) {
       const started = m.concerns.some((c) => ACTIVE.includes(c.status) && c.lines.some((l) =>
-        track.get(c.key).lines.get(l.id).slots.some((s) => s.state === "done" || s.state === "booked")));
+        track.get(c.id).lines.get(l.id).slots.some((s) => s.state === "done" || s.state === "booked")));
       if (started) return "in_progress";
     }
     return m.status;
@@ -242,14 +242,14 @@ export function createPlanOverview(el, ctx) {
       c.lines.forEach((l) => {
         const dt = downtimeOf(c, l);
         if (!dt.days) return;
-        const lt = track.get(c.key).lines.get(l.id);
+        const lt = track.get(c.id).lines.get(l.id);
         lt.slots.forEach((s) => {
           if (![...OPEN_STATES, "booked"].includes(s.state) || !s.month) return;
           const e = evs.find((x) => s.month === x.month || (s.month === addMonths(x.month, -1) && dt.days >= LONG_DOWNTIME));
           if (!e) return;
           const early = addMonths(e.month, dt.days >= LONG_DOWNTIME ? -2 : -1);
           const to = early >= thisMonth() ? early : addMonths(e.month, 1);
-          out.push({ c, l, s, e, dt, to, lt, key: `${c.key}|${l.id}|${s.n}` });
+          out.push({ c, l, s, e, dt, to, lt, key: `${c.id}|${l.id}|${s.n}` });
         });
       });
     });
@@ -263,10 +263,10 @@ export function createPlanOverview(el, ctx) {
     const waiting = live.filter(isWaiting);
     if (!waiting.length) return [];
     const out = waiting
-      .filter((c) => c.lines.some((l) => track.get(c.key).lines.get(l.id).slots.some((s) => s.state === "booked")))
+      .filter((c) => c.lines.some((l) => track.get(c.id).lines.get(l.id).slots.some((s) => s.state === "booked")))
       .map((c) => ({ c, promote: "early", rank: 0.5 }));
     const trackedOpen = live.some((c) => !isWaiting(c) && c.status === "active" &&
-      !(c.lines.length && c.lines.every((l) => track.get(c.key).lines.get(l.id).complete)));
+      !(c.lines.length && c.lines.every((l) => track.get(c.id).lines.get(l.id).complete)));
     if (!trackedOpen && !out.length) {
       const order = st.wf.phases.map((p) => p.id);
       const next = waiting.slice().sort((a, b) => order.indexOf(phase(a).id) - order.indexOf(phase(b).id))[0];
@@ -285,12 +285,12 @@ export function createPlanOverview(el, ctx) {
     const rank = { overdue: 0, due: 1, unscheduled: 2 };
     m.concerns.forEach((c) => {
       if (!ACTIVE.includes(c.status)) return;
-      const t = track.get(c.key);
+      const t = track.get(c.id);
       if (booking) {
         c.lines.forEach((l) => {
           const lt = t.lines.get(l.id);
           const s = lt.next;
-          if (s && s.state in rank && !clashed.has(`${c.key}|${l.id}|${s.n}`)) out.push({ c, l, lt, s, rank: rank[s.state] });
+          if (s && s.state in rank && !clashed.has(`${c.id}|${l.id}|${s.n}`)) out.push({ c, l, lt, s, rank: rank[s.state] });
         });
       }
       if (c.status === "active" && c.lines.length && c.lines.every((l) => t.lines.get(l.id).complete)) {
@@ -326,7 +326,7 @@ export function createPlanOverview(el, ctx) {
     st.master.concerns.forEach((c) => {
       if (!ACTIVE.includes(c.status) || isWaiting(c)) return;
       c.lines.forEach((l) => {
-        const lt = track.get(c.key).lines.get(l.id);
+        const lt = track.get(c.id).lines.get(l.id);
         if (lt && lt.total) { total += lt.total; done += Math.min(lt.done, lt.total); }
       });
     });
@@ -372,7 +372,7 @@ export function createPlanOverview(el, ctx) {
     const tk = dateKeyOf(new Date());
     const hits = [];
     st.master.concerns.forEach((c) => c.lines.forEach((l) => {
-      const lt = track.get(c.key).lines.get(l.id);
+      const lt = track.get(c.id).lines.get(l.id);
       const s = lt.slots.find((x) => x.date === tk);
       if (s) hits.push({ c, l, lt, s });
     }));
@@ -469,7 +469,7 @@ export function createPlanOverview(el, ctx) {
     return `<div class="pv-row">
       <div class="pv-tx"><strong>${esc(l.treatment)}</strong><small>${esc(sub)}</small></div>
       <div class="pv-chips">${hidden ? `<span class="pv-more">+${hidden} earlier</span>` : ""}${
-        shown.map((s) => chipHtml(c, l, lt, s, clashKeys.has(`${c.key}|${l.id}|${s.n}`))).join("")}${
+        shown.map((s) => chipHtml(c, l, lt, s, clashKeys.has(`${c.id}|${l.id}|${s.n}`))).join("")}${
         lt.complete ? '<span class="pv-chip is-complete">Course complete</span>' : ""}</div>
       <div class="pv-price">${price ? esc(price) : ""}</div>
       <button type="button" class="po-mini" data-po="edit-line" ${attrs(c, l)}>Edit</button>
@@ -512,7 +512,7 @@ export function createPlanOverview(el, ctx) {
     const movable = active && OPEN_STATES.includes(s.state);
     const t = `${slotText(lt, s)}${clash ? " · too close to a patient event" : ""}${movable ? " · drag to move" : ""}`;
     return `<button type="button" class="pcal-step is-${s.state}${s.manual ? " is-manual" : ""}${movable ? " is-movable" : ""}${
-      clash ? " is-clash" : ""}" data-po="slot" ${attrs(c, l, s.n)} data-row="${esc(`${c.key}|${l.id}`)}"
+      clash ? " is-clash" : ""}" data-po="slot" ${attrs(c, l, s.n)} data-row="${esc(`${c.id}|${l.id}`)}"
       title="${esc(t)}" aria-label="${esc(t)}">${clash ? "⚠ " : ""}${s.n}</button>`;
   }
 
@@ -536,12 +536,12 @@ export function createPlanOverview(el, ctx) {
       list.forEach((c) => {
         const k = con(c.key);
         const active = ACTIVE.includes(c.status);
-        const t = track.get(c.key);
+        const t = track.get(c.id);
         rows += `<div class="pcal-concern${active ? "" : " is-off"}" style="--c:${esc(k.colour)}">${esc(k.label)}${
           active ? "" : ` <small>${esc(CONCERN_STATUS[c.status])}</small>`}</div>`;
         c.lines.forEach((l) => {
           const lt = t.lines.get(l.id);
-          const row = `${c.key}|${l.id}`;
+          const row = `${c.id}|${l.id}`;
           const unsched = lt.slots.filter((s) => !s.month && !["skipped", "waiting"].includes(s.state));
           rows += `<div class="pcal-label${active ? "" : " is-off"}" style="--c:${esc(k.colour)}">
             <strong>${esc(l.treatment)}</strong><small>${esc(nextText(lt))}</small>
@@ -583,7 +583,7 @@ export function createPlanOverview(el, ctx) {
       <div class="pv-phase${ph.tracked ? "" : " is-waiting"}" style="--p:${esc(ph.colour)}">
         ${many ? `<p class="pv-phase-head"><strong>${esc(ph.name)}</strong>${ph.tracked ? "" : '<span class="pv-phase-tag">Waiting</span>'}${
           ph.note ? `<small>${esc(ph.note)}</small>` : ""}</p>` : ""}
-        ${list.map((c) => groupHtml(c, track.get(c.key), clashKeys)).join("")}
+        ${list.map((c) => groupHtml(c, track.get(c.id), clashKeys)).join("")}
       </div>`).join("");
   }
 
@@ -637,11 +637,11 @@ export function createPlanOverview(el, ctx) {
   }
 
   const findLine = (ck, lid) => {
-    const c = st.master && st.master.concerns.find((x) => x.key === ck);
+    const c = st.master && st.master.concerns.find((x) => x.id === ck);
     return [c || null, c && lid ? c.lines.find((x) => x.id === lid) || null : null];
   };
   const slotOf = (c, l, n) => {
-    const lt = compute().get(c.key).lines.get(l.id);
+    const lt = compute().get(c.id).lines.get(l.id);
     return [lt, lt && lt.slots.find((x) => x.n === n)];
   };
   // Later sessions of the same treatment that are still to come (these follow a move)
@@ -654,7 +654,7 @@ export function createPlanOverview(el, ctx) {
 
   function setConcernStatus(c, v) {
     if (!c || !CONCERN_STATUS[v] || v === c.status) return Promise.resolve(false);
-    return commit((p) => { const x = p.concerns.find((y) => y.key === c.key); if (x) x.status = v; },
+    return commit((p) => { const x = p.concerns.find((y) => y.id === c.id); if (x) x.status = v; },
       "Changed a concern's status", `${con(c.key).label}: ${CONCERN_STATUS[v]}`);
   }
 
@@ -707,7 +707,7 @@ export function createPlanOverview(el, ctx) {
     const k = con(c.key);
     const ph = phase(c);
     const same = st.master.concerns.filter((x) => phase(x).id === ph.id);
-    const at = same.findIndex((x) => x.key === c.key);
+    const at = same.findIndex((x) => x.id === c.id);
     const dlg = openDlg(`
       <div class="lh-dialog-head"><h3>${esc(k.label)}</h3><p>${esc(c.description || "")}</p></div>
       ${st.wf.phases.length > 1 ? `<div class="lh-field"><span class="lh-label">Priority</span>
@@ -770,7 +770,7 @@ export function createPlanOverview(el, ctx) {
       const btn = form.querySelector('[type="submit"]');
       btn.disabled = true;
       const ok = await commit((p) => {
-        const x = p.concerns.find((y) => y.key === c.key);
+        const x = p.concerns.find((y) => y.id === c.id);
         if (x) Object.assign(x, vals);
       }, "Edited a concern's details", con(c.key).label);
       if (ok) dlg.close(); else btn.disabled = false;
@@ -780,11 +780,11 @@ export function createPlanOverview(el, ctx) {
   // Up or down within its priority (the plan's order is the order of master.concerns)
   function moveConcern(c, dir) {
     const same = st.master.concerns.filter((x) => phase(x).id === phase(c).id);
-    const other = same[same.findIndex((x) => x.key === c.key) + dir];
+    const other = same[same.findIndex((x) => x.id === c.id) + dir];
     if (!other) return Promise.resolve(false);
     return commit((p) => {
-      const a = p.concerns.findIndex((x) => x.key === c.key);
-      const b = p.concerns.findIndex((x) => x.key === other.key);
+      const a = p.concerns.findIndex((x) => x.id === c.id);
+      const b = p.concerns.findIndex((x) => x.id === other.id);
       [p.concerns[a], p.concerns[b]] = [p.concerns[b], p.concerns[a]];
     }, dir < 0 ? "Moved a concern up" : "Moved a concern down", `${con(c.key).label}, within ${phase(c).name}`);
   }
@@ -823,7 +823,7 @@ export function createPlanOverview(el, ctx) {
     const from = phase(c);
     if (!to || to.id === from.id || st.busy) return false;
     const promoting = to.tracked && !from.tracked;
-    const t = compute().get(c.key);
+    const t = compute().get(c.id);
     const fresh = new Set(c.lines.filter((l) => !t.lines.get(l.id).slots
       .some((s) => s.state === "done" || s.state === "booked")).map((l) => l.id));
     let start = "";
@@ -834,7 +834,7 @@ export function createPlanOverview(el, ctx) {
       if (start === null) return false;
     }
     return commit((p) => {
-      const x = p.concerns.find((y) => y.key === c.key);
+      const x = p.concerns.find((y) => y.id === c.id);
       if (!x) return;
       x.priority = to.id;
       if (start) {
@@ -873,12 +873,12 @@ export function createPlanOverview(el, ctx) {
     const later = laterOpen(lt, n);
     const ov = l.overrides || {};
     return commit((p) => {
-      setOv(p, c.key, l.id, String(n), { month: toMonth });
+      setOv(p, c.id, l.id, String(n), { month: toMonth });
       later.forEach((x) => {
         const own = (ov[String(x.n)] || {}).month;
         // Sessions without their own month already follow the moved one (by the interval). Pinned ones shift with it.
-        if (keepGaps) { if (own && shift) setOv(p, c.key, l.id, String(x.n), { month: addMonths(own, shift) }); }
-        else setOv(p, c.key, l.id, String(x.n), { month: x.month });
+        if (keepGaps) { if (own && shift) setOv(p, c.id, l.id, String(x.n), { month: addMonths(own, shift) }); }
+        else setOv(p, c.id, l.id, String(x.n), { month: x.month });
       });
     }, `Moved a session to ${monthLabel(toMonth)}`,
     `${l.treatment}, session ${n}${later.length ? (keepGaps ? `, and the ${later.length} after it` : ", later sessions kept in place") : ""}`);
@@ -912,7 +912,7 @@ export function createPlanOverview(el, ctx) {
       return;
     }
     st.busy = false;
-    await commit((p) => setOv(p, c.key, l.id, String(n), { asked: { at: new Date().toISOString(), by: (staff && staff.name) || "" } }),
+    await commit((p) => setOv(p, c.id, l.id, String(n), { asked: { at: new Date().toISOString(), by: (staff && staff.name) || "" } }),
       rebookNote ? "Asked reception to rebook" : "Asked reception to book", text);
     showToast("Reminder added for reception");
     if (ctx.onReminder) ctx.onReminder();
@@ -1011,7 +1011,7 @@ export function createPlanOverview(el, ctx) {
         action = s.manual ? "Undid Mark done" : "Undid a skip";
       } else return;
       b.disabled = true;
-      if (await commit((p) => setOv(p, c.key, l.id, String(n), patch), action, label)) dlg.close();
+      if (await commit((p) => setOv(p, c.id, l.id, String(n), patch), action, label)) dlg.close();
       else b.disabled = false;
     });
   }
@@ -1125,7 +1125,7 @@ export function createPlanOverview(el, ctx) {
           confirmLabel: "Remove", tone: "danger",
         }))) return;
         if (await commit((p) => {
-          const pc = p.concerns.find((y) => y.key === c.key);
+          const pc = p.concerns.find((y) => y.id === c.id);
           if (pc) pc.lines = pc.lines.filter((y) => y.id !== l.id);
         }, "Removed a treatment", `${con(c.key).label}: ${x.treatment}`)) dlg.close();
       });
@@ -1152,7 +1152,7 @@ export function createPlanOverview(el, ctx) {
       const btn = form.querySelector('[type="submit"]');
       btn.disabled = true;
       const ok = await commit((p) => {
-        const pc = p.concerns.find((y) => y.key === c.key);
+        const pc = p.concerns.find((y) => y.id === c.id);
         if (!pc) return;
         if (isNew) pc.lines.push(cleanLine(fields));
         else {

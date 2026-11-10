@@ -70,7 +70,7 @@ export async function openPlanReview({ patient, consult, recordId = "", recordDa
               ? `<select class="fb-select mp-cat" data-cat="${i}" aria-label="Which concern"><option value="">Choose a concern…</option>${
                 CATEGORIES.map((k) => `<option value="${esc(k)}">${esc(con(k).label)}</option>`).join("")}</select>`
               : chip(it.key)}
-              <span class="mp-badge ${BADGE[it.kind][1]}">${BADGE[it.kind][0]}</span>
+              <span class="mp-badge ${BADGE[it.kind][1]}">${it.again ? "Another entry for this concern" : BADGE[it.kind][0]}</span>
               ${it.kind === "new" || it.kind === "uncategorised" ? phaseSel(i) : ""}</span>
             ${it.after.description ? `<p class="mp-desc">${esc(it.after.description)}${it.after.area ? ` · <em>${esc(it.after.area)}</em>` : ""}</p>` : ""}
             ${linesHtml(it.after)}
@@ -122,12 +122,17 @@ export async function openPlanReview({ patient, consult, recordId = "", recordDa
       picks.push({ ...it, key, after });
     }
     const evPicks = [...form.querySelectorAll('[name="ev"]:checked')].map((x) => events[Number(x.value)]);
-    if (new Set(picks.map((p) => p.key)).size < picks.length) {
-      err.textContent = "Two ticked items are set to the same concern. Untick one, or choose a different concern."; err.hidden = false; return;
-    }
+    // A concern chosen by hand updates the plan's entry for it when there's exactly one that nothing else is updating.
+    // Otherwise it's listed as its own entry: the same concern can be in the plan more than once.
+    const used = new Set(picks.map((p) => p.targetId).filter(Boolean));
+    picks.forEach((p) => {
+      if (p.kind !== "uncategorised" || !master) return;
+      const free = master.concerns.filter((c) => c.key === p.key && !used.has(c.id));
+      if (free.length === 1) { p.targetId = free[0].id; used.add(free[0].id); }
+    });
     if (!picks.length && !evPicks.length) { err.textContent = "Tick at least one thing to apply."; err.hidden = false; return; }
 
-    const added = picks.filter((p) => !master || !master.concerns.some((c) => c.key === p.key)).length;
+    const added = picks.filter((p) => !p.targetId).length;
     const changed = picks.length - added;
     const summary = [added && `${added} concern${added === 1 ? "" : "s"} added`, changed && `${changed} updated`,
       evPicks.length && `${evPicks.length} event${evPicks.length === 1 ? "" : "s"} added`].filter(Boolean).join(", ") +
