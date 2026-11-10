@@ -5,7 +5,9 @@ import { SECTIONS, parseSoap, assembleSoap, transcriptHtml, cleanPlaceholders } 
 import {
   readSidecar, buildSidecar, planFromSidecar, planToSidecarPlan, planToText, priorCategories,
   planCardHtml, fieldHtml, getPlanValue, setPlanValue, refFrom, catKey, planFromText,
+  schedulesOf, setSchedule, treatmentLines,
 } from "./plan-editor.js";
+import { freqHtml, mountFreq } from "./plan-frequency.js";
 import { fetchTranscriptRecords, parseRecordDate } from "./transcripts.js";
 import {
   emailItemsFrom, emailCardHtml, openEmailComposer, emailItemsToText, emailItemsToSidecar,
@@ -735,6 +737,7 @@ async function planAction(btn) {
   const open = panel.querySelector("textarea.pe-input");
   if (open) commitPlanEdit(open);
   const action = btn.dataset.pe;
+  if (action === "freq") { editFrequency(Number(btn.dataset.ci), Number(btn.dataset.si)); return; }
 
   if (action === "remove-concern") {
     const i = Number(btn.dataset.ci);
@@ -770,6 +773,52 @@ async function planAction(btn) {
     const f = panel.querySelector(`.pe-field[data-pf="date"][data-ti="${plan.timeline.length - 1}"]`);
     if (f) startPlanEdit(f);
   }
+}
+
+// How often for one treatment in a concern: the same control as the master plan
+function editFrequency(ci, si) {
+  const c = current && current.plan && current.plan.concerns[ci];
+  if (!c) return;
+  const s = schedulesOf(c)[si] || {};
+  const name = treatmentLines(c)[si] || c.concern_category || "This treatment";
+  const was = String(c.frequency_interval || "").split(/\n+/)[si] || "";
+  const set = Array.isArray(c.schedules) && c.schedules[si];
+  const dlg = document.createElement("dialog");
+  dlg.className = "lh-dialog pe-freq-dlg";
+  dlg.innerHTML = `
+    <form class="lh-form" novalidate>
+      <div class="lh-dialog-head"><h3>How often</h3><p>${escapeHtml(name)}</p></div>
+      ${freqHtml({ pattern: s.pattern, sessions: s.sessions, intervalWeeks: s.interval_weeks, intervalUnit: s.interval_unit })}
+      <label class="lh-field"><span class="lh-label">Note (optional)</span>
+        <input name="note" maxlength="200" value="${escapeHtml(s.note || "")}" placeholder="e.g. Start after summer" /></label>
+      ${was && was !== "—" && !set ? `<p class="fe-note">Recorded as: “${escapeHtml(was)}”</p>` : ""}
+      <p class="lh-error" role="alert" hidden></p>
+      <div class="lh-actions">
+        <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+        <button type="submit" class="lh-btn is-primary">Done</button>
+      </div>
+    </form>`;
+  document.body.appendChild(dlg);
+  dlg.addEventListener("close", () => dlg.remove());
+  dlg.showModal();
+  const form = dlg.querySelector("form");
+  const freq = mountFreq(dlg);
+  dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const v = freq.read();
+    if (v.pattern === "course" && !v.sessions) {
+      const err = dlg.querySelector(".lh-error");
+      err.textContent = "Enter how many sessions the course has.";
+      err.hidden = false;
+      return;
+    }
+    setSchedule(c, si, { pattern: v.pattern, sessions: v.sessions, interval_weeks: v.intervalWeeks,
+      interval_unit: v.intervalUnit, note: form.elements.note.value });
+    markDirty();
+    rerenderPlan();
+    dlg.close();
+  });
 }
 
 // NEW vs UPDATE: categories this patient already had a plan for in EARLIER consultations

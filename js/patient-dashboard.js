@@ -656,6 +656,18 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   }, 0);
   window.addEventListener("hashchange", onLeave);
 
+  // Notes saved in their own tab: the consultation plans, badges and history here follow
+  try {
+    const notesBc = new BroadcastChannel("dm-notes");
+    notesBc.onmessage = (e) => {
+      if (!root.isConnected) { notesBc.close(); return; }
+      if (e.data && e.data.type === "notes-saved" && transcriptRecords.some((r) => r.id === e.data.id)) {
+        clearPageCache();
+        loadTranscriptSections();
+      }
+    };
+  } catch { /* older browsers: Refresh shows the change */ }
+
   // Treatment plan + Social history, both from appointment_transcripts (fetched once)
   async function loadTranscriptSections() {
     const socialCard = root.querySelector('details[data-key="social-history"]');

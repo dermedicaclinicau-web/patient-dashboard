@@ -19,6 +19,37 @@ export function everyText(weeks, unit) {
   return `1 every ${n === 1 ? "" : `${n} `}${word}${n === 1 ? "" : "s"}`;
 }
 
+// "Course of 3, 1 every 4 weeks" · "1 every 6 months" · "Once" · "Ongoing" ("" when nothing is set)
+export function scheduleText(l = {}) {
+  const every = everyText(l.intervalWeeks, l.intervalUnit);
+  if (l.pattern === "course") return [l.sessions ? `Course of ${l.sessions}` : "Course", every].filter(Boolean).join(", ");
+  if (l.pattern === "once") return "Once";
+  if (l.pattern === "maintenance") return every || "Ongoing";
+  return every;
+}
+
+// Reads wording like "every 4 weeks", "3 sessions 6 weeks apart", "6 monthly" or "once".
+// → { pattern, sessions, intervalWeeks, intervalUnit }, or null when it can't tell.
+export function parseFreq(text) {
+  const t = String(text || "").toLowerCase();
+  if (!t.trim()) return null;
+  const range = "(?:\\s*(?:-|–|to)\\s*\\d+)?";   // "4-6 weeks" counts as 4
+  const unitRe = "(week|wk|month|mth|year|yr)";
+  const m = new RegExp(`(?:every|each)\\s+(\\d+)?${range}\\s*${unitRe}`).exec(t)
+    || new RegExp(`(\\d+)${range}[\\s-]*${unitRe}s?(?:ly|\\s+apart|\\s+intervals?)`).exec(t);
+  const alone = !m && /\b(week|month|year)ly\b|\b(annual)/.exec(t);
+  let n = m ? Number(m[1]) || 1 : alone ? 1 : 0;
+  const word = m ? m[2] : alone ? (alone[1] || "year") : "";
+  let unit = word[0] === "w" ? "w" : word ? "m" : "";
+  if (word[0] === "y") n *= 12;
+  const s = /(?:course of|x)\s*(\d+)/.exec(t) || /(\d+)\s*(?:x\b|sessions?|treatments?|sittings?)/.exec(t);
+  const sessions = s ? Math.min(52, Number(s[1]) || 0) : 0;
+  const once = !n && !sessions && /\b(once|single|one[- ]off)\b/.test(t);
+  if (!n && !sessions && !once) return null;
+  if (!n) unit = "";
+  return { pattern: once ? "once" : sessions ? "course" : "maintenance", sessions, intervalWeeks: toWeeks(n, unit), intervalUnit: unit };
+}
+
 const PATTERNS = [["course", "A course"], ["maintenance", "Ongoing"], ["once", "Once"], ["unknown", "Not set"]];
 const QUICK = { w: [1, 2, 3, 4, 6, 8, 12, 16], m: [3, 6, 9, 12] };
 

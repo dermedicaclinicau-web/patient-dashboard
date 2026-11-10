@@ -13057,3 +13057,14 @@ dialog.lh-dialog.inv-dlg.pcg-dlg { width: min(660px, calc(100vw - 2rem)); }
 .fq-chip:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .fq-sum { margin: 0; padding-top: .5rem; border-top: 1px dashed var(--border); font-size: .86rem; font-weight: 600; color: #0f766e; }
 @media (max-width: 560px) { .fq-pattern .fe-seg-btn span { padding: .4rem .2rem; font-size: .74rem; } }
+
+
+/* Notes → Treatment Plan card: how often, one button per treatment */
+.pe-freqs { display: flex; flex-direction: column; align-items: flex-start; gap: .3rem; }
+.pe-freq { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: .15rem .55rem; max-width: 100%; padding: .32rem .75rem;
+  border: 1px solid #bbf7d0; border-radius: 10px; background: #f0fdf4; color: #14532d; font: inherit; font-size: .88rem;
+  font-weight: 600; text-align: left; cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+.pe-freq:hover, .pe-freq:focus-visible { border-color: #16a34a; box-shadow: 0 0 0 3px #dcfce7; outline: none; }
+.pe-freq-tx { font-size: .78rem; font-weight: 500; color: #64748b; }
+.pe-freq.is-empty { border-style: dashed; background: #fff; color: #15803d; font-weight: 500; }
+dialog.lh-dialog.pe-freq-dlg { width: min(520px, calc(100vw - 2rem)); }

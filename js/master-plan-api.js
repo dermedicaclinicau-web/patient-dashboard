@@ -2,8 +2,8 @@
 import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, getDocs, collection, query, orderBy, limit, runTransaction, serverTimestamp }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { CATEGORIES, canonicalCategory, PATTERNS } from "./plan-editor.js";
-import { everyText } from "./plan-frequency.js";
+import { CATEGORIES, canonicalCategory, PATTERNS, schedulesOf } from "./plan-editor.js";
+import { scheduleText } from "./plan-frequency.js";
 
 export const PLAN_STATUS = {
   proposed: "Proposed", sent: "Sent to patient", accepted: "Accepted",
@@ -38,11 +38,7 @@ export function monthLabel(k) {
 
 // "Course of 3, 1 every 4 weeks" · "1 every 3 months" · "Once"
 export function patternText(l) {
-  const every = everyText(l.intervalWeeks, l.intervalUnit);
-  if (l.pattern === "course") return [l.sessions ? `Course of ${l.sessions}` : "Course", every].filter(Boolean).join(", ");
-  if (l.pattern === "maintenance") return every ? `${every[0].toUpperCase()}${every.slice(1)}` : "Ongoing";
-  if (l.pattern === "once") return "Once";
-  return l.frequency || "";
+  return scheduleText(l) || l.frequency || "";
 }
 /* ---------- Clean shapes ---------- */
 
@@ -152,17 +148,18 @@ export function sharesWord(a, b) {
 function linesFrom(c, startMonth, key, services, countFrom) {
   const texts = String(c.treatment || "").split(/\n+/).map((s) => s.replace(/^[-•*]\s*/, "").trim()).filter(Boolean);
   const freqs = String(c.frequency_interval || "").split(/\n+/).map((s) => s.trim());
-  return (texts.length ? texts : [c.description || "Treatment"]).map((t, i) => cleanLine({
-    treatment: t,
-    frequency: freqs[i] && freqs[i] !== "—" ? freqs[i] : "",
-    pattern: i === 0 ? c.pattern : "unknown",       // the recorder's schedule fields describe the first treatment line
-    sessions: i === 0 ? c.sessions : 0,
-    intervalWeeks: i === 0 ? c.interval_weeks : 0,
-    intervalUnit: i === 0 ? c.interval_unit : "",
-    startMonth,
-    countFrom,
-    services: matchServices(t, key, services),
-  }));
+  const sch = schedulesOf(c);   // one schedule per treatment line
+  return (texts.length ? texts : [c.description || "Treatment"]).map((t, i) => {
+    const s = sch[i] || {};
+    return cleanLine({
+      treatment: t,
+      frequency: freqs[i] && freqs[i] !== "—" ? freqs[i] : "",
+      pattern: s.pattern, sessions: s.sessions, intervalWeeks: s.interval_weeks, intervalUnit: s.interval_unit,
+      startMonth,
+      countFrom,
+      services: matchServices(t, key, services),
+    });
+  });
 }
 // consult = the editable plan model (planFromSidecar / planFromText)
 // → { items: [{ kind: new | changed | same | uncategorised, key, before, after }], events: [new events] }

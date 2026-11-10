@@ -1,5 +1,6 @@
 import { escapeHtml } from "./utils.js";
 import { parsePlan, parseTimeline } from "./transcripts.js";
+import { scheduleText, parseFreq } from "./plan-frequency.js";
 
 /* ===================== Constants ===================== */
 
@@ -79,6 +80,67 @@ const I = {
 
 const str = (v) => String(v == null ? "" : v).trim();
 
+/* ===================== How often: one schedule per treatment line ===================== */
+
+// A concern's treatments, one per line
+export const treatmentLines = (c) => String((c && c.treatment) || "").split(/\n+/).map((s) => s.replace(/^[-•*]\s*/, "").trim()).filter(Boolean);
+const freqLines = (c) => String((c && c.frequency_interval) || "").split(/\n+/).map((s) => s.trim()).map((s) => (s === "—" ? "" : s));
+const cleanSched = (s = {}) => ({
+  pattern: PATTERNS.includes(str(s.pattern)) ? str(s.pattern) : "unknown",
+  sessions: whole(s.sessions),
+  interval_weeks: whole(s.interval_weeks),
+  interval_unit: /^[wm]$/.test(str(s.interval_unit)) ? str(s.interval_unit) : "",
+  note: str(s.note).slice(0, 200),
+});
+const schedText = (s) => [scheduleText({ pattern: s.pattern, sessions: s.sessions, intervalWeeks: s.interval_weeks, intervalUnit: s.interval_unit }), s.note]
+  .filter(Boolean).join(" · ");
+
+// One schedule per treatment line (always at least one). Set in the notes → as saved.
+// Otherwise from the recorder's fields (first treatment) or read from the Frequency wording.
+export function schedulesOf(c) {
+  const freqs = freqLines(c);
+  const saved = Array.isArray(c.schedules) ? c.schedules : [];
+  return Array.from({ length: Math.max(1, treatmentLines(c).length) }, (_, i) => {
+    if (saved[i]) return cleanSched(saved[i]);
+    const text = freqs[i] || "";
+    if (i === 0 && !saved.length && ((c.pattern && c.pattern !== "unknown") || whole(c.interval_weeks))) {
+      return cleanSched({ pattern: c.pattern, sessions: c.sessions, interval_weeks: c.interval_weeks,
+        interval_unit: c.interval_unit || (/month|mth/i.test(text) ? "m" : /week|wk/i.test(text) ? "w" : "") });
+    }
+    const p = parseFreq(text);
+    return p ? cleanSched({ pattern: p.pattern, sessions: p.sessions, interval_weeks: p.intervalWeeks, interval_unit: p.intervalUnit })
+      : cleanSched({ note: text });
+  });
+}
+
+// What each treatment's Frequency button says ("" = not set). Until one is changed here, the recorded wording is kept.
+export function scheduleLabels(c) {
+  const freqs = freqLines(c);
+  const saved = Array.isArray(c.schedules) ? c.schedules : [];
+  return schedulesOf(c).map((s, i) => (saved[i] ? schedText(s) : freqs[i] || schedText(s)));
+}
+
+// Sets one treatment's schedule, and rewrites the Frequency text and the first treatment's fields to match
+export function setSchedule(c, i, s) {
+  const freqs = freqLines(c);
+  const saved = Array.isArray(c.schedules) ? c.schedules : [];
+  const all = schedulesOf(c);
+  c.schedules = all.map((x, k) => (k === i ? cleanSched(s) : saved[k] ? cleanSched(saved[k]) : null));
+  const lines = all.map((x, k) => (c.schedules[k] ? schedText(c.schedules[k]) : freqs[k] || ""));
+  c.frequency_interval = lines.some(Boolean) ? lines.map((l) => l || "—").join("\n") : "";
+  const first = c.schedules[0] || all[0];
+  Object.assign(c, { pattern: first.pattern, sessions: first.sessions, interval_weeks: first.interval_weeks, interval_unit: first.interval_unit });
+}
+
+function freqRowHtml(c, ci) {
+  const names = treatmentLines(c);
+  return `<div class="pe-freqs">${scheduleLabels(c).map((label, k) => `
+    <button type="button" class="pe-freq${label ? "" : " is-empty"}" data-pe="freq" data-ci="${ci}" data-si="${k}" title="Set how often">
+      ${names.length > 1 ? `<span class="pe-freq-tx">${escapeHtml(names[k])}</span>` : ""}
+      <span class="pe-freq-v">${label ? escapeHtml(label) : "Set how often"}</span>
+    </button>`).join("")}</div>`;
+}
+
 /* ===================== Structured sidecar (same encoding as the recorder) ===================== */
 
 const SIDECAR_RE = /<!--STRUCTURED_SIDECAR:([^-]+)-->/;
@@ -128,6 +190,8 @@ export function planFromSidecar(sc) {
         pattern: PATTERNS.includes(str(c.pattern)) ? str(c.pattern) : "unknown",
         sessions: whole(c.sessions),
         interval_weeks: whole(c.interval_weeks),
+        interval_unit: /^[wm]$/.test(str(c.interval_unit)) ? str(c.interval_unit) : "",
+        ...(Array.isArray(c.schedules) ? { schedules: c.schedules.map((s) => (s ? cleanSched(s) : null)) } : {}),
       };
     });
 
@@ -163,6 +227,8 @@ export function planToSidecarPlan(plan) {
       quote: str(c.quote), comments: str(c.comments),
       pattern: PATTERNS.includes(str(c.pattern)) ? str(c.pattern) : "unknown",
       sessions: whole(c.sessions), interval_weeks: whole(c.interval_weeks),
+      interval_unit: /^[wm]$/.test(str(c.interval_unit)) ? str(c.interval_unit) : "",
+      ...(Array.isArray(c.schedules) ? { schedules: c.schedules } : {}),
     };
   });
   return {
@@ -326,7 +392,7 @@ function concernHtml(c, i, priorCats, showBadges) {
       ${fieldHtml({ pf: "description", ci: i }, c.description)}
       <div class="pe-rows">
         ${row(I.syringe, "Treatment", fieldHtml({ pf: "treatment", ci: i }, c.treatment))}
-        ${row(I.repeat, "Frequency", fieldHtml({ pf: "frequency_interval", ci: i }, c.frequency_interval))}
+        ${row(I.repeat, "Frequency", freqRowHtml(c, i))}
         ${row(I.tag, "Quote", fieldHtml({ pf: "quote", ci: i }, c.quote))}
         ${row(I.chat, "Comments", fieldHtml({ pf: "comments", ci: i }, c.comments))}
       </div>
