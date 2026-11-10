@@ -13380,3 +13380,12 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 .inv-fx-opt small { display: block; color: #64748b; }
 .inv-hint.is-ok { background: #ecfdf5; color: #047857; }
 @media (max-width: 560px) { .inv-fx-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* Inventory tabs: icons, and the row scrolls sideways when it doesn't fit */
+.inv-tabs { overflow-x: auto; overflow-y: hidden; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.inv-tabs::-webkit-scrollbar { display: none; }
+.inv-tabs a { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; flex-shrink: 0; }
+.inv-tab-ic { width: 16px; height: 16px; flex-shrink: 0; opacity: .65; transition: opacity .15s ease; }
+.inv-tabs a:hover .inv-tab-ic,
+.inv-tabs a.active .inv-tab-ic { opacity: 1; }
+.inv-tabs .inv-tabcount { margin-left: 1px; }
