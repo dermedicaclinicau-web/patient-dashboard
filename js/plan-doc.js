@@ -323,7 +323,9 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
         signatures: {}, templateName: ver.name, patientName: patient.name || "", recordDate: today, version: ver.version,
         createdBy: (staff && staff.name) || "",
       };
-      const doc = buildFormDocument({ sub, ver, letterhead: lh, images, blank: true });
+      // The "patient · date" line under the title is left off: the design says who it's for in its own words
+      const doc = buildFormDocument({ sub, ver: { ...ver, settings: { ...(ver.settings || {}), showMeta: false } },
+        letterhead: lh, images, blank: true });
       if (want === d.formId) tpl = { inner: doc.inner, css: doc.css };
     } catch (ex) {
       console.warn("Plan design form not loaded:", ex);
