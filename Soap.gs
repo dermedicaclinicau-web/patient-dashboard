@@ -61,6 +61,32 @@ function planWholeNum_(v) {
   return isFinite(n) && n > 0 ? Math.min(n, 520) : 0;
 }
 
+// A "patient event" that's really a treatment or appointment ("Skin Lifting appointment", "Filler review").
+// Same list as isTreatmentEvent in js/master-plan-api.js. Patient events are life events only.
+const PLAN_EVENT_TREATMENT_RE_ = new RegExp('\\b(' + [
+  'appointments?', 'appts?', 'treatments?', 'consult(?:ation)?s?', 'reviews?', 'follow[\\s-]?ups?',
+  'injections?', 'injectables?', 'anti[\\s-]?wrinkle', 'wrinkle relaxers?', 'botox', 'dysport', 'xeomin',
+  'fillers?', 'radiesse', 'sculptra', 'profhilo', 'rejuran', 'skin boosters?', 'lasers?', 'ipl', 'bbl', 'opl',
+  'peels?', 'hifu', 'ulthera(?:py)?', 'skin lifting', 'e[\\s-]?skin tight', 'firm\\s*(?:&|and)\\s*(?:contour|hydrate|fresh)',
+  'micro[\\s-]?needling', 'skin needling', 'dermaglow', 'restoraglow', 'genesis', 'hydrafacial', 'facials?',
+  'coolsculpt\\w*', 'trusculpt', 'vanquish', 'prp', 'threads?',
+].join('|') + ')\\b', 'i');
+
+function planEventNorm_(s) {
+  return String(s || '').toLowerCase().replace(/\([^)]*\)/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// txNames: this consultation's treatment lines
+function planEventIsTreatment_(name, txNames) {
+  const n = ' ' + planEventNorm_(name) + ' ';
+  if (!n.trim()) return false;
+  if (PLAN_EVENT_TREATMENT_RE_.test(String(name))) return true;
+  return (txNames || []).some(function (t) {
+    const k = planEventNorm_(t);
+    return k.length >= 4 && n.indexOf(' ' + k + ' ') !== -1;
+  });
+}
+
 // Tidies the treatment plan Gemini returned: exact category names, valid pattern, whole numbers,
 // timeline letters a–f, and only real patient events.
 function normalisePlanJson_(data) {
@@ -84,11 +110,32 @@ function normalisePlanJson_(data) {
       t.concern = m ? m[1].toLowerCase() : '';
     });
   }
+  // This consultation's treatments, one per line (an event must not be one of them)
+  const txNames = [];
+  Object.keys(concerns).forEach(function (k) {
+    const c = concerns[k];
+    if (!c || !c.treatment) return;
+    String(c.treatment).split(/\n+/).forEach(function (l) {
+      l = l.replace(/^[-•*]\s*/, '').trim();
+      if (l) txNames.push(l);
+    });
+  });
+  const dropped = [];
   tp.patient_events = (Array.isArray(tp.patient_events) ? tp.patient_events : [])
     .filter(function (e) { return e && String(e.name || '').trim(); })
     .map(function (e) {
       return { name: String(e.name).trim().slice(0, 100), month: String(e.month || '').trim().slice(0, 30), avoid_downtime: e.avoid_downtime === true };
+    })
+    .filter(function (e) {
+      if (!planEventIsTreatment_(e.name, txNames)) return true;
+      dropped.push(e.name + (e.month ? ' (' + e.month + ')' : ''));
+      return false;
     });
+  // Not lost: kept in the booking comments so the clinician can still see it was mentioned
+  if (dropped.length) {
+    const note = 'Mentioned (not added as patient events): ' + dropped.join(', ');
+    tp.booking_comments = [String(tp.booking_comments || '').trim(), note].filter(Boolean).join('\n');
+  }
   return data;
 }
 
@@ -434,10 +481,18 @@ ${PLAN_CONCERNS.map(function (n) { return '    - "' + n + '"'; }).join('\n')}
     ("a" for concern_a). If one visit treats two concerns, use the concern the visit is mainly for.
     Use "none" only if the step matches no concern.
 
-    *** PATIENT EVENTS ***
-    List upcoming events in the patient's life that affect WHEN treatments should happen: holidays, travel,
-    weddings, parties, photo shoots, surgery, exams. Only events with a month you can work out.
-    - "name": short, e.g. "River cruise", "Daughter's wedding".
+    *** PATIENT EVENTS (life events ONLY) ***
+    List upcoming events in the patient's PERSONAL LIFE that affect WHEN treatments should happen.
+    INCLUDE: holidays and travel, weddings, birthdays and anniversaries, parties and celebrations, photo shoots,
+      work or sporting events, exams, surgery or a medical procedure, pregnancy due dates, moving house.
+    NEVER INCLUDE — these are NOT patient events:
+      - Any appointment, consultation, review, follow-up or booking, at this clinic or anywhere else.
+      - Any cosmetic or skin treatment, at this clinic or elsewhere (e.g. "Skin Lifting appointment", "HIFU",
+        "filler top-up", "Wrinkle Relaxer review", "laser at another clinic"). Treatments belong in "concerns" and
+        "timeline". A treatment the patient is having elsewhere goes in that concern's "comments".
+      - Anything without a month you can work out.
+    - "name": the life event only, short, with NO treatment or appointment words.
+      e.g. "River cruise", "Daughter's wedding", "50th birthday", "Knee surgery".
     - "month": "MMMM YYYY", calculated from the Current Date of this recording.
     - "avoid_downtime": true if the patient wants to look their best or avoid redness/bruising/downtime
       before it (weddings, holidays, photos, events), or says so. Otherwise false.
@@ -1443,4 +1498,14 @@ function testPlanSchema() {
     "Patient: Great, I've got my daughter's wedding in March so I don't want any redness then.";
   const r = cleanSoapJson_(callGeminiComplex(t, new Date()));
   console.log(JSON.stringify(r.treatment_plan, null, 2));
+}
+
+// Run from the editor: only the wedding should come back as a patient event
+function testPlanEvents() {
+  const t = "Clinician: For your jowls we'll do Firm and Contour, once a year, $1595. " +
+    "Patient: I've also got my HIFU appointment in November at the other place, and my daughter's wedding in March, " +
+    "so no redness then please. Clinician: Let's book your review in two weeks.";
+  const r = callGeminiComplex(t, new Date());
+  console.log('Events: ' + JSON.stringify(r.treatment_plan.patient_events));
+  console.log('Booking comments: ' + r.treatment_plan.booking_comments);
 }

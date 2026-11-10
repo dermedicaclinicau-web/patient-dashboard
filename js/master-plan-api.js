@@ -174,9 +174,29 @@ function linesFrom(c, startMonth, key, services, countFrom) {
     });
   });
 }
+// A suggested "event" that's really a treatment or appointment ("HIFU appointment", "Botox review").
+// Patient events are life events only: holidays, weddings, birthdays, travel, surgery…
+// Same list as PLAN_EVENT_TREATMENT_RE_ in Soap.gs.
+const TREATMENT_EVENT_RE = new RegExp("\\b(" + [
+  "appointments?", "appts?", "treatments?", "consult(?:ation)?s?", "reviews?", "follow[\\s-]?ups?",
+  "injections?", "injectables?", "anti[\\s-]?wrinkle", "wrinkle relaxers?", "botox", "dysport", "xeomin",
+  "fillers?", "radiesse", "sculptra", "profhilo", "rejuran", "skin boosters?", "lasers?", "ipl", "bbl", "opl",
+  "peels?", "hifu", "ulthera(?:py)?", "skin lifting", "e[\\s-]?skin tight", "firm\\s*(?:&|and)\\s*(?:contour|hydrate|fresh)",
+  "micro[\\s-]?needling", "skin needling", "dermaglow", "restoraglow", "genesis", "hydrafacial", "facials?",
+  "coolsculpt\\w*", "trusculpt", "vanquish", "prp", "threads?",
+].join("|") + ")\\b", "i");
+
+// names: treatment and service names to check against (the consultation's, the clinic's)
+export function isTreatmentEvent(name, names = []) {
+  const n = ` ${normTx(name)} `;
+  if (!n.trim()) return false;
+  if (TREATMENT_EVENT_RE.test(String(name))) return true;
+  return names.some((t) => { const k = normTx(t); return k.length >= 4 && n.includes(` ${k} `); });
+}
+
 // consult = the editable plan model (planFromSidecar / planFromText)
 // → { items: [{ kind: new | changed | same | uncategorised, key, before, after }], events: [new events] }
-export function planChanges(master, consult, { recordId = "", services = [], fromKey = "" } = {}) {
+export function planChanges(master, consult, { recordId = "", services = [], fromKey = "", treatments = [] } = {}) {
   const cur = master ? master.concerns : [];
   const tl = consult.timeline || [];
   const sig = (x) => [x.lines.map((l) => `${normTx(l.treatment)}/${l.pattern}/${l.sessions}/${l.intervalWeeks}`).join("|"), normTx(x.quote)].join("#");
@@ -220,10 +240,18 @@ export function planChanges(master, consult, { recordId = "", services = [], fro
     return { kind: sig(before) === sig(after) ? "same" : "changed", key, before, after, targetId: before.id, again: false };
   });
   const have = new Set((master ? master.events : []).map((e) => `${normTx(e.name)}|${e.month}`));
+  // Treatment names to check events against: this consultation's, the services, and the clinic's list
+  const txNames = [
+    ...drafts.flatMap((d) => d.after.lines.map((l) => l.treatment)),
+    ...(services || []).map((r) => r.service),
+    ...(treatments || []).map((t) => t.name),
+  ].filter(Boolean);
+  const dropped = [];   // suggested "events" that were really treatments (not added)
   const events = (consult.patient_events || [])
     .map((e) => cleanEvent({ name: e.name, month: e.month, avoidDowntime: e.avoid_downtime === true, source: "consult" }))
-    .filter((e) => e.name && e.month && !have.has(`${normTx(e.name)}|${e.month}`));
-  return { items, events };
+    .filter((e) => e.name && e.month && !have.has(`${normTx(e.name)}|${e.month}`))
+    .filter((e) => (isTreatmentEvent(e.name, txNames) ? (dropped.push(e), false) : true));
+  return { items, events, dropped };
 }
 
 // The plan after applying the ticked items and events. targetId = the entry a pick updates ("" = a new entry).
