@@ -26,7 +26,7 @@ const BOOKING_STATUSES = ["accepted", "in_progress"]; // booking reminders only 
 const REC_LABEL = { tx: "Treatment record", cons: "Consent record", rx: "Prescription", summary: "Consultation notes" };
 const SVG = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const ICON_PLAN = SVG('<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M9 14l2 2 4-4"/>');
-const ADD_CONCERN_BTN = '<button type="button" class="pv-addcon" data-po="add-treatment">+ Add a treatment</button>';
+const ADD_CONCERN_BTN = '<button type="button" class="lh-btn pt-add" data-po="add-treatment">+ Add a treatment</button>';
 const ICON_SPARK = SVG('<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>');
 
 function openDlg(html) {
@@ -379,38 +379,22 @@ export function createPlanOverview(el, ctx) {
     return { done, total, pct: total ? Math.round((done / total) * 100) : 0 };
   }
 
+  // One quiet line: where the plan is up to, and the few things you can do with it
   function barHtml(m, eff, track) {
     const latest = ctx.latestConsult();
     const newer = latest && !m.sources.includes(latest.id);
-    const lines = m.concerns.reduce((n, c) => n + c.lines.length, 0);
-    const when = m.updatedAt ? m.updatedAt.toLocaleDateString("en-AU", { day: "numeric", month: "short" }) : "";
     const pg = progressOf(track);
-    return `<div class="pv-bar is-v2">
-      <div class="pv-bar-top">
-        <span class="pv-bar-ic">${ICON_PLAN}</span>
-        <div class="pv-bar-title">
-          <div><strong>Master plan</strong><span class="pv-status is-${esc(eff)}">${esc(PLAN_STATUS[eff])}</span></div>
-          <span class="pv-sub">${m.concerns.length} concern${m.concerns.length === 1 ? "" : "s"} · ${lines} treatment${lines === 1 ? "" : "s"} · v${m.version}${
-            when ? `, ${esc(when)}${m.updatedBy ? ` by ${esc(m.updatedBy)}` : ""}` : ""}</span>
-        </div>
-        <span class="pv-spacer"></span>
-        <div class="pv-bar-acts">
-          ${newer ? '<button type="button" class="lh-btn" data-po="apply-latest">Update from the latest consultation</button>' : ""}
-          <button type="button" class="lh-btn" data-po="doc">Patient copy</button>
-          <div class="fe-seg po-viewseg">${[["list", "List"], ["cal", "Calendar"]].map(([v, l]) =>
-            `<label class="fe-seg-btn"><input type="radio" name="po-view" value="${v}" data-po-view${st.view === v ? " checked" : ""} /><span>${l}</span></label>`).join("")}</div>
-          ${["proposed", "sent"].includes(eff) ? '<button type="button" class="lh-btn is-primary" data-po="accept">Patient accepted</button>' : ""}
-          <button type="button" class="lh-btn is-quiet pv-dots" data-po="plan-menu" aria-label="Plan options" title="Plan options">⋯</button>
-        </div>
-      </div>
-      ${pg.total ? `<div class="pv-prog${pg.done >= pg.total ? " is-done" : ""}" role="progressbar" aria-label="Planned sessions done"
-          aria-valuemin="0" aria-valuemax="${pg.total}" aria-valuenow="${pg.done}">
-        <div class="pv-prog-track"><i style="width:${pg.pct}%"></i></div>
-        <span><b>${pg.done}</b> of ${pg.total} planned session${pg.total === 1 ? "" : "s"} done · ${pg.pct}%</span>
-      </div>` : ""}
+    const sum = [PLAN_STATUS[eff], pg.total ? `${pg.done} of ${pg.total} session${pg.total === 1 ? "" : "s"} done` : ""].filter(Boolean).join(" · ");
+    return `<div class="pt-bar">
+      <span class="pt-bar-sum">${esc(sum)}</span>
+      ${newer ? '<button type="button" class="lh-btn" data-po="apply-latest">Update from the latest consultation</button>' : ""}
+      ${["proposed", "sent"].includes(eff) ? '<button type="button" class="lh-btn is-primary" data-po="accept">Patient accepted</button>' : ""}
+      <button type="button" class="lh-btn" data-po="doc">Print or email</button>
+      <div class="fe-seg po-viewseg">${[["list", "List"], ["cal", "Calendar"]].map(([v, l]) =>
+        `<label class="fe-seg-btn"><input type="radio" name="po-view" value="${v}" data-po-view${st.view === v ? " checked" : ""} /><span>${l}</span></label>`).join("")}</div>
+      <button type="button" class="lh-btn is-quiet pv-dots" data-po="plan-menu" aria-label="Plan options" title="Plan options">⋯</button>
     </div>`;
   }
-
   // Today's appointment, and which planned treatments it covers
   function todayHtml(track) {
     const appts = ctx.today() || [];
@@ -523,43 +507,64 @@ export function createPlanOverview(el, ctx) {
       lt.complete ? '<span class="pv-chip is-complete">Course complete</span>' : ""}`;
   }
 
-  // One treatment: its place in the plan, its concern as a tag, its sessions and its menu
-  function txRowHtml(x, clashKeys) {
+  // Where a treatment is up to, in words: "1 of 3 done · next planned for Dec 2026"
+  function statusLine(c, l, lt, clashKeys) {
+    if (lt.complete) return { text: `All ${lt.total} done`, tone: "booked" };
+    const prog = lt.total ? `${lt.done} of ${lt.total} done` : lt.done ? `${lt.done} done` : "";
+    const s = lt.next;
+    if (!s) return { text: prog || "Not started", tone: "" };
+    const what = {
+      booked: `booked for ${s.date === dateKeyOf(new Date()) ? "today" : dayLabel(s.date)}`, due: "due this month",
+      overdue: `overdue since ${monthLabel(s.month)}`, planned: `next planned for ${monthLabel(s.month)}`,
+      unscheduled: "no month chosen yet", waiting: "not scheduled yet",
+    }[s.state] || "";
+    const clash = lt.slots.some((y) => clashKeys.has(`${c.id}|${l.id}|${y.n}`));
+    return {
+      text: [prog || (s.state === "booked" ? "" : "Not started"), what, clash ? "too close to a patient event" : ""].filter(Boolean).join(" · "),
+      tone: clash ? "due" : ["overdue", "due", "booked"].includes(s.state) ? s.state : "",
+    };
+  }
+
+  // One treatment: what it is, where it's up to (click for the session dates), and the one thing to do next
+  function txRowHtml(x, clashKeys, booking) {
     const { c, l, lt } = x;
     const k = con(c.key);
-    const price = priceOf(c, l);
-    let sub;
-    if (lineOff(l)) {
+    const tag = `<button type="button" class="pt-tag" data-po="concern-menu" ${attrs(c)} title="Concern details">${esc(k.label)}</button>`;
+    const dots = `<button type="button" class="po-mini pv-dots" data-po="line-menu" ${attrs(c, l)} aria-label="${esc(l.treatment)} options" title="Options">⋯</button>`;
+    if (!x.going) {
       const when = l.statusAt ? shortDay(dateKeyOf(new Date(l.statusAt))) : "";
-      sub = [LINE_STATUS[l.status], [when, l.statusBy].filter(Boolean).join(", "), l.statusNote].filter(Boolean).join(" · ");
-    } else if (!x.going) {
-      sub = `${k.label}: ${CONCERN_STATUS[c.status]}`;
-    } else {
-      sub = [l.area || c.area, patternText(l) || "Schedule not set", lt.total ? `${lt.done} of ${lt.total} done` : ""].filter(Boolean).join(" · ");
+      const why = lineOff(l)
+        ? [LINE_STATUS[l.status], [when, l.statusBy].filter(Boolean).join(", "), l.statusNote].filter(Boolean).join(" · ")
+        : `${k.label}: ${CONCERN_STATUS[c.status]}`;
+      return `<div class="pt-row is-off"><div class="pt-main"><strong>${esc(l.treatment)}</strong>
+        <div class="pt-meta">${tag}</div><div class="pt-st">${esc(why)}</div></div>${dots}</div>`;
     }
-    return `<div class="pt-row${x.going ? "" : " is-off"}" style="--c:${esc(k.colour)}">
-      <span class="pt-rank">${x.going ? x.n : "–"}</span>
+    const meta = [l.area || c.area, patternText(l), priceOf(c, l)].filter(Boolean).join(" · ");
+    const sl = statusLine(c, l, lt, clashKeys);
+    const s = lt.next;
+    const ask = booking && s && ["due", "overdue"].includes(s.state)
+      ? `<button type="button" class="lh-btn pt-ask" data-po="ask" ${attrs(c, l, s.n)}>${s.asked ? "Ask reception again" : "Ask reception to book"}</button>` : "";
+    return `<div class="pt-row">
       <div class="pt-main"><strong>${esc(l.treatment)}</strong>
-        <div class="pt-meta"><button type="button" class="pt-tag" data-po="concern-menu" ${attrs(c)} title="Concern details">${esc(k.label)}</button>
-          <span>${esc(sub)}</span></div></div>
-      <div class="pv-chips">${slotChipsHtml(c, l, lt, clashKeys)}</div>
-      <div class="pv-price">${price ? esc(price) : ""}</div>
-      <button type="button" class="po-mini pv-dots" data-po="line-menu" ${attrs(c, l)} aria-label="${esc(l.treatment)} options" title="Options">⋯</button>
-    </div>`;
+        <div class="pt-meta">${tag}${meta ? ` · ${esc(meta)}` : ""}</div>
+        <details class="pt-st${sl.tone ? ` is-${sl.tone}` : ""}"><summary title="Show the sessions">${esc(sl.text)}</summary>
+          <div class="pv-chips">${slotChipsHtml(c, l, lt, clashKeys)}</div></details>
+      </div>${ask}${dots}</div>`;
   }
 
   function eventsHtml(m) {
     const list = m.events.slice().sort((a, b) => a.month.localeCompare(b.month));
+    if (!list.length) {
+      return '<p class="pt-quiet">No patient events to plan around. <button type="button" class="pt-link" data-po="add-event">Add one</button></p>';
+    }
     return `<div class="pv-events"><strong>Patient events</strong>
-      ${list.length ? list.map((e) => `<span class="pv-ev${e.avoidDowntime ? " is-avoid" : ""}" title="${
+      ${list.map((e) => `<span class="pv-ev${e.avoidDowntime ? " is-avoid" : ""}" title="${
         e.avoidDowntime ? "Avoid downtime before it" : ""}">${esc(e.name)} · ${esc(monthLabel(e.month))}
-        <button type="button" class="po-x" data-po="remove-event" data-e="${esc(e.id)}" aria-label="Remove ${esc(e.name)}">×</button></span>`).join("")
-        : '<span class="pv-sub">Weddings, holidays or other dates to plan around</span>'}
+        <button type="button" class="po-x" data-po="remove-event" data-e="${esc(e.id)}" aria-label="Remove ${esc(e.name)}">×</button></span>`).join("")}
       <span class="pv-spacer"></span>
       <button type="button" class="po-mini" data-po="add-event">+ Add</button>
     </div>`;
   }
-
   /* ---------- Drawing: Calendar ---------- */
 
   function stepHtml(c, l, lt, s, clash, active) {
@@ -630,35 +635,34 @@ export function createPlanOverview(el, ctx) {
     </section>`;
   }
 
-  // List view: every treatment in booking order, under its priority. The concern is a tag on each one.
-  function phasesHtml(track, clashKeys) {
+  // List view: every treatment in booking order, under Now / Next / Later
+  function phasesHtml(track, clashKeys, booking) {
     const m = st.master;
     const all = planItems(track);
     const going = all.filter((x) => x.going);
-    going.forEach((x, i) => { x.n = i + 1; });
     if (st.filter && !m.concerns.some((c) => c.id === st.filter)) st.filter = "";
     const show = (x) => !st.filter || x.c.id === st.filter;
     const many = st.wf.phases.length > 1;
+    const short = (name) => String(name || "").split("·").pop().trim();   // "Priority 1 · Now" → "Now"
 
-    const filters = m.concerns.length > 1 ? `<div class="pt-filter"><span>Concerns</span>
-      <button type="button" class="pt-fchip${st.filter ? "" : " is-on"}" data-po="filter" data-c="">All · ${all.length}</button>
-      ${m.concerns.map((c) => `<button type="button" class="pt-fchip${st.filter === c.id ? " is-on" : ""}" data-po="filter" data-c="${esc(c.id)}"
-        style="--c:${esc(con(c.key).colour)}">${esc(con(c.key).label)} · ${c.lines.length}</button>`).join("")}</div>` : "";
+    const filters = m.concerns.length > 1 ? `<div class="pt-filter">
+      <button type="button" class="pt-fchip${st.filter ? "" : " is-on"}" data-po="filter" data-c="">All</button>
+      ${m.concerns.map((c) => `<button type="button" class="pt-fchip${st.filter === c.id ? " is-on" : ""}" data-po="filter" data-c="${esc(c.id)}">${
+        esc(con(c.key).label)}</button>`).join("")}</div>` : "";
 
     const sections = st.wf.phases.map((ph) => {
       const list = going.filter((x) => x.ph.id === ph.id && show(x));
       if (!list.length) return "";
-      return `<section class="pt-sec${ph.tracked ? "" : " is-waiting"}" style="--p:${esc(ph.colour)}">
-        ${many ? `<p class="pt-sec-head"><strong>${esc(ph.name)}</strong>${ph.note ? `<small>${esc(ph.note)}</small>` : ""}${
-          ph.tracked ? "" : "<small>· no reminders yet</small>"}</p>` : ""}
-        <div class="pt-list">${list.map((x) => txRowHtml(x, clashKeys)).join("")}</div>
+      return `<section class="pt-sec">
+        ${many ? `<p class="pt-sec-head">${esc(short(ph.name))}</p>` : ""}
+        <div class="pt-list">${list.map((x) => txRowHtml(x, clashKeys, booking)).join("")}</div>
       </section>`;
     }).join("");
 
     const off = all.filter((x) => !x.going && show(x));
-    const offHtml = off.length ? `<section class="pt-sec is-off">
-      <p class="pt-sec-head"><strong>Not going ahead</strong><small>${off.length} treatment${off.length === 1 ? "" : "s"} · kept for the record</small></p>
-      <div class="pt-list">${off.map((x) => txRowHtml(x, clashKeys)).join("")}</div></section>` : "";
+    const offHtml = off.length ? `<section class="pt-sec">
+      <p class="pt-sec-head">Not going ahead</p>
+      <div class="pt-list">${off.map((x) => txRowHtml(x, clashKeys, booking)).join("")}</div></section>` : "";
 
     const unmatched = m.concerns.map((c) => {
       const n = track.get(c.id).unmatched;
@@ -666,7 +670,7 @@ export function createPlanOverview(el, ctx) {
         ? `<p class="po-unmatched">${n} visit${n === 1 ? "" : "s"} for ${esc(con(c.key).label)} couldn't be matched to a treatment. Edit a treatment to link its services.</p>` : "";
     }).join("");
 
-    return `${filters}${sections || (offHtml ? "" : '<p class="tb-none">No treatments yet. Open a concern to add one.</p>')}${offHtml}${unmatched}`;
+    return `${filters}${sections || (offHtml ? "" : '<p class="tb-none">No treatments yet.</p>')}${offHtml}${unmatched}`;
   }
 
   function draw() {
@@ -682,14 +686,15 @@ export function createPlanOverview(el, ctx) {
     const clashes = clashList(track);
     const clashKeys = new Set(clashes.map((x) => x.key));
     const list = needsList(track, clashes, booking);
-    if (hint) hint.textContent = `${PLAN_STATUS[eff]} · ${m.concerns.length} concern${m.concerns.length === 1 ? "" : "s"}`;
+    const txCount = m.concerns.reduce((n, c) => n + c.lines.length, 0);
+    if (hint) hint.textContent = `${PLAN_STATUS[eff]} · ${txCount} treatment${txCount === 1 ? "" : "s"}`;
     el.innerHTML = `<div class="po pv">
       ${barHtml(m, eff, track)}
       ${todayHtml(track)}
       ${needsHtml(list, booking, eff)}
       ${st.view === "cal"
         ? `${calendarHtml(track, clashKeys)}${ADD_CONCERN_BTN}`
-        : `${phasesHtml(track, clashKeys)}${ADD_CONCERN_BTN}${eventsHtml(m)}`}
+        : `${phasesHtml(track, clashKeys, booking)}<div class="pt-foot">${ADD_CONCERN_BTN}</div>${eventsHtml(m)}`}
     </div>`;
     if (eff !== m.status) setTimeout(() => saveAutoStatus(eff), 0);
   }
@@ -763,8 +768,10 @@ export function createPlanOverview(el, ctx) {
       <div class="lh-field"><span class="lh-label">Status</span>
         <div class="pv-radios">${Object.entries(PLAN_STATUS).map(([v, l]) => `
           <label class="fe-check"><input type="radio" name="status" value="${v}"${v === eff ? " checked" : ""} /> ${l}</label>`).join("")}</div></div>
+      <p class="fe-note">Version ${m.version}${m.updatedAt ? ` · last changed ${esc(m.updatedAt.toLocaleDateString("en-AU", { day: "numeric", month: "short" }))}${
+        m.updatedBy ? ` by ${esc(m.updatedBy)}` : ""}` : ""}</p>
       <div class="po-slot-btns">
-        <button type="button" class="lh-btn" data-act="doc">Patient copy</button>
+        <button type="button" class="lh-btn" data-act="doc">Print or email</button>
         <button type="button" class="lh-btn" data-act="history">History</button>
         ${newer ? '<button type="button" class="lh-btn" data-act="latest">Update from the latest consultation</button>' : ""}
       </div>

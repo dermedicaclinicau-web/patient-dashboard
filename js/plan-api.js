@@ -160,10 +160,12 @@ export function serviceSetup(services, name) {
 export const PLAN_DOC_DEFAULTS = {
   title: "Your treatment plan",
   colour: "#0F766E",
-  welcome: "Hi {First name},\n\nThank you for coming in to see us. Here is the treatment plan we talked about, organised by the concerns you'd like to work on.",
+  welcome: "Hi {First name},\n\nThank you for coming in to see us. Here is the treatment plan we talked about, in the order we suggest.",
   closing: "If you have any questions about your plan, or you'd like to book your next treatment, give us a call or reply to this email.",
   disclaimer: "Prices are a guide only and may change. Your clinician will confirm the details at each visit.",
   showPrices: true,
+  showConcerns: true,    // the "What we're working on" list
+  showTimeline: true,    // "Your next 12 months"
   emailSubject: "Your treatment plan - Dermedica",
   emailMessage: "Hi {First name},\n\nYour treatment plan is attached. If you have any questions, or you'd like to book, reply to this email or give us a call.\n\nKind regards,\nDermedica",
 };
@@ -178,6 +180,8 @@ function cleanDocSettings(x = {}) {
     closing: text(x.closing, 2000, d.closing),
     disclaimer: text(x.disclaimer, 1000, d.disclaimer),
     showPrices: x.showPrices === undefined ? d.showPrices : x.showPrices === true,
+    showConcerns: x.showConcerns === undefined ? d.showConcerns : x.showConcerns === true,
+    showTimeline: x.showTimeline === undefined ? d.showTimeline : x.showTimeline === true,
     emailSubject: clip(x.emailSubject, 200) || d.emailSubject,
     emailMessage: text(x.emailMessage, 3000, d.emailMessage),
   };

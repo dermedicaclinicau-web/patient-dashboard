@@ -1,16 +1,17 @@
-// The patient's copy of their treatment plan: choose what to include, preview it, then download, print or email.
+// The patient's copy of their treatment plan: choose what to include, adjust the design, then download, print or email.
 import { db } from "./firebase-config.js";
 import { doc, getDoc, getDocs, collection, query, orderBy, limit }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { getPlanDocSettings, deliverPlanDoc, phaseOf, cleanWorkflow } from "./plan-api.js";
+import { getPlanDocSettings, savePlanDocSettings, deliverPlanDoc, phaseOf, cleanWorkflow, PLAN_DOC_DEFAULTS } from "./plan-api.js";
+import { lineOff, sharesWord } from "./master-plan-api.js";
 import { thisMonth, addMonths } from "./plan-track.js";
 import { showToast } from "./utils.js";
-
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const PDF_LIB = "https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js";
 const ACTIVE = ["active", "maintenance"];
 const EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
+const HEX = /^#[0-9a-f]{6}$/i;
 
 const firstName = (p) => p.firstName || String(p.name || "").split(" ")[0] || "";
 const fillIn = (t, p) => String(t || "").replace(/\{\s*first name\s*\}/gi, firstName(p)).replace(/\{\s*full name\s*\}/gi, p.name || "");
@@ -24,6 +25,30 @@ const dayLong = (k) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(k || "");
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" }) : "";
 };
+const shortPhase = (name) => String(name || "").split("·").pop().trim();   // "Priority 1 · Now" → "Now"
+
+/* ---------- The plan's treatments, in the order the list shows them ---------- */
+
+// Treatments still going ahead (declined ones, and resolved or not-pursued concerns, never go to the patient)
+function docItems(master, wf) {
+  const out = [];
+  master.concerns.forEach((c, ci) => c.lines.forEach((l, li) => {
+    if (!ACTIVE.includes(c.status) || lineOff(l)) return;
+    out.push({ c, l, ci, li, ph: phaseOf(wf, l.priority || c.priority) });
+  }));
+  const pr = (x) => wf.phases.findIndex((p) => p.id === x.ph.id);
+  return out.sort((a, b) => pr(a) - pr(b) || (a.l.rank ? 0 : 1) - (b.l.rank ? 0 : 1)
+    || (a.l.rank || 0) - (b.l.rank || 0) || a.ci - b.ci || a.li - b.li);
+}
+
+// A treatment's quote: its own, otherwise the line of its concern's quote that names it
+function quoteOf(c, l) {
+  if (l.quote) return l.quote;
+  const lines = String(c.quote || "").split(/\n+/).map((s) => s.trim()).filter(Boolean);
+  const hit = lines.find((q) => sharesWord(q, l.treatment));
+  if (hit) { const i = hit.lastIndexOf(" - "); return i > -1 ? hit.slice(i + 3) : hit; }
+  return c.lines.length === 1 ? lines.join("; ") : "";
+}
 
 /* ---------- Plain-English wording for patients ---------- */
 
@@ -75,87 +100,90 @@ function letterheadHtml(lh, colour) {
     <td style="padding:0 0 12px;vertical-align:middle;text-align:${logo ? "right" : "left"}">${name}${lines}</td></tr></table>`;
 }
 
-// Adds up the dollar amounts in the quotes ("$650", "$1,240.50")
-function quoteTotal(list) {
+// Adds up the dollar amounts in some quotes ("$650", "$1,240.50")
+function quoteTotal(texts) {
   let t = 0;
-  list.forEach((c) => (String(c.quote || "").match(/\$\s?[\d,]+(?:\.\d{2})?/g) || [])
+  texts.forEach((q) => (String(q || "").match(/\$\s?[\d,]+(?:\.\d{2})?/g) || [])
     .forEach((m) => { t += Number(m.replace(/[$,\s]/g, "")) || 0; }));
   return Math.round(t * 100) / 100;
 }
 const money = (n) => `$${n.toLocaleString("en-AU", { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 })}`;
 
-// pick = { concerns: Set(keys), lines: Set(line ids), prices: Set(keys), message }
+// pick = { lines: Set(treatment ids to include), message }   d = the design (plan_settings/document)
 export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff, wf = cleanWorkflow({}) }) {
-  const colour = d.colour;
-  const concerns = master.concerns.filter((c) => pick.concerns.has(c.key) && c.lines.some((l) => pick.lines.has(l.id)));
-  const today = new Date();
-  const todayText = today.toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" });
+  const colour = HEX.test(d.colour || "") ? d.colour : PLAN_DOC_DEFAULTS.colour;
+  const items = docItems(master, wf).filter((x) => pick.lines.has(x.l.id));
+  const ltOf = (x) => track.get(x.c.id).lines.get(x.l.id);
+  const todayText = new Date().toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" });
+  const cell = "padding:9px 10px;border-top:1px solid #f1f5f9;vertical-align:top";
 
-  const sectionHtml = (c) => {
-    const lab = labelOf(c.key);
-    const lines = c.lines.filter((l) => pick.lines.has(l.id));
-    return `<div style="margin:0 0 14px;padding:12px 14px;border:1px solid #e2e8f0;border-left:5px solid ${lab.colour};page-break-inside:avoid">
-      <div style="font-size:15px;font-weight:bold;color:#0f172a">${esc(lab.label)}</div>
-      ${c.area ? `<div style="font-size:12px;color:#64748b">Areas: ${esc(c.area)}</div>` : ""}
-      ${c.description ? `<p style="margin:6px 0 8px">${esc(c.description)}</p>` : ""}
-      <table style="width:100%;border-collapse:collapse;font-size:13px">${lines.map((l) => {
-        const lt = track.get(c.key).lines.get(l.id);
-        return `<tr>
-          <td style="padding:7px 10px 7px 0;border-top:1px solid #f1f5f9;vertical-align:top;width:48%"><strong>${esc(l.treatment)}</strong>
-            <div style="color:#64748b;font-size:12px">${esc(scheduleText(l, lt))}</div></td>
-          <td style="padding:7px 0;border-top:1px solid #f1f5f9;vertical-align:top;color:#334155">${esc(progressText(lt))}</td></tr>`;
-      }).join("")}</table>
-      ${pick.prices.has(c.key) && c.quote ? `<div style="margin-top:8px;padding:8px 10px;background:#f8fafc;font-size:12px;color:#334155">
-        <strong style="color:#0f172a">Quote</strong><br>${esc(c.quote).replace(/\n/g, "<br>")}</div>` : ""}
-    </div>`;
+  const rowHtml = (x) => {
+    const lt = ltOf(x);
+    const area = x.l.area || x.c.area;
+    const quote = d.showPrices ? quoteOf(x.c, x.l) : "";
+    return `<tr>
+      <td style="${cell};padding-left:0;width:46%"><strong style="color:#0f172a">${esc(x.l.treatment)}</strong>
+        <div style="color:#64748b;font-size:12px">${esc([labelOf(x.c.key).label, area].filter(Boolean).join(" · "))}</div>
+        <div style="color:#64748b;font-size:12px">${esc(scheduleText(x.l, lt))}</div></td>
+      <td style="${cell};color:#334155">${esc(progressText(lt))}</td>
+      ${d.showPrices ? `<td style="${cell};padding-right:0;text-align:right;white-space:nowrap;color:#0f172a">${esc(quote)}</td>` : ""}</tr>`;
   };
 
-  // Grouped by priority, with a quote total under each (when switched on in the plan workflow)
+  // Under each priority, in the order to book them, with a quote total (when switched on in the plan workflow)
   const many = wf.phases.length > 1;
   let grand = 0;
   let priced = 0;
   const sections = wf.phases.map((ph) => {
-    const list = concerns.filter((c) => phaseOf(wf, c.priority).id === ph.id);
+    const list = items.filter((x) => x.ph.id === ph.id);
     if (!list.length) return "";
-    const total = wf.docPhaseTotals ? quoteTotal(list.filter((c) => pick.prices.has(c.key))) : 0;
+    const total = d.showPrices && wf.docPhaseTotals ? quoteTotal(list.map((x) => quoteOf(x.c, x.l))) : 0;
     if (total) { grand += total; priced++; }
-    return `${many ? `<div style="margin:18px 0 8px;padding-left:10px;border-left:4px solid ${esc(ph.colour)};page-break-after:avoid">
-        <div style="font-size:15px;font-weight:bold;color:#0f172a">${esc(ph.name)}</div>
+    return `<div style="margin:0 0 16px;page-break-inside:avoid">
+      ${many ? `<div style="margin:0 0 4px;padding-left:10px;border-left:4px solid ${colour}">
+        <div style="font-size:15px;font-weight:bold;color:#0f172a">${esc(shortPhase(ph.name))}</div>
         ${ph.note ? `<div style="font-size:12px;color:#64748b">${esc(ph.note)}</div>` : ""}</div>` : ""}
-      ${list.map(sectionHtml).join("")}
-      ${total ? `<div style="margin:-6px 0 14px;text-align:right;font-size:12px;color:#334155">Quoted${
-        many ? ` for ${esc(ph.name)}` : ""}: <strong>${esc(money(total))}</strong></div>` : ""}`;
-  }).join("") + (priced > 1 ? `<div style="margin:4px 0 14px;padding:8px 10px;background:#f8fafc;text-align:right;font-size:13px">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">${list.map(rowHtml).join("")}</table>
+      ${total ? `<div style="padding-top:6px;border-top:1px solid #e2e8f0;text-align:right;font-size:12px;color:#334155">Quoted${
+        many ? ` for ${esc(shortPhase(ph.name))}` : ""}: <strong>${esc(money(total))}</strong></div>` : ""}
+    </div>`;
+  }).join("") + (priced > 1 ? `<div style="margin:0 0 14px;padding:8px 10px;background:#f8fafc;text-align:right;font-size:13px">
     Full plan as quoted: <strong>${esc(money(grand))}</strong></div>` : "");
 
+  // What we're working on: each concern in the copy that has a description
+  const seen = new Set();
+  const concerns = d.showConcerns ? items.map((x) => x.c).filter((c) => c.description && !seen.has(c.id) && seen.add(c.id)) : [];
+  const concernsHtml = concerns.length ? `<h2 style="margin:16px 0 6px;font-size:15px;color:#0f172a">What we're working on</h2>
+    ${concerns.map((c) => `<p style="margin:0 0 6px"><strong style="color:#0f172a">${esc(labelOf(c.key).label)}</strong>: ${esc(c.description)}</p>`).join("")}` : "";
+
   // The coming 12 months: planned and booked treatments, and the patient's events
-  const cur = thisMonth();
-  const months = Array.from({ length: 12 }, (_, i) => addMonths(cur, i));
-  const byMonth = new Map(months.map((k) => [k, []]));
-  concerns.forEach((c) => c.lines.filter((l) => pick.lines.has(l.id)).forEach((l) => {
-    track.get(c.key).lines.get(l.id).slots.forEach((s) => {
+  let timeline = "";
+  if (d.showTimeline) {
+    const cur = thisMonth();
+    const months = Array.from({ length: 12 }, (_, i) => addMonths(cur, i));
+    const byMonth = new Map(months.map((k) => [k, []]));
+    items.forEach((x) => ltOf(x).slots.forEach((s) => {
       let k = s.month;
       if (s.state === "due" || s.state === "overdue") k = cur;
       else if (s.state !== "planned" && s.state !== "booked") return;
       if (!byMonth.has(k)) return;
-      byMonth.get(k).push(`<span style="display:inline-block;margin:0 10px 2px 0"><span style="display:inline-block;width:8px;height:8px;border-radius:4px;background:${
-        labelOf(c.key).colour};margin-right:5px"></span>${esc(l.treatment)}${s.state === "booked" ? ` <span style="color:#64748b">(booked ${esc(dayLong(s.date))})</span>` : ""}</span>`);
+      byMonth.get(k).push(`${esc(x.l.treatment)}${s.state === "booked" ? ` <span style="color:#64748b">(booked ${esc(dayLong(s.date))})</span>` : ""}`);
+    }));
+    master.events.forEach((e) => {
+      if (byMonth.has(e.month)) byMonth.get(e.month).push(`<strong style="color:#92400e">★ ${esc(e.name)}</strong>`);
     });
-  }));
-  master.events.forEach((e) => {
-    if (byMonth.has(e.month)) byMonth.get(e.month).push(`<span style="display:inline-block;margin:0 10px 2px 0;color:#92400e;font-weight:bold">★ ${esc(e.name)}</span>`);
-  });
-  const timeline = months.filter((k) => byMonth.get(k).length).map((k) => `<tr>
-    <td style="padding:6px 10px 6px 0;border-top:1px solid #f1f5f9;vertical-align:top;width:130px;font-weight:bold;color:#0f172a">${esc(monthLong(k))}</td>
-    <td style="padding:6px 0;border-top:1px solid #f1f5f9;vertical-align:top">${byMonth.get(k).join("")}</td></tr>`).join("");
+    timeline = months.filter((k) => byMonth.get(k).length).map((k) => `<tr>
+      <td style="padding:6px 10px 6px 0;border-top:1px solid #f1f5f9;vertical-align:top;width:130px;font-weight:bold;color:#0f172a">${esc(monthLong(k))}</td>
+      <td style="padding:6px 0;border-top:1px solid #f1f5f9;vertical-align:top">${byMonth.get(k).join(", ")}</td></tr>`).join("");
+  }
 
   return `<div style="width:720px;padding:4px;background:#fff;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.5;color:#1e293b">
     ${letterheadHtml(lh, colour)}
-    <h1 style="margin:18px 0 2px;font-size:22px;color:${colour}">${esc(d.title)}</h1>
+    <h1 style="margin:18px 0 2px;font-size:22px;color:${colour}">${esc(d.title || PLAN_DOC_DEFAULTS.title)}</h1>
     <div style="margin:0 0 14px;color:#64748b;font-size:12px">For ${esc(patient.name || "")} · ${esc(todayText)}</div>
     ${d.welcome ? paras(fillIn(d.welcome, patient)) : ""}
     ${pick.message ? `<div style="margin:4px 0 14px;padding:10px 12px;background:#f8fafc;border-left:3px solid ${colour}">${paras(pick.message, "margin:0 0 6px")}</div>` : ""}
-    ${sections ? `<h2 style="margin:16px 0 8px;font-size:15px;color:#0f172a">Your concerns and treatments</h2>${sections}` : ""}
+    ${concernsHtml}
+    ${sections ? `<h2 style="margin:16px 0 8px;font-size:15px;color:#0f172a">Your treatments</h2>${sections}` : ""}
     ${timeline ? `<div style="page-break-inside:avoid"><h2 style="margin:16px 0 6px;font-size:15px;color:#0f172a">Your next 12 months</h2>
       <table style="width:100%;border-collapse:collapse;font-size:13px">${timeline}</table></div>` : ""}
     ${d.closing ? `<div style="margin-top:16px">${paras(fillIn(d.closing, patient))}</div>` : ""}
@@ -224,43 +252,54 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
     ]);
   } catch (err) {
     console.error("Patient copy failed:", err);
-    showToast("Couldn't open the patient copy. Try again.");
+    showToast("Couldn't open the treatment plan copy. Try again.");
     return;
   }
 
+  const all = docItems(master, wf);
   const pick = {
-    concerns: new Set(master.concerns.filter((c) => ACTIVE.includes(c.status) &&
-      (wf.docShowWaiting || phaseOf(wf, c.priority).tracked)).map((c) => c.key)),
-    lines: new Set(master.concerns.flatMap((c) => c.lines.map((l) => l.id))),
-    prices: new Set(d.showPrices ? master.concerns.filter((c) => c.quote).map((c) => c.key) : []),
+    lines: new Set(all.filter((x) => wf.docShowWaiting || x.ph.tracked).map((x) => x.l.id)),
     message: "",
   };
   const fileName = `Treatment plan - ${patient.name || "Patient"}.pdf`;
   const html = () => planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff, wf });
   const lastSent = sends.map((s) => `${s.kind === "print" ? "Printed" : `Emailed to ${s.to}`} ${
     s.sentAt ? new Date(s.sentAt).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : ""}${s.sentBy ? ` by ${s.sentBy}` : ""}`);
+  const tick = (key, label) => `<label class="fe-check"><input type="checkbox" data-d="${key}"${d[key] ? " checked" : ""} /> ${label}</label>`;
 
   const dlg = document.createElement("dialog");
   dlg.className = "lh-dialog pd-dlg";
   dlg.innerHTML = `
     <form class="pd-grid" novalidate>
       <div class="pd-opts">
-        <div class="lh-dialog-head"><h3>Patient copy</h3>
-          <p>Choose what to include. Clinicians' notes are never included.</p></div>
-        <div class="pd-cons">${master.concerns.map((c) => {
-          const lab = labelOf(c.key);
-          return `<div class="pd-con" style="--c:${esc(lab.colour)}">
-            <label class="fe-check pd-con-name"><input type="checkbox" data-con="${esc(c.key)}"${pick.concerns.has(c.key) ? " checked" : ""} />
-              <strong>${esc(lab.label)}</strong>${wf.phases.length > 1 ? ` <small class="muted">${esc(phaseOf(wf, c.priority).name)}</small>` : ""}${
-                ACTIVE.includes(c.status) ? "" : ' <small class="muted">(not active)</small>'}</label>
-            ${c.lines.map((l) => `<label class="fe-check pd-line"><input type="checkbox" data-line="${esc(l.id)}" data-of="${esc(c.key)}"${
-              pick.lines.has(l.id) ? " checked" : ""} /> ${esc(l.treatment)}</label>`).join("")}
-            ${c.quote ? `<label class="fe-check pd-line pd-price"><input type="checkbox" data-price="${esc(c.key)}"${
-              pick.prices.has(c.key) ? " checked" : ""} /> Show the quote</label>` : ""}
-          </div>`;
-        }).join("")}</div>
+        <div class="lh-dialog-head"><h3>Print or email the treatment plan</h3>
+          <p>Choose what to include. Clinicians' notes and treatments that aren't going ahead are never included.</p></div>
+        <div class="pd-cons">${all.length ? wf.phases.map((ph) => {
+          const list = all.filter((x) => x.ph.id === ph.id);
+          return list.length ? `<div class="pd-con"><strong class="pd-con-name">${esc(shortPhase(ph.name))}</strong>
+            ${list.map((x) => `<label class="fe-check pd-line"><input type="checkbox" data-line="${esc(x.l.id)}"${pick.lines.has(x.l.id) ? " checked" : ""} />
+              ${esc(x.l.treatment)} <small class="muted">${esc(labelOf(x.c.key).label)}</small></label>`).join("")}</div>` : "";
+        }).join("") : '<p class="tb-none">There are no treatments going ahead in this plan.</p>'}</div>
         <label class="lh-field"><span class="lh-label">Message to the patient (optional)</span>
           <textarea name="message" rows="3" maxlength="1500" placeholder="A personal note, shown near the top"></textarea></label>
+        <details class="pd-design">
+          <summary>Design</summary>
+          <p class="fe-note">Changes here are saved as the clinic's default for every patient. <span data-role="saved"></span></p>
+          <div class="inv-two">
+            <label class="lh-field"><span class="lh-label">Title</span><input data-d="title" maxlength="80" value="${esc(d.title)}" /></label>
+            <label class="lh-field"><span class="lh-label">Colour</span><input type="color" data-d="colour" value="${esc(d.colour)}" /></label>
+          </div>
+          <label class="lh-field"><span class="lh-label">Welcome</span>
+            <textarea data-d="welcome" rows="4" maxlength="2000">${esc(d.welcome)}</textarea>
+            <small class="fe-note">{First name} is filled in for each patient.</small></label>
+          <label class="lh-field"><span class="lh-label">Closing</span>
+            <textarea data-d="closing" rows="3" maxlength="2000">${esc(d.closing)}</textarea></label>
+          <label class="lh-field"><span class="lh-label">Small print</span>
+            <textarea data-d="disclaimer" rows="2" maxlength="1000">${esc(d.disclaimer)}</textarea></label>
+          ${tick("showPrices", "Show quotes")}
+          ${tick("showConcerns", "Show what we're working on (concern descriptions)")}
+          ${tick("showTimeline", "Show the next 12 months")}
+        </details>
         ${lastSent.length ? `<p class="pd-last">Last sent: ${lastSent.map(esc).join("<br>")}</p>` : ""}
         <div class="pd-acts">
           <button type="button" class="lh-btn" data-act="download">Download PDF</button>
@@ -283,40 +322,61 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
       <div class="pd-preview"><div class="pd-page" data-role="preview"></div></div>
     </form>`;
   document.body.appendChild(dlg);
-  dlg.addEventListener("close", () => dlg.remove());
   dlg.showModal();
 
   const form = dlg.querySelector("form");
   const err = dlg.querySelector(".lh-error");
   const preview = dlg.querySelector('[data-role="preview"]');
   const emailBox = dlg.querySelector('[data-role="email"]');
+  const savedNote = dlg.querySelector('[data-role="saved"]');
   let busy = false;
-  let timer = 0;
+  let drawTimer = 0;
+  let saveTimer = 0;
+  let dirty = false;
 
-  const syncLines = () => form.querySelectorAll("[data-line], [data-price]").forEach((x) => {
-    x.disabled = !pick.concerns.has(x.dataset.of || x.dataset.price);
-  });
   const draw = () => { preview.innerHTML = html(); };
-  syncLines();
+  const drawSoon = () => { clearTimeout(drawTimer); drawTimer = setTimeout(draw, 250); };
   draw();
 
+  // A design change is saved as the clinic's default shortly after typing stops (and when the window closes)
+  async function saveDesign() {
+    clearTimeout(saveTimer);
+    if (!dirty) return;
+    dirty = false;
+    try {
+      await savePlanDocSettings(d, staff);
+      if (savedNote.isConnected) savedNote.textContent = "Saved.";
+    } catch (ex) {
+      console.warn("Plan design not saved:", ex);
+      const msg = ex && ex.code === "permission-denied"
+        ? "You don't have access to save the default, so it's used for this copy only."
+        : "Couldn't save the default. It's used for this copy.";
+      if (savedNote.isConnected) savedNote.textContent = msg; else showToast(msg);
+    }
+  }
+  dlg.addEventListener("close", () => { saveDesign(); dlg.remove(); });
+
   form.addEventListener("submit", (e) => e.preventDefault());
+  form.addEventListener("input", (e) => {
+    const t = e.target;
+    if (t.name === "message") { pick.message = t.value.trim(); drawSoon(); return; }
+    const key = t.dataset.d;
+    if (!key) return;
+    d[key] = t.type === "checkbox" ? t.checked : t.value;
+    dirty = true;
+    savedNote.textContent = "";
+    drawSoon();
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveDesign, 1200);
+  });
   form.addEventListener("change", (e) => {
     const t = e.target;
-    const flip = (set, k) => { if (t.checked) set.add(k); else set.delete(k); };
-    if (t.dataset.con) { flip(pick.concerns, t.dataset.con); syncLines(); }
-    else if (t.dataset.line) flip(pick.lines, t.dataset.line);
-    else if (t.dataset.price) flip(pick.prices, t.dataset.price);
-    else return;
+    if (!t.dataset.line) return;
+    if (t.checked) pick.lines.add(t.dataset.line); else pick.lines.delete(t.dataset.line);
     draw();
   });
-  form.elements.message.addEventListener("input", () => {
-    pick.message = form.elements.message.value.trim();
-    clearTimeout(timer);
-    timer = setTimeout(draw, 250);
-  });
 
-  const nothing = () => !master.concerns.some((c) => pick.concerns.has(c.key) && c.lines.some((l) => pick.lines.has(l.id)));
+  const nothing = () => !all.some((x) => pick.lines.has(x.l.id));
   const fail = (t) => { err.textContent = t; err.hidden = false; };
 
   async function run(btn, label, job) {
