@@ -462,9 +462,9 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
         <div class="pd-blk-opts">
           <select class="fb-select" data-bf="size" aria-label="Size">${[["s", "Small"], ["m", "Normal"], ["l", "Large"], ["xl", "Extra large"]].map(([v, t]) =>
             `<option value="${v}"${b.size === v ? " selected" : ""}>${t}</option>`).join("")}</select>
-          <label class="fe-check"><input type="checkbox" data-bf="bold"${b.bold ? " checked" : ""} /> Bold</label>
-          <label class="fe-check"><input type="checkbox" data-bf="tint"${b.tint ? " checked" : ""} /> Colour</label>
-          <label class="fe-check"><input type="checkbox" data-bf="center"${b.align === "center" ? " checked" : ""} /> Centre</label>
+          <label class="pd-tog" title="Bold"><input type="checkbox" data-bf="bold"${b.bold ? " checked" : ""} /><span><b>B</b></span></label>
+          <label class="pd-tog" title="Use the design colour"><input type="checkbox" data-bf="tint"${b.tint ? " checked" : ""} /><span>Colour</span></label>
+          <label class="pd-tog" title="Centre on the page"><input type="checkbox" data-bf="center"${b.align === "center" ? " checked" : ""} /><span>Centre</span></label>
         </div>` : ""}
       ${b.type === "message" ? '<small class="fe-note">Shows what you type in "Message to the patient" above.</small>' : ""}
     </div>`).join("");

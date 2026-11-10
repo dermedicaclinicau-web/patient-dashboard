@@ -13128,12 +13128,25 @@ dialog.lh-dialog.pe-freq-dlg { width: min(520px, calc(100vw - 2rem)); }
 
 .pd-d3 { display: grid; grid-template-columns: 1fr 1fr 4.5rem; gap: .5rem; }
 .pd-blk-title { margin: .8rem 0 .3rem; }
-.pd-blk { margin-bottom: .4rem; padding: .45rem .55rem; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; }
+/* Design: one block on the page */
+.pd-blk { margin-bottom: .5rem; padding: .55rem .65rem; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; }
 .pd-blk-head { display: flex; align-items: center; gap: .25rem; }
-.pd-blk-head strong { flex: 1; font-size: .85rem; color: #334155; }
-.pd-blk input[data-bf], .pd-blk textarea { width: 100%; margin-top: .35rem; }
-.pd-blk-opts { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .7rem; margin-top: .35rem; }
-.pd-blk-opts .fb-select { width: auto; }
+.pd-blk-head strong { flex: 1; font-size: .82rem; font-weight: 600; color: #475569; }
+.pd-blk input[data-bf="text"], .pd-blk textarea { display: block; width: 100%; box-sizing: border-box; margin-top: .45rem;
+  padding: .5rem .65rem; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; font: inherit; font-size: .9rem;
+  line-height: 1.4; color: #0f172a; }
+.pd-blk textarea { min-height: 3.4rem; resize: vertical; }
+.pd-blk input[data-bf="text"]:focus, .pd-blk textarea:focus { outline: none; border-color: #0f766e; box-shadow: 0 0 0 3px rgba(15, 118, 110, .12); }
+.pd-blk-opts { display: flex; align-items: center; gap: .35rem; margin-top: .45rem; }
+.pd-blk-opts .fb-select { flex: 1; min-width: 0; width: auto; padding: .3rem .5rem; font-size: .82rem; }
+.pd-blk .fe-note { display: block; margin-top: .3rem; }
+/* Bold / Colour / Centre: small buttons that stay pressed */
+.pd-tog { display: inline-flex; cursor: pointer; }
+.pd-tog input { position: absolute; opacity: 0; width: 0; height: 0; }
+.pd-tog span { padding: .3rem .6rem; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; font-size: .82rem;
+  color: #475569; white-space: nowrap; }
+.pd-tog input:checked + span { border-color: #0f766e; background: #e6f4f2; color: #115e59; }
+.pd-tog input:focus-visible + span { box-shadow: 0 0 0 3px rgba(15, 118, 110, .2); }
 .pd-add { display: flex; flex-wrap: wrap; gap: .35rem; margin: .5rem 0; }
 
 .pd-tpl code { padding: .05rem .3rem; border-radius: 4px; background: #f1f5f9; font-size: .8rem; white-space: nowrap; }
