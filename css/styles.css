@@ -4825,7 +4825,7 @@ button.pa-bdg { font-family: inherit; line-height: inherit; }
 .pd-acts { display: flex; flex-wrap: wrap; gap: .4rem; }
 .pd-email { display: grid; gap: .5rem; padding: .7rem; border: 1px solid var(--border); border-radius: 10px; background: #f8fafc; }
 .pd-preview { overflow: auto; padding: 1.2rem; background: #e2e8f0; }
-.pd-page { width: 760px; margin: 0 auto; padding: 24px 20px; background: #fff; box-shadow: 0 2px 12px rgba(15, 23, 42, .15); }
+.pd-page { width: 760px; margin: 0 auto; padding: 20px 20px; background: #fff; box-shadow: 0 2px 12px rgba(15, 23, 42, .15); }
 @media (max-width: 900px) {
   .pd-grid { grid-template-columns: 1fr; max-height: none; }
   .pd-opts { border-right: 0; border-bottom: 1px solid var(--border); }

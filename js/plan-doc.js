@@ -119,7 +119,7 @@ function progressText(lt) {
 
 function letterheadHtml(lh, colour) {
   const logo = lh && /^data:image\/(png|jpeg);base64,/.test(lh.logo || "")
-    ? `<img src="${lh.logo}" alt="" style="max-height:70px;max-width:240px" />` : "";
+    ? `<img src="${lh.logo}" alt="" style="max-height:70px;max-width:200px" />` : "";
   const name = lh && lh.showName !== false && lh.name ? `<div style="font-size:16px;font-weight:bold;color:#0f172a">${esc(lh.name)}</div>` : "";
   const lines = lh ? [lh.line1, lh.line2].filter(Boolean).map((x) => `<div style="font-size:11px;color:#64748b">${esc(x)}</div>`).join("") : "";
   if (!logo && !name && !lines) return `<div style="border-bottom:3px solid ${colour}"></div>`;
@@ -281,7 +281,7 @@ export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staf
   if (parts) {
     return { treatments: treatmentsHtml(), concerns: concernsHtml(), timeline: timelineHtml(), message: blockHtml({ type: "message" }) };
   }
-  return `${RICH_STYLE}<div class="pdoc" style="width:703px;box-sizing:border-box;padding:0 15px;background:#fff;font-family:${font};font-size:${base}px;line-height:1.5;color:#1e293b">
+  return `${RICH_STYLE}<div class="pdoc" style="width:fit-content;box-sizing:border-box;padding:0 15px;background:#fff;font-family:${font};font-size:${base}px;line-height:1.5;color:#1e293b">
     ${letterheadHtml(lh, colour)}
     ${has("title") ? "" : '<div style="height:16px"></div>'}
     ${blocks.map((b) => {
