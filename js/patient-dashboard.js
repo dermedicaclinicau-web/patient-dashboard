@@ -7,7 +7,7 @@ import { skincareSectionHtml, mountSkincare } from "./skincare-view.js";
 import { recordsSectionHtml, mountRecords } from "./records-view.js";
 import { formRecordsSectionHtml, mountFormRecords } from "./form-records.js";
 import { setRecordingPatient } from "./recording-bar.js";
-import { historySectionHtml, mountHistory } from "./history-view.js";
+import { historySectionHtml, mountHistory, txShort } from "./history-view.js";
 import { latestMerge, undoMerge } from "./merge-patients.js";
 import { confirmDialog, alertDialog } from "./dialog.js";
 import {
@@ -813,7 +813,8 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     if (recs.status === "fulfilled") {
       const add = (kind) => (r) => {
         if (!(r.date instanceof Date) || isNaN(r.date)) return;
-        list.push({ dateKey: toDateKey(r.date), kind, href: hrefOf(r), label: label(r) });
+        list.push({ dateKey: toDateKey(r.date), kind, href: hrefOf(r), label: label(r),
+          short: kind === "tx" ? txShort(r.title) : "" });
       };
       (recs.value.treatments || []).forEach(add("tx"));
       (recs.value.consents || []).forEach(add("cons"));
@@ -1616,8 +1617,11 @@ function paBadgesHtml(recs, missing) {
     const b = PA_BADGES[k];
     const list = by.get(k);
     const draft = list.some((r) => r.draft) ? " is-draft" : "";   // brown while the notes are a draft
-    if (list.length === 1) return paRecHtml(list[0], `pa-bdg is-${k}${draft}`, escapeHtml(b.short));
-    return `<details class="pa-bdg-menu"><summary class="pa-bdg is-${k}${draft}">${escapeHtml(b.short)} ×${list.length}</summary>
+    // Treatment records: "Txr - WR" when every record that day is the same treatment (the full name shows on hover)
+    const shorts = [...new Set(list.map((r) => r.short || ""))];
+    const text = k === "tx" && shorts.length === 1 && shorts[0] ? `Txr - ${shorts[0]}` : b.short;
+    if (list.length === 1) return paRecHtml(list[0], `pa-bdg is-${k}${draft}`, escapeHtml(text));
+    return `<details class="pa-bdg-menu"><summary class="pa-bdg is-${k}${draft}">${escapeHtml(text)} ×${list.length}</summary>
       <div class="pa-bdg-pop">${list.map((r) => paRecHtml(r, `pa-pop-item${r.draft ? " is-draft" : ""}`, escapeHtml(r.label || b.full))).join("")}</div></details>`;
   }).join("") + (missing ? '<span class="pa-bdg is-missing" title="Injectables were booked but there\'s no treatment record for this day">No Tx Record</span>' : "");
   return html ? `<div class="pa-badges">${html}</div>` : "";
