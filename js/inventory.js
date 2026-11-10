@@ -44,6 +44,14 @@ const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
 };
 const when = (d) => (d ? d.toLocaleString("en-AU", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" }) : "");
+// "today", "10 Nov", or "10 Nov 2025" for another year
+const countDay = (key) => {
+  if (key === dayKey()) return "today";
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
+  if (!m) return "";
+  return new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU",
+    +m[1] === new Date().getFullYear() ? { day: "numeric", month: "short" } : { day: "numeric", month: "short", year: "numeric" });
+};
 const money = (n) => (n === null || n === undefined ? "" : `$${Number(n).toFixed(2)}`);
 const fmtN = (n) => String(+Number(n || 0).toFixed(2));
 const errText = (err, fallback) => (err && err.code === "permission-denied"
@@ -467,17 +475,30 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     syncQuickBar();
   }
 
+  // Shelf count (the latest opening count) | Shelf digital | JT store
   function stockRow(p) {
     if (st.quick) return quickRow(p);
-    const qty = (loc) => `<span class="inv-q${lowAt(p, loc) ? " is-low" : ""}"><small>${loc === "shelf" ? "Shelf" : "JT"}</small><b>${p.stock[loc]}</b></span>`;
-    const sup = supplierOf(p.supplierId);
+    const digital = (loc, label) => `<span class="inv-q${lowAt(p, loc) ? " is-low" : ""}"><small>${label}</small><b>${p.stock[loc]}</b></span>`;
+
+    // Compared with digital at the moment it was counted, so sales since don't look like a mismatch
+    const c = st.lastCounts.get(`${p.id}|shelf`);
+    const inCount = (p.countFreq || "never") !== "never" && p.countWhere !== "jt";
+    const diff = !!c && c.counted !== c.system;
+    const tip = c
+      ? `Counted ${c.counted} at the opening count on ${niceDate(c.dateKey)}${c.by ? ` by ${c.by}` : ""}. Digital said ${c.system} then.`
+      : inCount ? "No opening count of the Shelf in the last 120 days." : "This product isn't in the opening count of the Shelf.";
+    const counted = `<span class="inv-q is-count${c ? (diff ? " is-diff" : "") : " is-none"}" title="${esc(tip)}">
+      <small>Shelf count</small><b>${c ? c.counted : "—"}</b>
+      <em>${c ? `Last count ${esc(countDay(c.dateKey))}` : inCount ? "No count yet" : "Not counted"}</em></span>`;
+
     return `
-      <button type="button" class="inv-row" data-product="${esc(p.id)}">
+      <button type="button" class="inv-row has-qs" data-product="${esc(p.id)}">
         <span class="inv-name"><strong>${esc(p.name)}</strong>
           <small>${esc([p.brand, suppliersText(p), p.tracked ? "Batch & expiry" : "",
-            isSharedProduct(p) ? `${st.open.filter((c) => c.productId === p.id).length} open` : ""].filter(Boolean).join(" · "))}</small></span>
-          <span class="inv-flags">${flags(p).map(([t, l]) => `<span class="inv-flag is-${t}">${esc(l)}</span>`).join("")}</span>
-        ${st.view !== "jt" ? qty("shelf") : ""}${st.view !== "shelf" ? qty("jt") : ""}
+            isSharedProduct(p) ? `${st.open.filter((x) => x.productId === p.id).length} open` : ""].filter(Boolean).join(" · "))}</small></span>
+        <span class="inv-flags">${flags(p).map(([t, l]) => `<span class="inv-flag is-${t}">${esc(l)}</span>`).join("")}</span>
+        <span class="inv-qs">${st.view !== "jt" ? counted + digital("shelf", "Shelf digital") : ""}${
+          st.view !== "shelf" ? digital("jt", "JT store") : ""}</span>
         <span class="inv-unit">${esc(unitPlural(p.stockUnit))}</span>
       </button>`;
   }
