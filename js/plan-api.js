@@ -105,11 +105,26 @@ export async function getPlanSettings() {
   return { concerns, services, treatments };
 }
 
-// The whole list, in order (hidden ones included). Built-in concerns can be hidden, never removed.
-export async function savePlanConcerns(concerns, staff) {
-  const clean = concernList(concerns).map(({ name, label, colour, hidden }) => ({ name, label, colour, hidden }));
+async function writeConcerns(list, staff) {
+  const clean = concernList(list).map(({ name, label, colour, hidden }) => ({ name, label, colour, hidden }));
   await setDoc(doc(db, "plan_settings", "concerns"), { concerns: clean, ...stamp(staff) });
   registerConcerns(concernList(clean));
+}
+
+// The whole list exactly as given: order, hidden ones and the clinic's own (the Concerns and treatments card)
+export function savePlanConcernList(concerns, staff) {
+  return writeConcerns(concerns, staff);
+}
+
+// Names and colours only (the older Concerns card). The order, hidden concerns and the clinic's own stay as saved.
+export async function savePlanConcerns(concerns, staff) {
+  const snap = await getDoc(doc(db, "plan_settings", "concerns"));
+  const saved = concernList(snap.exists() ? snap.data().concerns : []);
+  const by = new Map((concerns || []).map((x) => [catKey(x && x.name), x]));
+  await writeConcerns(saved.map((c) => {
+    const x = by.get(catKey(c.name));
+    return x ? { ...c, label: x.label, colour: x.colour } : c;
+  }), staff);
 }
 
 export async function savePlanTreatments(rows, staff) {

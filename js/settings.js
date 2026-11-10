@@ -2,6 +2,7 @@
 // Email flows (#/settings/flows) has its own page (email-flows.js), but shares this tab bar.
 import { mountRecordingSettings } from "./recording-settings.js";
 import { renderPlanSettings } from "./plan-settings.js";
+import { renderPlanCatalogue } from "./plan-catalogue.js";
 import { renderUiTextSettings } from "./ui-text-settings.js";
 import { renderPlanWorkflowSettings } from "./plan-workflow-settings.js";
 
@@ -40,7 +41,11 @@ export function mountSettings(container, { param = "", staff = null } = {}) {
   root.innerHTML = settingsHeaderHtml(tab) + '<div data-role="body"></div>';
   const body = root.querySelector('[data-role="body"]');
 
-  if (tab === "plans") renderPlanSettings(body, { staff });
+  if (tab === "plans") {
+    body.innerHTML = '<div data-role="catalogue"></div><div data-role="plans"></div>';
+    renderPlanCatalogue(body.querySelector('[data-role="catalogue"]'), { staff });
+    renderPlanSettings(body.querySelector('[data-role="plans"]'), { staff });
+  }
   else if (tab === "workflow") renderPlanWorkflowSettings(body, { staff });
   else if (tab === "wording") renderUiTextSettings(body, { staff });
   else mountRecordingSettings(body, { staff, embedded: true });
