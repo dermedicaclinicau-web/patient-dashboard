@@ -13283,3 +13283,15 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
   .pdz-body { grid-template-columns: 170px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
   .pdz-insp { grid-column: 1 / -1; border-left: 0; border-top: 1px solid #e2e8f0; max-height: 40vh; }
 }
+
+/* Create / update the master plan: patient events */
+.mp-evs { margin-top: 14px; padding-top: 12px; border-top: 1px solid #e2e8f0; display: grid; gap: 10px; }
+.mp-ev-head { margin: 0; }
+.mp-ev-head small { display: block; color: #64748b; font-weight: 400; margin-top: 2px; }
+.mp-ev-btns { margin-left: auto; display: inline-flex; gap: 6px; align-items: center; }
+.mp-row.is-editing { border-color: #BA7517; }
+.mp-ev-form { display: grid; grid-template-columns: 2fr 1fr; gap: 10px; margin: 8px 0 6px; }
+.mp-ev-acts { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.mp-ev-add { justify-self: start; }
+.mp-ev-none, .mp-ev-dropped { margin: 0; font-size: 13px; color: #64748b; }
+@media (max-width: 560px) { .mp-ev-form { grid-template-columns: 1fr; } }
