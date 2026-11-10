@@ -154,6 +154,13 @@ export function createPlanOverview(el, ctx) {
   const liveLines = (c) => c.lines.filter((l) => !lineOff(l));
   // Every treatment still going ahead is complete (true too when they've all been declined)
   const allDone = (c, t) => c.lines.length > 0 && liveLines(c).every((l) => t.lines.get(l.id).complete);
+  const phaseRank = (c, l) => st.wf.phases.findIndex((p) => p.id === linePhase(c, l).id);
+  // Within a concern: by priority, declined treatments last
+  const orderedLines = (c) => c.lines.slice().sort((a, b) =>
+    (lineOff(a) ? 99 : phaseRank(c, a)) - (lineOff(b) ? 99 : phaseRank(c, b)));
+  // The concern's next waiting treatment (lowest priority first, then the order listed), or null
+  const nextWaitingLine = (c, not) => c.lines.filter((y) => y.id !== not.id && !lineOff(y) && lineWaiting(c, y))
+    .sort((a, b) => phaseRank(c, a) - phaseRank(c, b))[0] || null;
   const firstTracked = () => st.wf.phases.find((p) => p.tracked) || st.wf.phases[0];
   const byPhase = () => st.wf.phases.map((ph) => ({ ph, list: st.master.concerns.filter((c) => phase(c).id === ph.id) }));
 
@@ -511,7 +518,7 @@ export function createPlanOverview(el, ctx) {
       </header>
       ${c.description || c.comments ? `<p class="pv-notes">${esc(c.description)}${
         c.comments ? `${c.description ? " " : ""}<span class="pv-goal" title="${esc(c.comments)}">Notes: ${esc(c.comments)}</span>` : ""}</p>` : ""}
-      ${c.lines.map((l) => rowHtml(c, l, t.lines.get(l.id), clashKeys)).join("") || '<p class="tb-none pv-pad">No treatments yet.</p>'}
+      ${orderedLines(c).map((l) => rowHtml(c, l, t.lines.get(l.id), clashKeys)).join("") || '<p class="tb-none pv-pad">No treatments yet.</p>'}
       ${t.unmatched ? `<p class="po-unmatched pv-pad">${t.unmatched} visit${t.unmatched === 1 ? "" : "s"} for this concern couldn't be matched to a treatment. Edit a treatment to link its services.</p>` : ""}
     </section>`;
   }
@@ -1179,6 +1186,11 @@ export function createPlanOverview(el, ctx) {
       };
       const area = f.area.value.trim();
       const quote = f.quote.value.trim();
+      // Declined while it was the one going ahead: the concern's next waiting treatment takes its place
+      const declined = !isNew && statusChanged && status !== "active" && !lineOff(l) && !lineWaiting(c, l);
+      const up = declined && st.wf.promote !== "off" ? nextWaitingLine(c, l) : null;
+      const upTo = up ? linePhase(c, l) : null;
+      const upStart = st.wf.promoteStart === "next" ? addMonths(thisMonth(), 1) : thisMonth();
       const btn = form.querySelector('[type="submit"]');
       btn.disabled = true;
       const ok = await commit((p) => {
@@ -1190,11 +1202,24 @@ export function createPlanOverview(el, ctx) {
           if (i > -1) pc.lines[i] = cleanLine({ ...pc.lines[i], ...fields });
         }
         addToConcern(pc, treatment, area, quote);
+        const pu = up ? pc.lines.find((y) => y.id === up.id) : null;
+        if (pu) {
+          pu.priority = upTo.id === phaseOf(st.wf, pc.priority).id ? "" : upTo.id;   // "" = the concern's own priority
+          if (!pu.startMonth || pu.startMonth < upStart) pu.startMonth = upStart;
+          Object.keys(pu.overrides || {}).forEach((n) => {
+            delete pu.overrides[n].month;                                   // months planned while it waited would be overdue
+            if (!Object.keys(pu.overrides[n]).length) delete pu.overrides[n];
+          });
+        }
       }, isNew ? "Added a treatment"
         : !statusChanged ? "Edited a treatment"
         : status === "active" ? "Made a treatment active again"
-        : `Marked a treatment ${LINE_STATUS[status].toLowerCase()}`, `${con(c.key).label}: ${treatment}`);
-      if (ok) dlg.close(); else btn.disabled = false;
+        : `Marked a treatment ${LINE_STATUS[status].toLowerCase()}`,
+      `${con(c.key).label}: ${treatment}${up ? `; ${up.treatment} moved up to ${upTo.name}` : ""}`);
+      if (ok) {
+        dlg.close();
+        if (up) showToast(`${up.treatment} is now ${upTo.name}, starting ${monthLabel(upStart)}`);
+      } else btn.disabled = false;
     });
     form.elements.treatment.focus();
   }
