@@ -287,7 +287,7 @@ function render() {
     <div class="sp-head">
       <div class="sp-head-main">
         <p class="sp-eyebrow">Consultation notes</p>
-        <h3>${escapeHtml(d["Patient Name"] || "Patient")}</h3>
+        <h3>${patientLinkHtml(d)}</h3>
         <p class="sp-meta">${escapeHtml(d["Record Date and Time"] || "")}${d["Staff Name"] ? ` · ${escapeHtml(d["Staff Name"])}` : ""}</p>
       </div>
       <span class="sp-status ${reviewed ? "is-reviewed" : "is-draft"}">${escapeHtml(reviewed ? "Reviewed" : status)}</span>
@@ -355,6 +355,15 @@ function render() {
   }
 }
 
+// The patient's name, linked to their dashboard (#/patient/<id>). Plain text if the record isn't linked to a patient.
+function patientLinkHtml(d) {
+  const name = escapeHtml(d["Patient Name"] || "Patient");
+  const pid = String(d["Patient Doc ID"] || d["Patient ID"] || "").trim();
+  if (!pid) return name;
+  return `<a class="sp-name" href="#/patient/${encodeURIComponent(pid)}" data-sp-patient="${escapeHtml(pid)}"
+    title="Open ${name}'s dashboard">${name}</a>`;
+}
+
 // What the recording rules did on this recording (System configuration → Recording rules)
 function rulesHtml(d) {
   const hits = Array.isArray(d["Rule Hits"]) ? d["Rule Hits"] : [];
@@ -409,6 +418,25 @@ function markDirty() {
 /* ===================== Actions ===================== */
 
 async function onClick(e) {
+  // The patient's name → their dashboard
+  const pl = e.target.closest("a[data-sp-patient]");
+  if (pl) {
+    if (e.ctrlKey || e.metaKey || e.shiftKey) return;   // the browser opens it in a new tab
+    e.preventDefault();
+    const hash = pl.getAttribute("href");
+    if (mode === "page") {
+      // Notes in their own tab: the dashboard in another tab (the same one each time), so the notes stay open
+      const w = window.open(pl.href, `dm-patient-${pl.dataset.spPatient.replace(/[^A-Za-z0-9_-]/g, "")}`);
+      if (w) { try { w.focus(); } catch { /* the browser decides */ } return; }
+      if (hasUnsavedNotes()) { showToast("Allow pop-ups for the portal, or save the notes first."); return; }
+      location.hash = hash;   // pop-ups blocked and nothing unsaved: this tab
+      return;
+    }
+    // The side panel: the dashboard in this tab, with the panel kept out of the way
+    if (mode === "max") setMode("min");
+    location.hash = hash;
+    return;
+  }
   // Treatment Plan card: click a line to edit, or add/remove items
   if (current && current.plan) {
     const field = e.target.closest(".pe-field");
