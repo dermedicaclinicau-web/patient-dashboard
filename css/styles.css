@@ -13125,3 +13125,15 @@ dialog.lh-dialog.pe-freq-dlg { width: min(520px, calc(100vw - 2rem)); }
 .pd-design summary { cursor: pointer; font-weight: 600; color: #0f172a; }
 .pd-design[open] summary { margin-bottom: .5rem; }
 .pd-design input[type="color"] { width: 100%; height: 2.4rem; padding: .15rem; }
+
+.pd-d3 { display: grid; grid-template-columns: 1fr 1fr 4.5rem; gap: .5rem; }
+.pd-blk-title { margin: .8rem 0 .3rem; }
+.pd-blk { margin-bottom: .4rem; padding: .45rem .55rem; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; }
+.pd-blk-head { display: flex; align-items: center; gap: .25rem; }
+.pd-blk-head strong { flex: 1; font-size: .85rem; color: #334155; }
+.pd-blk input[data-bf], .pd-blk textarea { width: 100%; margin-top: .35rem; }
+.pd-blk-opts { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .7rem; margin-top: .35rem; }
+.pd-blk-opts .fb-select { width: auto; }
+.pd-add { display: flex; flex-wrap: wrap; gap: .35rem; margin: .5rem 0; }
+
+.pd-tpl code { padding: .05rem .3rem; border-radius: 4px; background: #f1f5f9; font-size: .8rem; white-space: nowrap; }

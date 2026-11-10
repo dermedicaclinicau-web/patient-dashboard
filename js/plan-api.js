@@ -170,10 +170,41 @@ export const PLAN_DOC_DEFAULTS = {
   emailMessage: "Hi {First name},\n\nYour treatment plan is attached. If you have any questions, or you'd like to book, reply to this email or give us a call.\n\nKind regards,\nDermedica",
 };
 
+export const DOC_FONTS = {
+  arial: ["Arial", "Arial,Helvetica,sans-serif"],
+  verdana: ["Verdana", "Verdana,Geneva,sans-serif"],
+  trebuchet: ["Trebuchet", "'Trebuchet MS',Arial,sans-serif"],
+  georgia: ["Georgia (serif)", "Georgia,'Times New Roman',serif"],
+};
+const DOC_BLOCKS = ["title", "text", "message", "concerns", "treatments", "timeline"];
+const docBlockId = () => Math.random().toString(36).slice(2, 10);
+
+// The copy's blocks, top to bottom. "text" can be added any number of times; the others once each.
+// Nothing saved yet: built from the older title / welcome / closing / small print boxes.
+function cleanDocBlocks(list, old) {
+  const seen = new Set();
+  const out = (Array.isArray(list) ? list : []).map((b) => ({
+    id: /^[a-z0-9]{4,16}$/.test(String((b && b.id) || "")) ? b.id : docBlockId(),
+    type: DOC_BLOCKS.includes(b && b.type) ? b.type : "",
+    text: typeof (b && b.text) === "string" ? b.text.slice(0, 2000) : "",
+    size: ["s", "m", "l", "xl"].includes(b && b.size) ? b.size : "m",
+    bold: !!(b && b.bold === true),
+    tint: !!(b && b.tint === true),                       // in the design colour
+    align: b && b.align === "center" ? "center" : "left",
+  })).filter((b) => b.type && (b.type === "text" || (!seen.has(b.type) && seen.add(b.type)))).slice(0, 30);
+  if (out.length) return out;
+  const mk = (type, extra = {}) => ({ id: docBlockId(), type, text: "", size: "m", bold: false, tint: false, align: "left", ...extra });
+  return [
+    mk("title", { text: old.title }), mk("text", { text: old.welcome }), mk("message"),
+    ...(old.showConcerns ? [mk("concerns")] : []), mk("treatments"), ...(old.showTimeline ? [mk("timeline")] : []),
+    mk("text", { text: old.closing }), mk("text", { text: old.disclaimer, size: "s" }),
+  ].filter((b) => b.type !== "text" || b.text.trim());
+}
+
 function cleanDocSettings(x = {}) {
   const d = PLAN_DOC_DEFAULTS;
   const text = (v, n, fb) => (typeof v === "string" ? String(v).slice(0, n) : fb);
-  return {
+  const old = {
     title: clip(x.title, 80) || d.title,
     colour: HEX.test(x.colour || "") ? x.colour : d.colour,
     welcome: text(x.welcome, 2000, d.welcome),
@@ -185,7 +216,15 @@ function cleanDocSettings(x = {}) {
     emailSubject: clip(x.emailSubject, 200) || d.emailSubject,
     emailMessage: text(x.emailMessage, 3000, d.emailMessage),
   };
+  return {
+    ...old,
+    formId: /^[A-Za-z0-9_-]{1,40}$/.test(String(x.formId || "")) ? x.formId : "",   // a Form Builder form used as the design ("" = standard)
+    font: DOC_FONTS[x.font] ? x.font : "arial",
+    fontSize: intIn(x.fontSize === undefined ? 13 : x.fontSize, 11, 16),
+    blocks: cleanDocBlocks(x.blocks, old),
+  };
 }
+
 
 export async function getPlanDocSettings() {
   const s = await getDoc(doc(db, "plan_settings", "document"));

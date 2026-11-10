@@ -2,10 +2,15 @@
 import { db } from "./firebase-config.js";
 import { doc, getDoc, getDocs, collection, query, orderBy, limit }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { getPlanDocSettings, savePlanDocSettings, deliverPlanDoc, phaseOf, cleanWorkflow, PLAN_DOC_DEFAULTS } from "./plan-api.js";
+import { getPlanDocSettings, savePlanDocSettings, deliverPlanDoc, phaseOf, cleanWorkflow, PLAN_DOC_DEFAULTS, DOC_FONTS } from "./plan-api.js";
 import { lineOff, sharesWord } from "./master-plan-api.js";
 import { thisMonth, addMonths } from "./plan-track.js";
 import { showToast } from "./utils.js";
+import { listPublishedForms, getFormTemplate, getFormVersion, categoryLabel } from "./form-templates.js";
+import { buildFormDocument } from "./form-document.js";
+import { patientAnswers } from "./form-delivery.js";
+import { tagValues } from "./form-tags.js";
+import { bankImage } from "./image-bank-api.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const PDF_LIB = "https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js";
@@ -110,54 +115,67 @@ function quoteTotal(texts) {
 const money = (n) => `$${n.toLocaleString("en-AU", { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 })}`;
 
 // pick = { lines: Set(treatment ids to include), message }   d = the design (plan_settings/document)
-export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff, wf = cleanWorkflow({}) }) {
+// The copy is d.blocks, top to bottom: title, text, the personal message, concerns, treatments, timeline.
+// parts: true returns the plan's pieces on their own ({ treatments, concerns, timeline, message }), for a Form Builder design
+export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff, wf = cleanWorkflow({}), parts = false }) {
   const colour = HEX.test(d.colour || "") ? d.colour : PLAN_DOC_DEFAULTS.colour;
+  const base = Number(d.fontSize) || 13;
+  const px = { s: base - 2, m: base, l: base + 3, xl: base + 8 };
+  const font = (DOC_FONTS[d.font] || DOC_FONTS.arial)[1];
+  const blocks = Array.isArray(d.blocks) ? d.blocks : [];
+  const has = (type) => blocks.some((b) => b.type === type);
   const items = docItems(master, wf).filter((x) => pick.lines.has(x.l.id));
   const ltOf = (x) => track.get(x.c.id).lines.get(x.l.id);
   const todayText = new Date().toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" });
   const cell = "padding:9px 10px;border-top:1px solid #f1f5f9;vertical-align:top";
+  const small = `font-size:${base - 1}px;color:#64748b`;
+  // A Form Builder design has its own headings
+  const h2 = (t) => (parts ? "" : `<h2 style="margin:16px 0 8px;font-size:${base + 2}px;color:#0f172a">${t}</h2>`);
 
   const rowHtml = (x) => {
     const lt = ltOf(x);
-    const area = x.l.area || x.c.area;
-    const quote = d.showPrices ? quoteOf(x.c, x.l) : "";
     return `<tr>
       <td style="${cell};padding-left:0;width:46%"><strong style="color:#0f172a">${esc(x.l.treatment)}</strong>
-        <div style="color:#64748b;font-size:12px">${esc([labelOf(x.c.key).label, area].filter(Boolean).join(" · "))}</div>
-        <div style="color:#64748b;font-size:12px">${esc(scheduleText(x.l, lt))}</div></td>
+        <div style="${small}">${esc([labelOf(x.c.key).label, x.l.area || x.c.area].filter(Boolean).join(" · "))}</div>
+        <div style="${small}">${esc(scheduleText(x.l, lt))}</div></td>
       <td style="${cell};color:#334155">${esc(progressText(lt))}</td>
-      ${d.showPrices ? `<td style="${cell};padding-right:0;text-align:right;white-space:nowrap;color:#0f172a">${esc(quote)}</td>` : ""}</tr>`;
+      ${d.showPrices ? `<td style="${cell};padding-right:0;text-align:right;white-space:nowrap;color:#0f172a">${esc(quoteOf(x.c, x.l))}</td>` : ""}</tr>`;
   };
 
   // Under each priority, in the order to book them, with a quote total (when switched on in the plan workflow)
-  const many = wf.phases.length > 1;
-  let grand = 0;
-  let priced = 0;
-  const sections = wf.phases.map((ph) => {
-    const list = items.filter((x) => x.ph.id === ph.id);
-    if (!list.length) return "";
-    const total = d.showPrices && wf.docPhaseTotals ? quoteTotal(list.map((x) => quoteOf(x.c, x.l))) : 0;
-    if (total) { grand += total; priced++; }
-    return `<div style="margin:0 0 16px;page-break-inside:avoid">
-      ${many ? `<div style="margin:0 0 4px;padding-left:10px;border-left:4px solid ${colour}">
-        <div style="font-size:15px;font-weight:bold;color:#0f172a">${esc(shortPhase(ph.name))}</div>
-        ${ph.note ? `<div style="font-size:12px;color:#64748b">${esc(ph.note)}</div>` : ""}</div>` : ""}
-      <table style="width:100%;border-collapse:collapse;font-size:13px">${list.map(rowHtml).join("")}</table>
-      ${total ? `<div style="padding-top:6px;border-top:1px solid #e2e8f0;text-align:right;font-size:12px;color:#334155">Quoted${
-        many ? ` for ${esc(shortPhase(ph.name))}` : ""}: <strong>${esc(money(total))}</strong></div>` : ""}
-    </div>`;
-  }).join("") + (priced > 1 ? `<div style="margin:0 0 14px;padding:8px 10px;background:#f8fafc;text-align:right;font-size:13px">
-    Full plan as quoted: <strong>${esc(money(grand))}</strong></div>` : "");
+  function treatmentsHtml() {
+    const many = wf.phases.length > 1;
+    let grand = 0;
+    let priced = 0;
+    const out = wf.phases.map((ph) => {
+      const list = items.filter((x) => x.ph.id === ph.id);
+      if (!list.length) return "";
+      const total = d.showPrices && wf.docPhaseTotals ? quoteTotal(list.map((x) => quoteOf(x.c, x.l))) : 0;
+      if (total) { grand += total; priced++; }
+      return `<div style="margin:0 0 16px;page-break-inside:avoid">
+        ${many ? `<div style="margin:0 0 4px;padding-left:10px;border-left:4px solid ${colour}">
+          <div style="font-size:${base + 2}px;font-weight:bold;color:#0f172a">${esc(shortPhase(ph.name))}</div>
+          ${ph.note ? `<div style="${small}">${esc(ph.note)}</div>` : ""}</div>` : ""}
+        <table style="width:100%;border-collapse:collapse;font-size:${base}px">${list.map(rowHtml).join("")}</table>
+        ${total ? `<div style="padding-top:6px;border-top:1px solid #e2e8f0;text-align:right;font-size:${base - 1}px;color:#334155">Quoted${
+          many ? ` for ${esc(shortPhase(ph.name))}` : ""}: <strong>${esc(money(total))}</strong></div>` : ""}
+      </div>`;
+    }).join("");
+    if (!out) return "";
+    return `${h2("Your treatments")}${out}${priced > 1 ? `<div style="margin:0 0 14px;padding:8px 10px;background:#f8fafc;text-align:right">
+      Full plan as quoted: <strong>${esc(money(grand))}</strong></div>` : ""}`;
+  }
 
-  // What we're working on: each concern in the copy that has a description
-  const seen = new Set();
-  const concerns = d.showConcerns ? items.map((x) => x.c).filter((c) => c.description && !seen.has(c.id) && seen.add(c.id)) : [];
-  const concernsHtml = concerns.length ? `<h2 style="margin:16px 0 6px;font-size:15px;color:#0f172a">What we're working on</h2>
-    ${concerns.map((c) => `<p style="margin:0 0 6px"><strong style="color:#0f172a">${esc(labelOf(c.key).label)}</strong>: ${esc(c.description)}</p>`).join("")}` : "";
+  // Each concern in the copy that has a description
+  function concernsHtml() {
+    const seen = new Set();
+    const list = items.map((x) => x.c).filter((c) => c.description && !seen.has(c.id) && seen.add(c.id));
+    return list.length ? `${h2("What we're working on")}${list.map((c) =>
+      `<p style="margin:0 0 6px"><strong style="color:#0f172a">${esc(labelOf(c.key).label)}</strong>: ${esc(c.description)}</p>`).join("")}` : "";
+  }
 
   // The coming 12 months: planned and booked treatments, and the patient's events
-  let timeline = "";
-  if (d.showTimeline) {
+  function timelineHtml() {
     const cur = thisMonth();
     const months = Array.from({ length: 12 }, (_, i) => addMonths(cur, i));
     const byMonth = new Map(months.map((k) => [k, []]));
@@ -171,27 +189,46 @@ export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staf
     master.events.forEach((e) => {
       if (byMonth.has(e.month)) byMonth.get(e.month).push(`<strong style="color:#92400e">★ ${esc(e.name)}</strong>`);
     });
-    timeline = months.filter((k) => byMonth.get(k).length).map((k) => `<tr>
+    const rows = months.filter((k) => byMonth.get(k).length).map((k) => `<tr>
       <td style="padding:6px 10px 6px 0;border-top:1px solid #f1f5f9;vertical-align:top;width:130px;font-weight:bold;color:#0f172a">${esc(monthLong(k))}</td>
       <td style="padding:6px 0;border-top:1px solid #f1f5f9;vertical-align:top">${byMonth.get(k).join(", ")}</td></tr>`).join("");
+    return rows ? `<div style="page-break-inside:avoid">${h2("Your next 12 months")}
+      <table style="width:100%;border-collapse:collapse;font-size:${base}px">${rows}</table></div>` : "";
   }
 
-  return `<div style="width:720px;padding:4px;background:#fff;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.5;color:#1e293b">
+  function blockHtml(b) {
+    if (b.type === "title") {
+      return `<h1 style="margin:18px 0 2px;font-size:${base + 9}px;color:${colour}">${esc(b.text || d.title || PLAN_DOC_DEFAULTS.title)}</h1>
+        <div style="margin:0 0 14px;${small}">For ${esc(patient.name || "")} · ${esc(todayText)}</div>`;
+    }
+    if (b.type === "text") {
+      const t = fillIn(b.text, patient);
+      if (!t.trim()) return "";
+      const big = b.size === "l" || b.size === "xl";
+      return paras(t, `margin:${big ? "14px 0 6px" : "0 0 10px"};font-size:${px[b.size] || base}px;${b.bold ? "font-weight:bold;" : ""}${
+        b.tint ? `color:${colour};` : b.size === "s" ? "color:#64748b;" : big ? "color:#0f172a;" : ""}${big ? "line-height:1.25;" : ""}text-align:${
+        b.align === "center" ? "center" : "left"}`);
+    }
+    if (b.type === "message") {
+      return pick.message ? `<div style="margin:4px 0 14px;padding:10px 12px;background:#f8fafc;border-left:3px solid ${colour}">${
+        paras(pick.message, "margin:0 0 6px")}</div>` : "";
+    }
+    if (b.type === "concerns") return concernsHtml();
+    if (b.type === "treatments") return treatmentsHtml();
+    if (b.type === "timeline") return timelineHtml();
+    return "";
+  }
+
+  if (parts) {
+    return { treatments: treatmentsHtml(), concerns: concernsHtml(), timeline: timelineHtml(), message: blockHtml({ type: "message" }) };
+  }
+  return `<div style="width:720px;padding:4px;background:#fff;font-family:${font};font-size:${base}px;line-height:1.5;color:#1e293b">
     ${letterheadHtml(lh, colour)}
-    <h1 style="margin:18px 0 2px;font-size:22px;color:${colour}">${esc(d.title || PLAN_DOC_DEFAULTS.title)}</h1>
-    <div style="margin:0 0 14px;color:#64748b;font-size:12px">For ${esc(patient.name || "")} · ${esc(todayText)}</div>
-    ${d.welcome ? paras(fillIn(d.welcome, patient)) : ""}
-    ${pick.message ? `<div style="margin:4px 0 14px;padding:10px 12px;background:#f8fafc;border-left:3px solid ${colour}">${paras(pick.message, "margin:0 0 6px")}</div>` : ""}
-    ${concernsHtml}
-    ${sections ? `<h2 style="margin:16px 0 8px;font-size:15px;color:#0f172a">Your treatments</h2>${sections}` : ""}
-    ${timeline ? `<div style="page-break-inside:avoid"><h2 style="margin:16px 0 6px;font-size:15px;color:#0f172a">Your next 12 months</h2>
-      <table style="width:100%;border-collapse:collapse;font-size:13px">${timeline}</table></div>` : ""}
-    ${d.closing ? `<div style="margin-top:16px">${paras(fillIn(d.closing, patient))}</div>` : ""}
-    ${d.disclaimer ? `<p style="margin:12px 0 0;font-size:11px;color:#64748b">${esc(d.disclaimer).replace(/\n/g, "<br>")}</p>` : ""}
-    <p style="margin:12px 0 0;font-size:11px;color:#94a3b8">Prepared${staff && staff.name ? ` by ${esc(staff.name)}` : ""}${lh && lh.name ? ` · ${esc(lh.name)}` : ""}</p>
+    ${has("title") ? "" : '<div style="height:16px"></div>'}
+    ${blocks.map(blockHtml).join("")}
+    <p style="margin:12px 0 0;font-size:${base - 2}px;color:#94a3b8">Prepared${staff && staff.name ? ` by ${esc(staff.name)}` : ""}${lh && lh.name ? ` · ${esc(lh.name)}` : ""}</p>
   </div>`;
 }
-
 /* ---------- PDF (made in the browser, so it matches the preview) ---------- */
 
 function loadPdfLib() {
@@ -262,10 +299,55 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
     message: "",
   };
   const fileName = `Treatment plan - ${patient.name || "Patient"}.pdf`;
-  const html = () => planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff, wf });
+  /* ---------- A Form Builder form as the design ---------- */
+  const forms = await listPublishedForms().catch(() => []);
+  let tpl = null;      // { inner, css } once the chosen form is loaded
+  let tplMsg = "";
+  async function loadTpl() {
+    const want = d.formId;
+    tpl = null;
+    tplMsg = "";
+    if (!want) return;
+    try {
+      const t = await getFormTemplate(want);
+      if (!t || t.status !== "live" || !t.version) throw new Error("not published");
+      const ver = await getFormVersion(want, t.version);
+      if (!ver) throw new Error("version missing");
+      const images = {};
+      await Promise.all([...new Set(ver.fields.filter((f) => f && f.type === "image" && f.source !== "staff" && f.fileId).map((f) => f.fileId))]
+        .map((id) => bankImage(id).then((src) => { images[id] = src; }).catch(() => {})));
+      const now = new Date();
+      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+      const sub = {
+        answers: { ...patientAnswers(ver, patient), __tags: tagValues({ patient, staff, recordDate: today, today }) },
+        signatures: {}, templateName: ver.name, patientName: patient.name || "", recordDate: today, version: ver.version,
+        createdBy: (staff && staff.name) || "",
+      };
+      const doc = buildFormDocument({ sub, ver, letterhead: lh, images, blank: true });
+      if (want === d.formId) tpl = { inner: doc.inner, css: doc.css };
+    } catch (ex) {
+      console.warn("Plan design form not loaded:", ex);
+      tplMsg = "That form couldn't be opened (is it still published?), so the standard design is shown.";
+    }
+  }
+  // The form's page, with the plan's parts put where their tags are
+  function formHtml() {
+    const p = planDocHtml({ patient, master, track, labelOf, d: { ...d, fontSize: 14 }, lh, pick, staff, wf, parts: true });
+    let inner = tpl.inner;
+    let placed = false;
+    Object.entries(p).forEach(([name, block]) => {
+      const tag = `\\{\\s*Plan\\s+${name}\\s*\\}`;
+      const put = () => { if (name === "treatments") placed = true; return block; };
+      inner = inner.replace(new RegExp(`<p[^>]*>\\s*${tag}\\s*</p>`, "gi"), put).replace(new RegExp(tag, "gi"), put);
+    });
+    if (!placed) inner += p.treatments;   // no {Plan treatments} on the form: they go at the end
+    return `<style>${tpl.css}</style><div class="pdfdoc">${inner}</div>`;
+  }
+  await loadTpl();
+  const html = () => (tpl ? formHtml() : planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff, wf }));
   const lastSent = sends.map((s) => `${s.kind === "print" ? "Printed" : `Emailed to ${s.to}`} ${
     s.sentAt ? new Date(s.sentAt).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : ""}${s.sentBy ? ` by ${s.sentBy}` : ""}`);
-  const tick = (key, label) => `<label class="fe-check"><input type="checkbox" data-d="${key}"${d[key] ? " checked" : ""} /> ${label}</label>`;
+
 
   const dlg = document.createElement("dialog");
   dlg.className = "lh-dialog pd-dlg";
@@ -285,21 +367,40 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
         <details class="pd-design">
           <summary>Design</summary>
           <p class="fe-note">Changes here are saved as the clinic's default for every patient. <span data-role="saved"></span></p>
-          <div class="inv-two">
-            <label class="lh-field"><span class="lh-label">Title</span><input data-d="title" maxlength="80" value="${esc(d.title)}" /></label>
+          <label class="lh-field"><span class="lh-label">Page design</span>
+            <select class="fb-select" data-d="formId">
+              <option value="">Standard design</option>
+              ${forms.map((t) => `<option value="${esc(t.id)}"${d.formId === t.id ? " selected" : ""}>${esc(t.name)} (${esc(categoryLabel(t.category))})</option>`).join("")}
+              ${d.formId && !forms.some((t) => t.id === d.formId) ? `<option value="${esc(d.formId)}" selected>A form that isn't published now</option>` : ""}
+            </select></label>
+          <div class="pd-tpl" data-role="tplhelp" hidden>
+            <p class="fe-note">This page comes from Form Builder. In a Text block, put these on their own line:
+              <code>{Plan treatments}</code> <code>{Plan concerns}</code> <code>{Plan timeline}</code> <code>{Plan message}</code>.
+              <code>{First name}</code>, <code>{Patient name}</code> and <code>{Today}</code> work too.</p>
+            <div class="pd-add">
+              <a class="lh-btn" data-role="tpledit" target="_blank" rel="noopener">Edit in Form Builder</a>
+              <button type="button" class="lh-btn" data-tplreload>Reload the design</button>
+            </div>
+            <p class="lh-error" data-role="tplmsg"></p>
+          </div>
+          <div class="pd-d3">
+            <label class="lh-field"><span class="lh-label">Font</span>
+              <select class="fb-select" data-d="font">${Object.entries(DOC_FONTS).map(([k, v]) =>
+                `<option value="${k}"${d.font === k ? " selected" : ""}>${v[0]}</option>`).join("")}</select></label>
+            <label class="lh-field"><span class="lh-label">Text size</span>
+              <select class="fb-select" data-d="fontSize">${[[11, "Small"], [12, "Smaller"], [13, "Normal"], [14, "Large"], [15, "Larger"], [16, "Largest"]].map(([n, t]) =>
+                `<option value="${n}"${Number(d.fontSize) === n ? " selected" : ""}>${t}</option>`).join("")}</select></label>
             <label class="lh-field"><span class="lh-label">Colour</span><input type="color" data-d="colour" value="${esc(d.colour)}" /></label>
           </div>
-          <label class="lh-field"><span class="lh-label">Welcome</span>
-            <textarea data-d="welcome" rows="4" maxlength="2000">${esc(d.welcome)}</textarea>
-            <small class="fe-note">{First name} is filled in for each patient.</small></label>
-          <label class="lh-field"><span class="lh-label">Closing</span>
-            <textarea data-d="closing" rows="3" maxlength="2000">${esc(d.closing)}</textarea></label>
-          <label class="lh-field"><span class="lh-label">Small print</span>
-            <textarea data-d="disclaimer" rows="2" maxlength="1000">${esc(d.disclaimer)}</textarea></label>
-          ${tick("showPrices", "Show quotes")}
-          ${tick("showConcerns", "Show what we're working on (concern descriptions)")}
-          ${tick("showTimeline", "Show the next 12 months")}
+          <label class="fe-check"><input type="checkbox" data-d="showPrices"${d.showPrices ? " checked" : ""} /> Show quotes</label>
+          <div data-role="std">
+          <p class="lh-label pd-blk-title">What's on the page, top to bottom</p>
+          <div data-role="blocks"></div>
+          <div class="pd-add" data-role="addblock"></div>
+          <small class="fe-note">{First name} is filled in for each patient.</small>
+          </div>
         </details>
+        
         ${lastSent.length ? `<p class="pd-last">Last sent: ${lastSent.map(esc).join("<br>")}</p>` : ""}
         <div class="pd-acts">
           <button type="button" class="lh-btn" data-act="download">Download PDF</button>
@@ -357,17 +458,107 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
   dlg.addEventListener("close", () => { saveDesign(); dlg.remove(); });
 
   form.addEventListener("submit", (e) => e.preventDefault());
-  form.addEventListener("input", (e) => {
-    const t = e.target;
-    if (t.name === "message") { pick.message = t.value.trim(); drawSoon(); return; }
-    const key = t.dataset.d;
-    if (!key) return;
-    d[key] = t.type === "checkbox" ? t.checked : t.value;
+  /* ---------- Design: the blocks on the page ---------- */
+
+  const BLOCK_NAME = { title: "Title and date", text: "Text", message: "Your message to the patient",
+    concerns: "What we're working on", treatments: "The treatments", timeline: "The next 12 months" };
+  const blocksEl = dlg.querySelector('[data-role="blocks"]');
+  const addEl = dlg.querySelector('[data-role="addblock"]');
+  const newBlock = (type, extra = {}) => ({ id: Math.random().toString(36).slice(2, 10), type, text: "", size: "m", bold: false,
+    tint: false, align: "left", ...extra });
+
+  function drawBlocks() {
+    const n = d.blocks.length;
+    blocksEl.innerHTML = d.blocks.map((b, i) => `<div class="pd-blk" data-b="${esc(b.id)}">
+      <div class="pd-blk-head"><strong>${esc(BLOCK_NAME[b.type] || "Block")}</strong>
+        <button type="button" class="po-mini" data-bact="up" aria-label="Move up" title="Move up"${i === 0 ? " disabled" : ""}>↑</button>
+        <button type="button" class="po-mini" data-bact="down" aria-label="Move down" title="Move down"${i === n - 1 ? " disabled" : ""}>↓</button>
+        <button type="button" class="po-mini" data-bact="remove" aria-label="Remove" title="Remove">×</button></div>
+      ${b.type === "title" ? `<input data-bf="text" maxlength="80" value="${esc(b.text)}" aria-label="Title" />` : ""}
+      ${b.type === "text" ? `<textarea data-bf="text" rows="2" maxlength="2000" aria-label="Text">${esc(b.text)}</textarea>
+        <div class="pd-blk-opts">
+          <select class="fb-select" data-bf="size" aria-label="Size">${[["s", "Small"], ["m", "Normal"], ["l", "Large"], ["xl", "Extra large"]].map(([v, t]) =>
+            `<option value="${v}"${b.size === v ? " selected" : ""}>${t}</option>`).join("")}</select>
+          <label class="fe-check"><input type="checkbox" data-bf="bold"${b.bold ? " checked" : ""} /> Bold</label>
+          <label class="fe-check"><input type="checkbox" data-bf="tint"${b.tint ? " checked" : ""} /> Colour</label>
+          <label class="fe-check"><input type="checkbox" data-bf="center"${b.align === "center" ? " checked" : ""} /> Centre</label>
+        </div>` : ""}
+      ${b.type === "message" ? '<small class="fe-note">Shows what you type in "Message to the patient" above.</small>' : ""}
+    </div>`).join("");
+    const missing = ["title", "message", "concerns", "treatments", "timeline"].filter((t) => !d.blocks.some((b) => b.type === t));
+    addEl.innerHTML = `<button type="button" class="lh-btn" data-badd="heading">+ Heading</button>
+      <button type="button" class="lh-btn" data-badd="text">+ Text</button>
+      ${missing.map((t) => `<button type="button" class="lh-btn" data-badd="${t}">+ ${esc(BLOCK_NAME[t])}</button>`).join("")}`;
+  }
+  drawBlocks();
+
+  // Standard design: the blocks list. A Form Builder design: its tags and an Edit link.
+  function syncDesign() {
+    dlg.querySelector('[data-role="std"]').hidden = !!d.formId;
+    dlg.querySelector('[data-role="tplhelp"]').hidden = !d.formId;
+    dlg.querySelector('[data-role="tpledit"]').href = `${location.pathname}${location.search}#/forms/${encodeURIComponent(d.formId || "")}`;
+    const msg = dlg.querySelector('[data-role="tplmsg"]');
+    msg.textContent = tplMsg;
+    msg.hidden = !tplMsg;
+  }
+  syncDesign();
+
+  const touched = () => {
     dirty = true;
     savedNote.textContent = "";
     drawSoon();
     clearTimeout(saveTimer);
     saveTimer = setTimeout(saveDesign, 1200);
+  };
+
+  dlg.querySelector(".pd-design").addEventListener("click", (e) => {
+    if (e.target.closest("[data-tplreload]")) { loadTpl().then(() => { syncDesign(); draw(); }); return; }
+    const add = e.target.closest("[data-badd]");
+    if (add) {
+      const t = add.dataset.badd;
+      // Headings and text go at the top (move them with the arrows); the others go at the end
+      if (t === "heading") d.blocks.unshift(newBlock("text", { text: "New heading", size: "l", bold: true }));
+      else if (t === "text") d.blocks.unshift(newBlock("text", { text: "New text" }));
+      else d.blocks.push(newBlock(t, t === "title" ? { text: d.title } : {}));
+      drawBlocks();
+      touched();
+      if (t === "heading" || t === "text") { const box = blocksEl.querySelector("textarea"); if (box) { box.focus(); box.select(); } }
+      return;
+    }
+    const act = e.target.closest("[data-bact]");
+    if (!act || act.disabled) return;
+    const i = d.blocks.findIndex((b) => b.id === act.closest("[data-b]").dataset.b);
+    if (i < 0) return;
+    if (act.dataset.bact === "remove") d.blocks.splice(i, 1);
+    else {
+      const j = i + (act.dataset.bact === "up" ? -1 : 1);
+      if (j < 0 || j >= d.blocks.length) return;
+      [d.blocks[i], d.blocks[j]] = [d.blocks[j], d.blocks[i]];
+    }
+    drawBlocks();
+    touched();
+  });
+
+  form.addEventListener("input", (e) => {
+    const t = e.target;
+    if (t.name === "message") { pick.message = t.value.trim(); drawSoon(); return; }
+    const row = t.dataset.bf ? t.closest("[data-b]") : null;
+    if (row) {
+      const b = d.blocks.find((y) => y.id === row.dataset.b);
+      if (!b) return;
+      const f = t.dataset.bf;
+      if (f === "center") b.align = t.checked ? "center" : "left";
+      else if (f === "bold" || f === "tint") b[f] = t.checked;
+      else b[f] = t.value;
+      if (b.type === "title" && f === "text") d.title = t.value;
+      touched();
+      return;
+    }
+    const key = t.dataset.d;
+    if (!key) return;
+    d[key] = t.type === "checkbox" ? t.checked : key === "fontSize" ? Number(t.value) : t.value;
+    if (key === "formId") { syncDesign(); loadTpl().then(() => { syncDesign(); draw(); }); }
+    touched();
   });
   form.addEventListener("change", (e) => {
     const t = e.target;
