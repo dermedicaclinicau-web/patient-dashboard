@@ -46,6 +46,26 @@ const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Frida
 const INJ_RE = /wrinkle relaxer|\bWR\b|\bfiller\b|radiesse|belotero|juvederm|profhilo|sculptra|skin ?booster|hydra repair|collagen growth|xeomin|botox|dysport|hyalase/i;
 const REVIEW_RE = /^review\b/i;
 
+// Words that don't say which treatment it was: left out before shortening
+const TX_FILLER = /^(treatment|treatments|record|records|form|forms|consent|tx|txr|the|and|of|for|new|old|v\d+|\d+)$/i;
+
+// A treatment record's form name, shortened for its badge:
+// one word → its first 3 letters ("Ultherapy" → "Ult"); several → their initials ("Wrinkle Relaxer" → "WR").
+// Short capitals stay as written ("OPL", "IPL"). "" when only filler words are left.
+export function txShort(title) {
+  const words = String(title || "")
+    .split(/[\s/&+,·()[\]\-–—]+/)
+    .map((w) => w.replace(/[^A-Za-z0-9]/g, ""))
+    .filter((w) => w && !TX_FILLER.test(w));
+  if (!words.length) return "";
+  if (words.length === 1) {
+    const w = words[0];
+    if (/^[A-Z0-9]{2,4}$/.test(w)) return w;
+    return w.charAt(0).toUpperCase() + w.slice(1, 3).toLowerCase();
+  }
+  return words.slice(0, 3).map((w) => w.charAt(0).toUpperCase()).join("");
+}
+
 // "No treatment record" only from this day: the same setting as Past appointments (ui_settings/records → txCheckFrom, "" = off)
 const TX_CHECK_DEFAULT = "2026-07-01";
 let txCheckLoad = null;
@@ -169,7 +189,13 @@ async function buildVisits(patient) {
   // Badges
   if (recs) {
     recs.treatments.forEach((t) => {
-      if (t.date) visit(toDateKey(t.date)).badges.push({ type: "tx", label: "Treatment record", link: t.link, portalId: t.portalId || "" });
+      if (!t.date) return;
+      const short = txShort(t.title);
+      visit(toDateKey(t.date)).badges.push({
+        type: "tx", label: short ? `Txr - ${short}` : "Treatment record",
+        full: short ? `Treatment record · ${t.title}` : "Treatment record",   // shown on hover
+        link: t.link, portalId: t.portalId || "",
+      });
     });
     recs.consents.forEach((c) => {
       if (c.date) visit(toDateKey(c.date)).badges.push({ type: "consent", label: `Consent Form · ${c.title}`, link: c.link, portalId: c.portalId || "" });
@@ -227,7 +253,7 @@ async function buildVisits(patient) {
     // Only when the treatment records actually loaded, so a failed load never shows false warnings
     v.missing = !!recs && !!txFrom && v.status === "past" && v.key >= txFrom && v.inj && !v.badges.some((b) => b.type === "tx");
     v.search = [v.dateLabel, v.key, v.weekday, ...v.services.map((s) => `${s.name} ${s.staff}`),
-      ...v.badges.map((b) => `${b.label} ${b.status || ""}`), v.missing ? "missing no treatment record" : ""]
+      ...v.badges.map((b) => `${b.label} ${b.full || ""} ${b.status || ""}`), v.missing ? "missing no treatment record" : ""]
       .join(" ").toLowerCase();
     return v;
   });
@@ -474,15 +500,17 @@ function badgeHtml(b) {
   
   const icon = { tx: ICONS.doc, consent: ICONS.consent, summary: ICONS.summary, plan: ICONS.plan, ssp: ICONS.ssp, merge: ICONS.merge }[b.type];
   const inner = `${icon}<span>${escapeHtml(b.label)}</span>`;
+  // Shortened badges: the full name on hover, and read out in full by screen readers
+  const tip = b.full ? ` title="${escapeHtml(b.full)}" aria-label="${escapeHtml(b.full)}"` : "";
 
   if (b.type === "tx" || b.type === "consent") {
     // Made in the portal: open the saved form (same as the Past appointments badges)
     if (b.portalId) {
-      return `<a class="hv-badge b-${b.type}" href="#/form-record/${encodeURIComponent(b.portalId)}" target="_blank" rel="noopener">${inner}</a>`;
+      return `<a class="hv-badge b-${b.type}" href="#/form-record/${encodeURIComponent(b.portalId)}" target="_blank" rel="noopener"${tip}>${inner}</a>`;
     }
     // From the old app: open its PDF in a new tab
     if (/^https:\/\//i.test(b.link || "")) {
-      return `<a class="hv-badge b-${b.type}" href="${escapeHtml(b.link)}" target="_blank" rel="noopener noreferrer">${inner}</a>`;
+      return `<a class="hv-badge b-${b.type}" href="${escapeHtml(b.link)}" target="_blank" rel="noopener noreferrer"${tip}>${inner}</a>`;
     }
   }
   if (b.type === "plan") return `<button type="button" class="hv-badge b-plan" data-hv-jump="plan">${inner}</button>`;
@@ -494,7 +522,7 @@ function badgeHtml(b) {
       title="${reviewed ? "Reviewed notes" : "Draft: these notes haven't been reviewed yet"}">${inner}</button>`;
   }
   if (b.type === "merge") return `<button type="button" class="hv-badge b-merge" data-hv-merge="${escapeHtml(JSON.stringify(b.ids || []))}" title="Combine these recordings into one set of notes">${inner}</button>`;
-  return `<span class="hv-badge b-${b.type}">${inner}</span>`;
+  return `<span class="hv-badge b-${b.type}"${tip}>${inner}</span>`;
 }
 
 function visitCard(v) {
