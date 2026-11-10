@@ -1863,7 +1863,7 @@ function planGroupHtml(group, isLatest) {
   const kind = addable.length ? "plan" : concerns ? "manual" : "review";
   const state = kind === "plan" ? '<span class="tp-state" hidden></span>'   // filled in once the master plan has loaded
     : kind === "review" ? '<span class="tp-state">Review only</span>'
-    : '<span class="tp-state" title="This older plan can\'t be read as concerns. Use + Add a concern on the master plan.">Add by hand</span>';
+    : '<span class="tp-state" title="This older plan can\'t be read as concerns. Use + Add a treatment on the treatment plan.">Add by hand</span>';
   const editBtn = (p) => `<button type="button" class="tp-edit" data-action="tp-edit" data-rid="${escapeHtml(p.id)}"
     title="Open this consultation's notes">${ICONS.edit}<span>${can("consult.record") ? "Edit" : "Notes"}</span></button>`;
 

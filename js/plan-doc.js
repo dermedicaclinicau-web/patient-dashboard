@@ -9,7 +9,7 @@ import { showToast } from "./utils.js";
 import { listPublishedForms, getFormTemplate, getFormVersion, categoryLabel } from "./form-templates.js";
 import { buildFormDocument } from "./form-document.js";
 import { patientAnswers, docToPdf } from "./form-delivery.js";
-import { tagValues } from "./form-tags.js";
+import { tagValues, fillTags } from "./form-tags.js";
 import { bankImage } from "./image-bank-api.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -18,8 +18,15 @@ const ACTIVE = ["active", "maintenance"];
 const EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
 const HEX = /^#[0-9a-f]{6}$/i;
 
-const firstName = (p) => p.firstName || String(p.name || "").split(" ")[0] || "";
-const fillIn = (t, p) => String(t || "").replace(/\{\s*first name\s*\}/gi, firstName(p)).replace(/\{\s*full name\s*\}/gi, p.name || "");
+// Merge tags, the same ones as Form Builder: {Patient name}, {First name}, {Today}, {Record date}, {My name}…
+// A tag that isn't known is left as typed.
+function fillIn(t, p, staff = null) {
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  const vals = tagValues({ patient: p, staff, recordDate: today, today });
+  vals["full name"] = vals["patient name"];   // the older tag still works
+  return fillTags(t, vals, "");
+}
 const paras = (t, style = "margin:0 0 10px") => esc(t).trim().split(/\n{2,}/).filter(Boolean)
   .map((x) => `<p style="${style}">${x.replace(/\n/g, "<br>")}</p>`).join("");
 const monthLong = (k) => {
@@ -207,11 +214,11 @@ export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staf
 
   function blockHtml(b) {
     if (b.type === "title") {
-      return `<h1 style="margin:18px 0 2px;font-size:${base + 9}px;color:${colour}">${esc(b.text || d.title || PLAN_DOC_DEFAULTS.title)}</h1>
+      return `<h1 style="margin:18px 0 2px;font-size:${base + 9}px;color:${colour}">${esc(fillIn(b.text || d.title || PLAN_DOC_DEFAULTS.title, patient, staff))}</h1>
         <div style="margin:0 0 14px;${small}">For ${esc(patient.name || "")} · ${esc(todayText)}</div>`;
     }
     if (b.type === "text") {
-      const t = fillIn(b.text, patient);
+      const t = fillIn(b.text, patient, staff);
       if (!t.trim()) return "";
       const big = b.size === "l" || b.size === "xl";
       return paras(t, `margin:${big ? "14px 0 6px" : "0 0 10px"};font-size:${px[b.size] || base}px;${b.bold ? "font-weight:bold;" : ""}${
@@ -381,7 +388,8 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
           <p class="lh-label pd-blk-title">What's on the page, top to bottom</p>
           <div data-role="blocks"></div>
           <div class="pd-add" data-role="addblock"></div>
-          <small class="fe-note">{First name} is filled in for each patient.</small>
+          <small class="fe-note">Tags are filled in for each patient: {Patient name}, {First name}, {Last name}, {Date of birth},
+            {Patient ID}, {Today}, {My name}.</small>
           </div>
         </details>
         
@@ -567,7 +575,7 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
   /* ---------- Email: its own window on top ---------- */
 
   // What's typed is kept if the window is closed and opened again
-  const mail = { to: patient.email || "", cc: "", subject: fillIn(d.emailSubject, patient), body: fillIn(d.emailMessage, patient) };
+  const mail = { to: patient.email || "", cc: "", subject: fillIn(d.emailSubject, patient, staff), body: fillIn(d.emailMessage, patient, staff) };
 
   function openEmail() {
     if (busy) return;
