@@ -281,7 +281,7 @@ export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staf
   if (parts) {
     return { treatments: treatmentsHtml(), concerns: concernsHtml(), timeline: timelineHtml(), message: blockHtml({ type: "message" }) };
   }
-  return `${RICH_STYLE}<div class="pdoc" style="width:703px;box-sizing:border-box;padding:0 4px;background:#fff;font-family:${font};font-size:${base}px;line-height:1.5;color:#1e293b">
+  return `${RICH_STYLE}<div class="pdoc" style="width:703px;box-sizing:border-box;padding:0 15px;background:#fff;font-family:${font};font-size:${base}px;line-height:1.5;color:#1e293b">
     ${letterheadHtml(lh, colour)}
     ${has("title") ? "" : '<div style="height:16px"></div>'}
     ${blocks.map((b) => {
