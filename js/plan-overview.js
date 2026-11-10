@@ -26,7 +26,7 @@ const BOOKING_STATUSES = ["accepted", "in_progress"]; // booking reminders only 
 const REC_LABEL = { tx: "Treatment record", cons: "Consent record", rx: "Prescription", summary: "Consultation notes" };
 const SVG = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const ICON_PLAN = SVG('<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M9 14l2 2 4-4"/>');
-const ADD_CONCERN_BTN = '<button type="button" class="pv-addcon" data-po="add-concern">+ Add a concern</button>';
+const ADD_CONCERN_BTN = '<button type="button" class="pv-addcon" data-po="add-treatment">+ Add a treatment</button>';
 const ICON_SPARK = SVG('<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>');
 
 function openDlg(html) {
@@ -103,6 +103,8 @@ function nextText(lt) {
 
 // The price for one treatment from its concern's quote ("Dermal filler 1ml - $650" → "$650")
 function priceOf(c, l) {
+  const own = String(l.quote || "").match(/\$\s?[\d,]+(?:\.\d{2})?/);   // the treatment's own quote wins
+  if (own) return own[0].replace(/\s/g, "");
   const lines = String(c.quote || "").split(/\n+/).filter((q) => /\$\s?\d/.test(q));
   if (!lines.length) return "";
   const hit = lines.find((q) => sharesWord(q, l.treatment)) || (c.lines.length === 1 ? lines[0] : "");
@@ -533,7 +535,7 @@ export function createPlanOverview(el, ctx) {
     } else if (!x.going) {
       sub = `${k.label}: ${CONCERN_STATUS[c.status]}`;
     } else {
-      sub = [c.area, patternText(l) || "Schedule not set", lt.total ? `${lt.done} of ${lt.total} done` : ""].filter(Boolean).join(" · ");
+      sub = [l.area || c.area, patternText(l) || "Schedule not set", lt.total ? `${lt.done} of ${lt.total} done` : ""].filter(Boolean).join(" · ");
     }
     return `<div class="pt-row${x.going ? "" : " is-off"}" style="--c:${esc(k.colour)}">
       <span class="pt-rank">${x.going ? x.n : "–"}</span>
@@ -1233,27 +1235,53 @@ export function createPlanOverview(el, ctx) {
 
   /* ---------- Add / edit a treatment line ---------- */
 
+  // c and l given: edit that treatment. l empty: add one (c empty: the concern is chosen in the window).
   function editLine(c, l, defaults = {}) {
+    const m = st.master;
     const isNew = !l;
-    const x = l || { treatment: "", pattern: "course", sessions: 3, intervalWeeks: 4, startMonth: "", countFrom: "", services: [], overrides: {}, ...defaults };
-    const linked = new Set(x.services.map(serviceKey));
-    // This concern's treatments from System configuration → Treatment plans
-    const catalogue = (st.settings.treatments || []).filter((t) => t.concern === c.key && !t.hidden);
-    const cands = [...new Map([
-      ...st.settings.services.filter((r) => r.concerns.includes(c.key)).map((r) => r.service),
-      ...catalogue.flatMap((t) => t.services),
-      ...x.services,
-    ].map((s) => [serviceKey(s), s])).values()].sort((a, b) => a.localeCompare(b, "en-AU"));
+    const today = dateKeyOf(new Date());
+    const x = l || { treatment: "", pattern: "course", sessions: 3, intervalWeeks: 4, startMonth: "", countFrom: "", services: [],
+      overrides: {}, area: "", quote: "", ...defaults };
+    const many = st.wf.phases.length > 1;
+    const inPlan = m ? m.concerns : [];
+    const others = st.settings.concerns.filter((k) => !k.hidden && !inPlan.some((y) => y.key === k.name));
+    if (!c && !inPlan.length && !others.length) { showToast("The concern list didn't load. Reload the page and try again."); return; }
+    // The concern box holds "id:<entry in this plan>" or "key:<a concern not in the plan yet>"
+    const keyOf = (v) => (v.startsWith("id:") ? (inPlan.find((y) => y.id === v.slice(3)) || {}).key || "" : v.slice(4));
+    const catOf = (key) => (st.settings.treatments || []).filter((t) => t.concern === key && !t.hidden);
+    const defPhase = l ? linePhase(c, l).id : c ? phase(c).id : inPlan.length ? st.wf.addPhase : st.wf.newPlanPhase;
+    const area0 = x.area || "";
+    const quote0 = l ? (x.quote || priceOf(c, l)) : (x.quote || "");
     const tracked = !isNew && Object.keys(x.overrides || {}).length > 0;
+
     const dlg = openDlg(`
-      <div class="lh-dialog-head"><h3>${isNew ? "Add a treatment" : "Edit treatment"}</h3><p>${chip(c.key)}</p></div>
-      ${catalogue.length ? `<label class="lh-field"><span class="lh-label">${isNew ? "Choose from the treatment list" : "Fill in from the treatment list"}</span>
-        <select class="fb-select" name="preset"><option value="">${isNew ? "Type my own" : "Keep as it is"}</option>${
-          catalogue.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}${t.quote ? ` · ${esc(t.quote)}` : ""}</option>`).join("")}</select>
-        <small class="fe-note">Fills in everything below. You can still change any of it.</small></label>` : ""}
+      <div class="lh-dialog-head"><h3>${isNew ? "Add a treatment" : "Edit treatment"}</h3>
+        <p>${isNew ? "Choose the concern it treats. A concern that isn't in the plan yet is added with it." : "Everything about this treatment."}</p></div>
+      <div class="inv-two">
+        <label class="lh-field"><span class="lh-label">Concern</span>
+          <select class="fb-select" name="concern">${c ? "" : '<option value="">Choose a concern…</option>'}
+            ${inPlan.length ? `<optgroup label="In this plan">${inPlan.map((y) =>
+              `<option value="id:${esc(y.id)}"${c && y.id === c.id ? " selected" : ""}>${esc(con(y.key).label)}</option>`).join("")}</optgroup>` : ""}
+            ${others.length ? `<optgroup label="Add a concern">${others.map((k) =>
+              `<option value="key:${esc(k.name)}">${esc(k.label)}</option>`).join("")}</optgroup>` : ""}
+          </select></label>
+        ${many ? `<label class="lh-field"><span class="lh-label">Priority</span>
+          <select class="fb-select" name="lpriority">${st.wf.phases.map((p) =>
+            `<option value="${esc(p.id)}"${p.id === defPhase ? " selected" : ""}>${esc(p.name)}${p.tracked ? "" : " (waiting)"}</option>`).join("")}</select></label>` : ""}
+      </div>
+      <label class="lh-field" data-role="presetwrap" hidden><span class="lh-label">${isNew ? "Choose from the treatment list" : "Fill in from the treatment list"}</span>
+        <select class="fb-select" name="preset"></select>
+        <small class="fe-note">Fills in everything below. You can still change any of it.</small></label>
       <label class="lh-field"><span class="lh-label">Treatment</span>
         <input name="treatment" maxlength="300" value="${esc(x.treatment)}" placeholder="e.g. Skin Needling, full face" /></label>
       ${freqHtml(x)}
+      <div class="inv-two">
+        <label class="lh-field"><span class="lh-label">Area (optional)</span>
+          <input name="area" maxlength="200" list="po-area-list" value="${esc(area0)}" placeholder="${esc((c && c.area) || "e.g. Full face")}" />
+          <datalist id="po-area-list"></datalist></label>
+        <label class="lh-field"><span class="lh-label">Quote (optional)</span>
+          <input name="quote" maxlength="200" value="${esc(quote0)}" placeholder="e.g. $899 per session" /></label>
+      </div>
       <div class="inv-two">
         <label class="lh-field"><span class="lh-label">Start month</span>
           <input name="start" type="month" value="${esc(x.startMonth)}" placeholder="2026-11" /></label>
@@ -1261,30 +1289,10 @@ export function createPlanOverview(el, ctx) {
           <input name="from" type="date" value="${esc(x.countFrom)}" />
           <small class="fe-note">Visits before this day don't count. Empty: from the consultation.</small></label>
       </div>
-      <div class="inv-two">
-        ${st.wf.phases.length > 1 ? `<label class="lh-field"><span class="lh-label">Priority</span>
-          <select class="fb-select" name="lpriority"><option value="">Same as the concern (${esc(phase(c).name)})</option>${
-            st.wf.phases.map((p) => `<option value="${esc(p.id)}"${x.priority === p.id ? " selected" : ""}>${esc(p.name)}${
-              p.tracked ? "" : " (waiting)"}</option>`).join("")}</select></label>` : ""}
-        <label class="lh-field"><span class="lh-label">Status</span>
-          <select class="fb-select" name="lstatus">${Object.entries(LINE_STATUS).map(([v, t]) =>
-            `<option value="${v}"${v === (x.status || "active") ? " selected" : ""}>${t}</option>`).join("")}</select>
-          <small class="fe-note">Not interested and No longer relevant stop its reminders. Sessions already done stay.</small></label>
-      </div>
       <div class="lh-field"><span class="lh-label">Appointment services that count as this treatment</span>
-        ${cands.length ? `<input type="search" class="fe-input" data-role="svcfind" placeholder="Search services" aria-label="Search services" />
-          <div class="po-svcs">${cands.map((s) => `<label class="fe-check" data-find="${esc(s.toLowerCase())}">
-            <input type="checkbox" name="svc" value="${esc(s)}"${linked.has(serviceKey(s)) ? " checked" : ""} /> ${esc(s)}</label>`).join("")}</div>`
-          : '<p class="tb-none">No services are set up for this concern yet (Inventory → Treatment plans).</p>'}
+        <input type="search" class="fe-input" data-role="svcfind" placeholder="Search services" aria-label="Search services" />
+        <div class="po-svcs" data-role="svcs"></div>
         <small class="fe-note">None ticked: visits for this concern are matched by the treatment's name.</small></div>
-      <div class="inv-two">
-        <label class="lh-field"><span class="lh-label">Area (optional)</span>
-          <input name="area" maxlength="200" list="po-area-list" placeholder="e.g. Full face" />
-          <datalist id="po-area-list"></datalist></label>
-        <label class="lh-field"><span class="lh-label">Quote (optional)</span>
-          <input name="quote" maxlength="200" placeholder="e.g. $899 per session" /></label>
-      </div>
-      <small class="fe-note">Type anything. They're added to this concern's area and quote${isNew ? "" : "; leave them empty to keep those as they are"}.</small>
       <p class="lh-error" role="alert" hidden></p>
       <div class="lh-actions">
         ${isNew ? "" : '<button type="button" class="lh-btn is-quiet po-danger" data-act="remove">Remove</button>'}
@@ -1292,114 +1300,144 @@ export function createPlanOverview(el, ctx) {
         <button type="submit" class="lh-btn is-primary">${isNew ? "Add" : "Save"}</button>
       </div>`);
     const form = dlg.querySelector("form");
+    const f = form.elements;
     const err = dlg.querySelector(".lh-error");
+    const fail = (t) => { err.textContent = t; err.hidden = false; };
     const freq = mountFreq(dlg);
-    const preset = form.elements.preset;
-    if (preset) {
-      preset.addEventListener("change", () => {
-        const t = catalogue.find((y) => y.id === preset.value);
-        if (!t) return;
-        const f = form.elements;
-        f.treatment.value = t.name;
-        freq.set(t);
-        if (t.services.length) {
-          const want = new Set(t.services.map(serviceKey));
-          form.querySelectorAll('[name="svc"]').forEach((b) => {
-            b.checked = want.has(serviceKey(b.value));
-            b.closest("[data-find]").hidden = false;
-          });
-        }
-        f.quote.value = t.quote;
-        f.area.value = t.areas.length === 1 ? t.areas[0] : "";   // several areas: choose from the suggestions
-        dlg.querySelector("#po-area-list").innerHTML = t.areas.map((a) => `<option value="${esc(a)}"></option>`).join("");
-      });
-    }
+    const svcBox = dlg.querySelector('[data-role="svcs"]');
+    const presetWrap = dlg.querySelector('[data-role="presetwrap"]');
     const find = dlg.querySelector('[data-role="svcfind"]');
-    if (find) {
-      find.addEventListener("input", () => {
-        const q = find.value.trim().toLowerCase();
-        dlg.querySelectorAll(".po-svcs [data-find]").forEach((r) => {
-          r.hidden = !!q && !r.dataset.find.includes(q) && !r.querySelector("input").checked;
+    let firstSync = true;
+
+    // The treatment list, services and area suggestions follow the chosen concern
+    const sync = () => {
+      const key = keyOf(f.concern.value);
+      const cat = catOf(key);
+      presetWrap.hidden = !cat.length;
+      f.preset.innerHTML = `<option value="">${isNew ? "Type my own" : "Keep as it is"}</option>${
+        cat.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}${t.quote ? ` · ${esc(t.quote)}` : ""}</option>`).join("")}`;
+      const ticked = new Map([...form.querySelectorAll('[name="svc"]:checked')].map((b) => [serviceKey(b.value), b.value]));
+      if (firstSync) x.services.forEach((s) => ticked.set(serviceKey(s), s));
+      firstSync = false;
+      const cands = [...new Map([
+        ...st.settings.services.filter((r) => r.concerns.includes(key)).map((r) => r.service),
+        ...cat.flatMap((t) => t.services),
+        ...ticked.values(),
+      ].map((s) => [serviceKey(s), s])).values()].sort((a, b) => a.localeCompare(b, "en-AU"));
+      find.hidden = !cands.length;
+      svcBox.innerHTML = cands.length ? cands.map((s) => `<label class="fe-check" data-find="${esc(s.toLowerCase())}">
+          <input type="checkbox" name="svc" value="${esc(s)}"${ticked.has(serviceKey(s)) ? " checked" : ""} /> ${esc(s)}</label>`).join("")
+        : `<p class="tb-none">${key ? "No services are set up for this concern yet (Inventory → Treatment plans)." : "Choose a concern first."}</p>`;
+      dlg.querySelector("#po-area-list").innerHTML = [...new Set(cat.flatMap((t) => t.areas))]
+        .map((a) => `<option value="${esc(a)}"></option>`).join("");
+    };
+    sync();
+    f.concern.addEventListener("change", sync);
+
+    f.preset.addEventListener("change", () => {
+      const t = catOf(keyOf(f.concern.value)).find((y) => y.id === f.preset.value);
+      if (!t) return;
+      f.treatment.value = t.name;
+      freq.set(t);
+      if (t.services.length) {
+        const want = new Set(t.services.map(serviceKey));
+        form.querySelectorAll('[name="svc"]').forEach((b) => {
+          b.checked = want.has(serviceKey(b.value));
+          b.closest("[data-find]").hidden = false;
         });
+      }
+      f.quote.value = t.quote;
+      f.area.value = t.areas.length === 1 ? t.areas[0] : "";   // several areas: choose from the suggestions
+    });
+    find.addEventListener("input", () => {
+      const q = find.value.trim().toLowerCase();
+      svcBox.querySelectorAll("[data-find]").forEach((r) => {
+        r.hidden = !!q && !r.dataset.find.includes(q) && !r.querySelector("input").checked;
       });
-      find.addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
-    }
+    });
+    find.addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
     dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+
     const rm = dlg.querySelector('[data-act="remove"]');
     if (rm) {
       rm.addEventListener("click", async () => {
+        const lastOne = c.lines.length === 1;
         if (!(await confirmDialog({
           title: `Remove ${x.treatment}?`,
-          message: tracked ? "Sessions marked by hand, skipped or moved for it are removed too. The plan's history keeps a copy."
-            : "It's taken out of the plan. The plan's history keeps a copy.",
+          message: `${tracked ? "Sessions marked by hand, skipped or moved for it are removed too. " : "It's taken out of the plan. "}${
+            lastOne ? `It's the only treatment for ${con(c.key).label}, so that concern goes too. ` : ""}The plan's history keeps a copy.`,
           confirmLabel: "Remove", tone: "danger",
         }))) return;
         if (await commit((p) => {
           const pc = p.concerns.find((y) => y.id === c.id);
-          if (pc) pc.lines = pc.lines.filter((y) => y.id !== l.id);
+          if (!pc) return;
+          pc.lines = pc.lines.filter((y) => y.id !== l.id);
+          if (!pc.lines.length) p.concerns = p.concerns.filter((y) => y !== pc);
         }, "Removed a treatment", `${con(c.key).label}: ${x.treatment}`)) dlg.close();
       });
     }
+
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const f = form.elements;
-      const pattern = f.pattern.value;
+      err.hidden = true;
+      const v = f.concern.value;
+      const key = keyOf(v);
       const treatment = f.treatment.value.trim();
       const start = f.start.value.trim();
-      err.hidden = true;
-      if (!treatment) { err.textContent = "Enter the treatment."; err.hidden = false; return; }
-      if (start && !MONTH_RE.test(start)) { err.textContent = "Enter the start month as e.g. 2026-11."; err.hidden = false; return; }
-      if (pattern === "course" && !(parseInt(f.sessions.value, 10) >= 1)) { err.textContent = "Enter how many sessions."; err.hidden = false; return; }
-      const status = f.lstatus.value;
-      const statusChanged = status !== (x.status || "active");
-      const fields = {
-        treatment, ...freq.read(),
-        priority: f.lpriority ? f.lpriority.value : x.priority || "",
-        status,
-        ...(statusChanged ? { statusAt: new Date().toISOString(), statusBy: (staff && staff.name) || "" } : {}),
-        startMonth: start, countFrom: f.from.value,
-        services: [...form.querySelectorAll('[name="svc"]:checked')].map((y) => y.value),
-      };
+      if (!key) { fail("Choose the concern it treats."); return; }
+      if (!treatment) { fail("Enter the treatment."); return; }
+      if (start && !MONTH_RE.test(start)) { fail("Enter the start month as e.g. 2026-11."); return; }
+      if (f.pattern.value === "course" && !(parseInt(f.sessions.value, 10) >= 1)) { fail("Enter how many sessions."); return; }
+      const target = v.startsWith("id:") ? inPlan.find((y) => y.id === v.slice(3)) || null : null;
+      if (target && target !== c && target.lines.length >= 10) { fail("That concern already has 10 treatments."); return; }
+      const prio = f.lpriority ? f.lpriority.value : defPhase;
+      const to = phaseOf(st.wf, prio);
+      const moved = !isNew && to.id !== linePhase(c, l).id;
+      const wake = moved && to.tracked && lineWaiting(c, l);
       const area = f.area.value.trim();
       const quote = f.quote.value.trim();
-      // Declined while it was the one going ahead: the concern's next waiting treatment takes its place
-      const declined = !isNew && statusChanged && status !== "active" && !lineOff(l) && !lineWaiting(c, l);
-      const up = declined && st.wf.promote !== "off" ? nextWaitingLine(c, l) : null;
-      const upTo = up ? linePhase(c, l) : null;
-      const upStart = st.wf.promoteStart === "next" ? addMonths(thisMonth(), 1) : thisMonth();
+      const fields = {
+        treatment, ...freq.read(), area, quote, startMonth: start, countFrom: f.from.value,
+        services: [...form.querySelectorAll('[name="svc"]:checked')].map((y) => y.value),
+      };
+      const newConcernId = inPlan.some((y) => y.id === key) ? `${key}#${newId()}` : key;
       const btn = form.querySelector('[type="submit"]');
       btn.disabled = true;
-      const ok = await commit((p) => {
-        const pc = p.concerns.find((y) => y.id === c.id);
-        if (!pc) return;
-        if (isNew) pc.lines.push(cleanLine(fields));
-        else {
-          const i = pc.lines.findIndex((y) => y.id === l.id);
-          if (i > -1) pc.lines[i] = cleanLine({ ...pc.lines[i], ...fields });
+      const ok = await commitOrCreate((p) => {
+        let pc = target ? p.concerns.find((y) => y.id === target.id) : null;
+        if (!pc) {
+          pc = { id: newConcernId, key, status: "active", priority: to.id, description: "", area: "", quote: "", comments: "",
+            sourceRecordId: "", lines: [] };
+          p.concerns.push(pc);
         }
-        addToConcern(pc, treatment, area, quote);
-        const pu = up ? pc.lines.find((y) => y.id === up.id) : null;
-        if (pu) {
-          pu.priority = upTo.id === phaseOf(st.wf, pc.priority).id ? "" : upTo.id;   // "" = the concern's own priority
-          if (!pu.startMonth || pu.startMonth < upStart) pu.startMonth = upStart;
-          Object.keys(pu.overrides || {}).forEach((n) => {
-            delete pu.overrides[n].month;                                   // months planned while it waited would be overdue
-            if (!Object.keys(pu.overrides[n]).length) delete pu.overrides[n];
-          });
+        if (isNew && !ACTIVE.includes(pc.status)) pc.status = "active";
+        const own = to.id === phaseOf(st.wf, pc.priority).id ? "" : to.id;   // "" = the concern's own priority
+        if (isNew) {
+          pc.lines.push(cleanLine({ ...fields, priority: own }));
+          if (p.status === "completed") p.status = "in_progress";   // there's something to do again
+        } else {
+          const old = p.concerns.find((y) => y.id === c.id);
+          const i = old ? old.lines.findIndex((y) => y.id === l.id) : -1;
+          if (i === -1) return;
+          const next = cleanLine({ ...old.lines[i], ...fields, priority: own, ...(moved ? { rank: 0 } : {}) });
+          if (wake) wakeLine(next, wakeStart());
+          if (old === pc) old.lines[i] = next;
+          else {
+            old.lines.splice(i, 1);
+            pc.lines.push(next);
+            if (!old.lines.length) p.concerns = p.concerns.filter((y) => y !== old);   // nothing left for that concern
+          }
         }
-      }, isNew ? "Added a treatment"
-        : !statusChanged ? "Edited a treatment"
-        : status === "active" ? "Made a treatment active again"
-        : `Marked a treatment ${LINE_STATUS[status].toLowerCase()}`,
-      `${con(c.key).label}: ${treatment}${up ? `; ${up.treatment} moved up to ${upTo.name}` : ""}`);
-      if (ok) {
-        dlg.close();
-        if (up) showToast(`${up.treatment} is now ${upTo.name}, starting ${monthLabel(upStart)}`);
-      } else btn.disabled = false;
+        // The concern's own area and quote are kept in step until the patient copy reads them from the treatment
+        addToConcern(pc, treatment, area !== area0 ? area : "", quote !== quote0 ? quote : "");
+      }, isNew ? "Added a treatment" : target && c && target.id === c.id ? "Edited a treatment" : "Moved a treatment to another concern",
+      `${con(key).label}: ${treatment}`);
+      if (!ok) { btn.disabled = false; return; }
+      dlg.close();
+      if (isNew) showToast(m ? "Treatment added" : "Master plan created");
     });
-    form.elements.treatment.focus();
-  }
-  
+    (c ? f.treatment : f.concern).focus();
+  }  
     /* ---------- Add a concern by hand (no consultation needed) ---------- */
 
   // Saves a change to the plan, or creates the plan when there isn't one yet
@@ -1424,107 +1462,6 @@ export function createPlanOverview(el, ctx) {
       st.busy = false;
       el.classList.remove("is-busy");
     }
-  }
-
-  function addConcern() {
-    const m = st.master;
-    const list = st.settings.concerns.filter((k) => !k.hidden);
-    if (!list.length) { showToast("The concern list didn't load. Reload the page and try again."); return; }
-    const many = st.wf.phases.length > 1;
-    const defPhase = m && m.concerns.length ? st.wf.addPhase : st.wf.newPlanPhase;
-    const today = dateKeyOf(new Date());
-    const catOf = (key) => (st.settings.treatments || []).filter((t) => t.concern === key && !t.hidden);
-    const dlg = openDlg(`
-      <div class="lh-dialog-head"><h3>Add a concern</h3>
-        <p>${m ? "It's added to the master plan." : "This starts the master plan."} No consultation needed.</p></div>
-      <div class="inv-two">
-        <label class="lh-field"><span class="lh-label">Concern</span>
-          <select class="fb-select" name="concern"><option value="">Choose a concern…</option>${
-            list.map((k) => `<option value="${esc(k.name)}">${esc(k.label)}</option>`).join("")}</select></label>
-        ${many ? `<label class="lh-field"><span class="lh-label">Priority</span>
-          <select class="fb-select" name="priority">${st.wf.phases.map((p) =>
-            `<option value="${esc(p.id)}"${p.id === defPhase ? " selected" : ""}>${esc(p.name)}${p.tracked ? "" : " (waiting)"}</option>`).join("")}</select></label>` : ""}
-      </div>
-      <p class="inv-hint" data-role="again" hidden></p>
-      <label class="lh-field"><span class="lh-label">Description (optional)</span>
-        <input name="description" maxlength="600" placeholder="e.g. Fine lines around the eyes" /></label>
-      <div class="lh-field"><span class="lh-label">Treatments</span>
-        <div class="po-svcs" data-role="txs"></div>
-        <small class="fe-note">Tick the ones to add. Tick none to type your own next.</small></div>
-      <div class="inv-two">
-        <label class="lh-field"><span class="lh-label">Area (optional)</span>
-          <input name="area" maxlength="200" list="po-conarea-list" placeholder="e.g. Full face" />
-          <datalist id="po-conarea-list"></datalist></label>
-        <label class="lh-field"><span class="lh-label">Start month (optional)</span>
-          <input name="start" type="month" placeholder="2026-11" /></label>
-      </div>
-      <small class="fe-note">Visits count from today, so earlier visits aren't ticked off for this concern.</small>
-      <p class="lh-error" role="alert" hidden></p>
-      <div class="lh-actions">
-        <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
-        <button type="submit" class="lh-btn is-primary">Add concern</button>
-      </div>`);
-    const form = dlg.querySelector("form");
-    const f = form.elements;
-    const err = dlg.querySelector(".lh-error");
-    const txsEl = dlg.querySelector('[data-role="txs"]');
-    const againEl = dlg.querySelector('[data-role="again"]');
-    const fail = (t) => { err.textContent = t; err.hidden = false; };
-
-    // The treatment list, area suggestions and the "already in the plan" note follow the chosen concern
-    const sync = () => {
-      const key = f.concern.value;
-      const cat = catOf(key);
-      txsEl.innerHTML = !key ? '<p class="tb-none">Choose a concern first.</p>'
-        : cat.length ? cat.map((t) => `<label class="fe-check"><input type="checkbox" name="tx" value="${esc(t.id)}" />
-            <span>${esc(t.name)} <small class="muted">${esc([patternText(t), t.quote].filter(Boolean).join(" · "))}</small></span></label>`).join("")
-        : '<p class="tb-none">No treatments are set up for this concern yet (System configuration → Treatment plans). You can type your own next.</p>';
-      dlg.querySelector("#po-conarea-list").innerHTML = [...new Set(cat.flatMap((t) => t.areas))]
-        .map((a) => `<option value="${esc(a)}"></option>`).join("");
-      const again = !!key && !!m && m.concerns.some((x) => x.key === key);
-      againEl.hidden = !again;
-      againEl.textContent = again ? `${con(key).label} is already in this plan. This adds it as another entry, e.g. for a later stage.` : "";
-    };
-    sync();
-    f.concern.addEventListener("change", sync);
-    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
-
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      err.hidden = true;
-      const key = f.concern.value;
-      const start = f.start.value.trim();
-      if (!key) { fail("Choose a concern."); return; }
-      if (start && !MONTH_RE.test(start)) { fail("Enter the start month as e.g. 2026-11."); return; }
-      const ticked = new Set([...form.querySelectorAll('[name="tx"]:checked')].map((b) => b.value));
-      const picked = catOf(key).filter((t) => ticked.has(t.id));
-      // The first entry for a concern is known by the concern's name; another one gets its own id
-      const id = m && m.concerns.some((x) => x.id === key) ? `${key}#${newId()}` : key;
-      const nc = {
-        id, key, status: "active", priority: many ? f.priority.value : defPhase,
-        description: f.description.value.trim(), area: "", quote: "", comments: "", sourceRecordId: "",
-        lines: picked.map((t) => cleanLine({
-          treatment: t.name, pattern: t.pattern, sessions: t.sessions, intervalWeeks: t.intervalWeeks, intervalUnit: t.intervalUnit,
-          startMonth: start, countFrom: today, services: t.services,
-        })),
-      };
-      addToConcern(nc, "", f.area.value.trim(), "");
-      picked.forEach((t) => addToConcern(nc, t.name, "", t.quote));
-      const btn = form.querySelector('[type="submit"]');
-      btn.disabled = true;
-      const ok = await commitOrCreate((p) => {
-        p.concerns.push(nc);
-        if (p.status === "completed") p.status = "in_progress";   // there's something to do again
-      }, "Added a concern", `${con(key).label}${picked.length ? `: ${picked.map((t) => t.name).join(", ")}` : ""}`);
-      if (!ok) { btn.disabled = false; return; }
-      dlg.close();
-      showToast(m ? "Concern added" : "Master plan created");
-      if (!picked.length) {
-        const c = st.master && st.master.concerns.find((x) => x.id === id);
-        if (c) editLine(c, null, { countFrom: today });
-      }
-    });
-    f.concern.focus();
   }
 
   /* ---------- Patient events ---------- */
@@ -1642,7 +1579,7 @@ export function createPlanOverview(el, ctx) {
     if (d.po === "plan-menu") { planMenu(); return; }
     if (d.po === "doc") { openDoc(); return; }
     if (d.po === "add-event") { addEvent(); return; }
-    if (d.po === "add-concern") { addConcern(); return; }
+    if (d.po === "add-treatment" || d.po === "add-concern") { editLine(null, null, { countFrom: dateKeyOf(new Date()) }); return; }
     if (d.po === "remove-event") { removeEvent(d.e); return; }
     if (d.po === "cal-prev") { st.calStart = addMonths(st.calStart, -3); draw(); return; }
     if (d.po === "cal-next") { st.calStart = addMonths(st.calStart, 3); draw(); return; }
