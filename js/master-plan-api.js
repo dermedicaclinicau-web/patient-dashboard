@@ -59,6 +59,8 @@ export function cleanLine(l = {}) {
     status: LINE_STATUS[l.status] ? l.status : "active",
     statusAt: clip(l.statusAt, 30),
     statusBy: clip(l.statusBy, 120),
+    statusNote: clip(l.statusNote, 200),   // why the patient declined it
+    rank: whole(l.rank),                    // its place within its priority (0 = not ordered by hand yet)
     startMonth: MONTH_RE.test(l.startMonth || "") ? l.startMonth : "",
     countFrom: /^\d{4}-\d{2}-\d{2}$/.test(l.countFrom || "") ? l.countFrom : "",
     services: [...new Set((Array.isArray(l.services) ? l.services : []).map((s) => clip(s, 150)).filter(Boolean))].slice(0, 20),
@@ -235,7 +237,7 @@ export function applyChanges(master, picks, events) {
     const lines = after.lines.map((l) => {
       const prev = old.lines.find((o) => normTx(o.treatment) === normTx(l.treatment));
       // Its own priority is kept. Proposed again in a new consultation: it's active again.
-      return prev ? { ...l, id: prev.id, overrides: prev.overrides, countFrom: prev.countFrom || l.countFrom, priority: prev.priority,
+      return prev ? { ...l, id: prev.id, overrides: prev.overrides, countFrom: prev.countFrom || l.countFrom, priority: prev.priority, rank: prev.rank,
         services: l.services.length ? l.services : prev.services, startMonth: l.startMonth || prev.startMonth } : l;
     });
     // A line that has been tracked (done, moved…) or declined is kept even if the new consultation doesn't mention it

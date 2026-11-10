@@ -135,6 +135,7 @@ export function createPlanOverview(el, ctx) {
   const { patient, staff } = ctx;
   const st = {
     master: null, settings: { concerns: [], services: [] }, loaded: false, error: "", busy: false, autoFor: -1,
+    filter: "",   // List view: show one concern's treatments ("" = all)
     wf: cleanWorkflow({}),
     view: (() => { try { return localStorage.getItem(VIEW_KEY) === "cal" ? "cal" : "list"; } catch { return "list"; } })(),
     calStart: addMonths(thisMonth(), -1),
@@ -162,6 +163,31 @@ export function createPlanOverview(el, ctx) {
   const nextWaitingLine = (c, not) => c.lines.filter((y) => y.id !== not.id && !lineOff(y) && lineWaiting(c, y))
     .sort((a, b) => phaseRank(c, a) - phaseRank(c, b))[0] || null;
   const firstTracked = () => st.wf.phases.find((p) => p.tracked) || st.wf.phases[0];
+
+  // Every treatment in the plan, in the order to book them: going ahead first, by priority, then the order staff set
+  function planItems(track) {
+    const out = [];
+    st.master.concerns.forEach((c, ci) => c.lines.forEach((l, li) => out.push({
+      c, l, ci, li, ph: linePhase(c, l), going: ACTIVE.includes(c.status) && !lineOff(l),
+      lt: track ? track.get(c.id).lines.get(l.id) : null,
+    })));
+    const pr = (x) => st.wf.phases.findIndex((p) => p.id === x.ph.id);
+    return out.sort((a, b) => (a.going ? 0 : 1) - (b.going ? 0 : 1) || pr(a) - pr(b)
+      || (a.l.rank ? 0 : 1) - (b.l.rank ? 0 : 1) || (a.l.rank || 0) - (b.l.rank || 0) || a.ci - b.ci || a.li - b.li);
+  }
+  const lineIn = (p, cid, lid) => {
+    const pc = p.concerns.find((y) => y.id === cid);
+    return (pc && pc.lines.find((y) => y.id === lid)) || null;
+  };
+  // A treatment leaving a waiting priority starts this month (or next), and months planned while it waited are dropped
+  const wakeStart = () => (st.wf.promoteStart === "next" ? addMonths(thisMonth(), 1) : thisMonth());
+  function wakeLine(pl, start) {
+    if (!pl.startMonth || pl.startMonth < start) pl.startMonth = start;
+    Object.keys(pl.overrides || {}).forEach((n) => {
+      delete pl.overrides[n].month;
+      if (!Object.keys(pl.overrides[n]).length) delete pl.overrides[n];
+    });
+  }
   const byPhase = () => st.wf.phases.map((ph) => ({ ph, list: st.master.concerns.filter((c) => phase(c).id === ph.id) }));
 
   async function load() {
@@ -484,43 +510,40 @@ export function createPlanOverview(el, ctx) {
       attrs(c, l, s.n)} title="${esc(t)}" aria-label="${esc(t)}">${clash ? "⚠ " : ""}${esc(chipLabel(s))}</button>`;
   }
 
-  function rowHtml(c, l, lt, clashKeys) {
-    const price = priceOf(c, l);
+  function slotChipsHtml(c, l, lt, clashKeys) {
     const done = lt.slots.filter((s) => s.state === "done");
     const firstWait = lt.slots.find((s) => s.state === "waiting");
     const shown = firstWait ? lt.slots.filter((s) => s.state !== "waiting").concat(firstWait)
       : lt.total ? lt.slots : [...done.slice(-3), ...lt.slots.filter((s) => s.state !== "done")];
     const hidden = firstWait ? 0 : lt.slots.length - shown.length;
-    const sub = [patternText(l) || "Schedule not set", lt.total ? `${lt.done} of ${lt.total} done` : ""].filter(Boolean).join(" · ");
-    const off = lineOff(l);
-    const own = !off && l.priority && linePhase(c, l).id !== phase(c).id ? linePhase(c, l) : null;
-    return `<div class="pv-row${off ? " is-off" : ""}">
-      <div class="pv-tx"><strong>${esc(l.treatment)}${off ? `<span class="pv-ltag">${esc(LINE_STATUS[l.status])}</span>` : ""}${
-        own ? `<span class="pv-ltag is-phase" style="--p:${esc(own.colour)}">${esc(own.name)}</span>` : ""}</strong><small>${esc(sub)}</small></div>
-      <div class="pv-chips">${hidden ? `<span class="pv-more">+${hidden} earlier</span>` : ""}${
-        shown.map((s) => chipHtml(c, l, lt, s, clashKeys.has(`${c.id}|${l.id}|${s.n}`))).join("")}${
-        lt.complete ? '<span class="pv-chip is-complete">Course complete</span>' : ""}</div>
-      <div class="pv-price">${price ? esc(price) : ""}</div>
-      <button type="button" class="po-mini" data-po="edit-line" ${attrs(c, l)}>Edit</button>
-    </div>`;
+    return `${hidden ? `<span class="pv-more">+${hidden} earlier</span>` : ""}${
+      shown.map((s) => chipHtml(c, l, lt, s, clashKeys.has(`${c.id}|${l.id}|${s.n}`))).join("")}${
+      lt.complete ? '<span class="pv-chip is-complete">Course complete</span>' : ""}`;
   }
 
-  function groupHtml(c, t, clashKeys) {
+  // One treatment: its place in the plan, its concern as a tag, its sessions and its menu
+  function txRowHtml(x, clashKeys) {
+    const { c, l, lt } = x;
     const k = con(c.key);
-    const off = !ACTIVE.includes(c.status);
-    return `<section class="pv-group${off ? " is-off" : ""}${isWaiting(c) ? " is-waiting" : ""}" style="--c:${esc(k.colour)}">
-      <header class="pv-ghead"><strong>${esc(k.label)}</strong>
-        ${c.area ? `<span class="pv-area">${esc(c.area)}</span>` : ""}
-        ${c.status !== "active" ? `<span class="pv-cstatus">${esc(CONCERN_STATUS[c.status])}</span>` : ""}
-        <span class="pv-spacer"></span>
-        ${c.quote ? `<button type="button" class="po-mini" data-po="quote" ${attrs(c)}>Quote</button>` : ""}
-        <button type="button" class="po-mini pv-dots" data-po="concern-menu" ${attrs(c)} aria-label="${esc(k.label)} options" title="Options">⋯</button>
-      </header>
-      ${c.description || c.comments ? `<p class="pv-notes">${esc(c.description)}${
-        c.comments ? `${c.description ? " " : ""}<span class="pv-goal" title="${esc(c.comments)}">Notes: ${esc(c.comments)}</span>` : ""}</p>` : ""}
-      ${orderedLines(c).map((l) => rowHtml(c, l, t.lines.get(l.id), clashKeys)).join("") || '<p class="tb-none pv-pad">No treatments yet.</p>'}
-      ${t.unmatched ? `<p class="po-unmatched pv-pad">${t.unmatched} visit${t.unmatched === 1 ? "" : "s"} for this concern couldn't be matched to a treatment. Edit a treatment to link its services.</p>` : ""}
-    </section>`;
+    const price = priceOf(c, l);
+    let sub;
+    if (lineOff(l)) {
+      const when = l.statusAt ? shortDay(dateKeyOf(new Date(l.statusAt))) : "";
+      sub = [LINE_STATUS[l.status], [when, l.statusBy].filter(Boolean).join(", "), l.statusNote].filter(Boolean).join(" · ");
+    } else if (!x.going) {
+      sub = `${k.label}: ${CONCERN_STATUS[c.status]}`;
+    } else {
+      sub = [c.area, patternText(l) || "Schedule not set", lt.total ? `${lt.done} of ${lt.total} done` : ""].filter(Boolean).join(" · ");
+    }
+    return `<div class="pt-row${x.going ? "" : " is-off"}" style="--c:${esc(k.colour)}">
+      <span class="pt-rank">${x.going ? x.n : "–"}</span>
+      <div class="pt-main"><strong>${esc(l.treatment)}</strong>
+        <div class="pt-meta"><button type="button" class="pt-tag" data-po="concern-menu" ${attrs(c)} title="Concern details">${esc(k.label)}</button>
+          <span>${esc(sub)}</span></div></div>
+      <div class="pv-chips">${slotChipsHtml(c, l, lt, clashKeys)}</div>
+      <div class="pv-price">${price ? esc(price) : ""}</div>
+      <button type="button" class="po-mini pv-dots" data-po="line-menu" ${attrs(c, l)} aria-label="${esc(l.treatment)} options" title="Options">⋯</button>
+    </div>`;
   }
 
   function eventsHtml(m) {
@@ -605,15 +628,43 @@ export function createPlanOverview(el, ctx) {
     </section>`;
   }
 
-    // List view: concerns grouped under their priority, in the workflow's order
+  // List view: every treatment in booking order, under its priority. The concern is a tag on each one.
   function phasesHtml(track, clashKeys) {
+    const m = st.master;
+    const all = planItems(track);
+    const going = all.filter((x) => x.going);
+    going.forEach((x, i) => { x.n = i + 1; });
+    if (st.filter && !m.concerns.some((c) => c.id === st.filter)) st.filter = "";
+    const show = (x) => !st.filter || x.c.id === st.filter;
     const many = st.wf.phases.length > 1;
-    return byPhase().filter((g) => g.list.length).map(({ ph, list }) => `
-      <div class="pv-phase${ph.tracked ? "" : " is-waiting"}" style="--p:${esc(ph.colour)}">
-        ${many ? `<p class="pv-phase-head"><strong>${esc(ph.name)}</strong>${ph.tracked ? "" : '<span class="pv-phase-tag">Waiting</span>'}${
-          ph.note ? `<small>${esc(ph.note)}</small>` : ""}</p>` : ""}
-        ${list.map((c) => groupHtml(c, track.get(c.id), clashKeys)).join("")}
-      </div>`).join("");
+
+    const filters = m.concerns.length > 1 ? `<div class="pt-filter"><span>Concerns</span>
+      <button type="button" class="pt-fchip${st.filter ? "" : " is-on"}" data-po="filter" data-c="">All · ${all.length}</button>
+      ${m.concerns.map((c) => `<button type="button" class="pt-fchip${st.filter === c.id ? " is-on" : ""}" data-po="filter" data-c="${esc(c.id)}"
+        style="--c:${esc(con(c.key).colour)}">${esc(con(c.key).label)} · ${c.lines.length}</button>`).join("")}</div>` : "";
+
+    const sections = st.wf.phases.map((ph) => {
+      const list = going.filter((x) => x.ph.id === ph.id && show(x));
+      if (!list.length) return "";
+      return `<section class="pt-sec${ph.tracked ? "" : " is-waiting"}" style="--p:${esc(ph.colour)}">
+        ${many ? `<p class="pt-sec-head"><strong>${esc(ph.name)}</strong>${ph.note ? `<small>${esc(ph.note)}</small>` : ""}${
+          ph.tracked ? "" : "<small>· no reminders yet</small>"}</p>` : ""}
+        <div class="pt-list">${list.map((x) => txRowHtml(x, clashKeys)).join("")}</div>
+      </section>`;
+    }).join("");
+
+    const off = all.filter((x) => !x.going && show(x));
+    const offHtml = off.length ? `<section class="pt-sec is-off">
+      <p class="pt-sec-head"><strong>Not going ahead</strong><small>${off.length} treatment${off.length === 1 ? "" : "s"} · kept for the record</small></p>
+      <div class="pt-list">${off.map((x) => txRowHtml(x, clashKeys)).join("")}</div></section>` : "";
+
+    const unmatched = m.concerns.map((c) => {
+      const n = track.get(c.id).unmatched;
+      return n && (!st.filter || st.filter === c.id)
+        ? `<p class="po-unmatched">${n} visit${n === 1 ? "" : "s"} for ${esc(con(c.key).label)} couldn't be matched to a treatment. Edit a treatment to link its services.</p>` : "";
+    }).join("");
+
+    return `${filters}${sections || (offHtml ? "" : '<p class="tb-none">No treatments yet. Open a concern to add one.</p>')}${offHtml}${unmatched}`;
   }
 
   function draw() {
@@ -881,6 +932,131 @@ export function createPlanOverview(el, ctx) {
       p.concerns.push(x);
     }, promoting ? "Moved a concern up" : "Changed a concern's priority",
     `${con(c.key).label}: ${from.name} → ${to.name}${start ? `, starting ${monthLabel(start)}` : ""}`);
+  }
+
+    /* ---------- One treatment's menu: order, priority and the patient's decision ---------- */
+
+  function lineMenu(c, l) {
+    const off = lineOff(l);
+    const live = ACTIVE.includes(c.status);
+    const ph = linePhase(c, l);
+    const same = planItems(null).filter((x) => x.going && x.ph.id === ph.id);
+    const at = same.findIndex((x) => x.c.id === c.id && x.l.id === l.id);
+    const btn = (act, label, extra = "") => `<button type="button" class="lh-btn" data-act="${act}"${extra}>${label}</button>`;
+    const dlg = openDlg(`
+      <div class="lh-dialog-head"><h3>${esc(l.treatment)}</h3>
+        <p>${chip(c.key)} ${esc(off ? LINE_STATUS[l.status] : live ? ph.name : CONCERN_STATUS[c.status])}</p></div>
+      <div class="pt-menu">
+        ${!off && live ? `<p class="pt-menu-h">Order and priority</p>
+          ${same.length > 1 ? `${btn("up", "↑ Move up", at <= 0 ? " disabled" : "")}${btn("down", "↓ Move down", at === same.length - 1 ? " disabled" : "")}` : ""}
+          ${st.wf.phases.filter((p) => p.id !== ph.id).map((p) =>
+            btn("to", `Move to ${esc(p.name)}${p.tracked ? "" : " (waiting)"}`, ` data-v="${esc(p.id)}"`)).join("")}
+          <p class="pt-menu-h">The patient's decision</p>
+          ${btn("off", "Not interested", ' data-v="not_interested"')}${btn("off", "No longer relevant", ' data-v="not_relevant"')}` : ""}
+        ${off ? btn("revive", "Make active again") : ""}
+        ${!live ? btn("reopen", `Make ${esc(con(c.key).label)} active again`) : ""}
+        <p class="pt-menu-h">Details</p>
+        ${btn("edit", "Edit treatment")}${btn("concern", "Concern details")}
+      </div>
+      <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="close">Close</button></div>`);
+    const form = dlg.querySelector("form");
+    form.addEventListener("submit", (e) => e.preventDefault());
+    form.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-act]");
+      if (!b || b.disabled || st.busy) return;
+      const act = b.dataset.act;
+      dlg.close();
+      if (act === "up" || act === "down") moveLine(c, l, act === "up" ? -1 : 1);
+      else if (act === "to") moveLineTo(c, l, b.dataset.v);
+      else if (act === "off") declineLine(c, l, b.dataset.v);
+      else if (act === "revive") reviveLine(c, l);
+      else if (act === "reopen") setConcernStatus(c, "active");
+      else if (act === "edit") editLine(c, l);
+      else if (act === "concern") concernMenu(c);
+    });
+  }
+
+  // Up or down within its priority: every treatment in that priority gets its place saved
+  function moveLine(c, l, dir) {
+    const ph = linePhase(c, l);
+    const same = planItems(null).filter((x) => x.going && x.ph.id === ph.id);
+    const i = same.findIndex((x) => x.c.id === c.id && x.l.id === l.id);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= same.length) return Promise.resolve(false);
+    [same[i], same[j]] = [same[j], same[i]];
+    return commit((p) => same.forEach((x, n) => {
+      const pl = lineIn(p, x.c.id, x.l.id);
+      if (pl) pl.rank = n + 1;
+    }), dir < 0 ? "Moved a treatment up" : "Moved a treatment down", `${l.treatment}, within ${ph.name}`);
+  }
+
+  // To another priority (it goes to the end of that priority)
+  function moveLineTo(c, l, id) {
+    const to = st.wf.phases.find((p) => p.id === id);
+    const from = linePhase(c, l);
+    if (!to || to.id === from.id) return Promise.resolve(false);
+    const wake = to.tracked && !from.tracked;
+    const start = wakeStart();
+    return commit((p) => {
+      const pc = p.concerns.find((y) => y.id === c.id);
+      const pl = pc && pc.lines.find((y) => y.id === l.id);
+      if (!pl) return;
+      pl.priority = to.id === phaseOf(st.wf, pc.priority).id ? "" : to.id;   // "" = the concern's own priority
+      pl.rank = 0;
+      if (wake) wakeLine(pl, start);
+      if (wake && p.status === "completed") p.status = "in_progress";
+    }, "Moved a treatment", `${l.treatment}: ${from.name} → ${to.name}${wake ? `, starting ${monthLabel(start)}` : ""}`);
+  }
+
+  // Not interested / No longer relevant: its reminders stop, and the concern's next waiting treatment takes its place
+  function declineLine(c, l, status) {
+    if (!LINE_STATUS[status] || status === "active") return;
+    const label = LINE_STATUS[status].toLowerCase();
+    const up = !lineWaiting(c, l) && st.wf.promote !== "off" ? nextWaitingLine(c, l) : null;
+    const upTo = up ? linePhase(c, l) : null;
+    const start = wakeStart();
+    const dlg = openDlg(`
+      <div class="lh-dialog-head"><h3>Mark ${esc(l.treatment)} as ${esc(label)}?</h3>
+        <p>Its reminders stop. Sessions already done stay on the plan.</p></div>
+      ${up ? `<p class="pt-preview">↑ ${esc(up.treatment)} moves up to ${esc(upTo.name)}, starting ${esc(monthLabel(start))}</p>` : ""}
+      <label class="lh-field"><span class="lh-label">Reason (optional)</span>
+        <input name="why" maxlength="200" placeholder="e.g. Worried about downtime" /></label>
+      <div class="lh-actions">
+        <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+        <button type="submit" class="lh-btn is-primary">Mark ${esc(label)}</button>
+      </div>`);
+    const form = dlg.querySelector("form");
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const why = form.elements.why.value.trim();
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      const ok = await commit((p) => {
+        const pc = p.concerns.find((y) => y.id === c.id);
+        const pl = pc && pc.lines.find((y) => y.id === l.id);
+        if (!pl) return;
+        Object.assign(pl, { status, statusAt: new Date().toISOString(), statusBy: (staff && staff.name) || "", statusNote: why });
+        const pu = up ? pc.lines.find((y) => y.id === up.id) : null;
+        if (pu) {
+          pu.priority = upTo.id === phaseOf(st.wf, pc.priority).id ? "" : upTo.id;
+          pu.rank = pl.rank || 0;   // it takes the declined treatment's place
+          wakeLine(pu, start);
+        }
+      }, `Marked a treatment ${label}`,
+      `${con(c.key).label}: ${l.treatment}${why ? ` (${why})` : ""}${up ? `; ${up.treatment} moved up to ${upTo.name}` : ""}`);
+      if (!ok) { btn.disabled = false; return; }
+      dlg.close();
+      if (up) showToast(`${up.treatment} is now ${upTo.name}, starting ${monthLabel(start)}`);
+    });
+    form.elements.why.focus();
+  }
+
+  function reviveLine(c, l) {
+    return commit((p) => {
+      const pl = lineIn(p, c.id, l.id);
+      if (pl) Object.assign(pl, { status: "active", statusAt: new Date().toISOString(), statusBy: (staff && staff.name) || "", statusNote: "" });
+    }, "Made a treatment active again", `${con(c.key).label}: ${l.treatment}`);
   }
 
   function showQuote(c) {
@@ -1471,6 +1647,7 @@ export function createPlanOverview(el, ctx) {
     if (d.po === "cal-prev") { st.calStart = addMonths(st.calStart, -3); draw(); return; }
     if (d.po === "cal-next") { st.calStart = addMonths(st.calStart, 3); draw(); return; }
     if (d.po === "cal-today") { st.calStart = addMonths(thisMonth(), -1); draw(); return; }
+    if (d.po === "filter") { st.filter = d.c || ""; draw(); return; }
     const [c, l] = findLine(d.c, d.l);
     if (!c) return;
     if (d.po === "set-concern") setConcernStatus(c, d.v);
@@ -1478,6 +1655,7 @@ export function createPlanOverview(el, ctx) {
     else if (d.po === "concern-menu") concernMenu(c);
     else if (d.po === "quote") showQuote(c);
     else if (d.po === "edit-line" && l) editLine(c, l);
+    else if (d.po === "line-menu" && l) lineMenu(c, l);
     else if (d.po === "slot" && l) slotDialog(c, l, Number(d.n));
     else if (d.po === "ask" && l) askReception(c, l, Number(d.n));
     else if (d.po === "clash-move" && l) moveSlot(c, l, Number(d.n), d.to, true);
