@@ -3,7 +3,7 @@ import { db, auth } from "./firebase-config.js";
 import { collection, addDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   getMasterPlan, saveMasterPlan, listPlanHistory, PLAN_STATUS, CONCERN_STATUS, patternText, monthLabel, cleanLine, cleanEvent,
-  matchServices, sharesWord, newId,
+  matchServices, sharesWord, newId, LINE_STATUS, lineOff,
 } from "./master-plan-api.js";
 import { getPlanSettings, serviceSetup, getPlanWorkflow, cleanWorkflow, phaseOf } from "./plan-api.js";
 import { visitsFrom, trackPlan, thisMonth, dateKeyOf, dayLabel, addMonths, monthDiff } from "./plan-track.js";
@@ -88,6 +88,7 @@ function chipLabel(s) {
 }
 
 function nextText(lt) {
+  if (lt.off) return [LINE_STATUS[lt.off], lt.done ? `${lt.done} done` : ""].filter(Boolean).join(" · ");
   const extra = lt.extra ? ` · ${lt.extra} more visit${lt.extra === 1 ? "" : "s"} than planned` : "";
   if (lt.complete) return `Complete · ${lt.done} of ${lt.total} done${extra}`;
   const prog = lt.total ? `${lt.done} of ${lt.total} done` : lt.done ? `${lt.done} done` : "";
@@ -147,6 +148,12 @@ export function createPlanOverview(el, ctx) {
   };
   const phase = (c) => phaseOf(st.wf, c.priority);
   const isWaiting = (c) => !phase(c).tracked;
+  // A treatment follows its concern's priority unless it has its own
+  const linePhase = (c, l) => phaseOf(st.wf, (l && l.priority) || c.priority);
+  const lineWaiting = (c, l) => !linePhase(c, l).tracked;
+  const liveLines = (c) => c.lines.filter((l) => !lineOff(l));
+  // Every treatment still going ahead is complete (true too when they've all been declined)
+  const allDone = (c, t) => c.lines.length > 0 && liveLines(c).every((l) => t.lines.get(l.id).complete);
   const firstTracked = () => st.wf.phases.find((p) => p.tracked) || st.wf.phases[0];
   const byPhase = () => st.wf.phases.map((ph) => ({ ph, list: st.master.concerns.filter((c) => phase(c).id === ph.id) }));
 
@@ -185,7 +192,7 @@ export function createPlanOverview(el, ctx) {
     return trackPlan(m, {
       visits: visitsFrom(ctx.pre(), ctx.today()),
       services: st.settings.services,
-      waiting: isWaiting,
+      waiting: lineWaiting,
       fromOf: (c, l) => (l && l.countFrom) || fallback(c),
     });
   }
@@ -268,8 +275,7 @@ export function createPlanOverview(el, ctx) {
     const out = waiting
       .filter((c) => c.lines.some((l) => track.get(c.id).lines.get(l.id).slots.some((s) => s.state === "booked")))
       .map((c) => ({ c, promote: "early", rank: 0.5 }));
-    const trackedOpen = live.some((c) => !isWaiting(c) && c.status === "active" &&
-      !(c.lines.length && c.lines.every((l) => track.get(c.id).lines.get(l.id).complete)));
+    const trackedOpen = live.some((c) => !isWaiting(c) && c.status === "active" && !allDone(c, track.get(c.id)));
     if (!trackedOpen && !out.length) {
       const order = st.wf.phases.map((p) => p.id);
       const next = waiting.slice().sort((a, b) => order.indexOf(phase(a).id) - order.indexOf(phase(b).id))[0];
@@ -296,9 +302,7 @@ export function createPlanOverview(el, ctx) {
           if (s && s.state in rank && !clashed.has(`${c.id}|${l.id}|${s.n}`)) out.push({ c, l, lt, s, rank: rank[s.state] });
         });
       }
-      if (c.status === "active" && c.lines.length && c.lines.every((l) => t.lines.get(l.id).complete)) {
-        out.push({ c, complete: true, rank: 3 });
-      }
+      if (c.status === "active" && allDone(c, t)) out.push({ c, complete: true, declined: !liveLines(c).length, rank: 3 });
     });
     return out.sort((a, b) => a.rank - b.rank);
   }
@@ -330,8 +334,9 @@ export function createPlanOverview(el, ctx) {
     let done = 0;
     let total = 0;
     st.master.concerns.forEach((c) => {
-      if (!ACTIVE.includes(c.status) || isWaiting(c)) return;
+      if (!ACTIVE.includes(c.status)) return;
       c.lines.forEach((l) => {
+        if (lineOff(l) || lineWaiting(c, l)) return;
         const lt = track.get(c.id).lines.get(l.id);
         if (lt && lt.total) { total += lt.total; done += Math.min(lt.done, lt.total); }
       });
@@ -414,6 +419,14 @@ export function createPlanOverview(el, ctx) {
           <button type="button" class="lh-btn" data-po="slot" ${attrs(x.c, x.l, x.s.n)}>More</button></div>
       </div>`;
     }
+    if (x.complete && x.declined) {
+      return `<div class="po-need is-complete">${chip(x.c.key)}
+        <div class="po-need-main"><strong>No treatments left to do</strong>
+          <small>Every treatment here was marked not interested or no longer relevant.</small></div>
+        <div class="po-need-acts">
+          <button type="button" class="lh-btn" data-po="set-concern" data-v="not_pursuing" ${attrs(x.c)}>Not pursuing</button></div>
+      </div>`;
+    }
     if (x.complete) {
       return `<div class="po-need is-complete">${chip(x.c.key)}
         <div class="po-need-main"><strong>Every treatment is done</strong>
@@ -472,8 +485,11 @@ export function createPlanOverview(el, ctx) {
       : lt.total ? lt.slots : [...done.slice(-3), ...lt.slots.filter((s) => s.state !== "done")];
     const hidden = firstWait ? 0 : lt.slots.length - shown.length;
     const sub = [patternText(l) || "Schedule not set", lt.total ? `${lt.done} of ${lt.total} done` : ""].filter(Boolean).join(" · ");
-    return `<div class="pv-row">
-      <div class="pv-tx"><strong>${esc(l.treatment)}</strong><small>${esc(sub)}</small></div>
+    const off = lineOff(l);
+    const own = !off && l.priority && linePhase(c, l).id !== phase(c).id ? linePhase(c, l) : null;
+    return `<div class="pv-row${off ? " is-off" : ""}">
+      <div class="pv-tx"><strong>${esc(l.treatment)}${off ? `<span class="pv-ltag">${esc(LINE_STATUS[l.status])}</span>` : ""}${
+        own ? `<span class="pv-ltag is-phase" style="--p:${esc(own.colour)}">${esc(own.name)}</span>` : ""}</strong><small>${esc(sub)}</small></div>
       <div class="pv-chips">${hidden ? `<span class="pv-more">+${hidden} earlier</span>` : ""}${
         shown.map((s) => chipHtml(c, l, lt, s, clashKeys.has(`${c.id}|${l.id}|${s.n}`))).join("")}${
         lt.complete ? '<span class="pv-chip is-complete">Course complete</span>' : ""}</div>
@@ -954,7 +970,7 @@ export function createPlanOverview(el, ctx) {
       ${s.state === "done" && !s.manual ? `<p class="inv-hint">Matched to the appointment on ${esc(dayLabel(s.date))}, so it's counted automatically.</p>` : ""}
       ${s.state === "done" ? recordsHtml(s.date) : ""}
       ${s.state === "booked" ? `<p class="inv-hint">There's an appointment booked for ${esc(dayLabel(s.date))}. It becomes Done after the visit.</p>` : ""}
-      ${waiting ? `<p class="inv-hint">${esc(con(c.key).label)} is in ${esc(phase(c).name)}, so its sessions aren't scheduled yet.</p>
+      ${waiting ? `<p class="inv-hint">${esc(l.priority ? l.treatment : con(c.key).label)} is in ${esc(linePhase(c, l).name)}, so its sessions aren't scheduled yet.</p>
         <div class="po-slot-btns"><button type="button" class="lh-btn is-primary" data-act="promote">Move to ${esc(firstTracked().name)}</button></div>` : ""}
       ${open ? `
         <div class="po-slot-row">
@@ -987,7 +1003,17 @@ export function createPlanOverview(el, ctx) {
       if (!b || st.busy) return;
       const act = b.dataset.act;
       if (act === "close") { dlg.close(); return; }
-      if (act === "promote") { dlg.close(); setConcernPhase(c, firstTracked().id); return; }
+      if (act === "promote") {
+        dlg.close();
+        if (!l.priority) { setConcernPhase(c, firstTracked().id); return; }
+        // The treatment has its own priority: only it moves up
+        commit((p) => {
+          const pc = p.concerns.find((y) => y.id === c.id);
+          const pl = pc && pc.lines.find((y) => y.id === l.id);
+          if (pl) pl.priority = firstTracked().id;
+        }, "Moved a treatment up", `${l.treatment}: ${linePhase(c, l).name} → ${firstTracked().name}`);
+        return;
+      }
       if (act === "ask") { dlg.close(); askReception(c, l, n); return; }
       if (act === "move") {
         const mo = form.elements.month.value.trim();
@@ -1051,6 +1077,16 @@ export function createPlanOverview(el, ctx) {
         <label class="lh-field"><span class="lh-label">Count visits from (optional)</span>
           <input name="from" type="date" value="${esc(x.countFrom)}" />
           <small class="fe-note">Visits before this day don't count. Empty: from the consultation.</small></label>
+      </div>
+      <div class="inv-two">
+        ${st.wf.phases.length > 1 ? `<label class="lh-field"><span class="lh-label">Priority</span>
+          <select class="fb-select" name="lpriority"><option value="">Same as the concern (${esc(phase(c).name)})</option>${
+            st.wf.phases.map((p) => `<option value="${esc(p.id)}"${x.priority === p.id ? " selected" : ""}>${esc(p.name)}${
+              p.tracked ? "" : " (waiting)"}</option>`).join("")}</select></label>` : ""}
+        <label class="lh-field"><span class="lh-label">Status</span>
+          <select class="fb-select" name="lstatus">${Object.entries(LINE_STATUS).map(([v, t]) =>
+            `<option value="${v}"${v === (x.status || "active") ? " selected" : ""}>${t}</option>`).join("")}</select>
+          <small class="fe-note">Not interested and No longer relevant stop its reminders. Sessions already done stay.</small></label>
       </div>
       <div class="lh-field"><span class="lh-label">Appointment services that count as this treatment</span>
         ${cands.length ? `<input type="search" class="fe-input" data-role="svcfind" placeholder="Search services" aria-label="Search services" />
@@ -1131,8 +1167,13 @@ export function createPlanOverview(el, ctx) {
       if (!treatment) { err.textContent = "Enter the treatment."; err.hidden = false; return; }
       if (start && !MONTH_RE.test(start)) { err.textContent = "Enter the start month as e.g. 2026-11."; err.hidden = false; return; }
       if (pattern === "course" && !(parseInt(f.sessions.value, 10) >= 1)) { err.textContent = "Enter how many sessions."; err.hidden = false; return; }
+      const status = f.lstatus.value;
+      const statusChanged = status !== (x.status || "active");
       const fields = {
         treatment, ...freq.read(),
+        priority: f.lpriority ? f.lpriority.value : x.priority || "",
+        status,
+        ...(statusChanged ? { statusAt: new Date().toISOString(), statusBy: (staff && staff.name) || "" } : {}),
         startMonth: start, countFrom: f.from.value,
         services: [...form.querySelectorAll('[name="svc"]:checked')].map((y) => y.value),
       };
@@ -1149,7 +1190,10 @@ export function createPlanOverview(el, ctx) {
           if (i > -1) pc.lines[i] = cleanLine({ ...pc.lines[i], ...fields });
         }
         addToConcern(pc, treatment, area, quote);
-      }, isNew ? "Added a treatment" : "Edited a treatment", `${con(c.key).label}: ${treatment}`);
+      }, isNew ? "Added a treatment"
+        : !statusChanged ? "Edited a treatment"
+        : status === "active" ? "Made a treatment active again"
+        : `Marked a treatment ${LINE_STATUS[status].toLowerCase()}`, `${con(c.key).label}: ${treatment}`);
       if (ok) dlg.close(); else btn.disabled = false;
     });
     form.elements.treatment.focus();

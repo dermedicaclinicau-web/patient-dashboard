@@ -11,6 +11,10 @@ export const PLAN_STATUS = {
 };
 export const CONCERN_STATUS = { active: "Active", maintenance: "Maintenance", resolved: "Resolved", not_pursuing: "Not pursuing" };
 
+// One treatment's own status. Anything but active stops its reminders (sessions already done stay).
+export const LINE_STATUS = { active: "Active", not_interested: "Not interested", not_relevant: "No longer relevant" };
+export const lineOff = (l) => !!l && !!l.status && l.status !== "active";
+
 const clip = (v, n) => String(v ?? "").trim().slice(0, n);
 const whole = (v) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n > 0 ? Math.min(n, 520) : 0; };
 const toDate = (v) => (v && typeof v.toDate === "function" ? v.toDate() : null);
@@ -51,6 +55,10 @@ export function cleanLine(l = {}) {
     sessions: whole(l.sessions),
     intervalWeeks: whole(l.intervalWeeks),
     intervalUnit: l.intervalUnit === "m" || l.intervalUnit === "w" ? l.intervalUnit : "",   // what staff chose: weeks or months
+    priority: /^[a-z0-9]{2,24}$/.test(String(l.priority || "")) ? l.priority : "",   // "" = the concern's priority
+    status: LINE_STATUS[l.status] ? l.status : "active",
+    statusAt: clip(l.statusAt, 30),
+    statusBy: clip(l.statusBy, 120),
     startMonth: MONTH_RE.test(l.startMonth || "") ? l.startMonth : "",
     countFrom: /^\d{4}-\d{2}-\d{2}$/.test(l.countFrom || "") ? l.countFrom : "",
     services: [...new Set((Array.isArray(l.services) ? l.services : []).map((s) => clip(s, 150)).filter(Boolean))].slice(0, 20),
@@ -226,12 +234,13 @@ export function applyChanges(master, picks, events) {
     const old = concerns[i];
     const lines = after.lines.map((l) => {
       const prev = old.lines.find((o) => normTx(o.treatment) === normTx(l.treatment));
-      return prev ? { ...l, id: prev.id, overrides: prev.overrides, countFrom: prev.countFrom || l.countFrom,
+      // Its own priority is kept. Proposed again in a new consultation: it's active again.
+      return prev ? { ...l, id: prev.id, overrides: prev.overrides, countFrom: prev.countFrom || l.countFrom, priority: prev.priority,
         services: l.services.length ? l.services : prev.services, startMonth: l.startMonth || prev.startMonth } : l;
     });
-    // A line that has been tracked (done, moved…) is kept even if the new consultation doesn't mention it
+    // A line that has been tracked (done, moved…) or declined is kept even if the new consultation doesn't mention it
     old.lines.forEach((o) => {
-      if (Object.keys(o.overrides || {}).length && !lines.some((l) => l.id === o.id)) lines.push(o);
+      if ((Object.keys(o.overrides || {}).length || lineOff(o)) && !lines.some((l) => l.id === o.id)) lines.push(o);
     });
     concerns[i] = { ...old, ...after, key, id: old.id, lines, priority: old.priority || after.priority,
       status: ["resolved", "not_pursuing"].includes(old.status) ? "active" : old.status };

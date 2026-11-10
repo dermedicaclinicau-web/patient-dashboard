@@ -84,6 +84,7 @@ function trackLine(line, past, future, waiting = false) {
   const ov = line.overrides || {};
   const iv = line.intervalWeeks || 0;
   const total = line.pattern === "course" ? Math.max(1, line.sessions || 1) : line.pattern === "once" ? 1 : 0; // 0 = ongoing
+  const off = !!line.status && line.status !== "active";   // not interested / no longer relevant: nothing more is planned
   const P = past.slice();
   const F = future.slice();
   const cur = thisMonth();
@@ -99,6 +100,7 @@ function trackLine(line, past, future, waiting = false) {
     else if (o.status === "skipped") s = { state: "skipped" };
     else if (P.length) s = { state: "done", date: P.shift() };
     else if (F.length) s = { state: "booked", date: F.shift() };
+    else if (off) break;
     else if (!total && line.pattern === "unknown" && !iv && slots.some((x) => x.state === "done")) break; // no schedule to follow
     else s = { state: !expected ? "unscheduled" : expected < cur ? "overdue" : expected === cur ? "due" : "planned" };
     // A concern in a waiting priority: nothing is due until it's moved up
@@ -113,7 +115,7 @@ function trackLine(line, past, future, waiting = false) {
   }
   const done = slots.filter((s) => s.state === "done").length;
   const next = slots.find((s) => !["done", "skipped"].includes(s.state)) || null;
-  return { slots, total, done, next, complete: !!total && !next, extra: total ? P.length : 0 };
+  return { slots, total, done, next, complete: !off && !!total && !next, extra: total ? P.length : 0, off: off ? line.status : "" };
 }
 
 /* ---------- The whole plan ---------- */
@@ -153,7 +155,7 @@ export function trackPlan(master, { visits, services, fromOf, waiting = () => fa
     out.set(c.id || c.key, {
       unmatched,
       lines: new Map(c.lines.map((l) => [l.id,
-        trackLine(l, [...hits.get(l.id).past].sort(), [...hits.get(l.id).future].sort(), waiting(c))])),
+        trackLine(l, [...hits.get(l.id).past].sort(), [...hits.get(l.id).future].sort(), waiting(c, l))])),
     });
   });
   return out;

@@ -13068,3 +13068,9 @@ dialog.lh-dialog.inv-dlg.pcg-dlg { width: min(660px, calc(100vw - 2rem)); }
 .pe-freq-tx { font-size: .78rem; font-weight: 500; color: #64748b; }
 .pe-freq.is-empty { border-style: dashed; background: #fff; color: #15803d; font-weight: 500; }
 dialog.lh-dialog.pe-freq-dlg { width: min(520px, calc(100vw - 2rem)); }
+
+/* Master plan: a treatment's own priority, and treatments the patient declined */
+.pv-row.is-off { opacity: .6; }
+.pv-ltag { display: inline-block; margin-left: .45rem; padding: .05rem .5rem; border-radius: 999px; background: #f1f5f9;
+  color: #64748b; font-size: .7rem; font-weight: 600; vertical-align: middle; }
+.pv-ltag.is-phase { background: color-mix(in srgb, var(--p) 14%, #fff); color: var(--p); }
