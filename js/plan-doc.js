@@ -117,7 +117,8 @@ const money = (n) => `$${n.toLocaleString("en-AU", { minimumFractionDigits: n % 
 // pick = { lines: Set(treatment ids to include), message }   d = the design (plan_settings/document)
 // The copy is d.blocks, top to bottom: title, text, the personal message, concerns, treatments, timeline.
 // parts: true returns the plan's pieces on their own ({ treatments, concerns, timeline, message }), for a Form Builder design
-export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff, wf = cleanWorkflow({}), parts = false }) {
+export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff, wf = cleanWorkflow({}), parts = false,
+  descOf = (c, l) => l.description || "" }) {
   const colour = HEX.test(d.colour || "") ? d.colour : PLAN_DOC_DEFAULTS.colour;
   const base = Number(d.fontSize) || 13;
   const px = { s: base - 2, m: base, l: base + 3, xl: base + 8 };
@@ -127,19 +128,27 @@ export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staf
   const items = docItems(master, wf).filter((x) => pick.lines.has(x.l.id));
   const ltOf = (x) => track.get(x.c.id).lines.get(x.l.id);
   const todayText = new Date().toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" });
-  const cell = "padding:9px 10px;border-top:1px solid #f1f5f9;vertical-align:top";
+
   const small = `font-size:${base - 1}px;color:#64748b`;
   // A Form Builder design has its own headings
   const h2 = (t) => (parts ? "" : `<h2 style="margin:16px 0 8px;font-size:${base + 2}px;color:#0f172a">${t}</h2>`);
 
+  // One treatment as a table row: Treatment | Frequency | Description | Quote
+  const td = `padding:8px 10px;border:1px solid #e2e8f0;vertical-align:top`;
+  const th = `padding:7px 10px;border:1px solid #e2e8f0;background:#f8fafc;text-align:left;font-size:${base - 1}px;color:#475569`;
+  const headHtml = `<tr><th style="${th};width:28%">Treatment</th><th style="${th};width:24%">Frequency</th>
+    <th style="${th}">Description</th>${d.showPrices ? `<th style="${th};width:15%;text-align:right">Quote</th>` : ""}</tr>`;
   const rowHtml = (x) => {
     const lt = ltOf(x);
+    const prog = progressText(lt);
+    const what = [labelOf(x.c.key).label, x.l.area || x.c.area].filter(Boolean).join(" · ");
+    const desc = descOf(x.c, x.l);
+    // With a description: the concern and area sit under the name. Without one: they are the description.
     return `<tr>
-      <td style="${cell};padding-left:0;width:46%"><strong style="color:#0f172a">${esc(x.l.treatment)}</strong>
-        <div style="${small}">${esc([labelOf(x.c.key).label, x.l.area || x.c.area].filter(Boolean).join(" · "))}</div>
-        <div style="${small}">${esc(scheduleText(x.l, lt))}</div></td>
-      <td style="${cell};color:#334155">${esc(progressText(lt))}</td>
-      ${d.showPrices ? `<td style="${cell};padding-right:0;text-align:right;white-space:nowrap;color:#0f172a">${esc(quoteOf(x.c, x.l))}</td>` : ""}</tr>`;
+      <td style="${td}"><strong style="color:#0f172a">${esc(x.l.treatment)}</strong>${desc && what ? `<div style="${small}">${esc(what)}</div>` : ""}</td>
+      <td style="${td};color:#334155">${esc(scheduleText(x.l, lt))}${prog ? `<div style="${small}">${esc(prog)}</div>` : ""}</td>
+      <td style="${td};color:#334155">${esc(desc || what)}</td>
+      ${d.showPrices ? `<td style="${td};text-align:right;white-space:nowrap;color:#0f172a">${esc(quoteOf(x.c, x.l))}</td>` : ""}</tr>`;
   };
 
   // Under each priority, in the order to book them, with a quote total (when switched on in the plan workflow)
@@ -156,7 +165,7 @@ export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staf
         ${many ? `<div style="margin:0 0 4px;padding-left:10px;border-left:4px solid ${colour}">
           <div style="font-size:${base + 2}px;font-weight:bold;color:#0f172a">${esc(shortPhase(ph.name))}</div>
           ${ph.note ? `<div style="${small}">${esc(ph.note)}</div>` : ""}</div>` : ""}
-        <table style="width:100%;border-collapse:collapse;font-size:${base}px">${list.map(rowHtml).join("")}</table>
+        <table style="width:100%;border-collapse:collapse;font-size:${base}px;margin-top:6px">${headHtml}${list.map(rowHtml).join("")}</table>
         ${total ? `<div style="padding-top:6px;border-top:1px solid #e2e8f0;text-align:right;font-size:${base - 1}px;color:#334155">Quoted${
           many ? ` for ${esc(shortPhase(ph.name))}` : ""}: <strong>${esc(money(total))}</strong></div>` : ""}
       </div>`;
@@ -242,9 +251,11 @@ function loadPdfLib() {
   });
 }
 
-async function pdfWorker(html, fileName) {
+// Returns a function that starts the PDF job. (The job itself can't be returned from an async function:
+// it behaves like a promise, so it would be unwrapped and lost.)
+async function pdfJob(html, fileName) {
   const h2p = await loadPdfLib();
-  return h2p().set({
+  return () => h2p().set({
     margin: [12, 12, 14, 12],
     filename: fileName,
     image: { type: "jpeg", quality: 0.95 },
@@ -255,8 +266,9 @@ async function pdfWorker(html, fileName) {
 }
 
 async function pdfBase64(html, fileName) {
-  const uri = await (await pdfWorker(html, fileName)).outputPdf("datauristring");
-  const i = uri.indexOf("base64,");
+  const start = await pdfJob(html, fileName);
+  const uri = await start().outputPdf("datauristring");
+  const i = String(uri || "").indexOf("base64,");
   if (i < 0) throw new Error("Couldn't make the PDF.");
   return uri.slice(i + 7);
 }
@@ -275,7 +287,7 @@ const SEND_ERRORS = {
 };
 
 // labelOf(key) → { label, colour } (the patient-facing concern names)
-export async function openPlanDocument({ patient, master, track, labelOf, staff, onSent, workflow }) {
+export async function openPlanDocument({ patient, master, track, labelOf, staff, onSent, workflow, descOf }) {
   const wf = workflow || cleanWorkflow({});
   let d;
   let lh = null;
@@ -334,7 +346,7 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
   }
   // The form's page, with the plan's parts put where their tags are
   function formHtml() {
-    const p = planDocHtml({ patient, master, track, labelOf, d: { ...d, fontSize: 14 }, lh, pick, staff, wf, parts: true });
+    const p = planDocHtml({ patient, master, track, labelOf, d: { ...d, fontSize: 14 }, lh, pick, staff, wf, parts: true, descOf });
     let inner = tpl.inner;
     let placed = false;
     Object.entries(p).forEach(([name, block]) => {
@@ -346,7 +358,7 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
     return `<style>${tpl.css}</style><div class="pdfdoc">${inner}</div>`;
   }
   await loadTpl();
-  const html = () => (tpl ? formHtml() : planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff, wf }));
+  const html = () => (tpl ? formHtml() : planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff, wf, descOf }));
   const lastSent = sends.map((s) => `${s.kind === "print" ? "Printed" : `Emailed to ${s.to}`} ${
     s.sentAt ? new Date(s.sentAt).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : ""}${s.sentBy ? ` by ${s.sentBy}` : ""}`);
 
@@ -383,7 +395,7 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
               <a class="lh-btn" data-role="tpledit" target="_blank" rel="noopener">Edit in Form Builder</a>
               <button type="button" class="lh-btn" data-tplreload>Reload the design</button>
             </div>
-            <p class="lh-error" data-role="tplmsg"></p>
+            <p class="fe-note fe-bad" data-role="tplmsg"></p>
           </div>
           <div class="pd-d3">
             <label class="lh-field"><span class="lh-label">Font</span>
@@ -600,7 +612,7 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
     if (act === "email-cancel") { emailBox.hidden = true; return; }
 
     if (act === "download") {
-      run(b, "Making the PDF…", async () => { await (await pdfWorker(html(), fileName)).save(); });
+      run(b, "Making the PDF…", async () => { const start = await pdfJob(html(), fileName); await start().save(); });
     } else if (act === "print") {
       run(b, "Sending…", async () => {
         await deliverPlanDoc({ patientId: patient.id, kind: "print", pdf: await pdfBase64(html(), fileName), fileName });

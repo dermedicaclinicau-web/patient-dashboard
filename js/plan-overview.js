@@ -751,6 +751,9 @@ export function createPlanOverview(el, ctx) {
   function openDoc() {
     openPlanDocument({
       patient, master: st.master, track: compute(), labelOf: con, staff, workflow: st.wf,
+      // The treatment's own description, otherwise the clinic's one for a treatment of that name
+      descOf: (c, l) => l.description || ((st.settings.treatments || []).find((t) =>
+        t.concern === c.key && t.name.trim().toLowerCase() === l.treatment.trim().toLowerCase()) || {}).description || "",
       onSent: async (kind) => {
         if (kind === "email" && st.master.status === "proposed") await setPlanStatus("sent");
       },
@@ -1287,7 +1290,7 @@ export function createPlanOverview(el, ctx) {
     const isNew = !l;
     const today = dateKeyOf(new Date());
     const x = l || { treatment: "", pattern: "course", sessions: 3, intervalWeeks: 4, startMonth: "", countFrom: "", services: [],
-      overrides: {}, area: "", quote: "", ...defaults };
+      overrides: {}, area: "", quote: "", description: "", ...defaults };
     const many = st.wf.phases.length > 1;
     const inPlan = m ? m.concerns : [];
     const others = st.settings.concerns.filter((k) => !k.hidden && !inPlan.some((y) => y.key === k.name));
@@ -1328,6 +1331,8 @@ export function createPlanOverview(el, ctx) {
         <label class="lh-field"><span class="lh-label">Quote (optional)</span>
           <input name="quote" maxlength="200" value="${esc(quote0)}" placeholder="e.g. $899 per session" /></label>
       </div>
+      <label class="lh-field"><span class="lh-label">Description for the patient (optional)</span>
+        <textarea name="desc" rows="2" maxlength="300" placeholder="Empty: the clinic's description for this treatment">${esc(x.description || "")}</textarea></label>
       <div class="inv-two">
         <label class="lh-field"><span class="lh-label">Start month</span>
           <input name="start" type="month" value="${esc(x.startMonth)}" placeholder="2026-11" /></label>
@@ -1393,6 +1398,7 @@ export function createPlanOverview(el, ctx) {
         });
       }
       f.quote.value = t.quote;
+      f.desc.value = t.description || "";
       f.area.value = t.areas.length === 1 ? t.areas[0] : "";   // several areas: choose from the suggestions
     });
     find.addEventListener("input", () => {
@@ -1443,7 +1449,7 @@ export function createPlanOverview(el, ctx) {
       const area = f.area.value.trim();
       const quote = f.quote.value.trim();
       const fields = {
-        treatment, ...freq.read(), area, quote, startMonth: start, countFrom: f.from.value,
+        treatment, ...freq.read(), area, quote, description: f.desc.value.trim(), startMonth: start, countFrom: f.from.value,
         services: [...form.querySelectorAll('[name="svc"]:checked')].map((y) => y.value),
       };
       const newConcernId = inPlan.some((y) => y.id === key) ? `${key}#${newId()}` : key;

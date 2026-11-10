@@ -82,6 +82,7 @@ export function cleanTreatment(t = {}) {
     services: list(t.services, 150, 20),   // appointment services that count as this treatment
     areas: list(t.areas, 60, 12),          // the areas it's offered for
     quote: clip(t.quote, 200),             // e.g. "$899 per session"
+    description: clip(t.description, 300), // what it does, in the patient's words (shown on their copy)
     pattern,
     sessions: pattern === "course" ? intIn(t.sessions, 1, 52) : 0,
     intervalWeeks: pattern === "once" ? 0 : intIn(t.intervalWeeks, 0, 520),

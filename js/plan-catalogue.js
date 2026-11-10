@@ -185,7 +185,7 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
     const isNew = !t;
     if (isNew && st.treatments.length >= MAX_TREATMENTS) { showToast(`You can have up to ${MAX_TREATMENTS} treatments in total.`); return; }
     const x = t ? { ...t, services: [...t.services], areas: [...t.areas] }
-      : { id: newId(), concern: c.name, name: "", services: [], areas: [], quote: "", pattern: "course", sessions: 3, intervalWeeks: 4 };
+      : { id: newId(), concern: c.name, name: "", services: [], areas: [], quote: "", description: "", pattern: "course", sessions: 3, intervalWeeks: 4 };
     const uniq = (arr) => [...new Map(arr.map((s) => [serviceKey(s), s])).values()];
     const byName = (a, b) => a.localeCompare(b, "en-AU");
     const mine = uniq(st.services.filter((r) => r.concerns.includes(c.name)).map((r) => r.service)).sort(byName);
@@ -205,6 +205,9 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
       ${freqHtml(x)}
       <label class="lh-field"><span class="lh-label">Quote</span>
         <input name="quote" maxlength="200" value="${esc(x.quote)}" placeholder="e.g. $899 per session" /></label>
+      <label class="lh-field"><span class="lh-label">Description for the patient (optional)</span>
+        <textarea name="desc" rows="2" maxlength="300" placeholder="e.g. Stimulates your own collagen to firm and smooth the skin">${esc(x.description || "")}</textarea>
+        <small class="fe-note">Shown in the Description column on the patient's copy of their plan.</small></label>
       <div class="lh-field"><span class="lh-label">Areas it's offered for</span>
         <div class="pcg-chips" data-role="areas"></div>
         <div class="pcg-addrow">
@@ -296,7 +299,7 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
       const next = {
         id: x.id, concern: c.name, name,
         services: [...form.querySelectorAll('[name="svc"]:checked')].map((b) => b.value).slice(0, 20),
-        areas: x.areas, quote: f.quote.value.trim(), ...freq.read(),
+        areas: x.areas, quote: f.quote.value.trim(), description: f.desc.value.trim(), ...freq.read(),
         hidden: false,
       };
       const i = st.treatments.findIndex((y) => y.id === x.id);
