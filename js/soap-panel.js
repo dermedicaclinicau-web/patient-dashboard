@@ -10,7 +10,7 @@ import {
 import { freqHtml, mountFreq } from "./plan-frequency.js";
 import { fetchTranscriptRecords, parseRecordDate } from "./transcripts.js";
 import {
-  emailItemsFrom, emailCardHtml, openEmailComposer, emailItemsToText, emailItemsToSidecar,
+  emailItemsFrom, emailCardHtml, openEmailComposer, openEmailInTab, emailItemsToText, emailItemsToSidecar,
 } from "./email-composer.js";
 
 import { callApi } from "./appointments.js";
@@ -183,6 +183,18 @@ function ensureDom() {
   window.addEventListener("beforeunload", (e) => {
     if (hasUnsavedNotes()) { e.preventDefault(); e.returnValue = ""; }
   });
+
+  // An email sent from its own tab: mark those treatments as emailed here too
+  try {
+    const ch = new BroadcastChannel("dm-notes");
+    ch.onmessage = (e) => {
+      const m = e.data;
+      if (!m || m.type !== "email-sent" || !m.entry || !current || !current.data || current.id !== m.id) return;
+      const log = Array.isArray(current.data["Treatment Emails Sent"]) ? current.data["Treatment Emails Sent"] : [];
+      current.data["Treatment Emails Sent"] = [...log, m.entry];
+      rerenderEmail();
+    };
+  } catch { /* older browsers: shows after a refresh */ }
 }
 
 function setMode(next) {
@@ -893,6 +905,8 @@ function draftEmail() {
   if (!picked.length) { showToast("Tick at least one treatment"); return; }
 
   const id = current.id;
+  // Its own tab, so staff can carry on here while it sends. Pop-ups blocked: the overlay as before.
+  if (openEmailInTab({ items: picked, recordId: id })) return;
   openEmailComposer({
     items: picked,
     recordId: id,

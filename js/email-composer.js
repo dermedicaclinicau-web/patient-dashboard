@@ -1,5 +1,6 @@
 import { db } from "./firebase-config.js";
-import { collection, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { collection, getDocs, doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { setTabTitle } from "./tab-icon.js";
 import { getPatient } from "./patients.js";
 import { callApi } from "./appointments.js";
 import { escapeHtml, showToast } from "./utils.js";
@@ -200,29 +201,15 @@ function htmlForSending(el) {
   return copy.innerHTML;
 }
 
-/* ===================== The composer overlay ===================== */
+/* ===================== The composer (overlay, or its own tab) ===================== */
 
-let dlg = null;
-let ctx = null;
+const SEND_LABEL = `${I.send}Send Email Now`;
 
-function ensureDialog() {
-  if (dlg) return;
-  dlg = document.createElement("dialog");
-  dlg.className = "em-dialog";
-  dlg.setAttribute("aria-label", "Preview email");
-  document.body.appendChild(dlg);
-
-  dlg.addEventListener("click", (e) => { if (e.target.closest("[data-em='close']")) dlg.close(); });
-  dlg.addEventListener("submit", onSubmit);
-  dlg.addEventListener("close", () => { dlg.innerHTML = ""; ctx = null; });
-}
-
-export async function openEmailComposer({ items, recordId, record, staff, onSent }) {
-  ensureDialog();
-  const myCtx = { items, recordId, onSent };
-  ctx = myCtx;
-  dlg.innerHTML = `<div class="em-loading"><div class="spinner"></div><p>Preparing email…</p></div>`;
-  if (!dlg.open) dlg.showModal();
+// Draws the composer into host and sends from it.
+// opts: { items, recordId, record, staff, alive(), close(), onSent(entry, to), busy(on) }
+async function fillComposer(host, opts) {
+  const { items, record, staff, alive } = opts;
+  host.innerHTML = `<div class="em-loading"><div class="spinner"></div><p>Preparing email…</p></div>`;
 
   const patientKey = str(record["Patient Doc ID"]) || str(record["Patient ID"]);
   const [patient, links, task] = await Promise.all([
@@ -230,7 +217,7 @@ export async function openEmailComposer({ items, recordId, record, staff, onSent
     loadLinks(),
     treatmentEmailTemplate(),
   ]);
-  if (ctx !== myCtx) return; // closed meanwhile
+  if (!alive()) return; // closed meanwhile
 
   const email = patient ? str(patient.email) : "";
   const firstName = (patient && str(patient.firstName)) || str(record["Patient Name"]).split(/\s+/)[0] || "";
@@ -252,11 +239,11 @@ export async function openEmailComposer({ items, recordId, record, staff, onSent
       console.warn("Treatment Info template failed, using the built-in email:", err);
     }
   }
-  if (ctx !== myCtx) return;
+  if (!alive()) return;
   const designed = !!html;
   if (!designed) html = buildEmailHtml({ firstName, items, links, staffName: staff ? staff.name : "" });
 
-  dlg.innerHTML = `
+  host.innerHTML = `
     <form class="em-form" novalidate>
       <header class="em-head">
         ${I.mailOpen}<h2>Preview Email</h2>
@@ -282,28 +269,30 @@ export async function openEmailComposer({ items, recordId, record, staff, onSent
 
       <footer class="em-foot">
         <button type="button" class="btn-ghost" data-em="close">Cancel</button>
-        <button type="submit" class="em-send">${I.send}Send Email Now</button>
+        <button type="submit" class="em-send">${SEND_LABEL}</button>
       </footer>
     </form>`;
 
-  const preview = dlg.querySelector(".em-preview");
+  const preview = host.querySelector(".em-preview");
   if (designed) showTreatmentEmail(preview, html, logo);   // logo and pictures shown on screen
   else preview.innerHTML = html;
 
-  const toInput = dlg.querySelector("input[name='to']");
-  (email ? dlg.querySelector(".em-send") : toInput).focus();
+  host.querySelectorAll("[data-em='close']").forEach((b) => b.addEventListener("click", () => opts.close()));
+  host.querySelector("form").addEventListener("submit", (e) => sendFrom(e, host, opts));
+
+  const toInput = host.querySelector("input[name='to']");
+  (email ? host.querySelector(".em-send") : toInput).focus();
 }
 
-async function onSubmit(e) {
+async function sendFrom(e, host, opts) {
   e.preventDefault();
-  if (!ctx) return;
-  const myCtx = ctx;
   const form = e.target;
+  const btn = host.querySelector(".em-send");
+  if (!btn || btn.disabled) return;
   const to = form.elements.to.value.trim();
   const subject = form.elements.subject.value.trim();
-  const preview = dlg.querySelector(".em-preview");
-  const errEl = dlg.querySelector(".em-error");
-  const btn = dlg.querySelector(".em-send");
+  const preview = host.querySelector(".em-preview");
+  const errEl = host.querySelector(".em-error");
 
   if (!/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(to)) {
     errEl.textContent = "Please enter a valid email address.";
@@ -318,19 +307,19 @@ async function onSubmit(e) {
   btn.disabled = true;
   btn.innerHTML = "Sending…";
   errEl.textContent = "";
+  if (opts.busy) opts.busy(true);
 
   try {
     const res = await callApi({
       action: "sendTreatmentEmail",
-      recordId: myCtx.recordId,
+      recordId: opts.recordId,
       to,
       subject,
       html: htmlForSending(preview),
-      treatments: myCtx.items.map((i) => i.name),
+      treatments: opts.items.map((i) => i.name),
     });
     showToast(`Email sent to ${to}`);
-    if (myCtx.onSent && res && res.entry) myCtx.onSent(res.entry);
-    dlg.close();
+    if (opts.onSent) opts.onSent(res && res.entry, to);
   } catch (err) {
     console.error("Sending the email failed:", err);
     const messages = {
@@ -340,10 +329,144 @@ async function onSubmit(e) {
       NOT_FOUND: "This consultation record no longer exists.",
       UNAUTHORIZED: "Your session has expired. Please log in again.",
     };
-    errEl.textContent = messages[err.code] || "Couldn't send the email. Please try again.";
+    if (errEl.isConnected) errEl.textContent = messages[err.code] || "Couldn't send the email. Please try again.";
     btn.disabled = false;
-    btn.innerHTML = `${I.send}Send Email Now`;
+    btn.innerHTML = SEND_LABEL;
+  } finally {
+    if (opts.busy) opts.busy(false);
   }
+}
+
+/* ----- The overlay (used when pop-ups are blocked) ----- */
+
+let dlg = null;
+let ctx = null;
+
+function ensureDialog() {
+  if (dlg) return;
+  dlg = document.createElement("dialog");
+  dlg.className = "em-dialog";
+  dlg.setAttribute("aria-label", "Preview email");
+  document.body.appendChild(dlg);
+  dlg.addEventListener("close", () => { dlg.innerHTML = ""; ctx = null; });
+}
+
+export async function openEmailComposer({ items, recordId, record, staff, onSent }) {
+  ensureDialog();
+  const myCtx = {};
+  ctx = myCtx;
+  if (!dlg.open) dlg.showModal();
+  await fillComposer(dlg, {
+    items, recordId, record, staff,
+    alive: () => ctx === myCtx,
+    close: () => dlg.close(),
+    onSent: (entry) => { if (onSent && entry) onSent(entry); dlg.close(); },
+  });
+}
+
+/* ----- Its own tab: #/email/<recordId>/<token> ----- */
+
+const HAND_KEY = "dm-email:";
+const HAND_TTL = 24 * 3600 * 1000;   // drafts never sent are tidied away after a day
+
+// From the notes: hands the ticked treatments to a new tab. false = pop-ups blocked (use the overlay).
+export function openEmailInTab({ items, recordId }) {
+  if (!recordId || !items || !items.length) return false;
+  const token = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  const key = HAND_KEY + token;
+  try {
+    Object.keys(localStorage).forEach((k) => {
+      if (!k.startsWith(HAND_KEY)) return;
+      try {
+        const at = Number((JSON.parse(localStorage.getItem(k)) || {}).at) || 0;
+        if (Date.now() - at > HAND_TTL) localStorage.removeItem(k);
+      } catch { localStorage.removeItem(k); }
+    });
+    localStorage.setItem(key, JSON.stringify({ recordId, items, at: Date.now() }));
+  } catch { return false; }   // storage blocked or full: the overlay instead
+
+  const url = `${location.href.split("#")[0]}#/email/${encodeURIComponent(recordId)}/${token}`;
+  let w = null;
+  try { w = window.open(url, "_blank"); } catch { w = null; }
+  if (!w) { try { localStorage.removeItem(key); } catch { /* ignore */ } return false; }
+  return true;
+}
+
+// The page in the new tab
+export async function mountEmailPage(container, param = "", { staff = null } = {}) {
+  const root = document.createElement("section");
+  root.className = "page em-page";
+  root.innerHTML = '<div class="em-sheet"></div>';
+  container.replaceChildren(root);
+  const host = root.querySelector(".em-sheet");
+
+  const [recordId = "", token = ""] = String(param || "").split("/");
+  const key = HAND_KEY + token;
+  const closeTab = () => {
+    window.close();   // works for tabs the portal opened
+    setTimeout(() => { if (!window.closed) showToast("You can close this tab now."); }, 300);
+  };
+  const state = (title, text) => {
+    host.innerHTML = `<div class="em-state"><strong>${escapeHtml(title)}</strong><p>${escapeHtml(text)}</p>
+      <button type="button" class="btn-ghost" data-em="close-tab">Close this tab</button></div>`;
+  };
+  root.addEventListener("click", (e) => { if (e.target.closest("[data-em='close-tab']")) closeTab(); });
+
+  let hand = null;
+  try { hand = JSON.parse(localStorage.getItem(key) || "null"); } catch { hand = null; }
+  if (!token || !hand || hand.recordId !== recordId || !Array.isArray(hand.items) || !hand.items.length) {
+    state("This email draft isn't available",
+      "It may have been sent already. Go back to the consultation notes and press Draft Email for Selected again.");
+    return;
+  }
+
+  setTabTitle("Email · Preparing…");
+  let record = null;
+  try {
+    const snap = await getDoc(doc(db, "appointment_transcripts", recordId));
+    if (!snap.exists()) throw Object.assign(new Error("Record not found"), { code: "not-found" });
+    record = snap.data();
+  } catch (err) {
+    if (!root.isConnected) return;
+    console.error("Email page: record not loaded:", err);
+    state("Couldn't open this email", err.code === "permission-denied" ? "You don't have permission to view these notes."
+      : err.code === "not-found" ? "This consultation record no longer exists." : "Check your connection and refresh this tab.");
+    return;
+  }
+  if (!root.isConnected) return;
+  const name = str(record["Patient Name"]) || "Patient";
+  setTabTitle(`Email · ${name}`);
+
+  // Closing the tab while it's sending: ask first
+  let sending = false;
+  const guard = (e) => { if (sending) { e.preventDefault(); e.returnValue = ""; } };
+  window.addEventListener("beforeunload", guard);
+  const onHash = () => setTimeout(() => {
+    if (root.isConnected) return;
+    window.removeEventListener("beforeunload", guard);
+    window.removeEventListener("hashchange", onHash);
+  }, 0);
+  window.addEventListener("hashchange", onHash);
+
+  await fillComposer(host, {
+    items: hand.items, recordId, record, staff,
+    alive: () => root.isConnected,
+    close: closeTab,
+    busy: (on) => { sending = on; setTabTitle(on ? `Sending… · ${name}` : `Email · ${name}`); },
+    onSent: (entry, to) => {
+      try { localStorage.removeItem(key); } catch { /* ignore */ }
+      // The notes tab marks these treatments as emailed
+      if (entry) {
+        try {
+          const ch = new BroadcastChannel("dm-notes");
+          ch.postMessage({ type: "email-sent", id: recordId, entry });
+          ch.close();
+        } catch { /* older browsers: the notes show it after a refresh */ }
+      }
+      setTabTitle(`✓ Emailed · ${name}`);
+      if (root.isConnected) state("Email sent", `Sent to ${to}. The consultation notes show it as emailed. You can close this tab.`);
+    },
+  });
 }
 
 /* ===================== Saving an edited list ===================== */

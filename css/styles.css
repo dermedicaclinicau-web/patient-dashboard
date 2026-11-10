@@ -13305,3 +13305,12 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 .sp-name:hover, .sp-name:focus-visible { color: #BA7517; border-bottom-color: currentColor; outline: none; }
 .sp-name::after { content: "↗"; font-size: .6em; margin-left: 5px; vertical-align: super; opacity: 0; transition: opacity .15s; }
 .sp-name:hover::after, .sp-name:focus-visible::after { opacity: 1; }
+
+/* Email preview in its own tab */
+.em-page { max-width: 860px; margin: 0 auto; }
+.em-sheet { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 20px 24px; box-shadow: 0 1px 3px rgba(15,23,42,.06); }
+.em-page .em-preview { max-height: none; min-height: 360px; }
+.em-state { display: grid; gap: 8px; justify-items: start; padding: 12px 0; }
+.em-state strong { font-size: 17px; }
+.em-state p { margin: 0 0 6px; color: #64748b; }
+@media (max-width: 560px) { .em-sheet { padding: 14px; border-radius: 10px; } }
