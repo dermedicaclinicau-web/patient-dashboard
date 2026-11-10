@@ -1,7 +1,7 @@
 // System configuration → Treatment plans: concern colours/names, services → concerns + downtime, patient copy (Admins).
 import { listServicesSeen, serviceKey } from "./inventory-api.js";
 import {
-  getPlanSettings, savePlanConcerns, saveServiceConcerns, suggestServiceConcerns,
+  getPlanSettings, saveServiceConcerns, suggestServiceConcerns,
   getPlanDocSettings, savePlanDocSettings, PLAN_DOC_DEFAULTS,
 } from "./plan-api.js";
 import { showToast } from "./utils.js";
@@ -44,18 +44,6 @@ export async function renderPlanSettings(body, { staff } = {}) {
   const chip = (name) => `<span class="ps-chip" style="--c:${esc(con(name).colour)}">${esc(con(name).label)}</span>`;
 
   body.innerHTML = `
-    <section class="tb-card">
-      <h4>Concerns</h4>
-      <p class="muted ps-note">The 9 concerns every treatment plan is organised by. Change a colour or the name staff and patients see.
-        The recorder always uses the name in grey, so plans keep matching.</p>
-      <div class="ps-concerns">${cfg.concerns.map((c, i) => `
-        <div class="ps-con">
-          <input type="color" data-cc="${i}" value="${esc(c.colour)}" aria-label="${esc(c.name)} colour" />
-          <span><input class="fe-input" data-cl="${i}" maxlength="60" value="${esc(c.label)}" aria-label="${esc(c.name)} name" />
-            <small>${esc(c.name)}</small></span>
-        </div>`).join("")}</div>
-      <div class="lh-actions"><button type="button" class="lh-btn is-primary" data-ps="save-concerns">Save concerns</button></div>
-    </section>
 
     <section class="tb-card">
       <h4>Services and concerns</h4>
@@ -117,8 +105,19 @@ export async function renderPlanSettings(body, { staff } = {}) {
   }
   drawList();
 
+  // The Concerns and treatments card above changed a concern: the chips and tick lists here follow
+  const onConcerns = (e) => {
+    if (!body.isConnected) { window.removeEventListener("plan-concerns-changed", onConcerns); return; }
+    cfg.concerns = (e.detail || []).map((c) => ({ ...c }));
+    const names = new Set(cfg.concerns.map((c) => c.name));
+    rows.forEach((r) => { r.concerns = r.concerns.filter((n) => names.has(n)); });   // a deleted concern comes off its services
+    drawList();
+  };
+  window.addEventListener("plan-concerns-changed", onConcerns);
+
   async function persist() {
     await saveServiceConcerns([...rows.values()], staff);
+    window.dispatchEvent(new CustomEvent("plan-services-changed", { detail: [...rows.values()] }));
   }
 
   /* ---------- One service ---------- */
@@ -131,7 +130,7 @@ export async function renderPlanSettings(body, { staff } = {}) {
       <form class="lh-form" novalidate>
         <div class="lh-dialog-head"><h3>${esc(r.service)}</h3>
           <p>Tick every concern this service treats. A visit for it can then complete a step in that concern of a patient's plan.</p></div>
-        <div class="ps-ticks">${cfg.concerns.map((c) => `
+        <div class="ps-ticks">${cfg.concerns.filter((c) => !c.hidden || r.concerns.includes(c.name)).map((c) => `
           <label class="fe-check"><input type="checkbox" name="con" value="${esc(c.name)}"${r.concerns.includes(c.name) ? " checked" : ""} />
             <i class="ps-dot" style="--c:${esc(c.colour)}"></i> ${esc(c.label)}</label>`).join("")}</div>
         <label class="fe-check"><input type="checkbox" name="none"${r.notTreatment ? " checked" : ""} /> Not a treatment (consultation, review, follow-up)</label>
@@ -294,25 +293,6 @@ export async function renderPlanSettings(body, { staff } = {}) {
         sd.disabled = false;
       }
       return;
-    }
-    const sv = e.target.closest('[data-ps="save-concerns"]');
-    if (!sv) return;
-    const next = cfg.concerns.map((c, i) => ({
-      ...c,
-      colour: body.querySelector(`[data-cc="${i}"]`).value,
-      label: body.querySelector(`[data-cl="${i}"]`).value.trim() || c.name,
-    }));
-    sv.disabled = true;
-    try {
-      await savePlanConcerns(next, staff);
-      cfg.concerns = next;
-      drawList();
-      showToast("Concerns saved");
-    } catch (ex) {
-      console.error("Save concerns failed:", ex);
-      showToast(errText(ex, "Couldn't save. Try again."));
-    } finally {
-      sv.disabled = false;
     }
   });
 }
