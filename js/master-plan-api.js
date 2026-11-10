@@ -40,6 +40,16 @@ export function monthLabel(k) {
   return m ? new Date(+m[1], +m[2] - 1, 1).toLocaleDateString("en-AU", { month: "short", year: "numeric" }) : "";
 }
 
+// "10/11/26 at 16:02"
+export function stampText(d) {
+  if (!(d instanceof Date) || isNaN(d)) return "";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${String(d.getFullYear()).slice(-2)} at ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+// "Saved 10/11/26 at 16:02 · Dr Joanna Teh" ("" until the plan has been saved)
+export const savedLine = (m) => (m && m.updatedAt
+  ? `Saved ${stampText(m.updatedAt)}${m.updatedBy ? ` · ${m.updatedBy}` : ""}` : "");
+
 // "Course of 3, 1 every 4 weeks" · "1 every 3 months" · "Once"
 export function patternText(l) {
   return scheduleText(l) || l.frequency || "";
@@ -293,6 +303,8 @@ export async function saveMasterPlan(patient, next, meta, staff) {
     const snap = await tx.get(ref);
     const cur = snap.exists() ? snap.data() : null;
     const curV = cur ? Number(cur.version) || 0 : 0;
+    // This exact save already went through (a retry after a dropped connection, or a second click): nothing more to do
+    if (meta.opId && cur && cur.lastOpId === meta.opId) return curV;
     if (meta.expectedVersion !== undefined && meta.expectedVersion !== curV) {
       throw new Error("Someone else has just changed this plan. Close this and open it again to see their changes.");
     }
@@ -306,6 +318,7 @@ export async function saveMasterPlan(patient, next, meta, staff) {
       events: (next.events || []).map(cleanEvent).filter((e) => e.name),
       sources: [...new Set([...((cur && cur.sources) || []), meta.recordId].filter(Boolean))].slice(-100),
       version: v,
+      lastOpId: clip(meta.opId, 40),
       createdAt: (cur && cur.createdAt) || serverTimestamp(),
       createdBy: cur ? cur.createdBy || "" : by,
       createdByUid: cur ? cur.createdByUid || "" : me,

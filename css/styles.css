@@ -13314,3 +13314,8 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 .em-state strong { font-size: 17px; }
 .em-state p { margin: 0 0 6px; color: #64748b; }
 @media (max-width: 560px) { .em-sheet { padding: 14px; border-radius: 10px; } }
+
+.pt-saved { font-size: 12px; color: #64748b; white-space: nowrap; transition: color .3s, background-color .3s; padding: 2px 6px; border-radius: 6px; }
+.pt-saved.is-fresh { color: #0f766e; background: #ecfdf5; font-weight: 600; }
+.mp-saved { margin: 4px 0 0; font-size: 12px; color: #64748b; }
+.mp-dlg .lh-error .lh-btn { margin-left: 8px; vertical-align: middle; }

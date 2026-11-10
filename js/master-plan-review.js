@@ -1,7 +1,7 @@
 // "Create / update the master plan" from one consultation: review each concern, tick what to apply.
 import {
   getMasterPlan, planChanges, applyChanges, saveMasterPlan, patternText, monthLabel, matchServices,
-  cleanEvent, isTreatmentEvent, normTx,
+  cleanEvent, isTreatmentEvent, normTx, newId, stampText, savedLine,
 } from "./master-plan-api.js";
 import { getPlanSettings, getPlanWorkflow, cleanWorkflow } from "./plan-api.js";
 import { CATEGORIES } from "./plan-editor.js";
@@ -73,7 +73,8 @@ export async function openPlanReview({ patient, consult, recordId = "", recordDa
       <div class="lh-dialog-head">
         <h3>${master ? "Update the master plan" : "Create the master plan"}</h3>
         <p>${esc(patient.name || "Patient")}${when ? ` · from the consultation on ${esc(when)}` : ""}${
-          master ? ` · currently version ${master.version}` : ""}. Tick what to apply. Anything already tracked stays as it is.</p></div>
+          master ? ` · currently version ${master.version}` : ""}. Tick what to apply. Anything already tracked stays as it is.</p>
+        ${master && master.updatedAt ? `<p class="mp-saved">Last ${esc(savedLine(master).charAt(0).toLowerCase() + savedLine(master).slice(1))}</p>` : ""}</div>
       <div class="mp-items">${items.map((it, i) => it.kind === "same" ? `
         <div class="mp-row is-same"><span class="mp-tick"></span><div class="mp-main">
           <span class="mp-top">${chip(it.key)} <span class="mp-badge is-same">No change</span></span></div></div>` : `
@@ -113,6 +114,14 @@ export async function openPlanReview({ patient, consult, recordId = "", recordDa
 
   const form = dlg.querySelector("form");
   const err = dlg.querySelector(".lh-error");
+  const opId = newId();   // this dialog's save: sending it twice can't make a conflict
+  // Open the dialog again with the plan as it is now
+  err.addEventListener("click", (e) => {
+    if (!e.target.closest('[data-act="reload"]')) return;
+    dlg.close();
+    if (onDone) onDone();
+    openPlanReview({ patient, consult, recordId, recordDate, staff, onDone });
+  });
 
   /* ---------- Patient events: tick, edit, remove, add ---------- */
 
@@ -275,19 +284,30 @@ export async function openPlanReview({ patient, consult, recordId = "", recordDa
     try {
       await saveMasterPlan(patient, applyChanges(master, picks, evPicks), {
         action: master ? "Updated from a consultation" : "Created from a consultation",
-        summary, recordId, expectedVersion: master ? master.version : 0,
+        summary, recordId, expectedVersion: master ? master.version : 0, opId,
       }, staff);
       dlg.close();
-      showToast(master ? "Master plan updated" : "Master plan created");
+      showToast(`${master ? "Master plan updated" : "Master plan created"} · saved ${stampText(new Date())}`);
       if (onDone) onDone();
     } catch (ex) {
       console.error("Save master plan failed:", ex);
+      btn.disabled = false;
+      btn.textContent = master ? "Update master plan" : "Create master plan";
+      err.hidden = false;
+      if (ex && /Someone else/.test(ex.message || "")) {
+        // Who saved it, and when, then one click to start again from their version
+        let now = null;
+        try { now = await getMasterPlan(patient.id); } catch { now = null; }
+        const who = now && now.updatedAt
+          ? `${now.updatedBy || "Someone"} saved it ${stampText(now.updatedAt)}` : "Someone has just saved it";
+        const inIt = now && recordId && now.sources.includes(recordId) ? ", and this consultation is already in it" : "";
+        err.innerHTML = `The plan changed after this window opened: ${esc(who)}${inIt}.
+          <button type="button" class="lh-btn" data-act="reload">Reload with the latest plan</button>`;
+        return;
+      }
       err.textContent = ex && ex.code === "permission-denied"
         ? "You don't have access to change treatment plans (needs clinical access)."
         : (ex && ex.message && !ex.code ? ex.message : "Couldn't save. Try again.");
-      err.hidden = false;
-      btn.disabled = false;
-      btn.textContent = master ? "Update master plan" : "Create master plan";
     }
   });
 }

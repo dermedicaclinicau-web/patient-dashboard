@@ -74,7 +74,13 @@ export function hasUnsavedNotes() {
 // On logout: close without asking
 export function closeSoapPanel() {
   current = null;
-  if (panel) { panel.hidden = true; content.innerHTML = ""; }
+  mode = "min";   // not "page" any more, so leaving the page can't reopen it
+  if (panel) {
+    panel.hidden = true;
+    content.innerHTML = "";
+    panel.classList.remove("is-max", "is-page");
+    if (panel.parentNode !== document.body) document.body.appendChild(panel);   // out of the page it was in
+  }
   if (tab) tab.hidden = true;
   try { sessionStorage.removeItem(STORE_KEY); } catch { /* ignore */ }
 }
@@ -216,7 +222,8 @@ function setMode(next) {
 
 // Leaving the Consultation page: the notes go back to being the usual panel (kept open as the Notes tab)
 export function detachSoapPanel() {
-  if (panel && mode === "page") setMode(current ? "min" : "open");
+  // Minimised: the Notes tab shows only if notes are still loaded (closed or deleted: nothing shows)
+  if (panel && mode === "page") setMode("min");
   host = null;
 }
 

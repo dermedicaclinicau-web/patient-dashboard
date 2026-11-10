@@ -3,7 +3,7 @@ import { db, auth } from "./firebase-config.js";
 import { collection, addDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   getMasterPlan, saveMasterPlan, listPlanHistory, PLAN_STATUS, CONCERN_STATUS, patternText, monthLabel, cleanLine, cleanEvent,
-  matchServices, sharesWord, newId, LINE_STATUS, lineOff,
+  matchServices, sharesWord, newId, LINE_STATUS, lineOff, savedLine,
 } from "./master-plan-api.js";
 import { getPlanSettings, serviceSetup, getPlanWorkflow, cleanWorkflow, phaseOf } from "./plan-api.js";
 import { visitsFrom, trackPlan, thisMonth, dateKeyOf, dayLabel, addMonths, monthDiff } from "./plan-track.js";
@@ -387,6 +387,7 @@ export function createPlanOverview(el, ctx) {
     const sum = [PLAN_STATUS[eff], pg.total ? `${pg.done} of ${pg.total} session${pg.total === 1 ? "" : "s"} done` : ""].filter(Boolean).join(" · ");
     return `<div class="pt-bar">
       <span class="pt-bar-sum">${esc(sum)}</span>
+      ${m.updatedAt ? `<span class="pt-saved" title="Version ${m.version}">${esc(savedLine(m))}</span>` : ""}
       ${newer ? '<button type="button" class="lh-btn" data-po="apply-latest">Update from the latest consultation</button>' : ""}
       ${["proposed", "sent"].includes(eff) ? '<button type="button" class="lh-btn is-primary" data-po="accept">Patient accepted</button>' : ""}
       <button type="button" class="lh-btn" data-po="doc">Print or email</button>
@@ -707,8 +708,9 @@ export function createPlanOverview(el, ctx) {
     st.busy = true;
     el.classList.add("is-busy");
     try {
-      await saveMasterPlan(patient, next, { action, summary, expectedVersion: m.version }, staff);
+      await saveMasterPlan(patient, next, { action, summary, expectedVersion: m.version, opId: newId() }, staff);
       await load();
+      flashSaved();
       return true;
     } catch (err) {
       console.error("Plan change failed:", err);
@@ -721,6 +723,14 @@ export function createPlanOverview(el, ctx) {
       st.busy = false;
       el.classList.remove("is-busy");
     }
+  }
+
+  // The "Saved …" line lights up for a moment after each change
+  function flashSaved() {
+    const s = el.querySelector(".pt-saved");
+    if (!s) return;
+    s.classList.add("is-fresh");
+    setTimeout(() => s.classList.remove("is-fresh"), 2500);
   }
 
   const findLine = (ck, lid) => {
@@ -1500,8 +1510,9 @@ export function createPlanOverview(el, ctx) {
     st.busy = true;
     el.classList.add("is-busy");
     try {
-      await saveMasterPlan(patient, next, { action: "Created by hand", summary, expectedVersion: 0 }, staff);
+      await saveMasterPlan(patient, next, { action: "Created by hand", summary, expectedVersion: 0, opId: newId() }, staff);
       await load();
+      flashSaved();
       return true;
     } catch (err) {
       console.error("Create master plan failed:", err);
