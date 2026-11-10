@@ -13295,3 +13295,8 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 .mp-ev-add { justify-self: start; }
 .mp-ev-none, .mp-ev-dropped { margin: 0; font-size: 13px; color: #64748b; }
 @media (max-width: 560px) { .mp-ev-form { grid-template-columns: 1fr; } }
+
+.cs-name { color: inherit; text-decoration: none; border-bottom: 1px dashed transparent; transition: color .15s, border-color .15s; }
+.cs-name:hover, .cs-name:focus-visible { color: #BA7517; border-bottom-color: currentColor; outline: none; }
+.cs-name::after { content: "↗"; font-size: .55em; margin-left: 5px; vertical-align: super; opacity: 0; transition: opacity .15s; }
+.cs-name:hover::after, .cs-name:focus-visible::after { opacity: 1; }

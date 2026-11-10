@@ -30,6 +30,8 @@ const micText = (err) => (err && err.name === "NotAllowedError"
   : (err && err.message) || "Couldn't start the recording.");
 const stateHtml = (title, text, btn = "") =>
   `<div class="cs-state"><strong>${esc(title)}</strong>${text ? `<p>${esc(text)}</p>` : ""}${btn}</div>`;
+// The patient's profile: same route the patient list opens ("" if we don't know which patient it is)
+const profileHref = (p) => (p && p.id ? `#/patient/${encodeURIComponent(p.id)}` : "");
 
 export function mountConsultPage(container, param = "", { staff = null } = {}) {
   const root = document.createElement("section");
@@ -114,9 +116,14 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
           <button type="button" class="lh-btn is-primary" data-cs="complete">Complete appointment</button>
           <button type="button" class="lh-btn is-quiet" data-cs="cancel">Cancel</button>`;
     }
+    // New tab: this tab holds the recording and the notes, so it stays put
+    const href = profileHref(patient);
+    const nameHtml = href
+      ? `<a class="cs-name" href="${esc(href)}" target="_blank" rel="noopener" title="Open ${esc(name)}'s profile in a new tab">${esc(name)}</a>`
+      : esc(name || "Loading…");
     return `<header class="cs-head">
       ${name ? `<span class="cs-av" style="--h:${hueFromString(name)}">${esc(getInitials(name))}</span>` : ""}
-      <div class="cs-who"><p class="cs-eyebrow">Consultation</p><h2>${esc(name || "Loading…")}</h2>
+      <div class="cs-who"><p class="cs-eyebrow">Consultation</p><h2>${nameHtml}</h2>
         <p class="muted">${esc(day)}${me().name ? ` · ${esc(me().name)}` : ""}</p></div>
       <div class="cs-ctrl">${ctrl}</div>
     </header>`;
@@ -212,7 +219,7 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
     if (v.kind === "lookup") watchServer();
     if (!patient) patient = (v.L && v.L.patient) || (v.j && v.j.patient) || null;
     const key = [v.kind, v.L && v.L.status, v.j && v.j.status, v.j && v.j.stage, v.j && v.j.transcriptId,
-      starting, startError, patient && patient.name, s.remote ? s.remote.recId : ""].join("|");
+      starting, startError, patient && patient.name, patient && patient.id, s.remote ? s.remote.recId : ""].join("|");
     if (key !== lastKey) {
       lastKey = key;
       viewEl.innerHTML = headHtml(v) + bodyHtml(v);
