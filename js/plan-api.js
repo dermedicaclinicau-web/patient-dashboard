@@ -177,8 +177,8 @@ export const DOC_FONTS = {
   trebuchet: ["Trebuchet", "'Trebuchet MS',Arial,sans-serif"],
   georgia: ["Georgia (serif)", "Georgia,'Times New Roman',serif"],
 };
-const DOC_BLOCKS = ["title", "text", "message", "concerns", "treatments", "timeline", "divider", "space", "sign"];
-const DOC_MANY = ["text", "divider", "space", "sign"];   // these can be added any number of times
+const DOC_BLOCKS = ["title", "text", "message", "concerns", "treatments", "timeline", "divider", "space", "sign", "image"];
+const DOC_MANY = ["text", "divider", "space", "sign", "image"];   // these can be added any number of times
 const docBlockId = () => Math.random().toString(36).slice(2, 10);
 
 // The copy's blocks, top to bottom. "text" can be added any number of times; the others once each.
@@ -193,7 +193,13 @@ function cleanDocBlocks(list, old) {
     size: ["s", "m", "l", "xl"].includes(b && b.size) ? b.size : "m",
     bold: !!(b && b.bold === true),
     tint: !!(b && b.tint === true),                       // in the design colour
-    align: b && b.align === "center" ? "center" : "left",
+    align: b && ["center", "right"].includes(b.align) ? b.align : "left",
+    gap: b && b.gap === "more" ? "more" : "",                              // extra space under it
+    fileId: /^[A-Za-z0-9_-]{10,80}$/.test(String((b && b.fileId) || "")) ? b.fileId : "",   // Image: from the Image Bank
+    fileName: clip(b && b.fileName, 120),
+    width: [30, 50, 75, 100].includes(Number(b && b.width)) ? Number(b.width) : 50,
+    hideFreq: !!(b && b.hideFreq === true),                                // Treatments table: columns left out
+    hideDesc: !!(b && b.hideDesc === true),
   })).filter((b) => b.type && (DOC_MANY.includes(b.type) || (!seen.has(b.type) && seen.add(b.type)))).slice(0, 40);
   if (out.length) return out;
   const mk = (type, extra = {}) => ({ id: docBlockId(), type, text: "", size: "m", bold: false, tint: false, align: "left", ...extra });

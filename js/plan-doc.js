@@ -13,6 +13,7 @@ import { tagValues, fillTags, fillTagsHtml } from "./form-tags.js";
 import { createRichEditor } from "./rich-editor.js";
 import { cleanRichHtml, richText, textToRichHtml } from "./rich-html.js";
 import { bankImage } from "./image-bank-api.js";
+import { openPlanDesigner } from "./plan-designer.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -139,8 +140,12 @@ const money = (n) => `$${n.toLocaleString("en-AU", { minimumFractionDigits: n % 
 // pick = { lines: Set(treatment ids to include), message }   d = the design (plan_settings/document)
 // The copy is d.blocks, top to bottom: title, text, the personal message, concerns, treatments, timeline.
 // parts: true returns the plan's pieces on their own ({ treatments, concerns, timeline, message }), for a Form Builder design
+// mark: each block is wrapped so the designer can select it. images: { fileId: src } for Image blocks.
+const BLOCK_EMPTY = { message: "Your message (shows when you type one)", concerns: "Concerns (none with a description on this plan)",
+  timeline: "Next 12 months (nothing planned yet)", treatments: "Treatments table (no treatments ticked)", image: "Image (choose a picture)",
+  text: "Empty text" };
 export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff, wf = cleanWorkflow({}), parts = false,
-  descOf = (c, l) => l.description || "" }) {
+  descOf = (c, l) => l.description || "", mark = false, images = {} }) {
   const colour = HEX.test(d.colour || "") ? d.colour : PLAN_DOC_DEFAULTS.colour;
   const base = Number(d.fontSize) || 13;
   const px = { s: base - 2, m: base, l: base + 3, xl: base + 8 };
@@ -158,22 +163,26 @@ export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staf
   // One treatment as a table row: Treatment | Frequency | Description | Quote
   const td = `padding:8px 10px;border:1px solid #e2e8f0;vertical-align:top`;
   const th = `padding:7px 10px;border:1px solid #e2e8f0;background:#f8fafc;text-align:left;font-size:${base - 1}px;color:#475569`;
-  const headHtml = `<tr><th style="${th};width:28%">Treatment</th><th style="${th};width:24%">Frequency</th>
-    <th style="${th}">Description</th>${d.showPrices ? `<th style="${th};width:15%;text-align:right">Quote</th>` : ""}</tr>`;
+  // The Treatments table block chooses its columns (a Form Builder design shows them all)
+  const tb = blocks.find((b) => b.type === "treatments") || {};
+  const showFreq = parts || !tb.hideFreq;
+  const showDesc = parts || !tb.hideDesc;
+  const headHtml = `<tr><th style="${th}${showFreq || showDesc ? ";width:28%" : ""}">Treatment</th>
+    ${showFreq ? `<th style="${th};width:24%">Frequency</th>` : ""}${showDesc ? `<th style="${th}">Description</th>` : ""}
+    ${d.showPrices ? `<th style="${th};width:15%;text-align:right">Quote</th>` : ""}</tr>`;
   const rowHtml = (x) => {
     const lt = ltOf(x);
     const prog = progressText(lt);
     const what = [labelOf(x.c.key).label, x.l.area || x.c.area].filter(Boolean).join(" · ");
     const desc = descOf(x.c, x.l);
-    // With a description: the concern and area sit under the name. Without one: they are the description.
+    // The concern and area sit under the name when the Description column holds a description, or isn't shown
     return `<tr>
-      <td style="${td}"><strong style="color:#0f172a">${esc(x.l.treatment)}</strong>${desc && what ? `<div style="${small}">${esc(what)}</div>` : ""}</td>
-      <td style="${td};color:#334155">${esc(scheduleText(x.l, lt))}${prog ? `<div style="${small}">${esc(prog)}</div>` : ""}</td>
-      <td style="${td};color:#334155">${esc(desc || what)}</td>
+      <td style="${td}"><strong style="color:#0f172a">${esc(x.l.treatment)}</strong>${(desc || !showDesc) && what ? `<div style="${small}">${esc(what)}</div>` : ""}</td>
+      ${showFreq ? `<td style="${td};color:#334155">${esc(scheduleText(x.l, lt))}${prog ? `<div style="${small}">${esc(prog)}</div>` : ""}</td>` : ""}
+      ${showDesc ? `<td style="${td};color:#334155">${esc(desc || what)}</td>` : ""}
       ${d.showPrices ? `<td style="${td};text-align:right;white-space:nowrap;color:#0f172a">${esc(quoteOf(x.c, x.l))}</td>` : ""}</tr>`;
   };
-
-  // Under each priority, in the order to book them, with a quote total (when switched on in the plan workflow)
+    // Under each priority, in the order to book them, with a quote total (when switched on in the plan workflow)
   function treatmentsHtml() {
     const many = wf.phases.length > 1;
     let grand = 0;
@@ -233,11 +242,18 @@ export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staf
         <div style="margin:0 0 14px;${small}">For ${esc(patient.name || "")} · ${esc(todayText)}</div>`;
     }
     if (b.type === "text" && b.html && richText(b.html)) {
-      return `<div class="fe-rich" style="margin:0 0 12px;text-align:${b.align === "center" ? "center" : "left"}">${
+      return `<div class="fe-rich" style="margin:0 0 12px;text-align:${["center", "right"].includes(b.align) ? b.align : "left"}">${
         fillTagsHtml(cleanRichHtml(b.html), tagVals(patient, staff), "")}</div>`;
     }
     if (b.type === "divider") return '<div style="margin:14px 0;border-top:1px solid #cbd5e1"></div>';
-    if (b.type === "space") return '<div style="height:22px"></div>';
+    if (b.type === "space") return `<div style="height:${{ s: 12, l: 40 }[b.size] || 22}px"></div>`;
+    if (b.type === "image") {
+      const src = images[b.fileId];
+      if (!src) return "";
+      const w = [30, 50, 75, 100].includes(Number(b.width)) ? Number(b.width) : 50;
+      return `<div style="margin:0 0 12px;text-align:${["center", "right"].includes(b.align) ? b.align : "left"}">
+        <img src="${src}" alt="" style="display:inline-block;width:${w}%;max-width:100%;height:auto" /></div>`;
+    }
     if (b.type === "sign") {
       const line = '<div style="height:34px;border-bottom:1px solid #334155"></div>';
       return `<table style="width:100%;margin:26px 0 10px;border-collapse:collapse;page-break-inside:avoid"><tr>
@@ -268,7 +284,12 @@ export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staf
   return `${RICH_STYLE}<div class="pdoc" style="width:703px;box-sizing:border-box;padding:0 4px;background:#fff;font-family:${font};font-size:${base}px;line-height:1.5;color:#1e293b">
     ${letterheadHtml(lh, colour)}
     ${has("title") ? "" : '<div style="height:16px"></div>'}
-    ${blocks.map(blockHtml).join("")}
+    ${blocks.map((b) => {
+      let h = blockHtml(b);
+      if (h && b.gap === "more") h += '<div style="height:16px"></div>';
+      if (!mark) return h;
+      return `<div class="pdz-b" data-blk="${esc(b.id)}">${h || `<div class="pdz-ph">${esc(BLOCK_EMPTY[b.type] || "Empty")}</div>`}</div>`;
+    }).join("")}
     <p style="margin:12px 0 0;font-size:${base - 2}px;color:#94a3b8">Prepared${staff && staff.name ? ` by ${esc(staff.name)}` : ""}${lh && lh.name ? ` · ${esc(lh.name)}` : ""}</p>
   </div>`;
 }
@@ -358,7 +379,11 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
     return inner;
   }
   await loadTpl();
-  const stdHtml = () => planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff, wf, descOf });
+  // Pictures on the standard design, from the Image Bank
+  const images = {};
+  await Promise.all([...new Set(d.blocks.filter((b) => b.type === "image" && b.fileId).map((b) => b.fileId))]
+    .map((id) => bankImage(id).then((src) => { images[id] = src; }).catch(() => {})));
+  const stdHtml = () => planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff, wf, descOf, images });
   // The preview
   const html = () => (tpl ? `<style>${tpl.css}</style><div class="pdfdoc">${formHtml()}</div>` : stdHtml());
   // The PDF: made by the same PDF maker as forms, which copes with the page being scrolled behind the window
@@ -412,8 +437,10 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
           </div>
           <label class="fe-check"><input type="checkbox" data-d="showPrices"${d.showPrices ? " checked" : ""} /> Show quotes</label>
           <div data-role="std">
-          <p class="lh-label pd-blk-title">Add to the page</p>
-          <div class="pd-pal" data-role="addblock"></div>
+            <div class="pd-add"><button type="button" class="lh-btn is-primary" data-act="design">Edit the page design</button></div>
+            <p class="fe-note">Add headings, text, pictures and the plan's parts, and arrange them on the page.</p>
+            <div hidden><div data-role="addblock"></div><div data-role="blocks"></div></div>
+          </div>
           <p class="lh-label pd-blk-title">Insert a tag into the text you're editing</p>
           <div class="pd-tags">${["{Patient name}", "{First name}", "{Date of birth}", "{Patient ID}", "{Today}", "{My name}"].map((t) =>
             `<button type="button" class="pd-tagchip" data-tagins="${esc(t)}">${esc(t)}</button>`).join("")}</div>
@@ -750,6 +777,19 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
     const act = b.dataset.act;
     if (act === "close") { if (!busy) dlg.close(); return; }
     if (act === "email-open") { openEmail(); return; }
+    if (act === "design") {
+      openPlanDesigner({
+        d, images, staff,
+        render: () => planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff, wf, descOf, images, mark: true }),
+        onChange: touched,
+        onClose: () => {
+          const sp = dlg.querySelector('[data-d="showPrices"]');
+          if (sp) sp.checked = !!d.showPrices;   // the Quote column can be switched in the designer too
+          draw();
+        },
+      });
+      return;
+    }
     if (act === "download") {
       run(b, "Making the PDF…", async () => {
         const { blob } = await makePdf();
