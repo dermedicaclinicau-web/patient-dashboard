@@ -938,36 +938,74 @@ export function createPlanOverview(el, ctx) {
 
     /* ---------- One treatment's menu: order, priority and the patient's decision ---------- */
 
-  function lineMenu(c, l) {
+  let pop = null;   // the open ⋯ dropdown: { el, anchor }
+  function onPopAway(e) { if (pop && !pop.el.contains(e.target) && !pop.anchor.contains(e.target)) closePop(); }
+  function onPopKey(e) {
+    if (e.key !== "Escape" || !pop) return;
+    const a = pop.anchor;
+    closePop();
+    if (a.isConnected) a.focus();
+  }
+  function closePop() {
+    if (!pop) return;
+    pop.el.remove();
+    pop = null;
+    document.removeEventListener("pointerdown", onPopAway, true);
+    document.removeEventListener("keydown", onPopKey, true);
+    window.removeEventListener("scroll", closePop, true);
+    window.removeEventListener("resize", closePop);
+  }
+
+  // The ⋯ dropdown on a treatment. It opens under the button; a click elsewhere, Esc or scrolling closes it.
+  function lineMenu(c, l, anchor) {
+    if (pop && pop.anchor === anchor) { closePop(); return; }   // a second click on ⋯ closes it
+    closePop();
     const off = lineOff(l);
     const live = ACTIVE.includes(c.status);
     const ph = linePhase(c, l);
     const same = planItems(null).filter((x) => x.going && x.ph.id === ph.id);
     const at = same.findIndex((x) => x.c.id === c.id && x.l.id === l.id);
-    const btn = (act, label, extra = "") => `<button type="button" class="lh-btn" data-act="${act}"${extra}>${label}</button>`;
-    const dlg = openDlg(`
-      <div class="lh-dialog-head"><h3>${esc(l.treatment)}</h3>
-        <p>${chip(c.key)} ${esc(off ? LINE_STATUS[l.status] : live ? ph.name : CONCERN_STATUS[c.status])}</p></div>
-      <div class="pt-menu">
-        ${!off && live ? `<p class="pt-menu-h">Order and priority</p>
-          ${same.length > 1 ? `${btn("up", "↑ Move up", at <= 0 ? " disabled" : "")}${btn("down", "↓ Move down", at === same.length - 1 ? " disabled" : "")}` : ""}
-          ${st.wf.phases.filter((p) => p.id !== ph.id).map((p) =>
-            btn("to", `Move to ${esc(p.name)}${p.tracked ? "" : " (waiting)"}`, ` data-v="${esc(p.id)}"`)).join("")}
-          <p class="pt-menu-h">The patient's decision</p>
-          ${btn("off", "Not interested", ' data-v="not_interested"')}${btn("off", "No longer relevant", ' data-v="not_relevant"')}` : ""}
-        ${off ? btn("revive", "Make active again") : ""}
-        ${!live ? btn("reopen", `Make ${esc(con(c.key).label)} active again`) : ""}
-        <p class="pt-menu-h">Details</p>
-        ${btn("edit", "Edit treatment")}${btn("concern", "Concern details")}
-      </div>
-      <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="close">Close</button></div>`);
-    const form = dlg.querySelector("form");
-    form.addEventListener("submit", (e) => e.preventDefault());
-    form.addEventListener("click", (e) => {
+    const item = (act, label, v = "") =>
+      `<button type="button" role="menuitem" class="pt-pop-item" data-act="${act}"${v ? ` data-v="${esc(v)}"` : ""}>${label}</button>`;
+    const groups = [];
+    if (!off && live) {
+      const order = [
+        at > 0 ? item("up", "Move up") : "",
+        at > -1 && at < same.length - 1 ? item("down", "Move down") : "",
+        ...st.wf.phases.filter((p) => p.id !== ph.id).map((p) => item("to", `Move to ${esc(p.name)}`, p.id)),
+      ].filter(Boolean);
+      if (order.length) groups.push(order.join(""));
+      groups.push(item("off", "Not interested", "not_interested") + item("off", "No longer relevant", "not_relevant"));
+    }
+    const back = [off ? item("revive", "Make active again") : "",
+      !live ? item("reopen", `Make ${esc(con(c.key).label)} active again`) : ""].filter(Boolean);
+    if (back.length) groups.push(back.join(""));
+    groups.push(item("edit", "Edit treatment") + item("concern", "Concern details"));
+
+    const box = document.createElement("div");
+    box.className = "pt-pop";
+    box.setAttribute("role", "menu");
+    box.setAttribute("aria-label", `${l.treatment} options`);
+    box.innerHTML = groups.join("<hr>");
+    document.body.appendChild(box);
+    // Under the button, right edges lined up; above it when there's no room below
+    const r = anchor.getBoundingClientRect();
+    const w = box.offsetWidth;
+    const h = box.offsetHeight;
+    const top = r.bottom + 4 + h > window.innerHeight - 8 ? Math.max(8, r.top - h - 4) : r.bottom + 4;
+    box.style.left = `${Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8))}px`;
+    box.style.top = `${top}px`;
+    pop = { el: box, anchor };
+    document.addEventListener("pointerdown", onPopAway, true);
+    document.addEventListener("keydown", onPopKey, true);
+    window.addEventListener("scroll", closePop, true);
+    window.addEventListener("resize", closePop);
+
+    box.addEventListener("click", (e) => {
       const b = e.target.closest("[data-act]");
-      if (!b || b.disabled || st.busy) return;
+      if (!b || st.busy) return;
       const act = b.dataset.act;
-      dlg.close();
+      closePop();
       if (act === "up" || act === "down") moveLine(c, l, act === "up" ? -1 : 1);
       else if (act === "to") moveLineTo(c, l, b.dataset.v);
       else if (act === "off") declineLine(c, l, b.dataset.v);
@@ -976,8 +1014,9 @@ export function createPlanOverview(el, ctx) {
       else if (act === "edit") editLine(c, l);
       else if (act === "concern") concernMenu(c);
     });
+    box.querySelector(".pt-pop-item").focus();
   }
-
+  
   // Up or down within its priority: every treatment in that priority gets its place saved
   function moveLine(c, l, dir) {
     const ph = linePhase(c, l);
@@ -1592,7 +1631,7 @@ export function createPlanOverview(el, ctx) {
     else if (d.po === "concern-menu") concernMenu(c);
     else if (d.po === "quote") showQuote(c);
     else if (d.po === "edit-line" && l) editLine(c, l);
-    else if (d.po === "line-menu" && l) lineMenu(c, l);
+    else if (d.po === "line-menu" && l) lineMenu(c, l, b);
     else if (d.po === "slot" && l) slotDialog(c, l, Number(d.n));
     else if (d.po === "ask" && l) askReception(c, l, Number(d.n));
     else if (d.po === "clash-move" && l) moveSlot(c, l, Number(d.n), d.to, true);

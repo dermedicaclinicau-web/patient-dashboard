@@ -13101,13 +13101,17 @@ dialog.lh-dialog.pe-freq-dlg { width: min(520px, calc(100vw - 2rem)); }
 .pt-tag { border: 0; border-radius: 999px; padding: .08rem .55rem; font: inherit; font-size: .74rem; font-weight: 600; cursor: pointer;
   background: color-mix(in srgb, var(--c) 14%, #fff); color: color-mix(in srgb, var(--c) 70%, #000); }
 .pt-tag:hover { background: color-mix(in srgb, var(--c) 24%, #fff); }
-.pt-menu { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
-.pt-menu .lh-btn { justify-content: flex-start; text-align: left; }
-.pt-menu-h { grid-column: 1 / -1; margin: .5rem 0 0; font-size: .75rem; font-weight: 600; color: #64748b; }
-.pt-menu-h:first-child { margin-top: 0; }
+
 .pt-preview { margin: 0 0 .6rem; padding: .55rem .75rem; border-radius: 8px; background: #eff6ff; color: #1e40af; font-size: .88rem; }
 @media (max-width: 760px) {
   .pt-row { grid-template-columns: 1.75rem minmax(0, 1fr) auto auto; }
   .pt-row .pv-chips { grid-column: 2 / -1; grid-row: 2; }
-  .pt-menu { grid-template-columns: 1fr; }
 }
+
+/* The ⋯ dropdown on a treatment */
+.pt-pop { position: fixed; z-index: 1000; min-width: 220px; max-width: 300px; padding: .3rem; border: 1px solid #e2e8f0;
+  border-radius: 10px; background: #fff; box-shadow: 0 10px 30px rgba(15, 23, 42, .14); }
+.pt-pop-item { display: block; width: 100%; padding: .45rem .7rem; border: 0; border-radius: 6px; background: none;
+  font: inherit; font-size: .9rem; color: #0f172a; text-align: left; cursor: pointer; }
+.pt-pop-item:hover, .pt-pop-item:focus-visible { background: #f1f5f9; outline: none; }
+.pt-pop hr { margin: .3rem 0; border: 0; border-top: 1px solid #f1f5f9; }
