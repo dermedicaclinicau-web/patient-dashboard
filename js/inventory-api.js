@@ -158,7 +158,9 @@ export function qtyText(p, n) {
 export function packText(p) {
   const dose = p.dosePer && p.doseUnit ? `, ${p.dosePer} ${p.doseUnit} each` : "";
   const same = p.packSize === 1 && String(p.orderUnit).toLowerCase() === String(p.stockUnit).toLowerCase();
-  const pack = same ? `Ordered by the ${p.stockUnit}` : `${p.orderUnit} of ${plural(p.packSize, p.stockUnit)}`;
+  const pack = same
+    ? (/^items?$/i.test(p.stockUnit) ? "bought one at a time" : `Ordered by the ${p.stockUnit}`)
+    : `${p.orderUnit} of ${plural(p.packSize, p.stockUnit)}`;
   return pack.charAt(0).toUpperCase() + pack.slice(1) + dose;
 }
 
@@ -2361,6 +2363,120 @@ export async function resolveCountLine(countId, index, { action, note = "" }, st
   });
 }
 
+
+/* ===================== Fixing a count difference from the product window ===================== */
+// For each counted batch: what was counted, what really happened since (corrections such as counts and starting stock
+// are left out, the same rule as Day by day), what should be there now, and digital now. Nothing is changed.
+const FIX_MOVE_TYPES = ["count", "baseline", "investigation", "tracking"];
+const isFixMove = (m) => FIX_MOVE_TYPES.includes(m.type) || (m.type === "undo" && m.undoKind === "fix");
+
+export async function countFixPlan(productId, countId, loc) {
+  const place = loc === "jt" ? "jt" : "shelf";
+  const [cSnap, pSnap, lots, moves] = await Promise.all([
+    getDoc(doc(db, "inv_counts", countId)),
+    getDoc(doc(db, "inv_products", productId)),
+    listLotsForProduct(productId),
+    listMoves({ productId, max: 2000 }),
+  ]);
+  if (!cSnap.exists()) throw new Error("That count no longer exists.");
+  if (!pSnap.exists()) throw new Error("This product no longer exists.");
+  const product = normaliseProduct(pSnap);
+  const c = cSnap.data() || {};
+  const countAt = toDate(c.at);
+  const dateKey = String(c.dateKey || "");
+  const base = (Array.isArray(c.lines) ? c.lines : []).map((l, index) => ({ l, index }))
+    .filter(({ l }) => l.productId === productId && l.loc === place);
+  if (!base.length) throw new Error("That count doesn't include this product any more.");
+
+  const sameLot = (x, l) => !product.tracked || ((x.batch || "") === (l.batch || "") && (x.expiry || "") === (l.expiry || ""));
+  const onPlace = (m, test) => (m.lines || []).filter((x) => x.loc === place && test(x))
+    .reduce((a, x) => a + (Number(x.delta) || 0), 0);
+  const after = moves.filter((m) => countAt && m.at && m.at > countAt).sort((a, b) => a.at - b.at);
+  // Entered after the count but dated before its day: it happened before the count, so the count already shows it
+  const real = after.filter((m) => !isFixMove(m)
+    && (KEY_RE.test(m.effectiveDate || "") ? m.effectiveDate : dayKey(m.at)) >= dateKey);
+
+  const lines = base.map(({ l, index }) => {
+    const since = real.reduce((a, m) => a + onPlace(m, (x) => sameLot(x, l)), 0);
+    const counted = Number(l.counted) || 0;
+    const lot = lots.find((x) => x.id === l.ref);
+    return {
+      index, ref: String(l.ref || ""), batch: String(l.batch || ""), expiry: String(l.expiry || ""),
+      status: String(l.status || ""), investigationId: String(l.investigationId || ""),
+      counted, system: Number(l.system) || 0, since, should: Math.max(0, counted + since),
+      digital: product.tracked ? (lot ? lot.qty : 0) : product.stock[place],
+    };
+  });
+  const anyLot = (x) => lines.some((l) => sameLot(x, l));
+  const describe = (m) => ({ at: m.at, label: MOVE_TYPES[m.type] || m.type, by: String(m.by || ""),
+    note: [m.reason, m.note].filter(Boolean).join(" · "), delta: onPlace(m, anyLot) });
+  const sum = (k) => lines.reduce((a, l) => a + l[k], 0);
+  return {
+    product, countId, dateKey, at: countAt, by: String(c.by || ""), loc: place, lines,
+    items: real.map(describe).filter((x) => x.delta),
+    fixes: after.filter(isFixMove).map(describe).filter((x) => x.delta),
+    counted: sum("counted"), system: sum("system"), sinceTotal: sum("since"), should: sum("should"), digital: sum("digital"),
+    investigating: lines.some((l) => l.status === "investigating"),
+  };
+}
+
+// Count lines dealt with outside an investigation. Only lines still to review change.
+export async function closeCountLines(countId, marks, staff) {
+  if (!marks || !marks.length) return 0;
+  const by = who(staff);
+  const me = uid();
+  const ref = doc(db, "inv_counts", countId);
+  let n = 0;
+  await runTransaction(db, async (tx) => {
+    n = 0;
+    const s = await tx.get(ref);
+    if (!s.exists()) throw new Error("This count no longer exists.");
+    const lines = (Array.isArray(s.data().lines) ? s.data().lines : []).map((l) => ({ ...l }));
+    const at = new Date().toISOString();
+    marks.forEach((m) => {
+      const l = lines[m.index];
+      if (!l || l.status !== "open") return;
+      lines[m.index] = { ...l, status: m.status === "accepted" ? "accepted" : "explained", applied: Number(m.applied) || 0,
+        note: clip(m.note, 500), resolvedBy: by, resolvedByUid: me, resolvedAt: at };
+      n++;
+    });
+    if (!n) return;
+    tx.update(ref, {
+      lines, openCount: lines.filter((l) => l.status === "open").length, updatedAt: serverTimestamp(), updatedBy: by,
+      events: arrayUnion({ at, by, action: "Fixed from the product window", note: `${n} line${n === 1 ? "" : "s"}` }),
+    });
+  });
+  return n;
+}
+
+// action: "set" (digital → what should be there now), "keep" (digital is right: a note is needed),
+// or "sorted" (it already matches). The lines still to review are closed either way.
+// "set" is logged as a stock count, so it can be undone from Activity.
+export async function fixCountDifference(plan, { action, note = "" }, staff) {
+  const text = clip(note, 300);
+  if (plan.investigating) throw new Error("This difference is being investigated, so it's closed from the investigation.");
+  if (action === "keep" && !text) throw new Error("Add a note saying why digital is right.");
+  let changed = 0;
+  if (action === "set") {
+    const targets = plan.lines.filter((l) => l.should !== l.digital)
+      .map((l) => ({ loc: plan.loc, batch: l.batch, expiry: l.expiry, qty: l.should }));
+    if (targets.length) {
+      changed = await setStartingStock(plan.product, targets, staff, {
+        type: "count", reason: "Count difference fixed",
+        note: [`Counted ${plan.counted} on ${plan.dateKey}`,
+          plan.sinceTotal ? `${plan.sinceTotal > 0 ? "+" : ""}${plan.sinceTotal} since` : "", text].filter(Boolean).join(" · "),
+      });
+    }
+  }
+  const why = action === "set" ? `Fixed: digital set to what should be there (${plan.should})`
+    : action === "keep" ? `Digital kept at ${plan.digital}: the count was wrong`
+    : "Digital already matched what should be there";
+  await closeCountLines(plan.countId, plan.lines.map((l) => ({
+    index: l.index, status: action === "set" && l.should !== l.digital ? "accepted" : "explained",
+    applied: action === "set" ? l.should - l.digital : 0, note: [why, text].filter(Boolean).join(" · "),
+  })), staff);
+  return { changed };
+}
 
 /* ===================== Starting stock: make digital match a day's opening count ===================== */
 // From then on every count difference is a real one. For each product + place + batch the latest count

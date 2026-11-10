@@ -13,6 +13,7 @@ import {
   rebuildPlan, applyRebuild, listCountsOn, getInvoiceSettings, saveInvoiceSettings,
   listBaseCounts, saveBaseCount, planFromBases, productLedger, suggestInvoiceLinks, invoiceNameKey,
   removeBaseCount, canUndoCorrection, undoCorrection, productSales, settlePendingSales, settleShortSales,
+  settleInvoiceFixes, countFixPlan, fixCountDifference, closeCountLines,
 } from "./inventory-api.js";
 import { searchPatients } from "./task-runner.js";
 import { openSetKitDialog, openKitFromShelfDialog } from "./kit-admin.js";
@@ -36,6 +37,7 @@ import { renderBillingCheck } from "./billing-check.js";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const SEARCH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
+const PENCIL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
 const TABS = [["stock", "Stock"], ["kits", "Kits"], ["investigations", "Investigations"], ["billing", "Billing check"], ["requests", "Requests"],
   ["receive", "Receive delivery"], ["orders", "Purchase orders"], ["products", "Products"], ["services", "Service links"],
   ["suppliers", "Suppliers"], ["activity", "Activity"], ["notifications", "Notifications"]];
@@ -334,14 +336,15 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     return out;
   }
 
-  // The latest opening count of each product + storage (batches added together)
+  // The latest opening count of each product + storage (batches added together), and which count it was (for Fix difference)
   function lastCountsOf(counts) {
     const m = new Map();
-    counts.filter((c) => c.kind === "opening").forEach((c) => {     // newest first
+    counts.filter((c) => c.kind === "opening" && !c.superseded).forEach((c) => {     // newest first
       const per = new Map();
-      c.lines.filter((l) => l.loc !== "kit").forEach((l) => {
+      c.lines.forEach((l) => {
+        if (l.loc === "kit") return;
         const k = `${l.productId}|${l.loc}`;
-        const a = per.get(k) || { counted: 0, system: 0, statuses: [], invIds: [], dateKey: c.dateKey, by: c.by };
+        const a = per.get(k) || { counted: 0, system: 0, statuses: [], invIds: [], countId: c.id, at: c.at, dateKey: c.dateKey, by: c.by };
         a.counted += Number(l.counted) || 0;
         a.system += Number(l.system) || 0;
         a.statuses.push(l.status);
@@ -489,7 +492,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       : inCount ? "No opening count of the Shelf in the last 120 days." : "This product isn't in the opening count of the Shelf.";
     const counted = `<span class="inv-q is-count${c ? (diff ? " is-diff" : "") : " is-none"}" title="${esc(tip)}">
       <small>Shelf count</small><b>${c ? c.counted : "—"}</b>
-      <em>${c ? `Last count ${esc(countDay(c.dateKey))}` : inCount ? "No count yet" : "Not counted"}</em></span>`;
+      <em>${c ? `Last count ${esc(countDay(c.dateKey))}` : inCount ? "No count yet" : "Not counted"}</em>${
+        canFix(p.id, "shelf") ? `<span class="inv-q-fix" role="button" data-fix="${esc(p.id)}" data-loc="shelf">Fix</span>` : ""}</span>`;
 
     return `
       <button type="button" class="inv-row has-qs" data-product="${esc(p.id)}">
@@ -2526,6 +2530,14 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     return `<small class="ivx-cl is-ok">Counted ${c.counted} on ${esc(d)} ✓ matched</small>`;
   }
 
+  // A count still to review can be fixed here (Manage inventory). Investigations are closed from the investigation.
+  const canFix = (pid, loc) => {
+    const c = st.lastCounts.get(`${pid}|${loc}`);
+    return canManage && !!c && c.statuses.includes("open") && !c.statuses.includes("investigating");
+  };
+  const fixBtn = (pid, loc) => (canFix(pid, loc)
+    ? `<button type="button" class="lh-btn inv-pd-fix" data-fix="${esc(pid)}" data-loc="${loc}">Fix difference</button>` : "");
+
   // The product window: the latest opening count of the Shelf, as its own card
   function shelfCountCard(p) {
     const c = st.lastCounts.get(`${p.id}|shelf`);
@@ -2543,7 +2555,143 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     return `<div class="inv-pd-loc is-count${matched ? "" : " is-diff"}"><span>Shelf · counted</span>
       <strong>${esc(qtyText(p, c.counted))}</strong>
       <small>Last count ${esc(countDay(c.dateKey))}${c.by ? ` by ${esc(c.by)}` : ""}</small>
-      <small class="ivx-cl${tone ? ` is-${tone}` : ""}">${matched ? "" : `Digital said ${c.system} then · `}${state}</small></div>`;
+      <small class="ivx-cl${tone ? ` is-${tone}` : ""}">${matched ? "" : `Digital said ${c.system} then · `}${state}</small>
+      ${fixBtn(p.id, "shelf")}</div>`;
+  }
+
+  // Fix a count difference: what was counted, plus what really happened since, against digital now.
+  // Resolves true when something was saved.
+  function fixDifference(pid, loc = "shelf") {
+    const c = st.lastCounts.get(`${pid}|${loc}`);
+    if (!c || !c.countId) { showToast("There's no count to fix."); return Promise.resolve(false); }
+    const where = loc === "jt" ? "JT storage" : "Shelf";
+    const sgn = (n) => (n > 0 ? `+${n}` : n < 0 ? `−${-n}` : "0");
+    const tm = (d) => (d ? d.toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "");
+
+    return new Promise((resolve) => {
+      let saved = false, busy = false, plan = null;
+      const dlg = openDialog("inv-dlg inv-fxdlg",
+        '<div class="lh-form" data-role="fx"><div class="skeleton" style="height:220px;border-radius:12px"></div></div>');
+      const box = dlg.querySelector('[data-role="fx"]');
+      dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
+      dlg.addEventListener("close", () => resolve(saved));
+      const goLabel = (v) => (v === "recount" ? "Count now" : v === "keep" ? `Keep digital at ${plan.digital}` : `Set digital to ${plan.should}`);
+
+      function draw() {
+        const p = plan.product;
+        const head = `<div class="lh-dialog-head"><h3>Fix the ${esc(where)} difference</h3>
+          <p>${esc(p.name)} · opening count ${esc(countDay(plan.dateKey))}${plan.at
+            ? ` at ${esc(plan.at.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }))}` : ""}${plan.by ? ` by ${esc(plan.by)}` : ""}</p></div>`;
+        if (plan.investigating) {
+          const iid = (plan.lines.find((l) => l.investigationId) || {}).investigationId;
+          box.innerHTML = `${head}<p class="inv-hint">This difference is being investigated (a recount and an admin review),
+              so it's closed from the investigation, not here.</p>
+            <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="cancel">Close</button>
+              ${iid ? `<a class="lh-btn is-primary" href="#/inventory/investigations/${esc(iid)}" data-act="goinv">Open investigation</a>` : ""}</div>`;
+          return;
+        }
+        const match = plan.should === plan.digital;
+        const fixed = plan.fixes[plan.fixes.length - 1];
+        const tile = (label, v, cls = "") => `<div class="inv-fx-tile ${cls}"><small>${esc(label)}</small><b>${esc(String(v))}</b></div>`;
+        box.innerHTML = `${head}
+          <div class="inv-fx-tiles">${tile("Counted", plan.counted)}${tile("Since then", sgn(plan.sinceTotal))}${
+            tile("Should be now", plan.should, "is-ok")}${tile("Digital now", plan.digital, match ? "is-ok" : "is-warn")}</div>
+          ${plan.items.length ? `<ul class="inv-fx-since">${plan.items.slice(-8).map((x) => `<li><b>${sgn(x.delta)}</b> ${esc(x.label)}
+              <small>${esc([tm(x.at), x.note, x.by].filter(Boolean).join(" · "))}</small></li>`).join("")}</ul>`
+            : `<p class="inv-hint">Nothing has been recorded on the ${esc(where)} since the count.</p>`}
+          ${plan.lines.length > 1 ? `<table class="inv-table"><thead><tr><th>${esc(batchName(p))}</th><th>Expiry</th><th>Counted</th>
+              <th>Since</th><th>Should be</th><th>Digital</th></tr></thead><tbody>${plan.lines.map((l) => `<tr>
+              <td>${esc(l.batch || "—")}</td><td>${esc(niceDate(l.expiry) || "—")}</td><td>${l.counted}</td><td>${sgn(l.since)}</td>
+              <td><strong>${l.should}</strong></td><td>${l.digital}</td></tr>`).join("")}</tbody></table>
+            <small class="fe-note">Only the batches in the count are changed.</small>` : ""}
+          ${match
+            ? `<p class="inv-hint is-ok">Digital already matches what should be there${fixed
+                ? `: ${esc(fixed.label.toLowerCase())} ${esc(tm(fixed.at))}${fixed.by ? ` by ${esc(fixed.by)}` : ""} fixed it` : ""}.
+                Mark it as sorted to close the difference. Stock doesn't change.</p>
+              <label class="lh-field"><span class="lh-label">Note (optional)</span><input name="note" maxlength="300" /></label>`
+            : `<div class="inv-fx-opts">
+                <label class="inv-fx-opt"><input type="radio" name="fx" value="set" checked />
+                  <span><strong>Set digital to ${plan.should}</strong> <em class="inv-flag is-info">Recommended</em>
+                  <small>${plan.should < plan.digital ? `Takes ${plan.digital - plan.should} off` : `Adds ${plan.should - plan.digital} to`}
+                    the ${esc(where)} and closes this difference.</small></span></label>
+                <label class="inv-fx-opt"><input type="radio" name="fx" value="recount" />
+                  <span><strong>Count it again now</strong><small>If you're not sure the ${plan.counted} was right.</small></span></label>
+                <label class="inv-fx-opt"><input type="radio" name="fx" value="keep" />
+                  <span><strong>Digital is right, the count was wrong</strong><small>Digital stays at ${plan.digital}. Add a note saying why.</small></span></label>
+              </div>
+              <label class="lh-field"><span class="lh-label" data-role="notelbl">Note (optional)</span>
+                <input name="note" maxlength="300" placeholder="e.g. Found 3 more behind the till" /></label>`}
+          <p class="lh-error" role="alert" hidden></p>
+          <div class="lh-actions">
+            <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+            <button type="button" class="lh-btn is-primary" data-act="go">${match ? "Mark as sorted" : goLabel("set")}</button>
+          </div>`;
+      }
+
+      box.addEventListener("change", (e) => {
+        if (e.target.name !== "fx" || !plan) return;
+        box.querySelector('[data-act="go"]').textContent = goLabel(e.target.value);
+        box.querySelector('[data-role="notelbl"]').textContent = e.target.value === "keep" ? "Note (needed)" : "Note (optional)";
+        box.querySelector(".lh-error").hidden = true;
+      });
+
+      box.addEventListener("click", async (e) => {
+        if (e.target.closest('[data-act="cancel"]')) { if (!busy) dlg.close(); return; }
+        if (e.target.closest('[data-act="goinv"]')) { dlg.close(); return; }   // the link opens the investigation
+        const go = e.target.closest('[data-act="go"]');
+        if (!go || busy || !plan) return;
+        const err = box.querySelector(".lh-error");
+        const fail = (t) => { err.textContent = t; err.hidden = false; };
+        const action = plan.should === plan.digital ? "sorted" : (box.querySelector('[name="fx"]:checked') || {}).value || "set";
+        const note = ((box.querySelector('[name="note"]') || {}).value || "").trim();
+        if (action === "keep" && !note) { fail("Add a note saying why digital is right."); return; }
+
+        if (action === "recount") {
+          const p = st.products.find((x) => x.id === pid);
+          if (!p) return;
+          busy = true;
+          const ok = await stockAction(p, "count");
+          busy = false;
+          if (!ok) return;
+          try {
+            await closeCountLines(plan.countId, plan.lines.map((l) => ({
+              index: l.index, status: "explained",
+              note: `Recounted on ${niceDate(dayKey())}: digital set to the recount${note ? ` · ${note}` : ""}`,
+            })), staff);
+          } catch (ex) { console.warn("Count difference not closed:", ex); }
+          saved = true;
+          dlg.close();
+          return;
+        }
+
+        busy = true;
+        go.disabled = true;
+        go.textContent = "Saving…";
+        try {
+          await fixCountDifference(plan, { action, note }, staff);
+          saved = true;
+          busy = false;
+          dlg.close();
+          showToast(action === "set" ? `Digital set to ${plan.should} on the ${where}. The difference is closed.`
+            : action === "keep" ? `Digital kept at ${plan.digital}. The difference is closed.`
+            : "Marked as sorted.");
+        } catch (ex) {
+          console.error("Fix difference failed:", ex);
+          busy = false;
+          go.disabled = false;
+          go.textContent = action === "sorted" ? "Mark as sorted" : goLabel(action);
+          fail(errText(ex, "Couldn't save. Try again."));
+        }
+      });
+
+      countFixPlan(pid, c.countId, loc)
+        .then((p2) => { plan = p2; if (dlg.open) draw(); })
+        .catch((ex) => {
+          console.error("Fix plan failed:", ex);
+          box.innerHTML = `<div class="tm-empty is-error">${esc(errText(ex, "Couldn't work it out. Try again."))}</div>
+            <div class="lh-actions"><button type="button" class="lh-btn" data-act="cancel">Close</button></div>`;
+        });
+    });
   }
 
   /* ---------- A product's stock window ---------- */
@@ -2552,6 +2700,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const box = dlg.querySelector('[data-role="pd"]');
     let pdMoves = [];   // the activity shown, for Undo / Used on a patient…
     let pdReturns = [];   // the returns shown, for Credit received
+    let pdTab = "ov";     // Overview · Check stock · Activity
+    let movesLoaded = false;
     const canOpen = canMove || can("consult.record");
 
     // Sales: every sale since a day, and whether it came off stock. Loaded on request (it reads the Timely invoices).
@@ -2589,77 +2739,177 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       drawSales();
     }
 
+    // Sales since a day: each one, and whether it came off stock
     function drawSales() {
       const el = box.querySelector('[data-role="sales"]');
       const p = st.products.find((x) => x.id === id);
       if (!el || !p) return;
-      const unit = p.stockUnit;
-      const cut = baseKey();
-      const head = `<div class="inv-pd-salehead"><h4>Sales</h4>
-        <label class="inv-pd-salefrom">Since <input type="date" data-sl="from" value="${sl.fromKey}" max="${dayKey()}" /></label>
-        <button type="button" class="lh-btn${sl.open ? " is-quiet" : ""}" data-sl="load"${sl.busy ? " disabled" : ""}>${
-          sl.busy ? "Checking invoices…" : sl.open ? "Refresh" : "Show sales"}</button></div>`;
-      if (sl.busy) { el.innerHTML = `<div class="inv-pd-sec">${head}<div class="skeleton" style="height:120px;border-radius:12px"></div></div>`; return; }
-      if (sl.err) { el.innerHTML = `<div class="inv-pd-sec">${head}<p class="tb-none tb-bad">${esc(sl.err)}</p></div>`; return; }
+      const head = `<div class="inv-pd-sec"><h4>Sales</h4>
+        <div class="inv-tools">
+          <label class="lh-field"><span class="lh-label">Since</span>
+            <input type="date" data-sl="from" value="${sl.fromKey}" max="${dayKey()}" /></label>
+          ${sl.open ? `<label class="fe-check"><input type="checkbox" data-sl="only"${sl.only ? " checked" : ""} /> Only ones to sort out</label>` : ""}
+          <span class="inv-spacer"></span>
+          <button type="button" class="lh-btn" data-sl="load"${sl.busy ? " disabled" : ""}>${
+            sl.busy ? "Loading…" : sl.open ? "Check again" : "Check sales"}</button>
+        </div>`;
+      if (sl.busy && !sl.open) { el.innerHTML = `${head}<div class="skeleton" style="height:120px;border-radius:12px"></div></div>`; return; }
+      if (sl.err) { el.innerHTML = `${head}<p class="tb-none tb-bad">${esc(sl.err)}</p></div>`; return; }
       if (!sl.open) {
-        el.innerHTML = `<div class="inv-pd-sec">${head}<p class="muted">Every sale since ${esc(niceDate(sl.fromKey))}: Timely invoices,
-          billing sheets and sales recorded by hand, and whether each one came off stock.</p></div>`;
+        el.innerHTML = `${head}<p class="muted">Every sale since that day, and whether it came off stock.
+          It reads the Timely invoices, so it takes a moment.</p></div>`;
         return;
       }
-
-      const L = sl.list;
-      const sum = (pred) => L.filter(pred).reduce((a, s) => a + s.qty, 0);
-      const sold = sum((s) => s.state !== "voided");
-      const taken = L.filter((s) => s.state === "taken" || s.state === "short").reduce((a, s) => a + s.taken, 0);
-      const pending = L.filter((s) => s.state === "pending");
-      const pendN = pending.reduce((a, s) => a + s.qty, 0);
-      const shortN = L.filter((s) => s.state === "short").reduce((a, s) => a + s.left, 0);
-      const countedN = sum((s) => s.state === "counted");
-      const todo = L.filter(fixable);
-      const after = todo.filter((s) => !cut || s.date >= cut).length;
-      const before = todo.length - after;
-      const rows = sl.only ? todo : L;
-      const picks = canManage && todo.length;
-      const pill = (label, v, cls = "") => `<span class="inv-lg-pill ${cls}"><b>${esc(String(v))}</b> ${esc(label)}</span>`;
-
-      el.innerHTML = `<div class="inv-pd-sec inv-pd-sales">${head}
-        <div class="inv-lg-sum">
-          ${pill("sold", sold, "is-strong")}
-          ${pill("taken off stock", taken)}
-          ${pendN ? pill("not taken off", pendN, "is-warn") : ""}
-          ${shortN ? pill("the Shelf was short", shortN, "is-warn") : ""}
-          ${(() => { const c = L.filter((s) => s.state === "more" || s.state === "fewer").length;
-            return c ? pill(c === 1 ? "invoice changed in Timely" : "invoices changed in Timely", c, "is-warn") : ""; })()}
-          ${countedN ? pill("counted, stock not changed", countedN) : ""}
-        </div>
-        ${!sl.startDate ? `<p class="inv-hint is-warn">Invoice uploads don't take sales off stock yet: there's no invoice start date.
-          Set it in Products → <strong>Invoice links</strong> (the same day as your base counts).</p>` : ""}
-        ${after ? `<p class="inv-hint is-warn"><strong>${plural(after, "sale")}${cut ? ` since the base count (${esc(niceDate(cut))})` : ""}
-          never fully came off stock.</strong> Not linked when uploaded, before the invoice start date, or the Shelf showed 0 when it sold (often a delivery not received yet).</p>` : ""}
-        ${before ? `<p class="inv-hint">${plural(before, "sale")} before the base count never came off stock. The base count already
-          reflects them, so <strong>mark them as already counted</strong> rather than taking them off.</p>` : ""}
-        ${sl.warn ? `<p class="inv-hint is-warn">Most of the invoices taken off stock can't be found in INVOICE RECORD under this product's
-          name any more, so changed invoices aren't checked. Check the name in Products → <strong>Invoice links</strong>.</p>` : ""}
-        ${L.length ? `<label class="fe-check"><input type="checkbox" data-sl="only"${sl.only ? " checked" : ""} /> Only ones not taken off</label>
-          <div class="inv-pd-salescroll"><table class="inv-table inv-pd-saletable"><thead><tr>${picks ? "<th></th>" : ""}
-            <th>Sold</th><th>From</th><th>Patient</th><th>Qty</th><th>Stock</th></tr></thead><tbody>${rows.map((s) => {
+      const todo = sl.list.filter(fixable);
+      const rows = sl.only ? todo : sl.list;
+      const picked = todo.filter((s) => sl.sel.has(s.id));
+      const qtyCell = (s) => (s.state === "more" || s.state === "fewer" ? `${s.qty} → ${s.sheetQty}`
+        : s.state === "short" ? `${s.qty} <small>(${s.left} short)</small>` : String(s.qty));
+      el.innerHTML = `${head}
+        ${sl.warn ? `<p class="inv-hint is-warn">Most of this product's invoice sales aren't on the invoice sheet under this name any more,
+          so nothing is flagged as changed. Check <strong>Products → Invoice links</strong>.</p>` : ""}
+        ${!sl.startDate ? '<p class="inv-hint">Invoice sales aren\'t taken off stock automatically yet (there\'s no invoice start date).</p>' : ""}
+        ${rows.length ? `<table class="inv-table"><thead><tr><th></th><th>Date</th><th>From</th><th>Patient</th><th>Qty</th><th></th></tr></thead>
+          <tbody>${rows.map((s) => {
             const [label, cls] = SALE_STATE[s.state] || [s.state, ""];
-            return `<tr class="${s.state === "pending" ? "is-diff" : ""}">
-              ${picks ? `<td>${fixable(s) ?`<input type="checkbox" data-slpick="${esc(s.id)}"${sl.sel.has(s.id) ? " checked" : ""}
-                aria-label="Select ${esc(s.invoiceId || "sale")}" />` : ""}</td>` : ""}
-              <td>${esc(niceDate(s.date))}${cut && s.date < cut ? '<small class="muted">before base count</small>' : ""}</td>
-              <td>${esc(SALE_SRC[s.source] || s.source)}${s.invoiceId ? ` ${esc(s.invoiceId)}` : ""}${s.provider ? `<small class="muted">${esc(s.provider)}</small>` : ""}</td>
-              <td>${esc(s.patientName || "—")}</td><td>${esc(plural(s.qty, unit))}</td>
-              <td><span class="inv-flag ${cls}">${esc(label)}</span>${s.state === "short" ? `<small>${s.left} not taken off</small>` : ""}${
-                s.state === "more" || s.state === "fewer" ? `<small>${s.sheetQty} on the invoice now (was ${s.qty})</small>` : ""}${
-                s.batches.length ? `<small class="muted">${esc(batchName(p))} ${esc(s.batches.join(", "))}</small>` : ""}</td></tr>`;
-          }).join("") || `<tr><td colspan="${picks ? 6 : 5}" class="tb-none">Nothing still to sort out. 👍</td></tr>`}</tbody></table></div>`
-          : `<p class="tb-none">No sales since ${esc(niceDate(sl.fromKey))}.</p>`}
-        ${picks ? `<div class="inv-pd-saleacts"><small class="muted">${sl.sel.size} ticked</small>
-          <button type="button" class="lh-btn is-primary" data-sl="take"${sl.sel.size ? "" : " disabled"}>Update stock</button>
-          <button type="button" class="lh-btn" data-sl="mark"${sl.sel.size ? "" : " disabled"}>Don't change stock</button></div>` : ""}
-        <small class="fe-note">Only invoice names linked to this product are listed. An unlinked name won't show here: link it in Products → Invoice links.</small>
+            return `<tr>
+              <td>${fixable(s) && canManage ? `<input type="checkbox" data-slpick="${esc(s.id)}"${sl.sel.has(s.id) ? " checked" : ""} aria-label="Select" />` : ""}</td>
+              <td>${esc(niceDate(s.date))}</td>
+              <td>${esc([SALE_SRC[s.source] || s.source, s.invoiceId].filter(Boolean).join(" "))}</td>
+              <td>${esc(s.patientName || "—")}</td><td>${qtyCell(s)}</td>
+              <td><span class="inv-flag ${cls}">${esc(label)}</span></td></tr>`;
+          }).join("")}</tbody></table>`
+          : `<p class="tb-none">${sl.only ? "Nothing to sort out. 👍" : "No sales since then."}</p>`}
+        ${canManage && todo.length ? `<div class="inv-pd-acts">
+          <span class="muted">${plural(picked.length, "sale")} ticked · ${esc(plural(picked.reduce((a, s) => a + owed(s), 0), p.stockUnit))}</span>
+          <span class="inv-spacer"></span>
+          <button type="button" class="lh-btn" data-sl="mark"${picked.length ? "" : " disabled"}>Don't change stock</button>
+          <button type="button" class="lh-btn is-primary" data-sl="take"${picked.length ? "" : " disabled"}>Update stock</button>
+        </div>` : ""}
       </div>`;
+    }
+
+    // quick: switching tab (the activity already loaded is reused)
+    function draw({ quick = false } = {}) {
+      const p = st.products.find((x) => x.id === id);
+      if (!p) { dlg.close(); return; }
+      const lots = lotsOf(id);
+      const storage = !isKitProduct(p) && !isSharedProduct(p);
+      const tabs = [["ov", "Overview"], ...(canView ? [["ck", "Check stock"]] : []), ["ac", "Activity"]];
+      if (!tabs.some(([k]) => k === pdTab)) pdTab = "ov";
+
+      // Everyday actions first, the rest under More
+      const btn = (attr, label, cls = "") => `<button type="button" class="lh-btn${cls}" ${attr}>${label}</button>`;
+      const main = [
+        canManage && btn('data-stock="count"', "Count", " is-primary"),
+        canMove && btn('data-stock="move"', "Move Shelf ⇄ JT"),
+        canMove && btn('data-act="sale"', "Record a sale"),
+        canMove && storage && btn('data-act="paper"', "Used on a patient"),
+      ].filter(Boolean);
+      const more = [
+        canManage && ['data-stock="add"', "Add stock"],
+        canMove && storage && ['data-act="return"', "Return…"],
+        canManage && ['data-stock="writeoff"', "Write off"],
+        canRequest && ['data-act="request"', "Request more"],
+      ].filter(Boolean);
+      const actsHtml = main.length || more.length ? `<div class="inv-pd-acts">${main.join("")}${more.length > 1
+        ? `<span class="inv-pd-morewrap"><button type="button" class="lh-btn" data-act="more" aria-expanded="false">More ▾</button>
+            <span class="inv-pd-more" role="menu" data-role="more" hidden>${more.map(([a, l]) =>
+              `<button type="button" role="menuitem" class="pt-pop-item" ${a}>${l}</button>`).join("")}</span></span>`
+        : more.map(([a, l]) => btn(a, l)).join("")}</div>` : "";
+
+      const cardsHtml = `<div class="inv-pd-qty has-count">${shelfCountCard(p)}${LOCATIONS.map((l) => `
+        <div class="inv-pd-loc${lowAt(p, l.key) ? " is-low" : ""}"><span>${esc(l.label)} · digital</span>
+          <strong>${esc(qtyText(p, p.stock[l.key]))}</strong>
+          ${p.reorder[l.key] !== null ? `<small>${lowAt(p, l.key) ? "Low · " : ""}reorder at ${p.reorder[l.key]}</small>` : ""}
+          ${l.key === "jt" ? countLine(p.id, "jt") + fixBtn(p.id, "jt") : ""}</div>`).join("")}</div>`;
+
+      // Overview
+      const lotNote = !p.tracked && canManage && p.stock.shelf + p.stock.jt > 0
+        ? (p.category === "injectable"
+          ? `<div class="inv-pd-sec inv-pd-nolot"><div><h4>Lot and expiry</h4>
+              <p class="muted">This stock has no ${esc(batchName(p).toLowerCase())} number or expiry date, so expiry warnings can't work for it.</p></div>
+              <button type="button" class="lh-btn" data-act="add-lots">Add lot &amp; expiry…</button></div>`
+          : `<p class="inv-pd-note"><span>No ${esc(batchName(p).toLowerCase())} or expiry recorded for this stock.</span>
+              <button type="button" class="lh-btn" data-act="add-lots">Add lot &amp; expiry</button></p>`)
+        : "";
+      const batchesHtml = p.tracked ? `<div class="inv-pd-sec"><h4>Stock by ${esc(batchName(p).toLowerCase())} <small>(oldest expiry first)</small></h4>${lots.length
+        ? `<table class="inv-table"><thead><tr><th>Storage</th><th>${esc(batchName(p))}</th><th>Expiry</th><th>Qty</th>${canManage ? "<th></th>" : ""}</tr></thead><tbody>${lots.map((l, i) => {
+            const ex = expiryState(l.expiry);
+            return `<tr><td>${esc(locLabel(l.loc))}</td><td>${esc(l.batch || "—")}</td>
+              <td>${esc(niceDate(l.expiry) || "—")}${ex ? ` <span class="inv-flag is-${ex === "expired" ? "bad" : "warn"}">${ex === "expired" ? "Expired" : "Soon"}</span>` : ""}</td>
+              <td>${esc(qtyText(p, l.qty))}</td>
+              ${canManage ? `<td class="inv-lot-act"><button type="button" class="lh-btn" data-editlot="${i}">Edit</button></td>` : ""}</tr>`;
+          }).join("")}</tbody></table>`
+        : '<p class="tb-none">No batches in stock.</p>'}</div>` : "";
+      const suppliersHtml = productSuppliers(p).length ? `<div class="inv-pd-sec"><h4>Supplier${productSuppliers(p).length > 1 ? "s" : ""}</h4>${
+        productSuppliers(p).map((t) => {
+          const s = supplierOf(t.supplierId);
+          if (!s) return "";
+          const bits = [t.supplierCode && `Code ${t.supplierCode}`,
+            t.cost !== null && t.cost !== undefined && `${money(t.cost)} / ${t.orderUnit || p.orderUnit}`, s.email, s.phone].filter(Boolean);
+          return `<p class="inv-pd-sup"><strong>${esc(s.name)}</strong>${t.main ? ' <span class="inv-flag is-info">Main</span>' : ""}${
+            bits.map((b) => ` · ${esc(b)}`).join("")}</p>`;
+        }).join("")}</div>` : "";
+
+      // Check stock
+      const baseHtml = canManage ? (() => {
+        const b = st.bases.get(p.id);
+        const nums = (x) => [x.shelf !== null && x.shelf !== undefined && `Shelf ${x.shelf}`,
+          x.jt !== null && x.jt !== undefined && `JT storage ${x.jt}`].filter(Boolean).join(" · ");
+        const hist = b ? b.history.filter((h) => /^\d{4}-\d{2}-\d{2}$/.test(h.dateKey || "")).slice(-3).reverse() : [];
+        return `<div class="inv-pd-sec inv-pd-base"><div><h4>Base count</h4>
+          <p class="muted">${b ? `${esc(nums(b))} on <strong>${esc(niceDate(b.dateKey))}</strong>${b.by ? ` · saved by ${esc(b.by)}` : ""}`
+            : "None saved yet. What was there on a day you know, so digital can be checked against it."}</p>
+          ${hist.length ? `<ul class="inv-base-hist">${hist.map((h, i) => `<li><span>Before: ${esc(nums(h) || "—")} on ${esc(niceDate(h.dateKey))}${
+            h.by ? ` · ${esc(h.by)}` : ""}</span><button type="button" class="rc-link" data-base-restore="${i}">Use again</button></li>`).join("")}</ul>` : ""}</div>
+          <span class="kit-acts">${b ? '<button type="button" class="lh-btn" data-act="base-check">Check digital</button>' : ""}
+            <button type="button" class="lh-btn${b ? " is-quiet" : ""}" data-act="base-set">${b ? "Change" : "Set base count"}</button>
+            ${b ? '<button type="button" class="lh-btn is-quiet" data-act="base-remove">Remove</button>' : ""}</span></div>`;
+      })() : "";
+      const ledgerHtml = canManage ? `<div class="inv-pd-sec inv-pd-base"><div><h4>Day by day</h4>
+          <p class="muted">What should have been there each day, next to digital and the opening counts. Find the day it stopped matching.</p></div>
+          <span class="kit-acts"><button type="button" class="lh-btn" data-act="ledger">Open</button></span></div>` : "";
+
+      const panel = pdTab === "ck" ? `${baseHtml}${canView ? '<div data-role="sales"></div>' : ""}${ledgerHtml}`
+        : pdTab === "ac" ? '<div class="inv-pd-sec"><div data-role="moves"><p class="tb-none">Loading…</p></div></div>'
+        : `${isSharedProduct(p) ? sharedSecHtml(p) : ""}${lotNote}${batchesHtml}${suppliersHtml}
+          <p class="inv-pd-line"><span>Opening count</span><strong>${esc(countText(p) || "Not in the opening count")}</strong></p>
+          <div data-role="returns"></div>
+          <div class="inv-pd-sec"><h4>Latest <button type="button" class="rc-link" data-tab="ac">See all activity</button></h4>
+            <div data-role="latest"><p class="tb-none">Loading…</p></div></div>`;
+
+      box.innerHTML = `
+        <div class="inv-pd-head">
+          <div><h3>${esc(p.name)}</h3>
+            <p class="muted">${esc([catLabel(p.category), p.brand, packText(p), p.tracked ? "Batch & expiry tracked" : ""].filter(Boolean).join(" · "))}</p></div>
+          <span class="inv-pd-tools">${canManage ? `<button type="button" class="ib-tool" data-act="edit" aria-label="Edit product" title="Edit product">${PENCIL}</button>` : ""}
+            <button type="button" class="ib-tool" data-act="close" aria-label="Close" title="Close">×</button></span>
+        </div>
+        ${cardsHtml}
+        ${actsHtml}
+        <nav class="inv-pd-tabs" role="tablist">${tabs.map(([k, l]) => `<button type="button" role="tab" class="inv-pd-tab${
+          k === pdTab ? " is-on" : ""}" aria-selected="${k === pdTab}" data-tab="${k}">${l}</button>`).join("")}</nav>
+        <div class="inv-pd-panel">${panel}</div>`;
+
+      if (pdTab === "ck") drawSales();
+      const paintMoves = () => {
+        const all = box.querySelector('[data-role="moves"]');
+        if (all) all.innerHTML = movesHtml(pdMoves, false, labelOf, canManage);
+        const latest = box.querySelector('[data-role="latest"]');
+        if (latest) latest.innerHTML = movesHtml(pdMoves.slice(0, 3), false, labelOf, canManage);
+      };
+      const paintReturns = () => { const el = box.querySelector('[data-role="returns"]'); if (el) el.innerHTML = returnsHtml(p, pdReturns); };
+      paintReturns();
+      if (quick && movesLoaded) { paintMoves(); return; }
+      listMoves({ productId: id, max: 15 })
+        .then((m) => { pdMoves = m; movesLoaded = true; paintMoves(); })
+        .catch(() => box.querySelectorAll('[data-role="moves"], [data-role="latest"]').forEach((el) => {
+          el.innerHTML = '<p class="tb-none tb-bad">Couldn\'t load the activity.</p>';
+        }));
+      listReturns({ productId: id })
+        .then((list) => { pdReturns = list; paintReturns(); })
+        .catch((err) => console.warn("Returns not loaded:", err));
     }
 
     async function settleSales(deduct, btn) {
@@ -3184,88 +3434,6 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         d2.addEventListener("close", () => resolve(saved));
       });
     }
-    function draw() {
-      const p = st.products.find((x) => x.id === id);
-      if (!p) { dlg.close(); return; }
-      const lots = lotsOf(id);
-      const sup = supplierOf(p.supplierId);
-      box.innerHTML = `
-        <div class="inv-pd-head">
-          <div><h3>${esc(p.name)}</h3>
-            <p class="muted">${esc([catLabel(p.category), p.brand, packText(p), p.tracked ? "Batch & expiry tracked" : ""].filter(Boolean).join(" · "))}</p></div>
-          <button type="button" class="ib-tool" data-act="close" aria-label="Close" title="Close">×</button>
-        </div>
-        <div class="inv-pd-qty has-count">
-          ${shelfCountCard(p)}
-          ${LOCATIONS.map((l) => `
-          <div class="inv-pd-loc${lowAt(p, l.key) ? " is-low" : ""}"><span>${esc(l.label)} · digital</span>
-            <strong>${esc(qtyText(p, p.stock[l.key]))}</strong>
-            ${p.reorder[l.key] !== null ? `<small>${lowAt(p, l.key) ? "Low · " : ""}reorder at ${p.reorder[l.key]}</small>` : ""}
-            ${l.key === "jt" ? countLine(p.id, "jt") : ""}</div>`).join("")}</div>
-          ${canMove || canRequest ? `<div class="inv-pd-acts">
-          ${canManage ? '<button type="button" class="lh-btn is-primary" data-stock="add">Add stock</button>' : ""}
-          ${canMove ? '<button type="button" class="lh-btn" data-stock="move">Move Shelf ⇄ JT</button>' : ""}
-          ${canMove ? '<button type="button" class="lh-btn" data-act="sale">Record a sale</button>' : ""}
-          ${canMove && !isKitProduct(p) && !isSharedProduct(p) ? '<button type="button" class="lh-btn" data-act="paper">Used on a patient</button>' : ""}
-          ${canMove && !isKitProduct(p) && !isSharedProduct(p) ? '<button type="button" class="lh-btn" data-act="return">Return…</button>' : ""}
-          ${canRequest ? '<button type="button" class="lh-btn" data-act="request">Request more</button>' : ""}
-          ${canManage ? `<button type="button" class="lh-btn" data-stock="count">Count</button>
-            <button type="button" class="lh-btn" data-stock="writeoff">Write off</button>
-            <button type="button" class="lh-btn" data-act="ledger">Day by day</button>
-            <button type="button" class="lh-btn is-quiet" data-act="edit">Edit product</button>` : ""}
-        </div>` : ""}
-        ${isSharedProduct(p) ? sharedSecHtml(p) : ""}
-        ${!p.tracked && canManage && p.stock.shelf + p.stock.jt > 0 ? `<div class="inv-pd-sec inv-pd-nolot">
-          <div><h4>Lot and expiry</h4>
-            <p class="muted">This stock has no ${esc(batchName(p).toLowerCase())} number or expiry date, so expiry warnings can't work for it.</p></div>
-          <button type="button" class="lh-btn${p.category === "injectable" ? " is-primary" : ""}" data-act="add-lots">Add lot &amp; expiry…</button>
-        </div>` : ""}
-        ${p.tracked ? `<div class="inv-pd-sec"><h4>Stock by ${esc(batchName(p).toLowerCase())} <small>(oldest expiry first)</small></h4>${lots.length
-          ? `<table class="inv-table"><thead><tr><th>Storage</th><th>${esc(batchName(p))}</th><th>Expiry</th><th>Qty</th>${canManage ? "<th></th>" : ""}</tr></thead><tbody>${lots.map((l, i) => {
-           const ex = expiryState(l.expiry);
-              return `<tr><td>${esc(locLabel(l.loc))}</td><td>${esc(l.batch || "—")}</td>
-                <td>${esc(niceDate(l.expiry) || "—")}${ex ? ` <span class="inv-flag is-${ex === "expired" ? "bad" : "warn"}">${ex === "expired" ? "Expired" : "Soon"}</span>` : ""}</td>
-                <td>${esc(qtyText(p, l.qty))}</td>
-                ${canManage ? `<td class="inv-lot-act"><button type="button" class="lh-btn" data-editlot="${i}">Edit</button></td>` : ""}</tr>`;
-            }).join("")}</tbody></table>`
-          : '<p class="tb-none">No batches in stock.</p>'}</div>` : ""}
-        ${productSuppliers(p).length ? `<div class="inv-pd-sec"><h4>Supplier${productSuppliers(p).length > 1 ? "s" : ""}</h4>${
-          productSuppliers(p).map((t) => {
-            const s = supplierOf(t.supplierId);
-            if (!s) return "";
-             const bits = [
-              t.supplierCode && `Code ${t.supplierCode}`,
-              t.cost !== null && t.cost !== undefined && `${money(t.cost)} / ${t.orderUnit || p.orderUnit}`,
-              s.email, s.phone,
-            ].filter(Boolean);
-            return `<p class="inv-pd-sup"><strong>${esc(s.name)}</strong>${t.main ? ' <span class="inv-flag is-info">Main</span>' : ""}${
-              bits.map((b) => ` · ${b}`).join("")}</p>`;
-          }).join("")}</div>` : ""}
-        ${canManage ? (() => {
-          const b = st.bases.get(p.id);
-          const nums = (x) => [x.shelf !== null && x.shelf !== undefined && `Shelf ${x.shelf}`,
-            x.jt !== null && x.jt !== undefined && `JT storage ${x.jt}`].filter(Boolean).join(" · ");
-          const hist = b ? b.history.filter((h) => /^\d{4}-\d{2}-\d{2}$/.test(h.dateKey || "")).slice(-3).reverse() : [];
-          return `<div class="inv-pd-sec inv-pd-base"><div><h4>Base count</h4>
-            <p class="muted">${b ? `${esc(nums(b))} on <strong>${esc(niceDate(b.dateKey))}</strong>${b.by ? ` · saved by ${esc(b.by)}` : ""}`
-              : "No starting point saved yet. Save what was there on a day you know, and digital can be checked against it at any time."}</p>
-            ${hist.length ? `<ul class="inv-base-hist">${hist.map((h, i) => `<li><span>Before: ${esc(nums(h) || "—")} on ${esc(niceDate(h.dateKey))}${
-              h.by ? ` · ${esc(h.by)}` : ""}</span><button type="button" class="rc-link" data-base-restore="${i}">Use again</button></li>`).join("")}</ul>` : ""}</div>
-            <span class="kit-acts">${b ? '<button type="button" class="lh-btn" data-act="base-check">Check digital</button>' : ""}
-              <button type="button" class="lh-btn${b ? " is-quiet" : ""}" data-act="base-set">${b ? "Change" : "Set base count"}</button>
-              ${b ? '<button type="button" class="lh-btn is-quiet" data-act="base-remove">Remove</button>' : ""}</span></div>`;
-        })() : ""}
-        <div data-role="returns"></div>
-        ${canView ? '<div data-role="sales"></div>' : ""}
-        <div class="inv-pd-sec"><h4>Recent activity</h4><div data-role="moves"><p class="tb-none">Loading…</p></div></div>`;
-      drawSales();
-      listMoves({ productId: id, max: 15 })
-        .then((m) => { pdMoves = m; const el = box.querySelector('[data-role="moves"]'); if (el) el.innerHTML = movesHtml(m, false, labelOf, canManage); })
-        .catch(() => { const el = box.querySelector('[data-role="moves"]'); if (el) el.innerHTML = '<p class="tb-none tb-bad">Couldn\'t load the activity.</p>'; });
-      listReturns({ productId: id })
-        .then((list) => { pdReturns = list; const el = box.querySelector('[data-role="returns"]'); if (el) el.innerHTML = returnsHtml(p, list); })
-        .catch((err) => console.warn("Returns not loaded:", err));
-    }
 
     box.addEventListener("change", (e) => {
       const t = e.target;
@@ -3278,6 +3446,20 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
     box.addEventListener("click", async (e) => {
       if (e.target.closest('[data-act="close"]')) { dlg.close(); return; }
+      const moreEl = box.querySelector('[data-role="more"]');
+      const moreBtn = e.target.closest('[data-act="more"]');
+      if (moreBtn) {
+        if (moreEl) { moreEl.hidden = !moreEl.hidden; moreBtn.setAttribute("aria-expanded", String(!moreEl.hidden)); }
+        return;
+      }
+      if (moreEl) moreEl.hidden = true;   // any other click closes the menu (its items carry on below)
+      const tb = e.target.closest("[data-tab]");
+      if (tb) { pdTab = tb.dataset.tab; draw({ quick: true }); return; }
+      const fx = e.target.closest("[data-fix]");
+      if (fx) {
+        if (await fixDifference(id, fx.dataset.loc || "shelf")) { await load(); if (dlg.open) draw(); }
+        return;
+      }
       const sb = e.target.closest("button[data-sl]");
       if (sb && !sl.busy) {
         if (sb.dataset.sl === "load") loadSales();
@@ -3731,6 +3913,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     }
     if (e.target.closest('[data-act="new-product"]')) { editProduct(null); return; }
     if (e.target.closest('[data-act="new-supplier"]')) { editSupplier(null); return; }
+    const fx = e.target.closest("[data-fix]");
+    if (fx) { fixDifference(fx.dataset.fix, fx.dataset.loc || "shelf").then((ok) => { if (ok) load(); }); return; }
     const pr = e.target.closest("[data-product]");
     if (pr) { openProduct(pr.dataset.product); return; }
     const ep = e.target.closest("[data-edit-product]");
