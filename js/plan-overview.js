@@ -3,7 +3,7 @@ import { db, auth } from "./firebase-config.js";
 import { collection, addDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   getMasterPlan, saveMasterPlan, listPlanHistory, PLAN_STATUS, CONCERN_STATUS, patternText, monthLabel, cleanLine, cleanEvent,
-  matchServices, sharesWord, newId, LINE_STATUS, lineOff, savedLine,
+  matchServices, sharesWord, newId, LINE_STATUS, lineOff, savedLine, lineNote,
 } from "./master-plan-api.js";
 import { getPlanSettings, serviceSetup, getPlanWorkflow, cleanWorkflow, phaseOf } from "./plan-api.js";
 import { visitsFrom, trackPlan, thisMonth, dateKeyOf, dayLabel, addMonths, monthDiff } from "./plan-track.js";
@@ -13,7 +13,7 @@ import { showToast } from "./utils.js";
 import { showSoapPanel } from "./soap-panel.js";
 import { openPlanDocument } from "./plan-doc.js";
 import { callApi } from "./appointments.js";
-import { freqHtml, mountFreq } from "./plan-frequency.js";
+import { freqHtml, mountFreq, scheduleText } from "./plan-frequency.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const MONTH_RE = /^\d{4}-\d{2}$/;
@@ -545,9 +545,11 @@ export function createPlanOverview(el, ctx) {
     const s = lt.next;
     const ask = booking && s && ["due", "overdue"].includes(s.state)
       ? `<button type="button" class="lh-btn pt-ask" data-po="ask" ${attrs(c, l, s.n)}>${s.asked ? "Ask reception again" : "Ask reception to book"}</button>` : "";
+    const note = lineNote(l);
     return `<div class="pt-row">
       <div class="pt-main"><strong>${esc(l.treatment)}</strong>
         <div class="pt-meta">${tag}${meta ? ` · ${esc(meta)}` : ""}</div>
+        ${note ? `<div class="pt-note">${esc(note)}</div>` : ""}
         <details class="pt-st${sl.tone ? ` is-${sl.tone}` : ""}"><summary title="Show the sessions">${esc(sl.text)}</summary>
           <div class="pv-chips">${slotChipsHtml(c, l, lt, clashKeys)}</div></details>
       </div>${ask}${dots}</div>`;
@@ -1210,7 +1212,8 @@ export function createPlanOverview(el, ctx) {
     const price = priceOf(c, l);
     const dlg = openDlg(`
       <div class="lh-dialog-head"><h3>${esc(l.treatment)}</h3><p>${chip(c.key)} ${esc(slotText(lt, s))}${
-        dt.days ? ` · ${dt.days} day${dt.days === 1 ? "" : "s"} of downtime` : ""}${price ? ` · quoted ${esc(price)}` : ""}</p></div>
+        dt.days ? ` · ${dt.days} day${dt.days === 1 ? "" : "s"} of downtime` : ""}${price ? ` · quoted ${esc(price)}` : ""}</p>
+        ${lineNote(l) ? `<p class="pt-note">${esc(lineNote(l))}</p>` : ""}</div>
       ${s.state === "done" && !s.manual ? `<p class="inv-hint">Matched to the appointment on ${esc(dayLabel(s.date))}, so it's counted automatically.</p>` : ""}
       ${s.state === "done" ? recordsHtml(s.date) : ""}
       ${s.state === "booked" ? `<p class="inv-hint">There's an appointment booked for ${esc(dayLabel(s.date))}. It becomes Done after the visit.</p>` : ""}
@@ -1334,6 +1337,9 @@ export function createPlanOverview(el, ctx) {
       <label class="lh-field"><span class="lh-label">Treatment</span>
         <input name="treatment" maxlength="300" value="${esc(x.treatment)}" placeholder="e.g. Skin Needling, full face" /></label>
       ${freqHtml(x)}
+      <label class="lh-field"><span class="lh-label">Comment on how often (optional)</span>
+        <input name="lnote" maxlength="300" value="${esc(lineNote(x) || (scheduleText(x) ? "" : x.frequency || ""))}"
+          placeholder="e.g. Neck to be trialled at the first session, then each time or alternated" /></label>
       <div class="inv-two">
         <label class="lh-field"><span class="lh-label">Area (optional)</span>
           <input name="area" maxlength="200" list="po-area-list" value="${esc(area0)}" placeholder="${esc((c && c.area) || "e.g. Full face")}" />
@@ -1458,8 +1464,11 @@ export function createPlanOverview(el, ctx) {
       const wake = moved && to.tracked && lineWaiting(c, l);
       const area = f.area.value.trim();
       const quote = f.quote.value.trim();
+      const sched = freq.read();
+      const note = f.lnote.value.trim();
       const fields = {
-        treatment, ...freq.read(), area, quote, description: f.desc.value.trim(), startMonth: start, countFrom: f.from.value,
+        treatment, ...sched, note, frequency: [scheduleText(sched), note].filter(Boolean).join(" · "),
+        area, quote, description: f.desc.value.trim(), startMonth: start, countFrom: f.from.value,
         services: [...form.querySelectorAll('[name="svc"]:checked')].map((y) => y.value),
       };
       const newConcernId = inPlan.some((y) => y.id === key) ? `${key}#${newId()}` : key;

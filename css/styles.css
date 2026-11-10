@@ -13465,3 +13465,13 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 /* The chosen answer's wording turns red too */
 .fe-field label:has(input[type="checkbox"]:checked),
 .fe-field label:has(input[type="radio"]:checked) { color: #b91c1c; }
+
+/* Master plan: the clinician's comment on how often, under the schedule */
+.pt-note, .mp-note {
+  display: block;
+  margin-top: 3px;
+  font-size: 12.5px;
+  font-style: italic;
+  line-height: 1.4;
+  color: #64748b;
+}

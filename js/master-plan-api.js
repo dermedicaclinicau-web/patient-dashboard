@@ -54,13 +54,27 @@ export const savedLine = (m) => (m && m.updatedAt
 export function patternText(l) {
   return scheduleText(l) || l.frequency || "";
 }
+
+// The clinician's comment on how often, shown under the schedule ("" if none).
+// Plans saved before comments had their own place keep it after " · " in the frequency wording.
+// No schedule: the whole wording is already shown by patternText, so nothing more is shown.
+export function lineNote(l) {
+  if (!l || !scheduleText(l)) return "";
+  if (l.note) return l.note;
+  const parts = String(l.frequency || "").trim().split(/\s+·\s+/);
+  if (parts.length < 2) return "";
+  const sched = normTx(scheduleText(l));
+  const rest = parts.filter((p) => normTx(p) !== sched);
+  return (rest.length < parts.length ? rest : parts.slice(1)).join(" · ");
+}
 /* ---------- Clean shapes ---------- */
 
 export function cleanLine(l = {}) {
   return {
     id: clip(l.id, 24) || newId(),
     treatment: clip(l.treatment, 300),
-    frequency: clip(l.frequency, 200),
+    frequency: clip(l.frequency, 400),
+    note: clip(l.note, 300),                // the clinician's comment on how often (e.g. "Neck to be trialled at the first session")
     pattern: PATTERNS.includes(l.pattern) ? l.pattern : "unknown",
     sessions: whole(l.sessions),
     intervalWeeks: whole(l.intervalWeeks),
@@ -174,9 +188,11 @@ function linesFrom(c, startMonth, key, services, countFrom) {
   const sch = schedulesOf(c);   // one schedule per treatment line
   return (texts.length ? texts : [c.description || "Treatment"]).map((t, i) => {
     const s = sch[i] || {};
+    const hasSched = !!scheduleText({ pattern: s.pattern, sessions: s.sessions, intervalWeeks: s.interval_weeks, intervalUnit: s.interval_unit });
     return cleanLine({
       treatment: t,
       frequency: freqs[i] && freqs[i] !== "—" ? freqs[i] : "",
+      note: hasSched ? (s.note || "") : "",   // no schedule: the wording itself is shown, comment and all
       pattern: s.pattern, sessions: s.sessions, intervalWeeks: s.interval_weeks, intervalUnit: s.interval_unit,
       startMonth,
       countFrom,
@@ -209,7 +225,7 @@ export function isTreatmentEvent(name, names = []) {
 export function planChanges(master, consult, { recordId = "", services = [], fromKey = "", treatments = [] } = {}) {
   const cur = master ? master.concerns : [];
   const tl = consult.timeline || [];
-  const sig = (x) => [x.lines.map((l) => `${normTx(l.treatment)}/${l.pattern}/${l.sessions}/${l.intervalWeeks}`).join("|"), normTx(x.quote)].join("#");
+  const sig = (x) => [x.lines.map((l) => `${normTx(l.treatment)}/${l.pattern}/${l.sessions}/${l.intervalWeeks}/${normTx(lineNote(l))}`).join("|"), normTx(x.quote)].join("#");
   const drafts = (consult.concerns || []).map((c) => {
     const key = canonicalCategory(c.concern_category);
     const start = tl.filter((t) => t.concern && t.concern === c.key).map((t) => monthKey(t.date)).filter(Boolean).sort()[0] || "";
@@ -279,6 +295,7 @@ export function applyChanges(master, picks, events) {
       const prev = old.lines.find((o) => normTx(o.treatment) === normTx(l.treatment));
       // Its own priority is kept. Proposed again in a new consultation: it's active again.
       return prev ? { ...l, id: prev.id, overrides: prev.overrides, countFrom: prev.countFrom || l.countFrom, priority: prev.priority, rank: prev.rank, area: prev.area, quote: prev.quote, description: prev.description,
+        note: l.note || lineNote(prev),   // a new comment replaces it; none keeps the one there
         services: l.services.length ? l.services : prev.services, startMonth: l.startMonth || prev.startMonth } : l;
     });
     // A line that has been tracked (done, moved…) or declined is kept even if the new consultation doesn't mention it
