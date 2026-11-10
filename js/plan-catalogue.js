@@ -3,7 +3,7 @@
 import { getPlanSettings, savePlanConcernList, savePlanTreatments } from "./plan-api.js";
 import { catKey } from "./plan-editor.js";
 import { patternText } from "./master-plan-api.js";
-import { serviceKey } from "./inventory-api.js";
+import { listServicesSeen, serviceKey } from "./inventory-api.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 
@@ -29,11 +29,12 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
   el.innerHTML = '<section class="tb-card pcg"><div class="skeleton sm"></div></section>';
   let st;
   try {
-    const s = await getPlanSettings();
+    const [s, seen] = await Promise.all([getPlanSettings(), listServicesSeen(180).catch(() => [])]);
     st = {
       concerns: s.concerns.map((c) => ({ ...c })),
       treatments: (s.treatments || []).map((t) => ({ ...t })),
       services: s.services || [],
+      seen: seen.map((x) => x.service),   // every service booked in the last 6 months, set up or not
       open: new Set(), status: "", bad: false,
     };
   } catch (err) {
@@ -62,7 +63,10 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
     setStatus("Saving…");
     chain = chain.then(async () => {
       for (const k of kinds) {
-        if (k === "concerns") await savePlanConcernList(st.concerns, staff);
+        if (k === "concerns") {
+          await savePlanConcernList(st.concerns, staff);
+          window.dispatchEvent(new CustomEvent("plan-concerns-changed", { detail: st.concerns }));
+        }
         else await savePlanTreatments(st.treatments, staff);
       }
       setStatus("All changes saved");
@@ -185,7 +189,8 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
     const byName = (a, b) => a.localeCompare(b, "en-AU");
     const mine = uniq(st.services.filter((r) => r.concerns.includes(c.name)).map((r) => r.service)).sort(byName);
     const mineKeys = new Set(mine.map(serviceKey));
-    const other = uniq([...x.services, ...st.services.filter((r) => !r.notTreatment).map((r) => r.service)])
+    const notTx = new Set(st.services.filter((r) => r.notTreatment).map((r) => serviceKey(r.service)));
+    const other = uniq([...x.services, ...[...st.services.map((r) => r.service), ...st.seen].filter((s) => !notTx.has(serviceKey(s)))])
       .filter((s) => !mineKeys.has(serviceKey(s))).sort(byName);
     const linked = new Set(x.services.map(serviceKey));
     const svcRow = (s, on) => `<label class="fe-check" data-find="${esc(s.toLowerCase())}">
@@ -395,6 +400,13 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
     } else return;
     persist("concerns");
   });
+
+  // A service was set up in "Services and concerns" below: the treatment window offers it straight away
+  const onServices = (e) => {
+    if (!el.isConnected) { window.removeEventListener("plan-services-changed", onServices); return; }
+    st.services = (e.detail || []).filter((r) => r.service);
+  };
+  window.addEventListener("plan-services-changed", onServices);
 
   draw();
 }
