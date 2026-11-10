@@ -350,7 +350,7 @@ export function createPlanOverview(el, ctx) {
       <span class="mp-empty-ic">${ICON_PLAN}</span>
       <div class="mp-empty-main">
         <strong>No master plan yet</strong>
-        <p>One plan per patient, organised by concern and tracked visit by visit.</p>
+        <p>One plan per patient, in the order to book the treatments, tracked visit by visit.</p>
         <ol class="mp-empty-steps">
           <li><b>1</b>Consultation plan</li><li><b>2</b>Review and apply</li><li><b>3</b>Track every visit</li>
         </ol>

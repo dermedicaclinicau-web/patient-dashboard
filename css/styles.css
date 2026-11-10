@@ -13155,3 +13155,23 @@ dialog.lh-dialog.pe-freq-dlg { width: min(520px, calc(100vw - 2rem)); }
 dialog.pd-mail { width: min(560px, 94vw); }
 .pd-mail textarea { width: 100%; }
 .pd-attach { margin: .2rem 0 .6rem; font-size: .85rem; color: #64748b; }
+
+/* Design: wider window while the designer is open */
+dialog.pd-dlg.is-designing { width: min(1560px, 97vw); max-width: 97vw; }
+dialog.pd-dlg.is-designing .pd-grid { grid-template-columns: minmax(480px, 580px) minmax(0, 1fr); }
+/* The palette, the tags and the editor */
+.pd-pal { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .35rem; }
+.pd-pal-item { padding: .45rem .6rem; border: 1px dashed #cbd5e1; border-radius: 8px; background: #fff; font: inherit;
+  font-size: .84rem; color: #334155; text-align: left; cursor: pointer; }
+.pd-pal-item:hover { border-style: solid; border-color: #0f766e; color: #115e59; }
+.pd-tags { display: flex; flex-wrap: wrap; gap: .3rem; }
+.pd-tagchip { padding: .2rem .5rem; border: 1px solid #e2e8f0; border-radius: 999px; background: #f8fafc; font: inherit;
+  font-size: .78rem; color: #475569; cursor: pointer; }
+.pd-tagchip:hover { border-color: #0f766e; color: #115e59; }
+.pd-blk.is-open { border-color: #0f766e; box-shadow: 0 0 0 3px rgba(15, 118, 110, .1); }
+.pd-blk-prev { display: block; width: 100%; margin-top: .4rem; padding: .45rem .6rem; border: 1px solid #f1f5f9; border-radius: 8px;
+  background: #f8fafc; font: inherit; font-size: .86rem; color: #475569; text-align: left; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; cursor: pointer; }
+.pd-blk-prev:hover { border-color: #cbd5e1; }
+.pd-rte { margin-top: .45rem; }
+.pd-grow { flex: 1; }

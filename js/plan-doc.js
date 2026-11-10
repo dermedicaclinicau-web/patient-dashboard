@@ -9,7 +9,9 @@ import { showToast } from "./utils.js";
 import { listPublishedForms, getFormTemplate, getFormVersion, categoryLabel } from "./form-templates.js";
 import { buildFormDocument } from "./form-document.js";
 import { patientAnswers, docToPdf } from "./form-delivery.js";
-import { tagValues, fillTags } from "./form-tags.js";
+import { tagValues, fillTags, fillTagsHtml } from "./form-tags.js";
+import { createRichEditor } from "./rich-editor.js";
+import { cleanRichHtml, richText, textToRichHtml } from "./rich-html.js";
 import { bankImage } from "./image-bank-api.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -20,13 +22,26 @@ const HEX = /^#[0-9a-f]{6}$/i;
 
 // Merge tags, the same ones as Form Builder: {Patient name}, {First name}, {Today}, {Record date}, {My name}…
 // A tag that isn't known is left as typed.
-function fillIn(t, p, staff = null) {
+function tagVals(p, staff = null) {
   const now = new Date();
   const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
   const vals = tagValues({ patient: p, staff, recordDate: today, today });
   vals["full name"] = vals["patient name"];   // the older tag still works
-  return fillTags(t, vals, "");
+  return vals;
 }
+const fillIn = (t, p, staff = null) => fillTags(t, tagVals(p, staff), "");
+
+// How rich text looks on the standard design (preview and PDF)
+const RICH_STYLE = `<style>
+  .pdoc .fe-rich p { margin: 0 0 8px; } .pdoc .fe-rich p:last-child { margin-bottom: 0; }
+  .pdoc .fe-rich h1 { margin: 10px 0 6px; font-size: 21px; line-height: 1.25; color: #0f172a; }
+  .pdoc .fe-rich h2 { margin: 10px 0 5px; font-size: 16px; line-height: 1.3; color: #0f172a; }
+  .pdoc .fe-rich h3 { margin: 8px 0 4px; font-size: 14px; color: #0f172a; }
+  .pdoc .fe-rich ul, .pdoc .fe-rich ol { margin: 0 0 8px; padding-left: 20px; }
+  .pdoc .fe-rich hr { border: none; border-top: 1px solid #cbd5e1; margin: 10px 0; }
+  .pdoc .fe-rich a { color: #0f766e; }
+</style>`;
+
 const paras = (t, style = "margin:0 0 10px") => esc(t).trim().split(/\n{2,}/).filter(Boolean)
   .map((x) => `<p style="${style}">${x.replace(/\n/g, "<br>")}</p>`).join("");
 const monthLong = (k) => {
@@ -217,6 +232,18 @@ export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staf
       return `<h1 style="margin:18px 0 2px;font-size:${base + 9}px;color:${colour}">${esc(fillIn(b.text || d.title || PLAN_DOC_DEFAULTS.title, patient, staff))}</h1>
         <div style="margin:0 0 14px;${small}">For ${esc(patient.name || "")} · ${esc(todayText)}</div>`;
     }
+    if (b.type === "text" && b.html && richText(b.html)) {
+      return `<div class="fe-rich" style="margin:0 0 12px;text-align:${b.align === "center" ? "center" : "left"}">${
+        fillTagsHtml(cleanRichHtml(b.html), tagVals(patient, staff), "")}</div>`;
+    }
+    if (b.type === "divider") return '<div style="margin:14px 0;border-top:1px solid #cbd5e1"></div>';
+    if (b.type === "space") return '<div style="height:22px"></div>';
+    if (b.type === "sign") {
+      const line = '<div style="height:34px;border-bottom:1px solid #334155"></div>';
+      return `<table style="width:100%;margin:26px 0 10px;border-collapse:collapse;page-break-inside:avoid"><tr>
+        <td style="width:62%;padding:0 28px 0 0">${line}<div style="${small}">Patient signature</div></td>
+        <td style="padding:0">${line}<div style="${small}">Date</div></td></tr></table>`;
+    }
     if (b.type === "text") {
       const t = fillIn(b.text, patient, staff);
       if (!t.trim()) return "";
@@ -238,7 +265,7 @@ export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staf
   if (parts) {
     return { treatments: treatmentsHtml(), concerns: concernsHtml(), timeline: timelineHtml(), message: blockHtml({ type: "message" }) };
   }
-  return `<div style="width:703px;box-sizing:border-box;padding:0 4px;background:#fff;font-family:${font};font-size:${base}px;line-height:1.5;color:#1e293b">
+  return `${RICH_STYLE}<div class="pdoc" style="width:703px;box-sizing:border-box;padding:0 4px;background:#fff;font-family:${font};font-size:${base}px;line-height:1.5;color:#1e293b">
     ${letterheadHtml(lh, colour)}
     ${has("title") ? "" : '<div style="height:16px"></div>'}
     ${blocks.map(blockHtml).join("")}
@@ -385,11 +412,13 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
           </div>
           <label class="fe-check"><input type="checkbox" data-d="showPrices"${d.showPrices ? " checked" : ""} /> Show quotes</label>
           <div data-role="std">
+          <p class="lh-label pd-blk-title">Add to the page</p>
+          <div class="pd-pal" data-role="addblock"></div>
+          <p class="lh-label pd-blk-title">Insert a tag into the text you're editing</p>
+          <div class="pd-tags">${["{Patient name}", "{First name}", "{Date of birth}", "{Patient ID}", "{Today}", "{My name}"].map((t) =>
+            `<button type="button" class="pd-tagchip" data-tagins="${esc(t)}">${esc(t)}</button>`).join("")}</div>
           <p class="lh-label pd-blk-title">What's on the page, top to bottom</p>
           <div data-role="blocks"></div>
-          <div class="pd-add" data-role="addblock"></div>
-          <small class="fe-note">Tags are filled in for each patient: {Patient name}, {First name}, {Last name}, {Date of birth},
-            {Patient ID}, {Today}, {My name}.</small>
           </div>
         </details>
         
@@ -444,35 +473,59 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
   /* ---------- Design: the blocks on the page ---------- */
 
   const BLOCK_NAME = { title: "Title and date", text: "Text", message: "Your message to the patient",
-    concerns: "What we're working on", treatments: "The treatments", timeline: "The next 12 months" };
+    concerns: "What we're working on", treatments: "The treatments", timeline: "The next 12 months",
+    divider: "Line", space: "Space", sign: "Signature line" };
+  const PALETTE = [["heading", "Heading"], ["text", "Text"], ["details", "Patient details"], ["divider", "Line"],
+    ["space", "Space"], ["sign", "Signature line"]];
   const blocksEl = dlg.querySelector('[data-role="blocks"]');
   const addEl = dlg.querySelector('[data-role="addblock"]');
-  const newBlock = (type, extra = {}) => ({ id: Math.random().toString(36).slice(2, 10), type, text: "", size: "m", bold: false,
+  const newBlock = (type, extra = {}) => ({ id: Math.random().toString(36).slice(2, 10), type, text: "", html: "", size: "m", bold: false,
     tint: false, align: "left", ...extra });
+  let openId = "";   // the Text block being edited (one rich text editor at a time)
+  // A block written before rich text: its plain text, as a heading if it was a large one
+  const legacyHtml = (b) => (b.size === "l" || b.size === "xl" ? `<h2>${esc(b.text)}</h2>` : textToRichHtml(b.text || ""));
 
   function drawBlocks() {
     const n = d.blocks.length;
-    blocksEl.innerHTML = d.blocks.map((b, i) => `<div class="pd-blk" data-b="${esc(b.id)}">
-      <div class="pd-blk-head"><strong>${esc(BLOCK_NAME[b.type] || "Block")}</strong>
-        <button type="button" class="po-mini" data-bact="up" aria-label="Move up" title="Move up"${i === 0 ? " disabled" : ""}>↑</button>
-        <button type="button" class="po-mini" data-bact="down" aria-label="Move down" title="Move down"${i === n - 1 ? " disabled" : ""}>↓</button>
-        <button type="button" class="po-mini" data-bact="remove" aria-label="Remove" title="Remove">×</button></div>
-      ${b.type === "title" ? `<input data-bf="text" maxlength="80" value="${esc(b.text)}" aria-label="Title" />` : ""}
-      ${b.type === "text" ? `<textarea data-bf="text" rows="2" maxlength="2000" aria-label="Text">${esc(b.text)}</textarea>
-        <div class="pd-blk-opts">
-          <select class="fb-select" data-bf="size" aria-label="Size">${[["s", "Small"], ["m", "Normal"], ["l", "Large"], ["xl", "Extra large"]].map(([v, t]) =>
-            `<option value="${v}"${b.size === v ? " selected" : ""}>${t}</option>`).join("")}</select>
-          <label class="pd-tog" title="Bold"><input type="checkbox" data-bf="bold"${b.bold ? " checked" : ""} /><span><b>B</b></span></label>
-          <label class="pd-tog" title="Use the design colour"><input type="checkbox" data-bf="tint"${b.tint ? " checked" : ""} /><span>Colour</span></label>
-          <label class="pd-tog" title="Centre on the page"><input type="checkbox" data-bf="center"${b.align === "center" ? " checked" : ""} /><span>Centre</span></label>
-        </div>` : ""}
-      ${b.type === "message" ? '<small class="fe-note">Shows what you type in "Message to the patient" above.</small>' : ""}
-    </div>`).join("");
+    blocksEl.innerHTML = d.blocks.map((b, i) => {
+      const open = b.type === "text" && b.id === openId;
+      const peek = String(b.text || "").replace(/\s+/g, " ").trim().slice(0, 90);
+      return `<div class="pd-blk${open ? " is-open" : ""}" data-b="${esc(b.id)}">
+        <div class="pd-blk-head"><strong>${esc(BLOCK_NAME[b.type] || "Block")}</strong>
+          <button type="button" class="po-mini" data-bact="up" aria-label="Move up" title="Move up"${i === 0 ? " disabled" : ""}>↑</button>
+          <button type="button" class="po-mini" data-bact="down" aria-label="Move down" title="Move down"${i === n - 1 ? " disabled" : ""}>↓</button>
+          <button type="button" class="po-mini" data-bact="remove" aria-label="Remove" title="Remove">×</button></div>
+        ${b.type === "title" ? `<input data-bf="text" maxlength="80" value="${esc(b.text)}" aria-label="Title" />` : ""}
+        ${b.type === "text" ? (open
+          ? `<div class="pd-rte" data-role="rte"></div>
+             <div class="pd-blk-opts">
+               <label class="pd-tog" title="Centre on the page"><input type="checkbox" data-bf="center"${b.align === "center" ? " checked" : ""} /><span>Centre</span></label>
+               <span class="pd-grow"></span>
+               <button type="button" class="lh-btn is-quiet" data-bact="done">Done</button></div>`
+          : `<button type="button" class="pd-blk-prev" data-bact="open" title="Click to edit">${esc(peek || "Empty. Click to write.")}</button>`) : ""}
+        ${b.type === "message" ? '<small class="fe-note">Shows what you type in "Message to the patient" above.</small>' : ""}
+      </div>`;
+    }).join("");
     const missing = ["title", "message", "concerns", "treatments", "timeline"].filter((t) => !d.blocks.some((b) => b.type === t));
-    addEl.innerHTML = `<button type="button" class="lh-btn" data-badd="heading">+ Heading</button>
-      <button type="button" class="lh-btn" data-badd="text">+ Text</button>
-      ${missing.map((t) => `<button type="button" class="lh-btn" data-badd="${t}">+ ${esc(BLOCK_NAME[t])}</button>`).join("")}`;
+    addEl.innerHTML = [...PALETTE, ...missing.map((t) => [t, BLOCK_NAME[t]])]
+      .map(([t, l]) => `<button type="button" class="pd-pal-item" data-badd="${t}">+ ${esc(l)}</button>`).join("");
+
+    // The open Text block gets the same editor as Form Builder's Text block
+    const host = blocksEl.querySelector('[data-role="rte"]');
+    const b = host && d.blocks.find((y) => y.id === openId);
+    if (host && b) {
+      const ed = createRichEditor(host, {
+        button: false,
+        onInput: () => {
+          b.html = ed.getHtml();
+          b.text = ed.text().trim().slice(0, 2000);   // a plain copy, for the one-line preview
+          touched();
+        },
+      });
+      ed.setHtml(b.html || legacyHtml(b));
+    }
   }
+
   drawBlocks();
 
   // Standard design: the blocks list. A Form Builder design: its tags and an Edit link.
@@ -494,27 +547,52 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
     saveTimer = setTimeout(saveDesign, 1200);
   };
 
-  dlg.querySelector(".pd-design").addEventListener("click", (e) => {
+  const design = dlg.querySelector(".pd-design");
+  // The window is wider while the designer is open
+  design.addEventListener("toggle", () => dlg.classList.toggle("is-designing", design.open));
+  // Clicking a tag mustn't move the cursor out of the text
+  design.addEventListener("mousedown", (e) => { if (e.target.closest("[data-tagins]")) e.preventDefault(); });
+
+  design.addEventListener("click", (e) => {
     if (e.target.closest("[data-tplreload]")) { loadTpl().then(() => { syncDesign(); draw(); }); return; }
+    const tag = e.target.closest("[data-tagins]");
+    if (tag) {
+      const box = blocksEl.querySelector(".pd-rte [contenteditable]");
+      if (!box) { showToast("Open a Text block first, then click a tag."); return; }
+      box.focus();
+      document.execCommand("insertText", false, tag.dataset.tagins);   // the editor saves it like typing
+      return;
+    }
+    if (e.target.closest(".re")) return;   // the editor's own buttons
     const add = e.target.closest("[data-badd]");
     if (add) {
       const t = add.dataset.badd;
-      // Headings and text go at the top (move them with the arrows); the others go at the end
-      if (t === "heading") d.blocks.unshift(newBlock("text", { text: "New heading", size: "l", bold: true }));
-      else if (t === "text") d.blocks.unshift(newBlock("text", { text: "New text" }));
-      else d.blocks.push(newBlock(t, t === "title" ? { text: d.title } : {}));
+      const made = t === "heading" ? newBlock("text", { text: "New heading", html: "<h2>New heading</h2>" })
+        : t === "text" ? newBlock("text", { text: "New text", html: "<p>New text</p>" })
+        : t === "details" ? newBlock("text", { text: "Patient name: {Patient name} Date: {Today}",
+            html: "<p><strong>Patient name:</strong> {Patient name}<br><strong>Date:</strong> {Today}</p>" })
+        : newBlock(t, t === "title" ? { text: d.title } : {});
+      // After the block being edited, otherwise at the end. Move it with the arrows.
+      const at = d.blocks.findIndex((b) => b.id === openId);
+      d.blocks.splice(at > -1 ? at + 1 : d.blocks.length, 0, made);
+      if (made.type === "text") openId = made.id;
       drawBlocks();
       touched();
-      if (t === "heading" || t === "text") { const box = blocksEl.querySelector("textarea"); if (box) { box.focus(); box.select(); } }
+      const row = blocksEl.querySelector(`[data-b="${made.id}"]`);
+      if (row) row.scrollIntoView({ block: "nearest", behavior: "smooth" });
       return;
     }
     const act = e.target.closest("[data-bact]");
     if (!act || act.disabled) return;
-    const i = d.blocks.findIndex((b) => b.id === act.closest("[data-b]").dataset.b);
+    const id = act.closest("[data-b]").dataset.b;
+    const i = d.blocks.findIndex((b) => b.id === id);
     if (i < 0) return;
-    if (act.dataset.bact === "remove") d.blocks.splice(i, 1);
+    const what = act.dataset.bact;
+    if (what === "open") { openId = id; drawBlocks(); const box = blocksEl.querySelector(".pd-rte [contenteditable]"); if (box) box.focus(); return; }
+    if (what === "done") { openId = ""; drawBlocks(); return; }
+    if (what === "remove") { d.blocks.splice(i, 1); if (openId === id) openId = ""; }
     else {
-      const j = i + (act.dataset.bact === "up" ? -1 : 1);
+      const j = i + (what === "up" ? -1 : 1);
       if (j < 0 || j >= d.blocks.length) return;
       [d.blocks[i], d.blocks[j]] = [d.blocks[j], d.blocks[i]];
     }
@@ -524,6 +602,7 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
 
   form.addEventListener("input", (e) => {
     const t = e.target;
+    if (t.closest && t.closest(".re")) return;   // typing in the rich text editor saves itself
     if (t.name === "message") { pick.message = t.value.trim(); drawSoon(); return; }
     const row = t.dataset.bf ? t.closest("[data-b]") : null;
     if (row) {
@@ -665,6 +744,7 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
   }
 
   form.addEventListener("click", (e) => {
+    if (e.target.closest(".re")) return;   // the editor's own buttons
     const b = e.target.closest("[data-act]");
     if (!b) return;
     const act = b.dataset.act;

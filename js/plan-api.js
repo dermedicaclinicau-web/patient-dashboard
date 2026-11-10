@@ -177,7 +177,8 @@ export const DOC_FONTS = {
   trebuchet: ["Trebuchet", "'Trebuchet MS',Arial,sans-serif"],
   georgia: ["Georgia (serif)", "Georgia,'Times New Roman',serif"],
 };
-const DOC_BLOCKS = ["title", "text", "message", "concerns", "treatments", "timeline"];
+const DOC_BLOCKS = ["title", "text", "message", "concerns", "treatments", "timeline", "divider", "space", "sign"];
+const DOC_MANY = ["text", "divider", "space", "sign"];   // these can be added any number of times
 const docBlockId = () => Math.random().toString(36).slice(2, 10);
 
 // The copy's blocks, top to bottom. "text" can be added any number of times; the others once each.
@@ -188,11 +189,12 @@ function cleanDocBlocks(list, old) {
     id: /^[a-z0-9]{4,16}$/.test(String((b && b.id) || "")) ? b.id : docBlockId(),
     type: DOC_BLOCKS.includes(b && b.type) ? b.type : "",
     text: typeof (b && b.text) === "string" ? b.text.slice(0, 2000) : "",
+    html: typeof (b && b.html) === "string" ? b.html.slice(0, 20000) : "",   // rich text (cleaned when it's shown)
     size: ["s", "m", "l", "xl"].includes(b && b.size) ? b.size : "m",
     bold: !!(b && b.bold === true),
     tint: !!(b && b.tint === true),                       // in the design colour
     align: b && b.align === "center" ? "center" : "left",
-  })).filter((b) => b.type && (b.type === "text" || (!seen.has(b.type) && seen.add(b.type)))).slice(0, 30);
+  })).filter((b) => b.type && (DOC_MANY.includes(b.type) || (!seen.has(b.type) && seen.add(b.type)))).slice(0, 40);
   if (out.length) return out;
   const mk = (type, extra = {}) => ({ id: docBlockId(), type, text: "", size: "m", bold: false, tint: false, align: "left", ...extra });
   return [
