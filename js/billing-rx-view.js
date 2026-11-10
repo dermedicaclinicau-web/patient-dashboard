@@ -172,11 +172,6 @@ export function billingRxSectionHtml() {
   const open = isOpenSaved("billing-rx", true) ? "open" : "";
   // The heading sits beside the rows, not around them: the dashboard's Expand all / Collapse all finds the cards one level down
   return `
-    <button type="button" class="sec-head bp-head" aria-expanded="false" title="Open or close all">
-      ${ICONS.chev}<span class="sec-head-ic">${ICONS.receipt}</span>
-      <span class="pc-title">Billing &amp; Prescriptions</span>
-      <span class="sec-head-sum bp-head-sum"></span>
-    </button>
     <div class="bp-grid">
       <details class="rc-card bp-card bp-billing" data-key="billing-rx" ${open}>
         <summary>

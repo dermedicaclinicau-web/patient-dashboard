@@ -448,6 +448,8 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
 
     ${preConsultHtml()}
 
+    ${historySectionHtml()}
+
     ${clinicalHistorySectionHtml()}
 
     ${treatmentPlansSectionHtml()}
@@ -459,9 +461,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     ${formRecordsSectionHtml()}
 
     ${patientTasksSectionHtml()}
-    
-    ${historySectionHtml()}
-    
+       
     ${billingRxSectionHtml()}
         
     ${injectableReferralSectionHtml()}

@@ -51,11 +51,6 @@ export function skincareSectionHtml() {
   const open = wasOpen() ? "open" : "";
   // The heading sits beside the row, not around it: the dashboard's Expand all / Collapse all finds the cards one level down
   return `
-    <button type="button" class="sec-head sk-head" aria-expanded="false" title="Open or close both">
-      ${ICONS.chev}<span class="sec-head-ic">${ICONS.drop}</span>
-      <span class="pc-title">Skin Care</span>
-      <span class="sec-head-sum sk-head-sum"></span>
-    </button>
     <div class="sk-grid">
       <details class="sk-card sk-ssp" data-key="skincare" ${open}>
         <summary>

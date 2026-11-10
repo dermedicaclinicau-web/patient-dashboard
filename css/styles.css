@@ -13389,3 +13389,17 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 .inv-tabs a:hover .inv-tab-ic,
 .inv-tabs a.active .inv-tab-ic { opacity: 1; }
 .inv-tabs .inv-tabcount { margin-left: 1px; }
+
+/* Allergies recorded: the card pulses red until someone opens it */
+@keyframes hx-allergy-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); }
+  50% { box-shadow: 0 0 0 5px rgba(220, 38, 38, .28); }
+}
+.hx-card.has-alert:not(.is-seen) {
+  border-color: #dc2626;
+  animation: hx-allergy-pulse 1.6s ease-in-out infinite;
+}
+/* Devices set to reduce motion: a steady red ring instead */
+@media (prefers-reduced-motion: reduce) {
+  .hx-card.has-alert:not(.is-seen) { animation: none; box-shadow: 0 0 0 3px rgba(220, 38, 38, .3); }
+}

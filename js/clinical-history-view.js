@@ -33,7 +33,8 @@ export const SECTIONS = {
     empty: "No allergies recorded.", item: "allergy", placeholder: "e.g. Penicillin (rash)" },
 };
 
-const ROWS = [["social", "meds", "hx-row1"], ["conditions", "allergies", "hx-row2"]];
+// Row 1: Medical Conditions | Medication · Row 2: Social History | Allergies
+const ROWS = [["conditions", "meds", "hx-row1"], ["social", "allergies", "hx-row2"]];
 
 export const NONE_RE = /^(nil\b|none\b|no known|nkda|nkfa|n\/a|not applicable|denies|no\s+(allerg|medic|condition|significant))/i;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -113,14 +114,8 @@ function isOpenSaved(key, fallback) {
 /* ===================== Layout ===================== */
 
 export function clinicalHistorySectionHtml() {
-  // The heading sits beside the rows, not around them: the dashboard's Expand all / Collapse all finds the cards one level down
-  const head = `
-    <button type="button" class="hx-head" data-hx-act="toggle-all" aria-expanded="false" title="Open or close all four">
-      ${ICONS.chev}<span class="hx-head-ic">${ICONS.pulse}</span>
-      <span class="pc-title">Clinical History</span>
-      <span class="hx-head-sum"></span>
-    </button>`;
-  return head + ROWS.map(([a, b, rowKey]) => {
+  // No heading: the two rows of cards sit straight on the page
+  return ROWS.map(([a, b, rowKey]) => {
     const open = isOpenSaved(rowKey, true) ? "open" : "";
     return `<div class="hx-grid">${cardHtml(a, rowKey, open)}${cardHtml(b, rowKey, open)}</div>`;
   }).join("");
@@ -167,7 +162,10 @@ export function mountClinicalHistory(root, patient, staff) {
     head.setAttribute("aria-expanded", String(all));
   };
   root.addEventListener("toggle", (e) => {
-    if (e.target.classList && e.target.classList.contains("hx-card")) syncHead();
+    if (!e.target.classList || !e.target.classList.contains("hx-card")) return;
+    syncHead();
+    // Allergies seen: it stops flashing for the rest of this visit to the page
+    if (e.target.open && e.target.dataset.hx === "allergies") e.target.classList.add("is-seen");
   }, true);
   syncHead();
 
