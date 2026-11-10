@@ -3,7 +3,7 @@ import { db } from "./firebase-config.js";
 import { doc, getDoc, getDocs, collection, query, orderBy, limit }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { getPlanDocSettings, savePlanDocSettings, deliverPlanDoc, phaseOf, cleanWorkflow, PLAN_DOC_DEFAULTS, DOC_FONTS } from "./plan-api.js";
-import { lineOff, sharesWord } from "./master-plan-api.js";
+import { lineOff, sharesWord, lineNote } from "./master-plan-api.js";
 import { thisMonth, addMonths } from "./plan-track.js";
 import { showToast } from "./utils.js";
 import { listPublishedForms, getFormTemplate, getFormVersion, categoryLabel } from "./form-templates.js";
@@ -175,10 +175,14 @@ export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staf
     const prog = progressText(lt);
     const what = [labelOf(x.c.key).label, x.l.area || x.c.area].filter(Boolean).join(" · ");
     const desc = descOf(x.c, x.l);
+    // The clinician's comment on how often: under the schedule, or under the name when the Frequency column is hidden
+    const note = lineNote(x.l);
+    const noteHtml = note ? `<div style="margin-top:2px;font-size:${base - 1}px;font-style:italic;color:#475569">${esc(note)}</div>` : "";
     // The concern and area sit under the name when the Description column holds a description, or isn't shown
     return `<tr>
-      <td style="${td}"><strong style="color:#0f172a">${esc(x.l.treatment)}</strong>${(desc || !showDesc) && what ? `<div style="${small}">${esc(what)}</div>` : ""}</td>
-      ${showFreq ? `<td style="${td};color:#334155">${esc(scheduleText(x.l, lt))}${prog ? `<div style="${small}">${esc(prog)}</div>` : ""}</td>` : ""}
+      <td style="${td}"><strong style="color:#0f172a">${esc(x.l.treatment)}</strong>${(desc || !showDesc) && what ? `<div style="${small}">${esc(what)}</div>` : ""}${
+        showFreq ? "" : noteHtml}</td>
+      ${showFreq ? `<td style="${td};color:#334155">${esc(scheduleText(x.l, lt))}${noteHtml}${prog ? `<div style="${small}">${esc(prog)}</div>` : ""}</td>` : ""}
       ${showDesc ? `<td style="${td};color:#334155">${esc(desc || what)}</td>` : ""}
       ${d.showPrices ? `<td style="${td};text-align:right;white-space:nowrap;color:#0f172a">${esc(quoteOf(x.c, x.l))}</td>` : ""}</tr>`;
   };
