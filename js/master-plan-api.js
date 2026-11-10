@@ -3,6 +3,7 @@ import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, getDocs, collection, query, orderBy, limit, runTransaction, serverTimestamp }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { CATEGORIES, canonicalCategory, PATTERNS } from "./plan-editor.js";
+import { everyText } from "./plan-frequency.js";
 
 export const PLAN_STATUS = {
   proposed: "Proposed", sent: "Sent to patient", accepted: "Accepted",
@@ -35,16 +36,14 @@ export function monthLabel(k) {
   return m ? new Date(+m[1], +m[2] - 1, 1).toLocaleDateString("en-AU", { month: "short", year: "numeric" }) : "";
 }
 
-// "Course of 3, every 4 weeks" · "Every 3 months" · "Once"
+// "Course of 3, 1 every 4 weeks" · "1 every 3 months" · "Once"
 export function patternText(l) {
-  const wk = (w) => (!w ? "" : w % 52 === 0 ? (w === 52 ? "year" : `${w / 52} years`)
-    : w >= 9 ? `${Math.round(w / 4.345)} months` : w === 1 ? "week" : `${w} weeks`);
-  if (l.pattern === "course") return [l.sessions ? `Course of ${l.sessions}` : "Course", l.intervalWeeks ? `every ${wk(l.intervalWeeks)}` : ""].filter(Boolean).join(", ");
-  if (l.pattern === "maintenance") return l.intervalWeeks ? `Every ${wk(l.intervalWeeks)}` : "Ongoing";
+  const every = everyText(l.intervalWeeks, l.intervalUnit);
+  if (l.pattern === "course") return [l.sessions ? `Course of ${l.sessions}` : "Course", every].filter(Boolean).join(", ");
+  if (l.pattern === "maintenance") return every ? `${every[0].toUpperCase()}${every.slice(1)}` : "Ongoing";
   if (l.pattern === "once") return "Once";
   return l.frequency || "";
 }
-
 /* ---------- Clean shapes ---------- */
 
 export function cleanLine(l = {}) {
@@ -55,6 +54,7 @@ export function cleanLine(l = {}) {
     pattern: PATTERNS.includes(l.pattern) ? l.pattern : "unknown",
     sessions: whole(l.sessions),
     intervalWeeks: whole(l.intervalWeeks),
+    intervalUnit: l.intervalUnit === "m" || l.intervalUnit === "w" ? l.intervalUnit : "",   // what staff chose: weeks or months
     startMonth: MONTH_RE.test(l.startMonth || "") ? l.startMonth : "",
     countFrom: /^\d{4}-\d{2}-\d{2}$/.test(l.countFrom || "") ? l.countFrom : "",
     services: [...new Set((Array.isArray(l.services) ? l.services : []).map((s) => clip(s, 150)).filter(Boolean))].slice(0, 20),
@@ -158,6 +158,7 @@ function linesFrom(c, startMonth, key, services, countFrom) {
     pattern: i === 0 ? c.pattern : "unknown",       // the recorder's schedule fields describe the first treatment line
     sessions: i === 0 ? c.sessions : 0,
     intervalWeeks: i === 0 ? c.interval_weeks : 0,
+    intervalUnit: i === 0 ? c.interval_unit : "",
     startMonth,
     countFrom,
     services: matchServices(t, key, services),

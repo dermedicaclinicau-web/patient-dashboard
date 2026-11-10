@@ -23,6 +23,8 @@ import {
 } from "./transcripts.js";
 import { readSidecar, planFromSidecar, planFromText } from "./plan-editor.js";
 import { createPlanOverview } from "./plan-overview.js";
+import { monthKey, monthLabel } from "./master-plan-api.js";
+import { CONCERN_COLOURS } from "./plan-api.js";
 import { openPlanReview } from "./master-plan-review.js";
 import {
   escapeHtml, getInitials, hueFromString, formatDobLong, calcAge,
@@ -224,6 +226,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   let pastFormsLoaded = false;
   let transcriptRecords = [];  // consultations, newest first (for the master plan)
   let planView = null;         // the Treatment Plan overview
+  let planSources = null;      // consultations already in the master plan ([] = no plan yet, null = not known)
   let recordsView = null;      // Treatment Records + Consent Records
   let reminderCount = 0;       // for the chips on the collapsed Pre-Consultation header
   let allergies = null;        // { known, items } from Clinical History; null until read
@@ -319,6 +322,8 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       if (card && card._pa) { card._pa.all = !card._pa.all; renderPastAppts(card); }
       return;
     }
+    const tpEdit = t.closest("[data-action='tp-edit']");
+    if (tpEdit) { showSoapPanel(tpEdit.dataset.rid); return; }   // the notes, with the plan card
     const mpApply = t.closest("[data-action='mp-apply']");
     if (mpApply) { applyFromRecord(transcriptRecords.find((r) => r.id === mpApply.dataset.rid)); return; }
     const sumBtn = t.closest("[data-pa-summary]");
@@ -485,6 +490,15 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     latestConsult: () => latestConsultRecord(),
     applyLatest: () => applyFromRecord(latestConsultRecord()),
     onReminder: () => { loadReminders(); if (tasksView) tasksView.reload(); },
+    onPlan: (m, s) => {
+      planSources = m ? m.sources : [];
+      if (s && s.concerns && s.concerns.length) {
+        conLook.clear();
+        s.concerns.forEach((k) => conLook.set(k.name, k));
+      }
+      markPlanStates(root, planSources);
+      paintConcerns(root);
+    },
   });
 
     // Top-level sections: <details> directly on the page, or one level down (e.g. the Clinical History rows)
@@ -668,6 +682,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       }
 
       renderTreatmentPlans(root, records);
+      markPlanStates(root, planSources);
       renderClinicalHistory(root, records);
     } catch (err) {
       if (!root.isConnected) return;
@@ -1831,28 +1846,58 @@ function planGroupHtml(group, isLatest) {
   const dateText = first.date ? formatShortDate(first.date) : (first.dateText || "Undated");
   const staff = [...new Set(group.map((p) => p.staff).filter(Boolean))].join(", ");
   const concerns = group.reduce((n, p) => n + p.parsed.concerns.length, 0);
-  const pill = concerns ? `${concerns} ${concerns === 1 ? "concern" : "concerns"}` : "Review";
+  // Consultations here whose plan can go into the master plan
+  const addable = group.filter((p) => { const c = consultPlanOf(p); return c && c.intent !== "reviewing_existing" && c.concerns.length; });
+  const kind = addable.length ? "plan" : concerns ? "manual" : "review";
+  const state = kind === "plan" ? '<span class="tp-state" hidden></span>'   // filled in once the master plan has loaded
+    : kind === "review" ? '<span class="tp-state">Review only</span>'
+    : '<span class="tp-state" title="This older plan can\'t be read as concerns. Use + Add a concern on the master plan.">Add by hand</span>';
+  const editBtn = (p) => `<button type="button" class="tp-edit" data-action="tp-edit" data-rid="${escapeHtml(p.id)}"
+    title="Open this consultation's notes">${ICONS.edit}<span>${can("consult.record") ? "Edit" : "Notes"}</span></button>`;
 
   return `
-    <details class="tp-record" ${isLatest ? "open" : ""}>
+    <details class="tp-record" data-kind="${kind}"${
+      addable.length ? ` data-rids="${escapeHtml(addable.map((p) => p.id).join(" "))}"` : ""} ${isLatest ? "open" : ""}>
       <summary>
         <span class="sum-left">
           <span class="tp-date">${escapeHtml(dateText)}</span>
           ${staff ? `<span class="tp-by">${escapeHtml(staff)}</span>` : ""}
-          <span class="hint">${pill}</span>
+          ${concerns ? `<span class="hint">${concerns} ${concerns === 1 ? "concern" : "concerns"}</span>` : ""}
+          ${state}
           ${isLatest ? `<span class="tp-latest">Latest</span>` : ""}
           ${group.some((p) => p.matchedByName) ? `<span class="task-flag neutral">Matched by name</span>` : ""}
         </span>
         <span class="tp-sum-right">
-          ${group.some((p) => { const c = consultPlanOf(p); return c && c.intent !== "reviewing_existing" && c.concerns.length; })
-            ? `<button type="button" class="tp-apply" data-action="mp-apply" data-rid="${escapeHtml((group.find((p) => {
-                const c = consultPlanOf(p); return c && c.concerns.length; }) || first).id)}">Apply to master plan</button>` : ""}
+          ${group.length === 1 ? editBtn(first) : ""}
+          ${addable.length ? `<button type="button" class="tp-apply" data-action="mp-apply" data-rid="${escapeHtml(addable[0].id)}">Add to master plan</button>` : ""}
           ${ICONS.chev}
         </span>
-        </summary>
-      <div class="tp-record-body">${group.map(planBodyHtml).join("")}</div>
+      </summary>
+      <div class="tp-record-body">${group.map((p) => (group.length > 1
+        ? `<div class="tp-rec-bar"><span>${escapeHtml(p.staff || "Consultation")}</span>${editBtn(p)}</div>` : "") + planBodyHtml(p)).join("")}</div>
     </details>`;
 }
+
+// "In the master plan" / "Not added yet" on each consultation plan. sources = the consultations the master plan was built from.
+function markPlanStates(root, sources) {
+  root.querySelectorAll('.tp-record[data-kind="plan"]').forEach((d) => {
+    const badge = d.querySelector(".tp-state");
+    const btn = d.querySelector(".tp-apply");
+    if (!badge) return;
+    if (!sources) { badge.hidden = true; return; }
+    const ids = (d.dataset.rids || "").split(" ").filter(Boolean);
+    const todo = ids.filter((id) => !sources.includes(id));
+    badge.hidden = false;
+    badge.textContent = todo.length ? "Not added yet" : "In the master plan";
+    badge.className = `tp-state ${todo.length ? "is-new" : "is-in"}`;
+    if (btn) {
+      btn.dataset.rid = todo[0] || ids[0];
+      btn.textContent = todo.length ? "Add to master plan" : "Compare with master plan";
+      btn.classList.toggle("is-primary", todo.length > 0);
+    }
+  });
+}
+
 
 function planBodyHtml(p) {
   const { intro, concerns, timeline } = p.parsed;
@@ -1862,10 +1907,14 @@ function planBodyHtml(p) {
     return `<div class="tp-note">${escapeHtml(p.plan)}</div>`;
   }
 
+  // The timeline comes from the plan's saved steps (each linked to its concern); older plans fall back to the text
+  const consult = consultPlanOf(p);
+  const steps = consult && consult.intent !== "reviewing_existing" && consult.timeline.some((t) => t.date || t.treatment);
+
   return `
     ${intro.length ? `<div class="tp-note">${intro.map(escapeHtml).join("<br>")}</div>` : ""}
     ${concerns.map(concernHtml).join("")}
-    ${timeline.length ? timelineHtml(timeline) : ""}`;
+    ${steps ? planTimelineHtml(consult) : timeline.length ? timelineHtml(timeline) : ""}`;
 }
 
 function fieldHtml(lines) {
@@ -1944,6 +1993,96 @@ function timelineHtml(lines) {
             <b>${escapeHtml(it.name)}</b>
             ${it.detail ? `<span>${escapeHtml(it.detail)}</span>` : ""}
           </div>`).join("")}
+        ${v.notes.length ? `<span class="tl-warn">${ICONS.alert}Instructions</span>` : ""}
+      </div>
+    </div>`).join("");
+
+  return `
+    <div class="tp-timeline">
+      <div class="tl-top">
+        <p class="tp-label">${ICONS.route}<span>Suggested timeline</span></p>
+        <span class="tl-count">${escapeHtml(summary)}</span>
+      </div>
+      ${notesHtml}
+      <div class="tl-scroll">
+        <div class="tl-steps" style="--steps:${visits.length}">${stepsHtml}</div>
+      </div>
+    </div>`;
+}
+
+
+/* ===================== Timeline from the plan's saved steps ===================== */
+
+// Concern names and colours from Treatment plan settings (filled in when the master plan loads)
+const conLook = new Map();
+const conLookOf = (name) => conLook.get(name) || { label: name, colour: CONCERN_COLOURS[name] || "#888780" };
+
+// The settings arrived after the timelines were drawn: put the clinic's names and colours on them
+function paintConcerns(root) {
+  root.querySelectorAll(".tl-tx[data-con]").forEach((n) => {
+    const k = conLookOf(n.dataset.con);
+    n.style.setProperty("--c", k.colour);
+    const label = n.querySelector("[data-con-label]");
+    if (label) label.textContent = k.label;
+  });
+}
+
+// consult = the plan model (planFromSidecar / planFromText): steps grouped by month, each treatment tagged with its concern
+function planTimelineHtml(consult) {
+  const cons = new Map(consult.concerns.filter((c) => c.key).map((c) => [c.key, c]));
+  const groups = new Map();
+  consult.timeline.forEach((t, i) => {
+    if (!t.date && !t.treatment) return;
+    const mk = monthKey(t.date);
+    const id = mk || `x-${t.date || i}`;
+    if (!groups.has(id)) groups.set(id, { mk, label: mk ? monthLabel(mk) : (t.date || "Planned"), items: [], notes: [] });
+    const g = groups.get(id);
+    const c = cons.get(t.concern) || null;
+    String(t.treatment || "").split(/\n+/).map((s) => s.replace(/^[-•*]\s*/, "").trim()).filter(Boolean)
+      .forEach((name) => g.items.push({ name, c }));
+    if (t.pretreatment_instructions) g.notes.push(t.pretreatment_instructions);
+  });
+  // Months in order; steps without a readable month keep their place at the end
+  const visits = [...groups.values()].sort((a, b) => (a.mk && b.mk ? a.mk.localeCompare(b.mk) : a.mk ? -1 : b.mk ? 1 : 0));
+  if (!visits.length) return "";
+
+  const dated = visits.filter((v) => v.mk);
+  const span = dated.length > 1 ? `${dated[0].label} to ${dated[dated.length - 1].label}` : "";
+  const summary = `${visits.length} ${visits.length === 1 ? "visit" : "visits"}${span ? ` · ${span}` : ""}`;
+
+  // The same instructions on several visits are shown once
+  const notes = new Map();
+  visits.forEach((v, i) => v.notes.forEach((text) => {
+    if (!notes.has(text)) notes.set(text, []);
+    if (!notes.get(text).includes(i + 1)) notes.get(text).push(i + 1);
+  }));
+  const notesHtml = [...notes.entries()].map(([text, nums]) => `
+    <div class="tl-note">
+      ${ICONS.alert}
+      <div>
+        <strong>Before treatment</strong>
+        <span class="tl-applies">(${visitList(nums)})</span>
+        <div>${escapeHtml(text).replace(/\n/g, "<br>")}</div>
+      </div>
+    </div>`).join("");
+
+  const txHtml = ({ name, c }) => {
+    if (!c) return `<div class="tl-tx"><b>${escapeHtml(name)}</b></div>`;
+    const cat = c.concern_category;
+    const look = conLookOf(cat);
+    return `<div class="tl-tx has-con"${cat ? ` data-con="${escapeHtml(cat)}"` : ""} style="--c:${escapeHtml(cat ? look.colour : "#94a3b8")}">
+      <b>${escapeHtml(name)}</b>
+      <span class="tl-con"><i></i>${escapeHtml(String(c.key).toUpperCase())} · <span data-con-label>${
+        escapeHtml(cat ? look.label : (c.description || "Concern").slice(0, 40))}</span></span>
+    </div>`;
+  };
+
+  const stepsHtml = visits.map((v, i) => `
+    <div class="tl-step">
+      <span class="tl-num">${i + 1}</span>
+      <span class="tl-mon">${escapeHtml(v.label)}</span>
+      <div class="tl-card">
+        ${v.items.map(txHtml).join("")}
         ${v.notes.length ? `<span class="tl-warn">${ICONS.alert}Instructions</span>` : ""}
       </div>
     </div>`).join("");

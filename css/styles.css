@@ -13010,3 +13010,50 @@ dialog.lh-dialog.inv-dlg.pcg-dlg { width: min(660px, calc(100vw - 2rem)); }
   .pcg-tx-row { flex-wrap: wrap; }
   .pcg-tx-chips { flex: 1 1 100%; justify-content: flex-start; order: 3; }
 }
+
+/* Master plan: add a concern by hand */
+.pv-addcon { justify-self: start; padding: .55rem 1rem; border: 1px dashed #c4b5fd; border-radius: 12px; background: #fff;
+  color: #6d28d9; font: inherit; font-size: .88rem; font-weight: 600; cursor: pointer; }
+.pv-addcon:hover, .pv-addcon:focus-visible { border-style: solid; background: #f5f3ff; outline: none; }
+.mp-empty-acts { display: grid; gap: .45rem; justify-items: center; }
+.mp-empty-alt { padding: .2rem .4rem; border: 0; background: none; color: #6d28d9; font: inherit; font-size: .84rem;
+  font-weight: 600; text-decoration: underline; cursor: pointer; }
+.mp-empty-alt:hover { color: #4c1d95; }
+@media (max-width: 760px) { .mp-empty-acts { grid-column: 1 / -1; } }
+
+/* Consultation plans: state, Edit, and the timeline's concern tags */
+.tp-state { padding: .1rem .55rem; border-radius: 999px; background: #f1f5f9; color: #64748b;
+  font-size: .7rem; font-weight: 700; white-space: nowrap; }
+.tp-state.is-in { background: #ecfdf5; color: #047857; }
+.tp-state.is-new { background: #fef3c7; color: #92400e; }
+.tp-edit { display: inline-flex; align-items: center; gap: .3rem; padding: .25rem .65rem; border: 1px solid var(--border);
+  border-radius: 8px; background: #fff; color: #475569; font: inherit; font-size: .78rem; font-weight: 600; cursor: pointer; }
+.tp-edit:hover { border-color: #6d28d9; color: #6d28d9; }
+.tp-edit svg { width: 13px; height: 13px; }
+.tp-apply.is-primary { border-color: #6d28d9; background: #6d28d9; color: #fff; }
+.tp-rec-bar { display: flex; align-items: center; justify-content: space-between; gap: .5rem; font-size: .82rem; color: var(--muted); }
+.tl-tx.has-con { border-left: 3px solid var(--c, #cbd5e1); }
+.tl-tx .tl-con { display: flex; align-items: center; gap: .3rem; margin-top: .15rem; font-size: .72rem; font-weight: 600;
+  color: color-mix(in srgb, var(--c, #64748b) 70%, #0f172a); }
+.tl-tx .tl-con span { font-size: inherit; color: inherit; }
+.tl-con i { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--c, #94a3b8); }
+
+/* How often: one control wherever a treatment's schedule is set */
+.fq { display: grid; gap: .55rem; padding: .85rem .95rem; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-2); }
+.fq .lh-label { font-size: .78rem; font-weight: 600; color: var(--muted); }
+.fq-pattern { background: #fff; }
+.fq-line { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; min-height: 44px; }
+.fq-part { display: inline-flex; align-items: center; gap: .5rem; font-size: .95rem; color: #334155; }
+.fq input[type="number"] { width: 72px; height: 44px; padding: 0 .4rem; border: 1px solid var(--border); border-radius: 10px; background: #fff;
+  color: var(--text); font: inherit; font-size: 1.1rem; font-weight: 700; text-align: center; font-variant-numeric: tabular-nums; }
+.fq input[type="number"]:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+.fq-unit { display: inline-flex; background: #fff; }
+.fq-unit .fe-seg-btn span { padding: .45rem .8rem; }
+.fq-quick { display: flex; flex-wrap: wrap; gap: .3rem; }
+.fq-chip { height: 30px; padding: 0 .7rem; border: 1px solid var(--border); border-radius: 999px; background: #fff; color: #475569;
+  font: inherit; font-size: .78rem; font-weight: 600; cursor: pointer; transition: border-color .15s, color .15s, background .15s; }
+.fq-chip:hover { border-color: var(--primary); color: var(--primary); }
+.fq-chip.is-on { border-color: var(--primary); background: var(--primary-soft); color: var(--primary-hover); }
+.fq-chip:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.fq-sum { margin: 0; padding-top: .5rem; border-top: 1px dashed var(--border); font-size: .86rem; font-weight: 600; color: #0f766e; }
+@media (max-width: 560px) { .fq-pattern .fe-seg-btn span { padding: .4rem .2rem; font-size: .74rem; } }

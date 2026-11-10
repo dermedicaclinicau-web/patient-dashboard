@@ -85,6 +85,7 @@ export function cleanTreatment(t = {}) {
     pattern,
     sessions: pattern === "course" ? intIn(t.sessions, 1, 52) : 0,
     intervalWeeks: pattern === "once" ? 0 : intIn(t.intervalWeeks, 0, 520),
+    intervalUnit: pattern !== "once" && (t.intervalUnit === "m" || t.intervalUnit === "w") ? t.intervalUnit : "",
     hidden: t.hidden === true,
   };
 }

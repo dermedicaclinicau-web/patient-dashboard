@@ -6,6 +6,7 @@ import { patternText } from "./master-plan-api.js";
 import { listServicesSeen, serviceKey } from "./inventory-api.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
+import { freqHtml, mountFreq } from "./plan-frequency.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const newId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
@@ -201,16 +202,9 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
         <p><span class="ps-chip" style="--c:${esc(c.colour)}">${esc(c.label)}</span></p></div>
       <label class="lh-field"><span class="lh-label">Treatment</span>
         <input name="txname" maxlength="120" value="${esc(x.name)}" placeholder="e.g. Rejuran" /></label>
-      <div class="inv-two">
-        <label class="lh-field"><span class="lh-label">How often</span><select class="fb-select" name="pattern">${
-          Object.entries(PATTERN_LABEL).map(([v, l]) => `<option value="${v}"${v === x.pattern ? " selected" : ""}>${l}</option>`).join("")}</select></label>
-        <label class="lh-field" data-role="sess"><span class="lh-label">Sessions</span>
-          <input name="sessions" type="number" min="1" max="52" step="1" value="${x.sessions || ""}" /></label>
-        <label class="lh-field" data-role="iv"><span class="lh-label">Every (weeks)</span>
-          <input name="interval" type="number" min="1" max="520" step="1" value="${x.intervalWeeks || ""}" placeholder="e.g. 4" /></label>
-        <label class="lh-field"><span class="lh-label">Quote</span>
-          <input name="quote" maxlength="200" value="${esc(x.quote)}" placeholder="e.g. $899 per session" /></label>
-      </div>
+      ${freqHtml(x)}
+      <label class="lh-field"><span class="lh-label">Quote</span>
+        <input name="quote" maxlength="200" value="${esc(x.quote)}" placeholder="e.g. $899 per session" /></label>
       <div class="lh-field"><span class="lh-label">Areas it's offered for</span>
         <div class="pcg-chips" data-role="areas"></div>
         <div class="pcg-addrow">
@@ -241,13 +235,7 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
     const find = dlg.querySelector('[data-role="find"]');
     const fail = (text) => { err.textContent = text; err.hidden = false; };
 
-    const sync = () => {
-      const p = form.elements.pattern.value;
-      dlg.querySelector('[data-role="sess"]').style.display = p === "course" ? "" : "none";
-      dlg.querySelector('[data-role="iv"]').style.display = p === "once" ? "none" : "";
-    };
-    sync();
-    form.elements.pattern.addEventListener("change", sync);
+    const freq = mountFreq(dlg);
 
     const drawAreas = () => {
       areasEl.innerHTML = x.areas.map((a, i) => `<span class="pcg-area">${esc(a)}
@@ -308,9 +296,7 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
       const next = {
         id: x.id, concern: c.name, name,
         services: [...form.querySelectorAll('[name="svc"]:checked')].map((b) => b.value).slice(0, 20),
-        areas: x.areas, quote: f.quote.value.trim(), pattern,
-        sessions: pattern === "course" ? sessions : 0,
-        intervalWeeks: pattern === "once" ? 0 : parseInt(f.interval.value, 10) || 0,
+        areas: x.areas, quote: f.quote.value.trim(), ...freq.read(),
         hidden: false,
       };
       const i = st.treatments.findIndex((y) => y.id === x.id);

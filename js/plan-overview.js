@@ -3,7 +3,7 @@ import { db, auth } from "./firebase-config.js";
 import { collection, addDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   getMasterPlan, saveMasterPlan, listPlanHistory, PLAN_STATUS, CONCERN_STATUS, patternText, monthLabel, cleanLine, cleanEvent,
-  matchServices, sharesWord,
+  matchServices, sharesWord, newId,
 } from "./master-plan-api.js";
 import { getPlanSettings, serviceSetup, getPlanWorkflow, cleanWorkflow, phaseOf } from "./plan-api.js";
 import { visitsFrom, trackPlan, thisMonth, dateKeyOf, dayLabel, addMonths, monthDiff } from "./plan-track.js";
@@ -13,6 +13,7 @@ import { showToast } from "./utils.js";
 import { showSoapPanel } from "./soap-panel.js";
 import { openPlanDocument } from "./plan-doc.js";
 import { callApi } from "./appointments.js";
+import { freqHtml, mountFreq } from "./plan-frequency.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const MONTH_RE = /^\d{4}-\d{2}$/;
@@ -25,6 +26,7 @@ const BOOKING_STATUSES = ["accepted", "in_progress"]; // booking reminders only 
 const REC_LABEL = { tx: "Treatment record", cons: "Consent record", rx: "Prescription", summary: "Consultation notes" };
 const SVG = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const ICON_PLAN = SVG('<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M9 14l2 2 4-4"/>');
+const ADD_CONCERN_BTN = '<button type="button" class="pv-addcon" data-po="add-concern">+ Add a concern</button>';
 const ICON_SPARK = SVG('<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>');
 
 function openDlg(html) {
@@ -156,6 +158,7 @@ export function createPlanOverview(el, ctx) {
         getPlanWorkflow().catch(() => cleanWorkflow({})),
       ]);
       Object.assign(st, { master: m, settings: s, wf, loaded: true, error: "" });
+      if (ctx.onPlan) ctx.onPlan(m, s);   // the patient page marks which consultation plans are in it
       if (m) refreshProgress();
     } catch (err) {
       console.warn("Master plan failed:", err);
@@ -313,9 +316,12 @@ export function createPlanOverview(el, ctx) {
           <li><b>1</b>Consultation plan</li><li><b>2</b>Review and apply</li><li><b>3</b>Track every visit</li>
         </ol>
       </div>
-      ${latest
-        ? `<button type="button" class="mp-empty-btn" data-po="apply-latest">${ICON_SPARK}<span>Create from the latest consultation</span></button>`
-        : '<small class="mp-empty-none">Record a consultation with a treatment plan first.</small>'}
+      <div class="mp-empty-acts">
+        ${latest
+          ? `<button type="button" class="mp-empty-btn" data-po="apply-latest">${ICON_SPARK}<span>Create from the latest consultation</span></button>`
+          : '<small class="mp-empty-none">No consultation with a treatment plan yet.</small>'}
+        <button type="button" class="mp-empty-alt" data-po="add-concern">Start a plan without a consultation</button>
+      </div>
     </div>`;
   }
 
@@ -606,8 +612,8 @@ export function createPlanOverview(el, ctx) {
       ${todayHtml(track)}
       ${needsHtml(list, booking, eff)}
       ${st.view === "cal"
-        ? calendarHtml(track, clashKeys)
-        : `${phasesHtml(track, clashKeys)}${eventsHtml(m)}`}
+        ? `${calendarHtml(track, clashKeys)}${ADD_CONCERN_BTN}`
+        : `${phasesHtml(track, clashKeys)}${ADD_CONCERN_BTN}${eventsHtml(m)}`}
     </div>`;
     if (eff !== m.status) setTimeout(() => saveAutoStatus(eff), 0);
   }
@@ -1018,9 +1024,9 @@ export function createPlanOverview(el, ctx) {
 
   /* ---------- Add / edit a treatment line ---------- */
 
-  function editLine(c, l) {
+  function editLine(c, l, preset = {}) {
     const isNew = !l;
-    const x = l || { treatment: "", pattern: "course", sessions: 3, intervalWeeks: 4, startMonth: "", countFrom: "", services: [], overrides: {} };
+    const x = l || { treatment: "", pattern: "course", sessions: 3, intervalWeeks: 4, startMonth: "", countFrom: "", services: [], overrides: {}, ...preset };
     const linked = new Set(x.services.map(serviceKey));
     // This concern's treatments from System configuration → Treatment plans
     const catalogue = (st.settings.treatments || []).filter((t) => t.concern === c.key && !t.hidden);
@@ -1038,14 +1044,8 @@ export function createPlanOverview(el, ctx) {
         <small class="fe-note">Fills in everything below. You can still change any of it.</small></label>` : ""}
       <label class="lh-field"><span class="lh-label">Treatment</span>
         <input name="treatment" maxlength="300" value="${esc(x.treatment)}" placeholder="e.g. Skin Needling, full face" /></label>
+      ${freqHtml(x)}
       <div class="inv-two">
-        <label class="lh-field"><span class="lh-label">How often</span><select class="fb-select" name="pattern">${
-          Object.entries(PATTERN_LABEL).map(([v, t]) => `<option value="${v}"${v === x.pattern ? " selected" : ""}>${t}</option>`).join("")}</select></label>
-        <label class="lh-field" data-role="sess"><span class="lh-label">Sessions</span>
-          <input name="sessions" type="number" min="1" max="52" step="1" value="${x.sessions || ""}" /></label>
-        <label class="lh-field" data-role="iv"><span class="lh-label">Every (weeks)</span>
-          <input name="interval" type="number" min="1" max="520" step="1" value="${x.intervalWeeks || ""}" placeholder="e.g. 4" />
-          <small class="fe-note">13 weeks ≈ 3 months · 26 ≈ 6 months · 52 = a year</small></label>
         <label class="lh-field"><span class="lh-label">Start month</span>
           <input name="start" type="month" value="${esc(x.startMonth)}" placeholder="2026-11" /></label>
         <label class="lh-field"><span class="lh-label">Count visits from (optional)</span>
@@ -1074,13 +1074,7 @@ export function createPlanOverview(el, ctx) {
       </div>`);
     const form = dlg.querySelector("form");
     const err = dlg.querySelector(".lh-error");
-    const sync = () => {
-      const p = form.elements.pattern.value;
-      dlg.querySelector('[data-role="sess"]').style.display = p === "course" ? "" : "none";
-      dlg.querySelector('[data-role="iv"]').style.display = p === "once" ? "none" : "";
-    };
-    sync();
-    form.elements.pattern.addEventListener("change", sync);
+    const freq = mountFreq(dlg);
     const preset = form.elements.preset;
     if (preset) {
       preset.addEventListener("change", () => {
@@ -1088,9 +1082,7 @@ export function createPlanOverview(el, ctx) {
         if (!t) return;
         const f = form.elements;
         f.treatment.value = t.name;
-        f.pattern.value = t.pattern;
-        f.sessions.value = t.sessions || "";
-        f.interval.value = t.intervalWeeks || "";
+        freq.set(t);
         if (t.services.length) {
           const want = new Set(t.services.map(serviceKey));
           form.querySelectorAll('[name="svc"]').forEach((b) => {
@@ -1101,7 +1093,6 @@ export function createPlanOverview(el, ctx) {
         f.quote.value = t.quote;
         f.area.value = t.areas.length === 1 ? t.areas[0] : "";   // several areas: choose from the suggestions
         dlg.querySelector("#po-area-list").innerHTML = t.areas.map((a) => `<option value="${esc(a)}"></option>`).join("");
-        sync();
       });
     }
     const find = dlg.querySelector('[data-role="svcfind"]');
@@ -1141,9 +1132,7 @@ export function createPlanOverview(el, ctx) {
       if (start && !MONTH_RE.test(start)) { err.textContent = "Enter the start month as e.g. 2026-11."; err.hidden = false; return; }
       if (pattern === "course" && !(parseInt(f.sessions.value, 10) >= 1)) { err.textContent = "Enter how many sessions."; err.hidden = false; return; }
       const fields = {
-        treatment, pattern,
-        sessions: pattern === "course" ? f.sessions.value : 0,
-        intervalWeeks: pattern === "once" ? 0 : f.interval.value,
+        treatment, ...freq.read(),
         startMonth: start, countFrom: f.from.value,
         services: [...form.querySelectorAll('[name="svc"]:checked')].map((y) => y.value),
       };
@@ -1164,6 +1153,133 @@ export function createPlanOverview(el, ctx) {
       if (ok) dlg.close(); else btn.disabled = false;
     });
     form.elements.treatment.focus();
+  }
+  
+    /* ---------- Add a concern by hand (no consultation needed) ---------- */
+
+  // Saves a change to the plan, or creates the plan when there isn't one yet
+  async function commitOrCreate(mutate, action, summary) {
+    if (st.master) return commit(mutate, action, summary);
+    const next = { status: "proposed", concerns: [], events: [] };
+    mutate(next);
+    st.busy = true;
+    el.classList.add("is-busy");
+    try {
+      await saveMasterPlan(patient, next, { action: "Created by hand", summary, expectedVersion: 0 }, staff);
+      await load();
+      return true;
+    } catch (err) {
+      console.error("Create master plan failed:", err);
+      showToast(err && err.code === "permission-denied"
+        ? "You don't have access to change treatment plans (needs clinical access)."
+        : err && err.message && !err.code ? err.message : "Couldn't save. Try again.");
+      if (err && /Someone else/.test(err.message || "")) await load();
+      return false;
+    } finally {
+      st.busy = false;
+      el.classList.remove("is-busy");
+    }
+  }
+
+  function addConcern() {
+    const m = st.master;
+    const list = st.settings.concerns.filter((k) => !k.hidden);
+    if (!list.length) { showToast("The concern list didn't load. Reload the page and try again."); return; }
+    const many = st.wf.phases.length > 1;
+    const defPhase = m && m.concerns.length ? st.wf.addPhase : st.wf.newPlanPhase;
+    const today = dateKeyOf(new Date());
+    const catOf = (key) => (st.settings.treatments || []).filter((t) => t.concern === key && !t.hidden);
+    const dlg = openDlg(`
+      <div class="lh-dialog-head"><h3>Add a concern</h3>
+        <p>${m ? "It's added to the master plan." : "This starts the master plan."} No consultation needed.</p></div>
+      <div class="inv-two">
+        <label class="lh-field"><span class="lh-label">Concern</span>
+          <select class="fb-select" name="concern"><option value="">Choose a concern…</option>${
+            list.map((k) => `<option value="${esc(k.name)}">${esc(k.label)}</option>`).join("")}</select></label>
+        ${many ? `<label class="lh-field"><span class="lh-label">Priority</span>
+          <select class="fb-select" name="priority">${st.wf.phases.map((p) =>
+            `<option value="${esc(p.id)}"${p.id === defPhase ? " selected" : ""}>${esc(p.name)}${p.tracked ? "" : " (waiting)"}</option>`).join("")}</select></label>` : ""}
+      </div>
+      <p class="inv-hint" data-role="again" hidden></p>
+      <label class="lh-field"><span class="lh-label">Description (optional)</span>
+        <input name="description" maxlength="600" placeholder="e.g. Fine lines around the eyes" /></label>
+      <div class="lh-field"><span class="lh-label">Treatments</span>
+        <div class="po-svcs" data-role="txs"></div>
+        <small class="fe-note">Tick the ones to add. Tick none to type your own next.</small></div>
+      <div class="inv-two">
+        <label class="lh-field"><span class="lh-label">Area (optional)</span>
+          <input name="area" maxlength="200" list="po-conarea-list" placeholder="e.g. Full face" />
+          <datalist id="po-conarea-list"></datalist></label>
+        <label class="lh-field"><span class="lh-label">Start month (optional)</span>
+          <input name="start" type="month" placeholder="2026-11" /></label>
+      </div>
+      <small class="fe-note">Visits count from today, so earlier visits aren't ticked off for this concern.</small>
+      <p class="lh-error" role="alert" hidden></p>
+      <div class="lh-actions">
+        <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+        <button type="submit" class="lh-btn is-primary">Add concern</button>
+      </div>`);
+    const form = dlg.querySelector("form");
+    const f = form.elements;
+    const err = dlg.querySelector(".lh-error");
+    const txsEl = dlg.querySelector('[data-role="txs"]');
+    const againEl = dlg.querySelector('[data-role="again"]');
+    const fail = (t) => { err.textContent = t; err.hidden = false; };
+
+    // The treatment list, area suggestions and the "already in the plan" note follow the chosen concern
+    const sync = () => {
+      const key = f.concern.value;
+      const cat = catOf(key);
+      txsEl.innerHTML = !key ? '<p class="tb-none">Choose a concern first.</p>'
+        : cat.length ? cat.map((t) => `<label class="fe-check"><input type="checkbox" name="tx" value="${esc(t.id)}" />
+            <span>${esc(t.name)} <small class="muted">${esc([patternText(t), t.quote].filter(Boolean).join(" · "))}</small></span></label>`).join("")
+        : '<p class="tb-none">No treatments are set up for this concern yet (System configuration → Treatment plans). You can type your own next.</p>';
+      dlg.querySelector("#po-conarea-list").innerHTML = [...new Set(cat.flatMap((t) => t.areas))]
+        .map((a) => `<option value="${esc(a)}"></option>`).join("");
+      const again = !!key && !!m && m.concerns.some((x) => x.key === key);
+      againEl.hidden = !again;
+      againEl.textContent = again ? `${con(key).label} is already in this plan. This adds it as another entry, e.g. for a later stage.` : "";
+    };
+    sync();
+    f.concern.addEventListener("change", sync);
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      const key = f.concern.value;
+      const start = f.start.value.trim();
+      if (!key) { fail("Choose a concern."); return; }
+      if (start && !MONTH_RE.test(start)) { fail("Enter the start month as e.g. 2026-11."); return; }
+      const ticked = new Set([...form.querySelectorAll('[name="tx"]:checked')].map((b) => b.value));
+      const picked = catOf(key).filter((t) => ticked.has(t.id));
+      // The first entry for a concern is known by the concern's name; another one gets its own id
+      const id = m && m.concerns.some((x) => x.id === key) ? `${key}#${newId()}` : key;
+      const nc = {
+        id, key, status: "active", priority: many ? f.priority.value : defPhase,
+        description: f.description.value.trim(), area: "", quote: "", comments: "", sourceRecordId: "",
+        lines: picked.map((t) => cleanLine({
+          treatment: t.name, pattern: t.pattern, sessions: t.sessions, intervalWeeks: t.intervalWeeks, intervalUnit: t.intervalUnit,
+          startMonth: start, countFrom: today, services: t.services,
+        })),
+      };
+      addToConcern(nc, "", f.area.value.trim(), "");
+      picked.forEach((t) => addToConcern(nc, t.name, "", t.quote));
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      const ok = await commitOrCreate((p) => {
+        p.concerns.push(nc);
+        if (p.status === "completed") p.status = "in_progress";   // there's something to do again
+      }, "Added a concern", `${con(key).label}${picked.length ? `: ${picked.map((t) => t.name).join(", ")}` : ""}`);
+      if (!ok) { btn.disabled = false; return; }
+      dlg.close();
+      showToast(m ? "Concern added" : "Master plan created");
+      if (!picked.length) {
+        const c = st.master && st.master.concerns.find((x) => x.id === id);
+        if (c) editLine(c, null, { countFrom: today });
+      }
+    });
+    f.concern.focus();
   }
 
   /* ---------- Patient events ---------- */
@@ -1281,6 +1397,7 @@ export function createPlanOverview(el, ctx) {
     if (d.po === "plan-menu") { planMenu(); return; }
     if (d.po === "doc") { openDoc(); return; }
     if (d.po === "add-event") { addEvent(); return; }
+    if (d.po === "add-concern") { addConcern(); return; }
     if (d.po === "remove-event") { removeEvent(d.e); return; }
     if (d.po === "cal-prev") { st.calStart = addMonths(st.calStart, -3); draw(); return; }
     if (d.po === "cal-next") { st.calStart = addMonths(st.calStart, 3); draw(); return; }
