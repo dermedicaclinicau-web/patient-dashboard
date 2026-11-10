@@ -4813,7 +4813,7 @@ button.pa-bdg { font-family: inherit; line-height: inherit; }
 
 /* Patient copy window */
 .pd-dlg { width: min(1180px, 97vw); max-height: 94vh; padding: 0; }
-.pd-grid { display: grid; grid-template-columns: 340px minmax(0, 1fr); min-height: 70vh; max-height: 94vh; }
+.pd-grid { display: block; grid-template-columns: 340px minmax(0, 1fr); min-height: 70vh; max-height: 94vh; }
 .pd-opts { display: grid; align-content: start; gap: .75rem; padding: 1.1rem; overflow: auto; border-right: 1px solid var(--border); }
 .pd-cons { display: grid; gap: .5rem; }
 .pd-con { padding: .5rem .6rem; border: 1px solid var(--border); border-left: 4px solid var(--c); border-radius: 0 10px 10px 0; }
@@ -13176,3 +13176,110 @@ dialog.pd-dlg.is-designing .pd-grid { grid-template-columns: minmax(480px, 580px
 .pd-rte { margin-top: .45rem; }
 .pd-grow { flex: 1; }
 
+/* Treatment plan page designer */
+dialog.pdz { width: min(1500px, 97vw); max-width: 97vw; height: 94vh; max-height: 94vh; padding: 0; border: 0; border-radius: 14px;
+  background: #f1f5f9; overflow: hidden; }
+dialog.pdz[open] { display: flex; flex-direction: column; }
+dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
+.pdz-top { display: flex; align-items: center; gap: 1rem; padding: .8rem 1.1rem; background: #fff; border-bottom: 1px solid #e2e8f0; }
+.pdz-top-main { flex: 1; min-width: 0; }
+.pdz-top-main strong { display: block; font-size: 1.05rem; color: #0f172a; }
+.pdz-top-main small { color: #64748b; }
+.pdz-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px minmax(0, 1fr) 330px; }
+.pdz-pal, .pdz-insp { overflow: auto; padding: .9rem; background: #fff; }
+.pdz-pal { border-right: 1px solid #e2e8f0; }
+.pdz-insp { border-left: 1px solid #e2e8f0; }
+.pdz-stage { overflow: auto; padding: 1.4rem; }
+.pdz-page { width: 703px; max-width: 100%; margin: 0 auto; padding: 34px 40px 60px; box-sizing: content-box; background: #fff;
+  box-shadow: 0 4px 24px rgba(15, 23, 42, .12); }
+.pdz-h { margin: 0 0 .5rem; font-weight: 600; color: #0f172a; }
+.pdz-sub { margin: .8rem 0 .35rem; font-size: .76rem; font-weight: 600; color: #64748b; }
+.pdz-hint { margin: .6rem 0 0; font-size: .82rem; color: #64748b; }
+.pdz-add { display: block; width: 100%; margin-bottom: .3rem; padding: .5rem .65rem; border: 1px dashed #cbd5e1; border-radius: 8px;
+  background: #fff; font: inherit; font-size: .88rem; color: #334155; text-align: left; cursor: pointer; }
+.pdz-add:hover:not(:disabled) { border-style: solid; border-color: #0f766e; color: #115e59; }
+.pdz-add:disabled { color: #94a3b8; background: #f8fafc; cursor: default; }
+.pdz-add small { float: right; font-size: .72rem; color: #94a3b8; }
+.pdz-empty { margin: 2rem 0; text-align: center; color: #64748b; }
+/* Blocks on the page: an outline, so selecting never moves the layout */
+.pdz-b { position: relative; border-radius: 4px; outline: 1px dashed transparent; outline-offset: 4px; cursor: pointer; }
+.pdz-b:hover { outline-color: #cbd5e1; }
+.pdz-b.is-sel { outline: 2px solid #0f766e; z-index: 1; }
+.pdz-ph { padding: .5rem .7rem; border: 1px dashed #cbd5e1; border-radius: 6px; font-size: .82rem; color: #94a3b8; text-align: center; }
+.pdz-tools { position: absolute; right: -4px; top: calc(100% + 7px); z-index: 2; display: flex; gap: 3px; }
+.pdz-tools button { width: 1.8rem; height: 1.8rem; border: 1px solid #e2e8f0; border-radius: 6px; background: #fff; color: #334155;
+  font: inherit; line-height: 1; cursor: pointer; box-shadow: 0 2px 6px rgba(15, 23, 42, .1); }
+.pdz-tools button:hover:not(:disabled) { border-color: #0f766e; color: #115e59; }
+.pdz-tools button:disabled { opacity: .4; cursor: default; }
+/* Settings */
+.pdz-f { margin-top: .8rem; }
+.pdz-f .lh-label { display: block; margin-bottom: .3rem; }
+.pdz-f .fe-check { display: flex; margin: .2rem 0; }
+.pdz-file { margin: 0 0 .4rem; font-size: .85rem; color: #334155; word-break: break-word; }
+.pdz-seg { display: inline-flex; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; }
+.pdz-seg button { padding: .35rem .7rem; border: 0; border-left: 1px solid #e2e8f0; background: #fff; font: inherit; font-size: .84rem;
+  color: #475569; cursor: pointer; }
+.pdz-seg button:first-child { border-left: 0; }
+.pdz-seg button.is-on { background: #e6f4f2; color: #115e59; font-weight: 600; }
+.pdz-tags { display: flex; flex-wrap: wrap; gap: .3rem; }
+.pdz-tags button { padding: .2rem .5rem; border: 1px solid #e2e8f0; border-radius: 999px; background: #f8fafc; font: inherit;
+  font-size: .78rem; color: #475569; cursor: pointer; }
+.pdz-tags button:hover { border-color: #0f766e; color: #115e59; }
+@media (max-width: 980px) {
+  .pdz-body { grid-template-columns: 170px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+  .pdz-insp { grid-column: 1 / -1; border-left: 0; border-top: 1px solid #e2e8f0; max-height: 40vh; }
+}
+
+/* Treatment plan page designer */
+dialog.pdz { width: min(1500px, 97vw); max-width: 97vw; height: 94vh; max-height: 94vh; padding: 0; border: 0; border-radius: 14px;
+  background: #f1f5f9; overflow: hidden; }
+dialog.pdz[open] { display: flex; flex-direction: column; }
+dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
+.pdz-top { display: flex; align-items: center; gap: 1rem; padding: .8rem 1.1rem; background: #fff; border-bottom: 1px solid #e2e8f0; }
+.pdz-top-main { flex: 1; min-width: 0; }
+.pdz-top-main strong { display: block; font-size: 1.05rem; color: #0f172a; }
+.pdz-top-main small { color: #64748b; }
+.pdz-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px minmax(0, 1fr) 330px; }
+.pdz-pal, .pdz-insp { overflow: auto; padding: .9rem; background: #fff; }
+.pdz-pal { border-right: 1px solid #e2e8f0; }
+.pdz-insp { border-left: 1px solid #e2e8f0; }
+.pdz-stage { overflow: auto; padding: 1.4rem; }
+.pdz-page { width: 703px; max-width: 100%; margin: 0 auto; padding: 34px 40px 60px; box-sizing: content-box; background: #fff;
+  box-shadow: 0 4px 24px rgba(15, 23, 42, .12); }
+.pdz-h { margin: 0 0 .5rem; font-weight: 600; color: #0f172a; }
+.pdz-sub { margin: .8rem 0 .35rem; font-size: .76rem; font-weight: 600; color: #64748b; }
+.pdz-hint { margin: .6rem 0 0; font-size: .82rem; color: #64748b; }
+.pdz-add { display: block; width: 100%; margin-bottom: .3rem; padding: .5rem .65rem; border: 1px dashed #cbd5e1; border-radius: 8px;
+  background: #fff; font: inherit; font-size: .88rem; color: #334155; text-align: left; cursor: pointer; }
+.pdz-add:hover:not(:disabled) { border-style: solid; border-color: #0f766e; color: #115e59; }
+.pdz-add:disabled { color: #94a3b8; background: #f8fafc; cursor: default; }
+.pdz-add small { float: right; font-size: .72rem; color: #94a3b8; }
+.pdz-empty { margin: 2rem 0; text-align: center; color: #64748b; }
+/* Blocks on the page: an outline, so selecting never moves the layout */
+.pdz-b { position: relative; border-radius: 4px; outline: 1px dashed transparent; outline-offset: 4px; cursor: pointer; }
+.pdz-b:hover { outline-color: #cbd5e1; }
+.pdz-b.is-sel { outline: 2px solid #0f766e; z-index: 1; }
+.pdz-ph { padding: .5rem .7rem; border: 1px dashed #cbd5e1; border-radius: 6px; font-size: .82rem; color: #94a3b8; text-align: center; }
+.pdz-tools { position: absolute; right: -4px; top: calc(100% + 7px); z-index: 2; display: flex; gap: 3px; }
+.pdz-tools button { width: 1.8rem; height: 1.8rem; border: 1px solid #e2e8f0; border-radius: 6px; background: #fff; color: #334155;
+  font: inherit; line-height: 1; cursor: pointer; box-shadow: 0 2px 6px rgba(15, 23, 42, .1); }
+.pdz-tools button:hover:not(:disabled) { border-color: #0f766e; color: #115e59; }
+.pdz-tools button:disabled { opacity: .4; cursor: default; }
+/* Settings */
+.pdz-f { margin-top: .8rem; }
+.pdz-f .lh-label { display: block; margin-bottom: .3rem; }
+.pdz-f .fe-check { display: flex; margin: .2rem 0; }
+.pdz-file { margin: 0 0 .4rem; font-size: .85rem; color: #334155; word-break: break-word; }
+.pdz-seg { display: inline-flex; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; }
+.pdz-seg button { padding: .35rem .7rem; border: 0; border-left: 1px solid #e2e8f0; background: #fff; font: inherit; font-size: .84rem;
+  color: #475569; cursor: pointer; }
+.pdz-seg button:first-child { border-left: 0; }
+.pdz-seg button.is-on { background: #e6f4f2; color: #115e59; font-weight: 600; }
+.pdz-tags { display: flex; flex-wrap: wrap; gap: .3rem; }
+.pdz-tags button { padding: .2rem .5rem; border: 1px solid #e2e8f0; border-radius: 999px; background: #f8fafc; font: inherit;
+  font-size: .78rem; color: #475569; cursor: pointer; }
+.pdz-tags button:hover { border-color: #0f766e; color: #115e59; }
+@media (max-width: 980px) {
+  .pdz-body { grid-template-columns: 170px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+  .pdz-insp { grid-column: 1 / -1; border-left: 0; border-top: 1px solid #e2e8f0; max-height: 40vh; }
+}
