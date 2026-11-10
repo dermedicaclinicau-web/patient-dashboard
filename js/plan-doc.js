@@ -8,12 +8,12 @@ import { thisMonth, addMonths } from "./plan-track.js";
 import { showToast } from "./utils.js";
 import { listPublishedForms, getFormTemplate, getFormVersion, categoryLabel } from "./form-templates.js";
 import { buildFormDocument } from "./form-document.js";
-import { patientAnswers } from "./form-delivery.js";
+import { patientAnswers, docToPdf } from "./form-delivery.js";
 import { tagValues } from "./form-tags.js";
 import { bankImage } from "./image-bank-api.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const PDF_LIB = "https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js";
+
 const ACTIVE = ["active", "maintenance"];
 const EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
 const HEX = /^#[0-9a-f]{6}$/i;
@@ -231,46 +231,12 @@ export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staf
   if (parts) {
     return { treatments: treatmentsHtml(), concerns: concernsHtml(), timeline: timelineHtml(), message: blockHtml({ type: "message" }) };
   }
-  return `<div style="width:720px;padding:4px;background:#fff;font-family:${font};font-size:${base}px;line-height:1.5;color:#1e293b">
+  return `<div style="width:703px;box-sizing:border-box;padding:0 4px;background:#fff;font-family:${font};font-size:${base}px;line-height:1.5;color:#1e293b">
     ${letterheadHtml(lh, colour)}
     ${has("title") ? "" : '<div style="height:16px"></div>'}
     ${blocks.map(blockHtml).join("")}
     <p style="margin:12px 0 0;font-size:${base - 2}px;color:#94a3b8">Prepared${staff && staff.name ? ` by ${esc(staff.name)}` : ""}${lh && lh.name ? ` · ${esc(lh.name)}` : ""}</p>
   </div>`;
-}
-/* ---------- PDF (made in the browser, so it matches the preview) ---------- */
-
-function loadPdfLib() {
-  if (window.html2pdf) return Promise.resolve(window.html2pdf);
-  return new Promise((resolve, reject) => {
-    const s = document.createElement("script");
-    s.src = PDF_LIB;
-    s.onload = () => (window.html2pdf ? resolve(window.html2pdf) : reject(new Error("The PDF maker didn't start.")));
-    s.onerror = () => reject(new Error("The PDF maker couldn't load. Check your connection."));
-    document.head.appendChild(s);
-  });
-}
-
-// Returns a function that starts the PDF job. (The job itself can't be returned from an async function:
-// it behaves like a promise, so it would be unwrapped and lost.)
-async function pdfJob(html, fileName) {
-  const h2p = await loadPdfLib();
-  return () => h2p().set({
-    margin: [12, 12, 14, 12],
-    filename: fileName,
-    image: { type: "jpeg", quality: 0.95 },
-    html2canvas: { scale: 2, useCORS: true, backgroundColor: "#ffffff" },
-    jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
-    pagebreak: { mode: ["css", "legacy"] },
-  }).from(html, "string");
-}
-
-async function pdfBase64(html, fileName) {
-  const start = await pdfJob(html, fileName);
-  const uri = await start().outputPdf("datauristring");
-  const i = String(uri || "").indexOf("base64,");
-  if (i < 0) throw new Error("Couldn't make the PDF.");
-  return uri.slice(i + 7);
 }
 
 /* ---------- The window ---------- */
@@ -355,10 +321,14 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
       inner = inner.replace(new RegExp(`<p[^>]*>\\s*${tag}\\s*</p>`, "gi"), put).replace(new RegExp(tag, "gi"), put);
     });
     if (!placed) inner += p.treatments;   // no {Plan treatments} on the form: they go at the end
-    return `<style>${tpl.css}</style><div class="pdfdoc">${inner}</div>`;
+    return inner;
   }
   await loadTpl();
-  const html = () => (tpl ? formHtml() : planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff, wf, descOf }));
+  const stdHtml = () => planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff, wf, descOf });
+  // The preview
+  const html = () => (tpl ? `<style>${tpl.css}</style><div class="pdfdoc">${formHtml()}</div>` : stdHtml());
+  // The PDF: made by the same PDF maker as forms, which copes with the page being scrolled behind the window
+  const makePdf = () => docToPdf(tpl ? { css: tpl.css, inner: formHtml(), fileName } : { css: "", inner: stdHtml(), fileName });
   const lastSent = sends.map((s) => `${s.kind === "print" ? "Printed" : `Emailed to ${s.to}`} ${
     s.sentAt ? new Date(s.sentAt).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : ""}${s.sentBy ? ` by ${s.sentBy}` : ""}`);
 
@@ -421,16 +391,7 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
           <button type="button" class="lh-btn" data-act="print">Send to printer</button>
           <button type="button" class="lh-btn is-primary" data-act="email-open">Email to patient</button>
         </div>
-        <div class="pd-email" data-role="email" hidden>
-          <label class="lh-field"><span class="lh-label">To</span><input name="to" type="email" maxlength="254" value="${esc(patient.email || "")}" /></label>
-          <label class="lh-field"><span class="lh-label">CC (optional)</span><input name="cc" type="email" maxlength="254" /></label>
-          <label class="lh-field"><span class="lh-label">Subject</span><input name="subject" maxlength="200" value="${esc(fillIn(d.emailSubject, patient))}" /></label>
-          <label class="lh-field"><span class="lh-label">Message</span><textarea name="body" rows="6" maxlength="3000">${esc(fillIn(d.emailMessage, patient))}</textarea></label>
-          <div class="pd-acts">
-            <button type="button" class="lh-btn is-quiet" data-act="email-cancel">Cancel</button>
-            <button type="button" class="lh-btn is-primary" data-act="email-send">Send email</button>
-          </div>
-        </div>
+
         <p class="lh-error" role="alert" hidden></p>
         <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="close">Close</button></div>
       </div>
@@ -442,7 +403,7 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
   const form = dlg.querySelector("form");
   const err = dlg.querySelector(".lh-error");
   const preview = dlg.querySelector('[data-role="preview"]');
-  const emailBox = dlg.querySelector('[data-role="email"]');
+
   const savedNote = dlg.querySelector('[data-role="saved"]');
   let busy = false;
   let drawTimer = 0;
@@ -603,37 +564,121 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
     }
   }
 
+  /* ---------- Email: its own window on top ---------- */
+
+  // What's typed is kept if the window is closed and opened again
+  const mail = { to: patient.email || "", cc: "", subject: fillIn(d.emailSubject, patient), body: fillIn(d.emailMessage, patient) };
+
+  function openEmail() {
+    if (busy) return;
+    if (nothing()) { fail("Tick at least one treatment to include."); return; }
+    err.hidden = true;
+    const onFile = String(patient.email || "").trim().toLowerCase();
+    const box = document.createElement("dialog");
+    box.className = "lh-dialog pd-mail";
+    box.innerHTML = `<form class="lh-form" novalidate>
+      <div class="lh-dialog-head"><h3>Email the treatment plan</h3>
+        <p>The plan is attached as a PDF, exactly as it looks in the preview.</p></div>
+      <label class="lh-field"><span class="lh-label">To</span>
+        <input name="to" type="email" maxlength="254" autocomplete="off" value="${esc(mail.to)}" /></label>
+      <p class="fe-note fe-bad" data-role="warn" hidden></p>
+      <label class="lh-field"><span class="lh-label">CC (optional)</span>
+        <input name="cc" type="email" maxlength="254" autocomplete="off" value="${esc(mail.cc)}" /></label>
+      <label class="lh-field"><span class="lh-label">Subject</span>
+        <input name="subject" maxlength="200" value="${esc(mail.subject)}" /></label>
+      <label class="lh-field"><span class="lh-label">Message</span>
+        <textarea name="body" rows="9" maxlength="3000">${esc(mail.body)}</textarea></label>
+      <p class="pd-attach">Attached: ${esc(fileName)}</p>
+      <p class="lh-error" role="alert" hidden></p>
+      <div class="lh-actions">
+        <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+        <button type="submit" class="lh-btn is-primary">Send email</button>
+      </div></form>`;
+    const f = box.querySelector("form");
+    const el = f.elements;
+    const bad = box.querySelector(".lh-error");
+    const warn = box.querySelector('[data-role="warn"]');
+    const send = f.querySelector('[type="submit"]');
+    let sending = false;
+
+    const checkTo = () => {
+      const v = el.to.value.trim().toLowerCase();
+      warn.textContent = !onFile ? "There's no email address on this patient's record. Type one in."
+        : "This isn't the email address on the patient's record.";
+      warn.hidden = !!onFile && (!v || v === onFile);
+    };
+    el.to.addEventListener("input", checkTo);
+    checkTo();
+
+    const keep = () => Object.assign(mail, { to: el.to.value.trim(), cc: el.cc.value.trim(), subject: el.subject.value.trim(), body: el.body.value.trim() });
+    box.addEventListener("cancel", (e) => { if (sending) e.preventDefault(); });
+    box.addEventListener("close", () => { keep(); box.remove(); });
+    box.querySelector('[data-act="cancel"]').addEventListener("click", () => { if (!sending) box.close(); });
+
+    f.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (sending) return;
+      keep();
+      const show = (t) => { bad.textContent = t; bad.hidden = false; };
+      bad.hidden = true;
+      if (!EMAIL_RE.test(mail.to)) { show("Enter a valid email address in To."); el.to.focus(); return; }
+      if (mail.cc && !EMAIL_RE.test(mail.cc)) { show("Check the CC email address."); el.cc.focus(); return; }
+      if (!mail.subject || !mail.body) { show("Add a subject and a message."); return; }
+      sending = true;
+      busy = true;
+      send.disabled = true;
+      send.textContent = "Preparing the PDF…";
+      try {
+        const { pdf } = await makePdf();
+        send.textContent = "Sending…";
+        await deliverPlanDoc({
+          patientId: patient.id, kind: "email", pdf, fileName, to: mail.to, cc: mail.cc, subject: mail.subject,
+          html: `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#1e293b">${paras(mail.body)}</div>`,
+        });
+        sending = false;
+        busy = false;
+        box.close();
+        showToast(`Emailed to ${mail.to}`);
+        dlg.close();
+        if (onSent) onSent("email");
+      } catch (ex) {
+        console.error("Plan email failed:", ex);
+        show(SEND_ERRORS[ex && ex.code] || (ex && ex.message && !ex.code ? ex.message : "Couldn't send. Try again."));
+        sending = false;
+        busy = false;
+        send.disabled = false;
+        send.textContent = "Send email";
+      }
+    });
+
+    document.body.appendChild(box);
+    box.showModal();
+    (mail.to ? el.body : el.to).focus();
+  }
+
   form.addEventListener("click", (e) => {
     const b = e.target.closest("[data-act]");
     if (!b) return;
     const act = b.dataset.act;
     if (act === "close") { if (!busy) dlg.close(); return; }
-    if (act === "email-open") { emailBox.hidden = false; form.elements.to.focus(); return; }
-    if (act === "email-cancel") { emailBox.hidden = true; return; }
-
+    if (act === "email-open") { openEmail(); return; }
     if (act === "download") {
-      run(b, "Making the PDF…", async () => { const start = await pdfJob(html(), fileName); await start().save(); });
+      run(b, "Making the PDF…", async () => {
+        const { blob } = await makePdf();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+      });
     } else if (act === "print") {
       run(b, "Sending…", async () => {
-        await deliverPlanDoc({ patientId: patient.id, kind: "print", pdf: await pdfBase64(html(), fileName), fileName });
+        await deliverPlanDoc({ patientId: patient.id, kind: "print", pdf: (await makePdf()).pdf, fileName });
         showToast("Sent to the printer");
         if (onSent) onSent("print");
-      });
-    } else if (act === "email-send") {
-      const to = form.elements.to.value.trim();
-      const cc = form.elements.cc.value.trim();
-      const subject = form.elements.subject.value.trim();
-      const message = form.elements.body.value.trim();
-      if (!EMAIL_RE.test(to) || (cc && !EMAIL_RE.test(cc))) { fail("Check the email address."); return; }
-      if (!subject || !message) { fail("Add a subject and a message."); return; }
-      run(b, "Sending…", async () => {
-        await deliverPlanDoc({
-          patientId: patient.id, kind: "email", pdf: await pdfBase64(html(), fileName), fileName, to, cc, subject,
-          html: `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#1e293b">${paras(message)}</div>`,
-        });
-        showToast(`Emailed to ${to}`);
-        dlg.close();
-        if (onSent) onSent("email");
       });
     }
   });

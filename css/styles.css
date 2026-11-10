@@ -13137,3 +13137,8 @@ dialog.lh-dialog.pe-freq-dlg { width: min(520px, calc(100vw - 2rem)); }
 .pd-add { display: flex; flex-wrap: wrap; gap: .35rem; margin: .5rem 0; }
 
 .pd-tpl code { padding: .05rem .3rem; border-radius: 4px; background: #f1f5f9; font-size: .8rem; white-space: nowrap; }
+
+/* Print or email: the email window */
+dialog.pd-mail { width: min(560px, 94vw); }
+.pd-mail textarea { width: 100%; }
+.pd-attach { margin: .2rem 0 .6rem; font-size: .85rem; color: #64748b; }
