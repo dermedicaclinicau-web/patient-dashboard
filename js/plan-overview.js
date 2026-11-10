@@ -1024,9 +1024,9 @@ export function createPlanOverview(el, ctx) {
 
   /* ---------- Add / edit a treatment line ---------- */
 
-  function editLine(c, l, preset = {}) {
+  function editLine(c, l, defaults = {}) {
     const isNew = !l;
-    const x = l || { treatment: "", pattern: "course", sessions: 3, intervalWeeks: 4, startMonth: "", countFrom: "", services: [], overrides: {}, ...preset };
+    const x = l || { treatment: "", pattern: "course", sessions: 3, intervalWeeks: 4, startMonth: "", countFrom: "", services: [], overrides: {}, ...defaults };
     const linked = new Set(x.services.map(serviceKey));
     // This concern's treatments from System configuration → Treatment plans
     const catalogue = (st.settings.treatments || []).filter((t) => t.concern === c.key && !t.hidden);
