@@ -177,13 +177,28 @@ function ensureDom() {
       e.target.blur();
       return;
     }
+    if ((e.key === "Enter" || e.key === " ") && e.target.matches && e.target.matches(".sp-grid > .sp-card > header")) {
+      e.preventDefault();
+      toggleCard(e.target.parentElement);
+      return;
+    }
     const field = e.target.closest && e.target.closest(".pe-field");
     if (field && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); startPlanEdit(field); }
   });
 
   panel.addEventListener("input", (e) => {
     if (e.target.matches("textarea")) autosize(e.target);
-    if (e.target.matches("textarea[data-key], textarea[data-extra]")) markDirty();
+    if (e.target.matches("textarea[data-key], textarea[data-extra]")) {
+      markDirty();
+      const card = e.target.closest(".sp-card");
+      const peek = card && card.querySelector(":scope > header .sp-peek");
+      if (peek) {
+        const info = cardInfo(card);
+        peek.textContent = info.peek;
+        card.classList.toggle("is-empty", info.empty);
+        updateSecBar();
+      }
+    }
   });
 
   window.addEventListener("beforeunload", (e) => {
@@ -291,6 +306,85 @@ async function load(id) {
   updateTab();
 }
 
+/* ===================== Sections that open and close ===================== */
+
+const OPEN_KEY = "sp-open";   // which sections each person keeps open (this computer only, never patient data)
+const CHEV = svg('<polyline points="6 9 12 15 18 9"/>');
+function openPrefs() { try { return JSON.parse(localStorage.getItem(OPEN_KEY)) || {}; } catch { return {}; } }
+function saveOpenPref(key, open) {
+  if (!key) return;
+  const p = openPrefs();
+  p[key] = open;
+  try { localStorage.setItem(OPEN_KEY, JSON.stringify(p)); } catch { /* not essential */ }
+}
+
+// What a section shows on its closed bar, and whether it's empty
+function cardInfo(card) {
+  const key = card.dataset.sec || "";
+  if (key === "plan" && current && current.plan) {
+    const p = current.plan;
+    if (p.intent === "reviewing_existing") return { empty: false, peek: "Review of existing plan" };
+    const cs = p.concerns || [];
+    return {
+      empty: !cs.length,
+      peek: cs.length ? `${cs.length} concern${cs.length === 1 ? "" : "s"} · ${cs.map((c) => c.concern_category || "Concern").join(", ")}` : "Nothing recorded",
+    };
+  }
+  if (key === "email" && card.matches("[data-email-card]")) {
+    const n = (current && current.emailItems ? current.emailItems : []).length;
+    return { empty: !n, peek: n ? `${n} treatment${n === 1 ? "" : "s"}` : "Nothing recorded" };
+  }
+  if (key === "pn") return { empty: false, peek: "" };
+  const ta = card.querySelector(":scope > textarea");
+  const v = ta ? ta.value.trim() : "";
+  return { empty: !v, peek: v ? v.split(/\n+/)[0].replace(/^\s*[-•*]\s*/, "") : "Nothing recorded" };
+}
+
+// Every section's bar: a preview, a chevron, and open or closed. Empty ones start closed;
+// the rest open, unless this person keeps that kind of section closed.
+function setupCards() {
+  if (!panel) return;
+  const prefs = openPrefs();
+  panel.querySelectorAll(".sp-grid > .sp-card").forEach((card) => {
+    const head = card.querySelector(":scope > header");
+    if (!head) return;
+    const info = cardInfo(card);
+    if (!head.querySelector(".sp-peek")) head.insertAdjacentHTML("beforeend", `<span class="sp-peek"></span><span class="sp-chev">${CHEV}</span>`);
+    head.querySelector(".sp-peek").textContent = info.peek;
+    card.classList.toggle("is-empty", info.empty);
+    if (!card.dataset.ready) {
+      card.dataset.ready = "1";
+      const key = card.dataset.sec;
+      card.classList.toggle("is-closed", info.empty ? true : key in prefs ? !prefs[key] : false);
+    }
+    head.tabIndex = 0;
+    head.setAttribute("role", "button");
+    head.setAttribute("aria-expanded", String(!card.classList.contains("is-closed")));
+  });
+  updateSecBar();
+}
+
+function toggleCard(card, open = card.classList.contains("is-closed"), remember = true) {
+  card.classList.toggle("is-closed", !open);
+  const head = card.querySelector(":scope > header");
+  if (head) head.setAttribute("aria-expanded", String(open));
+  if (open) card.querySelectorAll("textarea").forEach(autosize);
+  if (remember) saveOpenPref(card.dataset.sec, open);
+  updateSecBar();
+}
+
+function setAllCards(open) {
+  panel.querySelectorAll(".sp-grid > .sp-card").forEach((c) => toggleCard(c, open, false));
+}
+
+function updateSecBar() {
+  const el = panel && panel.querySelector('[data-role="seccount"]');
+  if (!el) return;
+  const cards = [...panel.querySelectorAll(".sp-grid > .sp-card")];
+  const empty = cards.filter((c) => c.classList.contains("is-empty")).length;
+  el.textContent = `${cards.length} section${cards.length === 1 ? "" : "s"}${empty ? ` · ${empty} empty` : ""}`;
+}
+
 /* ===================== Rendering ===================== */
 
 function render() {
@@ -338,15 +432,19 @@ function render() {
         <div class="sp-raw-body">${transcriptHtml(d["Full Raw Transcript"], escapeHtml)}</div>
       </details>
 
+      <div class="sp-secbar"><span data-role="seccount"></span>
+        <button type="button" class="sp-secbtn" data-sp="expand-all">Expand all</button>
+        <button type="button" class="sp-secbtn" data-sp="collapse-all">Collapse all</button></div>
+
       <div class="sp-grid">
         ${SECTIONS.map((s) => sectionHtml(s, current.original[s.key])).join("")}
         ${current.extras.map((x, i) => `
-          <section class="sp-card sp-tone-slate full">
+          <section class="sp-card sp-tone-slate full" data-sec="extra">
             <header>${ICONS.note}<span>${escapeHtml(x.heading)}</span></header>
             <textarea data-extra="${i}" placeholder="Nothing recorded.">${escapeHtml(x.text)}</textarea>
           </section>`).join("")}
 
-        <section class="sp-card sp-tone-pink full sp-pn">
+        <section class="sp-card sp-tone-pink full sp-pn" data-sec="pn">
           <header>${ICONS.note}<span>Personal Notes</span>
             <button type="button" class="sp-mini" data-sp="save-note">Save Note</button></header>
           <textarea data-pn placeholder="Add a personal note for future visits…">${escapeHtml(keepPn !== null ? keepPn : suggestions.join("\n"))}</textarea>
@@ -367,6 +465,7 @@ function render() {
       <button type="button" class="btn-primary" data-sp="save-reviewed">Save as Reviewed</button>
     </div>`;
 
+  setupCards();
   if (!panel.hidden) requestAnimationFrame(autosizeAll);
   // Own tab: its title says whose notes, and whether they're reviewed
   if (mode === "page" && !document.body.classList.contains("is-consult")) {
@@ -407,15 +506,15 @@ function rulesHtml(d) {
 function sectionHtml(s, value) {
   // Structured Treatment Plan card when the record has the recorder's sidecar
   if (s.key === "plan" && current && current.plan) {
-    return `<section class="sp-card sp-tone-green full" data-plan-card>${planCardHtml(current.plan, current.priorCats)}</section>`;
+    return `<section class="sp-card sp-tone-green full" data-plan-card data-sec="plan">${planCardHtml(current.plan, current.priorCats)}</section>`;
   }
     // Treatment Info to Email: checklist + composer
   if (s.key === "email" && current && current.emailItems && current.emailItems.length) {
-    return `<section class="sp-card sp-tone-indigo" data-email-card>${emailCardHtml(current.emailItems, current.data["Treatment Emails Sent"])}</section>`;
+    return `<section class="sp-card sp-tone-indigo" data-email-card data-sec="email">${emailCardHtml(current.emailItems, current.data["Treatment Emails Sent"])}</section>`;
   }
   const planActions = "";
   return `
-    <section class="sp-card sp-tone-${s.tone} ${s.full ? "full" : ""}">
+    <section class="sp-card sp-tone-${s.tone} ${s.full ? "full" : ""}" data-sec="${escapeHtml(s.key)}">
       <header>${ICONS[s.icon]}<span>${escapeHtml(s.title)}</span>${planActions}</header>
       <textarea data-key="${s.key}" placeholder="Nothing recorded.">${escapeHtml(value || "")}</textarea>
     </section>`;
@@ -456,6 +555,13 @@ async function onClick(e) {
     location.hash = hash;
     return;
   }
+  // A section's bar: open or close it (its own buttons still work as before)
+  const hd = e.target.closest("header");
+  if (hd && hd.parentElement && hd.parentElement.matches(".sp-grid > .sp-card")
+      && !e.target.closest("button, a, input, select, textarea, label")) {
+    toggleCard(hd.parentElement);
+    return;
+  }
   // Treatment Plan card: click a line to edit, or add/remove items
   if (current && current.plan) {
     const field = e.target.closest(".pe-field");
@@ -493,6 +599,8 @@ async function onClick(e) {
   else if (action === "delete-cancel") hideDeleteConfirm();
   else if (action === "delete-confirm") doDelete(btn);
   else if (action === "to-master") applyToMaster();
+  else if (action === "expand-all") setAllCards(true);
+  else if (action === "collapse-all") setAllCards(false);
 }
 
 function refreshHeaderIcon() {
@@ -749,6 +857,7 @@ async function doDelete(btn) {
 function rerenderPlan() {
   const card = panel.querySelector("[data-plan-card]");
   if (card && current && current.plan) card.innerHTML = planCardHtml(current.plan, current.priorCats);
+  setupCards();
 }
 
 function startPlanEdit(field) {
@@ -759,6 +868,7 @@ function startPlanEdit(field) {
   ta.dataset.pf = ref.pf;
   if (ref.ci !== undefined) ta.dataset.ci = ref.ci;
   if (ref.ti !== undefined) ta.dataset.ti = ref.ti;
+  if (ref.si !== undefined) ta.dataset.si = ref.si;   // which treatment row
   ta.placeholder = field.dataset.ph || "";
   ta.value = getPlanValue(current.plan, ref);
   field.replaceWith(ta);
@@ -773,9 +883,14 @@ function commitPlanEdit(ta) {
   const ref = refFrom(ta);
   const before = String(getPlanValue(current.plan, ref)).trim();
   const after = ta.value.trim();
-  if (after !== before) { setPlanValue(current.plan, ref, after); markDirty(); }
+  if (after !== before) {
+    setPlanValue(current.plan, ref, after);
+    markDirty();
+    // A treatment added or removed changes the rows: draw the card again
+    if (ref.pf === "row_treatment") { rerenderPlan(); return; }
+  }
   const tpl = document.createElement("template");
-  tpl.innerHTML = fieldHtml(ref, after).trim();
+  tpl.innerHTML = fieldHtml(ref, getPlanValue(current.plan, ref)).trim();   // as it's saved (e.g. "$198", not "Name - $198")
   if (ta.isConnected) ta.replaceWith(tpl.content.firstElementChild);
 }
 
@@ -902,6 +1017,7 @@ function rerenderEmail() {
   if (card && current && current.emailItems) {
     card.innerHTML = emailCardHtml(current.emailItems, current.data["Treatment Emails Sent"]);
   }
+  setupCards();
 }
 
 function draftEmail() {
@@ -1057,10 +1173,11 @@ async function emailFromPlan(btn) {
     markDirty();
 
     // Replace just the email card (other unsaved edits stay as they are)
-    const html = `<section class="sp-card sp-tone-indigo em-flash" data-email-card>${emailCardHtml(items, current.data["Treatment Emails Sent"])}</section>`;
+    const html = `<section class="sp-card sp-tone-indigo em-flash" data-email-card data-sec="email">${emailCardHtml(items, current.data["Treatment Emails Sent"])}</section>`;
     const existing = panel.querySelector("[data-email-card]") ||
       (panel.querySelector('textarea[data-key="email"]') || {}).closest?.(".sp-card");
     if (existing) existing.outerHTML = html;
+    setupCards();
     const card = panel.querySelector("[data-email-card]");
     if (card) card.scrollIntoView({ behavior: "smooth", block: "nearest" });
 
