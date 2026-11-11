@@ -43,11 +43,11 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   let active = 0;                      // the set the next tap places
 
   const rowHtml = (s, si) => `<div class="an-setrow${si === active ? " is-active" : ""}" data-setrow="${si}">
-      <span class="an-setname">${esc(s.name || (s.type === "label" ? "Labels" : "Values"))}${s.type !== "label" && s.unit ? ` <small>${esc(s.unit)}</small>` : ""}</span>
+      <span class="an-setname">${esc(s.name || (s.type === "label" ? "Labels" : "Values"))}${s.type !== "label" && s.unit ? ` <small>${esc(s.unit)}</small>` : ""}<b class="an-setfig" data-fig="${si}"></b></span>
       <div class="an-vals" role="group" aria-label="${esc(s.name || "Values")}">${s.values.map((x, i) =>
         `<button type="button" class="an-pick${i === 0 ? " is-on" : ""}" data-pick="${si}:${i}" aria-pressed="${i === 0}"
           title="${esc(s.type === "label" ? (x.name ? `${x.code}: ${x.name}` : x.code) : `${fmt(x.v)} ${s.unit || ""}`)}">${
-          valueSvg(s, x, 34)}${s.type === "label" && x.name ? `<small>${esc(x.name)}</small>` : ""}</button>`).join("")}</div>
+          valueSvg(s, x, compact ? 34 : 30)}${s.type === "label" && x.name ? `<small>${esc(x.name)}</small>` : ""}</button>`).join("")}</div>
       ${tagsOf(s).length ? `<div class="an-seg an-tags" role="group" aria-label="Tag">${tagsOf(s).map((t, i) =>
         `<button type="button" class="an-btn${i === 0 ? " is-on" : ""}" data-tag="${si}:${i}" aria-pressed="${i === 0}">${esc(t)}</button>`).join("")}</div>` : ""}
     </div>`;
@@ -66,7 +66,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   const editBtns = `<span class="an-spacer"></span>
     <button type="button" class="an-btn" data-act="undo" disabled>${I.undo}<span>Undo</span></button>
     <button type="button" class="an-btn" data-act="clear" disabled>Clear</button>`;
-  const marksHtml = marking ? `<div class="an-marks${order.length === 1 ? " has-one" : ""}" data-role="marks">${order.map(rowHtml).join("")}</div>` : "";
+  const marksHtml = marking ? `<div class="an-marks${order.length === 1 ? " has-one" : ""}${compact ? "" : " is-strip"}" data-role="marks">${order.map(rowHtml).join("")}</div>` : "";
   const stageHtml = `<div class="an-stage"><img alt="" draggable="false" /><canvas aria-label="${marking
     ? "Marking area. Tap to place the chosen value." : "Drawing area. Draw or tap to mark the picture."}"></canvas></div>`;
   const totalHtml = marking ? '<div class="an-total" data-role="total" aria-live="polite"></div>' : "";
@@ -79,7 +79,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       </div>${totalHtml}${stageHtml}`
     : `<div class="an-tools" role="toolbar" aria-label="Drawing tools">
         <div class="an-seg">${toolBtns}</div>${styleBtns}${editBtns}
-      </div>${marksHtml}${stageHtml}${totalHtml}`;
+      </div>${marksHtml}${totalHtml}${stageHtml}`;
 
   const img = box.querySelector(".an-stage img");
   const stage = box.querySelector(".an-stage");
@@ -184,8 +184,15 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     if (dashed) g.setLineDash([op.r / 3, op.r / 4]);
     g.stroke();
     g.setLineDash([]);
+    if (shape === "target") {   // Circle with dot: a solid centre dot
+      g.beginPath();
+      g.arc(op.x, op.y, op.r * 0.3, 0, Math.PI * 2);
+      g.fillStyle = see || dashed ? op.colour : "#ffffff";
+      g.fill();
+    }
 
     const fs = Math.round(op.r * textSize(op.text, shape, op.tsize));
+    if (!fs) return;   // a shape with no text (Circle with dot)
     const ty = op.y + op.r * (SHAPE_TEXT[shape] || SHAPE_TEXT.circle).dy;
     g.font = `bold ${fs}px Arial, Helvetica, sans-serif`;
     g.textAlign = "center";
@@ -233,6 +240,23 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     return out;
   }
 
+  // Beside a set's name: "0.35 mL", "SD 2 · PO 1", or "× 2" for a set with one label ("" before any marks)
+  const figText = (s) => {
+    const f = setFigures(s);
+    if (!f.n) return "";
+    if (f.type === "label") return s.values.length === 1 ? `× ${f.n}` : f.counts.map((c) => `${c.code} ${c.n}`).join(" · ");
+    return `${fmt(f.total)}${s.unit ? ` ${s.unit}` : ""}`;
+  };
+  // What the next tap places: "HA filler: 0.05 mL", "Cannula Entry Pt: Cannula entry point (Touch-up)"
+  const placingText = () => {
+    const s = order[active];
+    const x = s && s.values[sel[active]];
+    if (!x) return "";
+    const what = s.type === "label" ? (x.name || x.code) : `${fmt(x.v)}${s.unit ? ` ${s.unit}` : ""}`;
+    const tags = tagsOf(s);
+    return `${s.name ? `${s.name}: ` : ""}${what}${tags.length ? ` (${tags[tagSel[active]]})` : ""}`;
+  };
+
   // Compact bar: "Total: 6 units" (and Treatment / Touch-up when tags are used)
   function showHead() {
     if (!headTotal) return;
@@ -245,6 +269,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
 
   function showTotal() {
     showHead();
+    box.querySelectorAll("[data-fig]").forEach((el) => { el.textContent = figText(order[Number(el.dataset.fig)]); });
     if (!totalEl) return;
     if (compact) {   // the line under the toolbar: how to use it, plus any other sets' figures
       const others = order.filter((s) => s !== primary).map(setFigures).filter((x) => x.n).map((x) => (x.type === "label"
@@ -256,23 +281,12 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
         others.map((o) => `<span><b>${esc(o)}</b></span>`).join("")}`;
       return;
     }
-    if (tool === "erase") {
-      totalEl.innerHTML = "<span>Tap a mark, dot or line to remove it. Undo brings it back.</span>";
-      return;
-    }
-    if (!markOps().length) {
-      totalEl.innerHTML = `<span>${order.length > 1 ? "Choose a value from any set, then tap the picture." : "Tap the picture to place the chosen value."}
-        To remove one mark, use Erase.</span>`;
-      return;
-    }
-    totalEl.innerHTML = order.map((s) => {
-      const f = setFigures(s);
-      if (!f.n) return "";
-      if (f.type === "label") return `<span><b>${esc(s.name)}:</b> ${esc(f.counts.map((c) => `${c.code} × ${c.n}`).join(", "))}</span>`;
-      const tags = f.byTag ? Object.entries(f.byTag).filter(([, n]) => n > 0).map(([t, n]) => `${t} ${fmt(n)}`) : [];
-      return `<span><b>${esc(s.name)}:</b> <strong>${esc(fmt(f.total))}${s.unit ? ` ${esc(s.unit)}` : ""}</strong> (${f.n} mark${f.n === 1 ? "" : "s"})${
-        tags.length ? ` · ${esc(tags.join(" · "))}` : ""}</span>`;
-    }).join("");
+    // The totals are beside each set's name, so this line just says what a tap does
+    totalEl.innerHTML = `<span>${tool === "erase"
+      ? "Tap a mark, dot or line to remove it. Undo brings it back."
+      : tool === "mark"
+        ? `Placing <b>${esc(placingText())}</b>. Tap the picture to add it, or tap a mark again to remove it.`
+        : "Draw on the picture. Choose a value above to place marks again."}</span>`;
   }
 
   function redraw() {
