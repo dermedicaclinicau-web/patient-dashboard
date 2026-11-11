@@ -2,8 +2,7 @@
 import { db, auth } from "./firebase-config.js";
 import { collection, addDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
-  getMasterPlan, saveMasterPlan, listPlanHistory, PLAN_STATUS, CONCERN_STATUS, patternText, monthLabel, cleanLine, cleanEvent,
-  matchServices, sharesWord, newId, LINE_STATUS, lineOff, savedLine, lineNote,
+  getMasterPlan, saveMasterPlan, listPlanHistory, PLAN_STATUS,   matchServices, sharesWord, newId, LINE_STATUS, lineOff, savedLine, lineNote, startsText, CONCERN_STATUS, patternText, monthLabel, cleanLine, cleanEvent,
 } from "./master-plan-api.js";
 import { getPlanSettings, serviceSetup, getPlanWorkflow, cleanWorkflow, phaseOf } from "./plan-api.js";
 import { visitsFrom, trackPlan, thisMonth, dateKeyOf, dayLabel, addMonths, monthDiff } from "./plan-track.js";
@@ -540,7 +539,7 @@ export function createPlanOverview(el, ctx) {
       return `<div class="pt-row is-off"><div class="pt-main"><strong>${esc(l.treatment)}</strong>
         <div class="pt-meta">${tag}</div><div class="pt-st">${esc(why)}</div></div>${dots}</div>`;
     }
-    const meta = [l.area || c.area, patternText(l), priceOf(c, l)].filter(Boolean).join(" · ");
+    const meta = [l.area || c.area, patternText(l), startsText(l), priceOf(c, l)].filter(Boolean).join(" · ");
     const sl = statusLine(c, l, lt, clashKeys);
     const s = lt.next;
     const ask = booking && s && ["due", "overdue"].includes(s.state)

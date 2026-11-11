@@ -80,7 +80,7 @@ export function visitsFrom(pre, today = []) {
 
 // past/future: sorted date keys of visits that count for this line.
 // overrides[n]: { status: "done" | "skipped", date, month (moved), asked: { at, by } }
-function trackLine(line, past, future, waiting = false) {
+function trackLine(line, past, future, waiting = false, startFrom = "", after = null) {
   const ov = line.overrides || {};
   const iv = line.intervalWeeks || 0;
   const total = line.pattern === "course" ? Math.max(1, line.sessions || 1) : line.pattern === "once" ? 1 : 0; // 0 = ongoing
@@ -93,7 +93,7 @@ function trackLine(line, past, future, waiting = false) {
   for (let n = 1; n <= 60 && (!total || n <= total); n++) {
     const o = ov[String(n)] || {};
     // No start month set? Use a month written in the frequency ("Next treatment planned for June 2027")
-    const start = line.startMonth || monthKey(line.frequency);
+    const start = startFrom || line.startMonth || monthKey(line.frequency);   // "starts after the last …" wins
     const expected = o.month || (n === 1 ? start : prev ? addWeeks(prev.date || prev.month, iv) : "") || "";
     let s;
     if (o.status === "done") s = { state: "done", date: o.date || "", manual: true };
@@ -115,8 +115,26 @@ function trackLine(line, past, future, waiting = false) {
   }
   const done = slots.filter((s) => s.state === "done").length;
   const next = slots.find((s) => !["done", "skipped"].includes(s.state)) || null;
-  return { slots, total, done, next, complete: !off && !!total && !next, extra: total ? P.length : 0, off: off ? line.status : "" };
+  return { slots, total, done, next, complete: !off && !!total && !next, extra: total ? P.length : 0, off: off ? line.status : "", after };
 }
+
+/* ---------- Starting after another treatment ---------- */
+
+// Does a service or treatment name mean the one wanted? ("Ultherapy Full Face" ~ "Ulthera")
+export function afterMatch(name, want) {
+  const a = serviceKey(name);
+  const b = serviceKey(want);
+  return !!a && !!b && (a.includes(b) || b.includes(a) || sharesWord(name, want));
+}
+// The patient's latest visit with that service, done or booked ("" if none)
+export function lastVisitOf(visits, want) {
+  for (let i = (visits || []).length - 1; i >= 0; i--) {
+    if (visits[i].services.some((s) => afterMatch(s, want))) return visits[i].dateKey;
+  }
+  return "";
+}
+// "2026-03-12" + 6 months → "2026-09"
+export const fromAnchor = (key, n, unit) => (unit === "w" ? addWeeks(key, n) : addMonths(key, n));
 
 /* ---------- The whole plan ---------- */
 
@@ -124,6 +142,7 @@ function trackLine(line, past, future, waiting = false) {
 // → Map(concernKey → { lines: Map(lineId → track), unmatched })
 export function trackPlan(master, { visits, services, fromOf, waiting = () => false }) {
   const out = new Map();
+  const later = [];   // lines that start after a treatment that's only planned so far
   master.concerns.forEach((c) => {
     const hits = new Map(c.lines.map((l) => [l.id, { past: new Set(), future: new Set() }]));
     const twins = master.concerns.filter((x) => x !== c && x.key === c.key);   // the same concern listed again (e.g. now and later)
@@ -152,11 +171,33 @@ export function trackPlan(master, { visits, services, fromOf, waiting = () => fa
       });
       if (miss && !ids.size && v.dateKey >= (fromOf(c, null) || "")) unmatched++;
     });
-    out.set(c.id || c.key, {
-      unmatched,
-      lines: new Map(c.lines.map((l) => [l.id,
-        trackLine(l, [...hits.get(l.id).past].sort(), [...hits.get(l.id).future].sort(), waiting(c, l))])),
+    const lines = new Map();
+    c.lines.forEach((l) => {
+      const P = [...hits.get(l.id).past].sort();
+      const F = [...hits.get(l.id).future].sort();
+      let start = "";
+      let after = null;
+      if (l.afterService && l.afterN) {
+        // The patient's latest one (done or booked); it moves on if another is booked, until this one has started
+        const anchor = lastVisitOf(visits, l.afterService);
+        if (anchor) { start = fromAnchor(anchor, l.afterN, l.afterUnit); after = { anchor, planned: false }; }
+        else later.push({ c, l, P, F, lines });
+      }
+      lines.set(l.id, trackLine(l, P, F, waiting(c, l), start, after));
     });
+    out.set(c.id || c.key, { unmatched, lines });
+  });
+
+  // Not done or booked yet, but in this plan: counted from when that treatment is planned
+  later.forEach(({ c, l, P, F, lines }) => {
+    let m = "";
+    master.concerns.forEach((x) => x.lines.forEach((y) => {
+      if (m || y === l || !(afterMatch(y.treatment, l.afterService) || y.services.some((s) => afterMatch(s, l.afterService)))) return;
+      const t = out.get(x.id || x.key).lines.get(y.id);
+      const s = t && t.slots.find((z) => z.month && z.state !== "skipped");
+      if (s) m = s.date || s.month;
+    }));
+    if (m) lines.set(l.id, trackLine(l, P, F, waiting(c, l), fromAnchor(m, l.afterN, l.afterUnit), { anchor: m, planned: true }));
   });
   return out;
 }

@@ -1,7 +1,7 @@
 // "Create / update the master plan" from one consultation: review each concern, tick what to apply.
 import {
   getMasterPlan, planChanges, applyChanges, saveMasterPlan, patternText, monthLabel, matchServices,
-  cleanEvent, isTreatmentEvent, normTx, newId, stampText, savedLine, lineNote,
+  cleanEvent, isTreatmentEvent, normTx, newId, stampText, savedLine, lineNote, startsText,
 } from "./master-plan-api.js";
 import { getPlanSettings, getPlanWorkflow, cleanWorkflow } from "./plan-api.js";
 import { CATEGORIES } from "./plan-editor.js";
@@ -54,7 +54,7 @@ export async function openPlanReview({ patient, consult, recordId = "", recordDa
   const con = (k) => settings.concerns.find((c) => c.name === k) || { label: k, colour: "#888780" };
   const chip = (k) => (k ? `<span class="ps-chip" style="--c:${esc(con(k).colour)}">${esc(con(k).label)}</span>` : "");
   const linesHtml = (c) => `<ul class="mp-lines">${c.lines.map((l) => {
-    const bits = [patternText(l), l.startMonth && `from ${monthLabel(l.startMonth)}`].filter(Boolean);
+    const bits = [patternText(l), startsText(l) || (l.startMonth && `from ${monthLabel(l.startMonth)}`)].filter(Boolean);
     const note = lineNote(l);
     return `<li><strong>${esc(l.treatment)}</strong>${bits.length ? ` <small>${esc(bits.join(" · "))}</small>` : ""}${
       note ? `<em class="mp-note">${esc(note)}</em>` : ""}</li>`;

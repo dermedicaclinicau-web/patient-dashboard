@@ -18,6 +18,11 @@ import { confirmDialog } from "./dialog.js";
 import { escapeHtml, showToast, toDateKey } from "./utils.js";
 import { openPlanReview } from "./master-plan-review.js";
 import { setTabTitle } from "./tab-icon.js";
+import { fetchPreconsult } from "./appointments.js";
+import { visitsFrom, lastVisitOf, afterMatch, fromAnchor, dayLabel, dateKeyOf } from "./plan-track.js";
+import { getPlanSettings } from "./plan-api.js";
+import { monthLabel } from "./master-plan-api.js";
+import { serviceKey } from "./inventory-api.js";
 
 const svg = (p) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -937,7 +942,27 @@ async function planAction(btn) {
   }
 }
 
-// How often for one treatment in a concern: the same control as the master plan
+// The patient's appointments (for "starts after the last …"), read once per set of notes
+function patientVisits() {
+  if (!current || !current.data) return Promise.resolve([]);
+  if (current.visitsJob) return current.visitsJob;
+  const d = current.data;
+  current.visitsJob = fetchPreconsult({
+    id: String(d["Patient Doc ID"] || ""), pttId: String(d["Patient ID"] || ""),
+    name: String(d["Patient Name"] || ""), firstName: "", lastName: "", mergedIds: [],
+  })
+    .then((res) => (res && res.found ? visitsFrom(res.data) : []))
+    .catch((err) => { console.warn("Visit history not loaded:", err); return []; });
+  return current.visitsJob;
+}
+// The clinic's appointment services (System configuration → Treatment plans)
+let svcJob = null;
+function clinicServices() {
+  if (!svcJob) svcJob = getPlanSettings().then((s) => s.services.filter((r) => !r.notTreatment).map((r) => r.service)).catch(() => []);
+  return svcJob;
+}
+
+// How often for one treatment in a concern: the same control as the master plan, plus when it starts
 function editFrequency(ci, si) {
   const c = current && current.plan && current.plan.concerns[ci];
   if (!c) return;
@@ -945,12 +970,31 @@ function editFrequency(ci, si) {
   const name = treatmentLines(c)[si] || c.concern_category || "This treatment";
   const was = String(c.frequency_interval || "").split(/\n+/)[si] || "";
   const set = Array.isArray(c.schedules) && c.schedules[si];
+  const hasAfter = !!(s.after_n && s.after_service);
+  const first = String(current.data["Patient Name"] || "").split(" ")[0] || "The patient";
+  const seg = (nm, items, on) => items.map(([v, l]) =>
+    `<label class="fe-seg-btn"><input type="radio" name="${nm}" value="${v}"${v === on ? " checked" : ""} /><span>${l}</span></label>`).join("");
   const dlg = document.createElement("dialog");
   dlg.className = "lh-dialog pe-freq-dlg";
   dlg.innerHTML = `
     <form class="lh-form" novalidate>
       <div class="lh-dialog-head"><h3>How often</h3><p>${escapeHtml(name)}</p></div>
       ${freqHtml({ pattern: s.pattern, sessions: s.sessions, intervalWeeks: s.interval_weeks, intervalUnit: s.interval_unit })}
+      <div class="pe-after">
+        <span class="lh-label">When it starts</span>
+        <div class="fe-seg">${seg("startmode", [["plan", "As planned"], ["after", "After another treatment"]], hasAfter ? "after" : "plan")}</div>
+        <div class="pe-after-line" data-role="afterline"${hasAfter ? "" : " hidden"}>
+          <span>Start</span>
+          <input class="fe-input pe-after-n" name="after_n" type="number" min="1" max="520" step="1" inputmode="numeric"
+            value="${escapeHtml(String(s.after_n || 6))}" aria-label="How many" />
+          <span class="fe-seg">${seg("after_unit", [["w", "Weeks"], ["m", "Months"]], s.after_unit === "w" ? "w" : "m")}</span>
+          <span>after the last</span>
+          <input class="fe-input pe-after-svc" name="after_service" list="pe-after-list" maxlength="150" autocomplete="off"
+            value="${escapeHtml(s.after_service || "")}" placeholder="e.g. Ulthera" aria-label="Which treatment" />
+          <datalist id="pe-after-list"></datalist>
+        </div>
+        <p class="pe-after-hint" data-role="afterhint" hidden></p>
+      </div>
       <label class="lh-field"><span class="lh-label">Note (optional)</span>
         <input name="note" maxlength="200" value="${escapeHtml(s.note || "")}" placeholder="e.g. Start after summer" /></label>
       ${was && was !== "—" && !set ? `<p class="fe-note">Recorded as: “${escapeHtml(was)}”</p>` : ""}
@@ -964,19 +1008,65 @@ function editFrequency(ci, si) {
   dlg.addEventListener("close", () => dlg.remove());
   dlg.showModal();
   const form = dlg.querySelector("form");
+  const f = form.elements;
   const freq = mountFreq(dlg);
+  const err = dlg.querySelector(".lh-error");
+  const today = dateKeyOf(new Date());
+  let visits = [];
+
+  // The check underneath: her last one, and when the first of this treatment will be due
+  const syncAfter = () => {
+    const on = f.startmode.value === "after";
+    dlg.querySelector('[data-role="afterline"]').hidden = !on;
+    const hint = dlg.querySelector('[data-role="afterhint"]');
+    const svc = f.after_service.value.trim();
+    const n = parseInt(f.after_n.value, 10) || 0;
+    if (!on || !svc || !n) { hint.hidden = true; return; }
+    const unit = f.after_unit.value === "w" ? "w" : "m";
+    const last = lastVisitOf(visits, svc);
+    const inPlan = !last && current.plan.concerns.some((x) => treatmentLines(x).some((t) => afterMatch(t, svc)));
+    hint.textContent = last
+      ? `${first}'s last ${svc} ${last > today ? `is booked for ${dayLabel(last)}` : `was ${dayLabel(last)}`}, so the first ${name} is due ${monthLabel(fromAnchor(last, n, unit))}.`
+      : inPlan ? `${svc} isn't done or booked yet. The first ${name} is counted from when ${svc} is planned.`
+      : `No ${svc} in ${first}'s appointments yet. ${name} is planned once one is done or booked.`;
+    hint.hidden = false;
+  };
+  form.addEventListener("input", syncAfter);
+  form.addEventListener("change", syncAfter);
+
+  // Suggestions: what this patient has had (newest first, with the date), then the clinic's services
+  Promise.all([patientVisits(), clinicServices()]).then(([v, svcs]) => {
+    visits = v;
+    if (!dlg.isConnected) return;
+    const seen = new Set();
+    const opts = [];
+    for (let i = v.length - 1; i >= 0; i--) v[i].services.forEach((sv) => {
+      const k = serviceKey(sv);
+      if (seen.has(k)) return;
+      seen.add(k);
+      opts.push(`<option value="${escapeHtml(sv)}">${escapeHtml(`Last ${dayLabel(v[i].dateKey)}`)}</option>`);
+    });
+    svcs.forEach((sv) => { const k = serviceKey(sv); if (!seen.has(k)) { seen.add(k); opts.push(`<option value="${escapeHtml(sv)}"></option>`); } });
+    dlg.querySelector("#pe-after-list").innerHTML = opts.join("");
+    syncAfter();
+  });
+  syncAfter();
+
   dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
   form.addEventListener("submit", (e) => {
     e.preventDefault();
+    const fail = (t) => { err.textContent = t; err.hidden = false; };
     const v = freq.read();
-    if (v.pattern === "course" && !v.sessions) {
-      const err = dlg.querySelector(".lh-error");
-      err.textContent = "Enter how many sessions the course has.";
-      err.hidden = false;
-      return;
-    }
-    setSchedule(c, si, { pattern: v.pattern, sessions: v.sessions, interval_weeks: v.intervalWeeks,
-      interval_unit: v.intervalUnit, note: form.elements.note.value });
+    if (v.pattern === "course" && !v.sessions) { fail("Enter how many sessions the course has."); return; }
+    const after = f.startmode.value === "after";
+    const an = parseInt(f.after_n.value, 10);
+    const asvc = f.after_service.value.trim();
+    if (after && (!(an >= 1) || !asvc)) { fail("Enter how long after, and which treatment."); return; }
+    setSchedule(c, si, {
+      pattern: v.pattern, sessions: v.sessions, interval_weeks: v.intervalWeeks, interval_unit: v.intervalUnit,
+      note: f.note.value,
+      after_n: after ? an : 0, after_unit: after ? (f.after_unit.value === "w" ? "w" : "m") : "", after_service: after ? asvc : "",
+    });
     markDirty();
     rerenderPlan();
     dlg.close();

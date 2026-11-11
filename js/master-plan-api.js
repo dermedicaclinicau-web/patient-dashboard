@@ -2,7 +2,7 @@
 import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, getDocs, collection, query, orderBy, limit, runTransaction, serverTimestamp }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { CATEGORIES, canonicalCategory, PATTERNS, schedulesOf } from "./plan-editor.js";
+import { CATEGORIES, canonicalCategory, PATTERNS, schedulesOf, afterText, AFTER_RE } from "./plan-editor.js";
 import { scheduleText } from "./plan-frequency.js";
 
 export const PLAN_STATUS = {
@@ -65,8 +65,11 @@ export function lineNote(l) {
   if (parts.length < 2) return "";
   const sched = normTx(scheduleText(l));
   const rest = parts.filter((p) => normTx(p) !== sched);
-  return (rest.length < parts.length ? rest : parts.slice(1)).join(" · ");
+  return (rest.length < parts.length ? rest : parts.slice(1)).filter((p) => !AFTER_RE.test(p)).join(" · ");
 }
+
+// "starts 6 months after the last Ulthera" ("" when it starts as planned)
+export const startsText = (l) => (l ? afterText(l.afterN, l.afterUnit, l.afterService) : "");
 /* ---------- Clean shapes ---------- */
 
 export function cleanLine(l = {}) {
@@ -75,6 +78,9 @@ export function cleanLine(l = {}) {
     treatment: clip(l.treatment, 300),
     frequency: clip(l.frequency, 400),
     note: clip(l.note, 300),                // the clinician's comment on how often (e.g. "Neck to be trialled at the first session")
+    afterN: whole(l.afterN),                // starts this long after the patient's last afterService (0 = as planned)
+    afterUnit: l.afterUnit === "w" ? "w" : "m",
+    afterService: clip(l.afterService, 150),
     pattern: PATTERNS.includes(l.pattern) ? l.pattern : "unknown",
     sessions: whole(l.sessions),
     intervalWeeks: whole(l.intervalWeeks),
@@ -193,6 +199,7 @@ function linesFrom(c, startMonth, key, services, countFrom) {
       treatment: t,
       frequency: freqs[i] && freqs[i] !== "—" ? freqs[i] : "",
       note: hasSched ? (s.note || "") : "",   // no schedule: the wording itself is shown, comment and all
+      afterN: s.after_n, afterUnit: s.after_unit, afterService: s.after_service,
       pattern: s.pattern, sessions: s.sessions, intervalWeeks: s.interval_weeks, intervalUnit: s.interval_unit,
       startMonth,
       countFrom,
@@ -225,7 +232,7 @@ export function isTreatmentEvent(name, names = []) {
 export function planChanges(master, consult, { recordId = "", services = [], fromKey = "", treatments = [] } = {}) {
   const cur = master ? master.concerns : [];
   const tl = consult.timeline || [];
-  const sig = (x) => [x.lines.map((l) => `${normTx(l.treatment)}/${l.pattern}/${l.sessions}/${l.intervalWeeks}/${normTx(lineNote(l))}`).join("|"), normTx(x.quote)].join("#");
+  const sig = (x) => [x.lines.map((l) => `${normTx(l.treatment)}/${l.pattern}/${l.sessions}/${l.intervalWeeks}/${normTx(lineNote(l))}/${l.afterN}${l.afterUnit}${normTx(l.afterService)}`).join("|"), normTx(x.quote)].join("#");
   const drafts = (consult.concerns || []).map((c) => {
     const key = canonicalCategory(c.concern_category);
     const start = tl.filter((t) => t.concern && t.concern === c.key).map((t) => monthKey(t.date)).filter(Boolean).sort()[0] || "";
@@ -296,6 +303,7 @@ export function applyChanges(master, picks, events) {
       // Its own priority is kept. Proposed again in a new consultation: it's active again.
       return prev ? { ...l, id: prev.id, overrides: prev.overrides, countFrom: prev.countFrom || l.countFrom, priority: prev.priority, rank: prev.rank, area: prev.area, quote: prev.quote, description: prev.description,
         note: l.note || lineNote(prev),   // a new comment replaces it; none keeps the one there
+        ...(l.afterService ? {} : { afterN: prev.afterN, afterUnit: prev.afterUnit, afterService: prev.afterService }),
         services: l.services.length ? l.services : prev.services, startMonth: l.startMonth || prev.startMonth } : l;
     });
     // A line that has been tracked (done, moved…) or declined is kept even if the new consultation doesn't mention it

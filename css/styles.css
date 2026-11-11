@@ -13573,3 +13573,13 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 }
 .sp .sp-grid > .sp-card > textarea:focus { outline: none; background: #fafcff; }
 .sp .sp-grid > .sp-pn > .sp-hint, .sp .sp-grid > .sp-pn > .sp-prev { margin: 0 14px 12px 52px; }
+
+/* How often → When it starts */
+.pe-after { margin-top: 12px; padding: 12px 14px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc; }
+.pe-after > .fe-seg { margin-top: 6px; }
+.pe-after-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; }
+.pe-after-line[hidden] { display: none; }
+.pe-after-line .fe-seg { margin: 0; }
+.pe-after-n { width: 64px; text-align: center; }
+.pe-after-svc { flex: 1; min-width: 160px; }
+.pe-after-hint { margin: 10px 0 0; padding: 8px 10px; border-radius: 8px; background: #ecfdf5; color: #047857; font-size: 12.5px; }
