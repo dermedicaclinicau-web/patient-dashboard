@@ -3,7 +3,7 @@
 //   #/inventory/receive/<poId> → docket photo, what arrived, where it went (Shelf | JT storage, batch, expiry)
 import {
   LOCATIONS, PO_STATUS, getPo, listPos, listProducts, listReceipts, receivePo, uploadDocket,
-  syncReceivedRequests, plural, unitPlural, locLabel, expiryState, batchName,
+  syncReceivedRequests, plural, unitPlural, locLabel, expiryState, batchName, PO_MAX_QTY,
 } from "./inventory-api.js";
 import { can } from "./perms.js";
 import { linkDocketReceipt } from "./scanner-api.js";
@@ -105,7 +105,7 @@ export async function mountReceivePo(root, poId, staff) {
           <small>${esc(info.filter(Boolean).join(" · "))}</small></div>
         ${open && remaining ? `<div class="rcv-arrived"><span>${esc(unitPlural(l.orderUnit))} arrived</span>
             <div class="rcv-step"><button type="button" data-act="minus" aria-label="One less">−</button>
-              <input data-f="arrived" type="number" min="0" step="1" inputmode="numeric" value="${s.arrived}" aria-label="How many arrived" />
+              <input data-f="arrived" type="number" min="0" max="${PO_MAX_QTY}" step="1" inputmode="numeric" value="${s.arrived}" aria-label="How many arrived" />
               <button type="button" data-act="plus" aria-label="One more">+</button></div>
             <small>${remaining} still to come</small></div>`
           : `<span class="rcv-chip ${remaining ? "" : "is-done"}">${remaining ? `${remaining} not received` : "All received"}</span>`}
@@ -246,13 +246,14 @@ export async function mountReceivePo(root, poId, staff) {
 
   function setArrived(l, n, fromInput = false) {
     const s = state.get(l.key);
-    s.arrived = Math.max(0, Math.min(9999, n));
+    s.arrived = Math.max(0, Math.min(PO_MAX_QTY, n));   // the same limit as ordering
     const need = s.arrived * l.packSize;
     if (!s.arrived) s.rows = [];
     else if (!s.rows.length) s.rows = [newRow(home(l), need)];
     else if (s.rows.length === 1) balance(s.rows[0], home(l), need);
     const inp = cardOf(l).querySelector('[data-f="arrived"]');
-    if (inp && !fromInput) inp.value = s.arrived;
+    // Typed over the limit: the box shows the number actually used, so it never disagrees with the check
+    if (inp && (!fromInput || int(inp.value) !== s.arrived)) inp.value = s.arrived;
     drawSplits(l);
   }
 
