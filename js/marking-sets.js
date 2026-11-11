@@ -10,8 +10,11 @@ import { showToast } from "./utils.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 export const MARK_COLOURS = ["#2563eb", "#16a34a", "#d97706", "#dc2626", "#7c3aed", "#db2777", "#0891b2", "#4b5563"];
-export const MARK_SHAPES = [["circle", "Circle"], ["square", "Square"], ["diamond", "Diamond"], ["triangle", "Triangle"],
-  ["hexagon", "Hexagon"], ["star", "Star"]];
+export const MARK_SHAPES = [["circle", "Circle"], ["target", "Circle with dot"], ["square", "Square"], ["diamond", "Diamond"],
+  ["triangle", "Triangle"], ["hexagon", "Hexagon"], ["star", "Star"]];
+// Shapes that show no text (the dot is the mark; the code is still counted)
+const NO_TEXT = new Set(["target"]);
+export const shapeHasText = (shape) => !NO_TEXT.has(shape);
 export const TEXT_SIZES = [["s", "Small text"], ["m", "Medium text"], ["l", "Large text"]];
 const SHAPE_KEYS = MARK_SHAPES.map(([k]) => k);
 const TSIZE = { s: 0.75, m: 1, l: 1.3 };
@@ -22,8 +25,10 @@ export const fmtMark = (n) => String(+Number(n || 0).toFixed(2));
 export const SHAPE_TEXT = {
   circle: { dy: 0.06, fs: 1 }, square: { dy: 0.06, fs: 1 }, hexagon: { dy: 0.06, fs: 0.95 },
   diamond: { dy: 0.06, fs: 0.8 }, triangle: { dy: 0.35, fs: 0.7 }, star: { dy: 0.1, fs: 0.6 },
+  target: { dy: 0, fs: 0 },
 };
 export const textSize = (text, shape, tsize = "m") => {
+  if (!shapeHasText(shape)) return 0;
   const t = String(text || "");
   return (t.length > 3 ? 0.62 : t.length > 2 ? 0.78 : 1) * (SHAPE_TEXT[shape] || SHAPE_TEXT.circle).fs * (TSIZE[tsize] || 1);
 };
@@ -92,6 +97,11 @@ export function traceShape(g, shape, x, y, r) {
       if (g.roundRect) g.roundRect(x - s, y - s, 2 * s, 2 * s, r * 0.2); else g.rect(x - s, y - s, 2 * s, 2 * s);
       break;
     }
+    case "target":
+      g.arc(x, y, r, 0, Math.PI * 2);
+      g.moveTo(x + r * 0.3, y);
+      g.arc(x, y, r * 0.3, 0, Math.PI * 2);   // the centre dot (same direction, so a filled mark stays filled)
+      break;
     case "diamond": poly(ring(4, -Math.PI / 2, r * 1.18)); break;
     case "triangle": poly(ring(3, -Math.PI / 2, r * 1.3, r * 0.2)); break;
     case "hexagon": poly(ring(6, 0, r * 1.06)); break;
@@ -118,6 +128,7 @@ export function shapeSvg(shape, colour, text = "", { size = 30, fill = "solid", 
   let el;
   switch (shape) {
     case "square": el = `<rect x="${c - r * 0.88}" y="${c - r * 0.88}" width="${r * 1.76}" height="${r * 1.76}" rx="${r * 0.2}"/>`; break;
+    case "target": el = `<circle cx="${c}" cy="${c}" r="${r}"/>`; break;
     case "diamond": el = `<polygon points="${pts(ring(4, -Math.PI / 2, r * 1.18))}"/>`; break;
     case "triangle": el = `<polygon points="${pts(ring(3, -Math.PI / 2, r * 1.3, r * 0.2))}"/>`; break;
     case "hexagon": el = `<polygon points="${pts(ring(6, 0, r * 1.06))}"/>`; break;
@@ -128,10 +139,11 @@ export function shapeSvg(shape, colour, text = "", { size = 30, fill = "solid", 
     }))}"/>`; break;
     default: el = `<circle cx="${c}" cy="${c}" r="${r}"/>`;
   }
-  const t = String(text || "");
+  const t = shapeHasText(shape) ? String(text || "") : "";
   const st = SHAPE_TEXT[shape] || SHAPE_TEXT.circle;
   return `<svg class="ms-shape" viewBox="0 0 40 40" width="${size}" height="${size}" aria-hidden="true">` +
     `<g fill="${see ? "none" : col}" stroke="${see ? col : "#fff"}" stroke-width="${see ? 2.6 : 2}" stroke-linejoin="round">${el}</g>` +
+    (shape === "target" ? `<circle cx="${c}" cy="${c}" r="${(r * 0.3).toFixed(1)}" fill="${see ? col : "#fff"}"/>` : "") +
     (t ? `<text x="${c}" y="${(c + r * st.dy).toFixed(1)}" text-anchor="middle" dominant-baseline="central" font-family="Arial, Helvetica, sans-serif"` +
       ` font-weight="700" font-size="${(r * textSize(t, shape, tsize)).toFixed(1)}" fill="${tc}"${
         see ? ' stroke="#fff" stroke-width="2" paint-order="stroke"' : ""}>${esc(t)}</text>` : "") +
@@ -230,6 +242,7 @@ export async function openMarkingSetsDialog({ staff } = {}) {
       `<option value="${k}"${k === cur ? " selected" : ""}>${l}</option>`).join("")}</select>`;
     const valHtml = (s, x, j) => {
       const label = s.type === "label";
+      const noText = !shapeHasText(x.shape);
       return `<div class="ms-val${label ? " is-label" : ""}" data-v="${j}">
         <span class="ms-prev">${valueSvg(s, x, 34)}</span>
         ${label
@@ -239,8 +252,8 @@ export async function openMarkingSetsDialog({ staff } = {}) {
         ${sel("shape", MARK_SHAPES, x.shape || "circle", "Shape")}
         <label class="ms-sw" title="Shape colour"><span>Shape</span><input type="color" data-vk="colour" value="${esc(x.colour)}" aria-label="Shape colour" /></label>
         ${sel("fill", [["solid", "Filled"], ["none", "See-through"]], x.fill || "solid", "Background")}
-        <label class="ms-sw" title="Text colour"><span>Text</span><input type="color" data-vk="text" value="${esc(x.text || "#ffffff")}" aria-label="Text colour" /></label>
-        ${sel("tsize", TEXT_SIZES, x.tsize || "m", "Text size")}
+        ${noText ? "" : `<label class="ms-sw" title="Text colour"><span>Text</span><input type="color" data-vk="text" value="${esc(x.text || "#ffffff")}" aria-label="Text colour" /></label>
+        ${sel("tsize", TEXT_SIZES, x.tsize || "m", "Text size")}`}
         <button type="button" class="hx-x" data-vdel aria-label="Remove this value">×</button>
       </div>`;
     };
@@ -291,6 +304,12 @@ export async function openMarkingSetsDialog({ staff } = {}) {
       if (!vb || !t.dataset.vk) return;
       const x = s.values[Number(vb.dataset.v)];
       x[t.dataset.vk] = t.value;
+      // Circle with dot: see-through (a ring and a dot, like it's drawn by hand); the text settings go
+      if (t.dataset.vk === "shape") {
+        if (!shapeHasText(t.value) && x.fill !== "none") { x.fill = "none"; x.text = x.colour; }
+        draw();
+        return;
+      }
       // Keep the text readable when switching between filled and see-through
       if (t.dataset.vk === "fill") {
         const tx = vb.querySelector('[data-vk="text"]');
