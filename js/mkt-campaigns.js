@@ -12,6 +12,7 @@ import { showToast } from "./utils.js";
 import { listTemplates, setBuilderBack } from "./mkt-templates.js";
 import { esc, renderEmail, MERGE_TAGS } from "./mkt-email.js";
 import { mountRuleBuilder, cleanGroup, groupProblem, describeGroup, blankGroup, loadProductNames } from "./flow-rules.js";
+import { normSms, mountSmsDraft, mountSmsView, createSmsCampaign } from "./mkt-sms.js";
 
 const COL = "mkt_campaigns";
 const LIST_HREF = "#/tasks/marketing/campaigns";
@@ -126,6 +127,8 @@ function normC(snap) {
   const status = x.status === "archived" || STATUS[x.status] ? String(x.status) : "draft";
   return {
     id: snap.id, name: String(x.name || "Untitled campaign"), status,
+    channel: x.channel === "sms" ? "sms" : "email", text: String(x.text || ""),
+    smsStats: x.stats && typeof x.stats === "object" ? x.stats : {},
     templateId: String(x.templateId || ""), templateName: String(x.templateName || ""),
     subject: String(x.subject || ""), fromName: String(x.fromName || "Dermedica Clinic"), replyTo: String(x.replyTo || ""),
     audience: { mode: audMode(a.mode), rules: cleanGroup(a.rules || blankGroup()), list: cleanList(a.list), exclude: cleanExclude(a.exclude),
@@ -180,6 +183,7 @@ async function saveDraft(c, staff) {
 }
 
 function progressHtml(c) {
+  if (c.channel === "sms" && c.status === "building") return '<small class="muted">Making the list…</small>';
   if (c.status === "building") {
     return `<div class="mc-bar"><span style="width:${pct(c.buildChecked, c.buildTotal)}%"></span></div>
       <small class="muted">Choosing patients: ${n0(c.buildChecked)} of ${n0(c.buildTotal || "…")} checked</small>`;
@@ -202,9 +206,15 @@ function newDialog(staff, templates) {
   const dlg = openDialog(`
     <form class="lh-form" novalidate>
       <div class="lh-dialog-head"><h3>New campaign</h3><p>You'll choose who it goes to and when on the next page.</p></div>
+      <div class="mc-opts">
+        <label class="mc-opt"><input type="radio" name="kind" value="email" checked />
+          <span><strong>Email</strong><small>A designed email from Email templates</small></span></label>
+        <label class="mc-opt"><input type="radio" name="kind" value="sms" />
+          <span><strong>SMS</strong><small>A text to patients on Recall, through Textmagic</small></span></label>
+      </div>
       <label class="lh-field"><span class="lh-label">Name</span>
         <input name="name" maxlength="120" placeholder="October newsletter" autocomplete="off" /></label>
-      <label class="lh-field"><span class="lh-label">Email (optional for now)</span>
+      <label class="lh-field" data-role="tplField"><span class="lh-label">Email (optional for now)</span>
         <select class="fb-select" name="tpl"><option value="">Choose later</option>${templates.map((t) =>
           `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("")}</select></label>
       <p class="lh-error" role="alert" hidden></p>
@@ -216,15 +226,23 @@ function newDialog(staff, templates) {
   const form = dlg.querySelector("form");
   const err = dlg.querySelector(".lh-error");
   dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+  form.addEventListener("change", (e) => {
+    if (e.target.name !== "kind") return;
+    const sms = e.target.value === "sms";
+    dlg.querySelector('[data-role="tplField"]').hidden = sms;
+    form.elements.name.placeholder = sms ? "Anti-wrinkle recall, November" : "October newsletter";
+  });
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const name = form.elements.name.value.trim();
     if (!name) { err.textContent = "Give the campaign a name."; err.hidden = false; return; }
+    const sms = form.elements.kind.value === "sms";
     const t = templates.find((x) => x.id === form.elements.tpl.value);
     const btn = form.querySelector('[type="submit"]');
     btn.disabled = true;
     try {
-      const id = await createCampaign({ name, templateId: t ? t.id : "", templateName: t ? t.name : "" }, staff);
+      const id = sms ? await createSmsCampaign({ name }, staff)
+        : await createCampaign({ name, templateId: t ? t.id : "", templateName: t ? t.name : "" }, staff);
       dlg.close();
       location.hash = `${LIST_HREF}/${encodeURIComponent(id)}`;
     } catch (ex) {
@@ -237,7 +255,9 @@ function newDialog(staff, templates) {
   form.elements.name.focus();
 }
 
+
 function rowWhen(c) {
+  if (c.channel === "sms" && c.status === "sent") return `${n0(c.sent)} texts sent · ${rate(c.smsStats.replied, c.sent)} replied${c.finishedAt ? ` · ${when(c.finishedAt)}` : ""}`;
   if (c.status === "draft") return c.updatedAt ? `Edited ${when(c.updatedAt)}` : "";
   if (c.status === "scheduled") return `Sends ${when(new Date(c.sendAtMs))}`;
   if (c.status === "building") return "Choosing patients…";
@@ -280,8 +300,9 @@ export function mountCampaignList(box, { staff = null } = {}) {
     listEl.innerHTML = rows.length ? `<div class="mc-list">${rows.map((c) => `
       <a class="mc-row" href="${LIST_HREF}/${encodeURIComponent(c.id)}">
         <span class="mc-row-main">
-          <strong>${esc(c.name)}</strong>
-          <small>${esc([c.templateName || "No email chosen yet", c.subject].filter(Boolean).join(" · "))}</small>
+          <strong>${esc(c.name)}${c.channel === "sms" ? ' <span class="mc-pill is-sms">SMS</span>' : ""}</strong>
+          <small>${esc(c.channel === "sms" ? (c.text || "No message yet").slice(0, 90)
+            : [c.templateName || "No email chosen yet", c.subject].filter(Boolean).join(" · "))}</small>
           ${["building", "sending", "paused"].includes(c.status) ? `<span class="mc-row-bar">${progressHtml(c)}</span>` : ""}
         </span>
         <span class="mc-row-when">${esc(rowWhen(c))}</span>
@@ -334,6 +355,17 @@ export async function mountCampaignEditor(container, { id, staff = null } = {}) 
       root.innerHTML = `${BACK}<div class="state"><strong>Campaign not found</strong>It may have been deleted.</div>`;
       return;
     }
+    if ((snap.data() || {}).channel === "sms") {
+      const s = normSms(snap);
+      if (s.status === "draft") {
+        if (mode !== "sms-draft") { if (draft) draft.close(); mode = "sms-draft"; view = null; draft = mountSmsDraft(root, s, staff); }
+        return;
+      }
+      if (draft) { draft.close(); draft = null; }
+      if (mode !== "sms-view") { mode = "sms-view"; view = mountSmsView(root, s, staff); }
+      view.update(s);
+      return;
+    }
     const c = normC(snap);
     if (c.status === "draft") {
       // A draft isn't redrawn while it's being typed in (its own saves come back here too)
@@ -343,7 +375,8 @@ export async function mountCampaignEditor(container, { id, staff = null } = {}) 
     if (draft) { draft.close(); draft = null; }
     if (mode !== "view") { mode = "view"; view = mountView(root, c, staff); }
     view.update(c);
-  }, (err) => {
+  },
+   (err) => {
     if (!root.isConnected) return;
     console.error("Campaign failed:", err);
     root.innerHTML = `${BACK}<div class="state error"><strong>Couldn't open the campaign</strong>${esc(errText(err, "Try again."))}</div>`;
@@ -587,7 +620,7 @@ function mountDraft(page, c, staff) {
   let pastList = null;   // other campaigns that have sent at least one email
   getDocs(collection(db, COL)).then((snap) => {
     const t = (x) => (x.finishedAt || x.startedAt || x.updatedAt || new Date(0)).getTime();
-    pastList = snap.docs.map(normC).filter((x) => x.id !== c.id && x.status !== "archived" && x.sent > 0)
+    pastList = snap.docs.map(normC).filter((x) => x.id !== c.id && x.status !== "archived" && x.sent > 0 && x.channel !== "sms")
       .sort((a, b) => t(b) - t(a));
   }).catch((err) => { console.error("Earlier campaigns failed:", err); pastList = []; })
     .then(() => { if (root.isConnected) drawSkip(); });

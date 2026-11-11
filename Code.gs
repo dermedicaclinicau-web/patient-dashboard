@@ -11947,6 +11947,10 @@ function handleMarketing_(body) {
       return r.patientId ? { ok: true, patientId: r.patientId } : { ok: false, error: 'NO_PATIENT' };
     }
     if (!manage) return { ok: false, error: 'FORBIDDEN' };
+    if (op === 'smsOptions') return smscOptions_(cfg, session);
+    if (op === 'smsCount') return smscCount_(cfg, body, session);
+    if (op === 'smsTest') return smscTest_(cfg, body, session);
+    if (op === 'smsRefresh') return smscRefresh_(cfg, body);
     if (op === 'list') return { ok: true, rows: mktList_(cfg) };
     if (op === 'search') return upPtSearch_(body);
     if (op === 'block') return mktBlock_(cfg, body, session);
@@ -12426,6 +12430,7 @@ function mktSchedule_(cfg, body, session) {
     const c = fsGetDoc_(cfg, path);
     if (!c) return { ok: false, error: 'NOT_FOUND' };
     if (c.status !== 'draft') return { ok: true, problem: 'This campaign has already been scheduled.' };
+    if (c.channel === 'sms') return smscSchedule_(cfg, c, id, body, session);
     const tid = String(c.templateId || '');
     const t = /^[A-Za-z0-9_-]{10,40}$/.test(tid) ? fsGetDoc_(cfg, MKT_TEMPLATES_ + '/' + tid) : null;
     if (!t || t.status === 'archived') return { ok: true, problem: 'Choose the email it sends.' };
@@ -12531,12 +12536,14 @@ function runCampaigns() {
           } catch (e2) { /* not essential */ }
         }
       });
+    try { smscTallyAll_(cfg, deadline); } catch (e) { console.warn('SMS campaign results: ' + e); }
   } finally {
     cache.remove('mkt_runner');
   }
 }
 
 function mktRunOne_(cfg, c, deadline) {
+  if (c.channel === 'sms') return smscRunOne_(cfg, c, deadline);
   const path = MKT_CAMPAIGNS_ + '/' + c._id;
   if (c.status === 'scheduled') {
     if (Number(c.sendAtMs || 0) > Date.now()) return;
@@ -22225,4 +22232,547 @@ function testTextmagicOptouts() {
   const r = tmFetch_(tmAuth_(), 'get', '/unsubscribers?page=1&limit=3');
   console.log('First on the list: ' + JSON.stringify((r.resources || [])[0] || 'nobody'));
   console.log(JSON.stringify(tmUnsubSync_(getConfig_(), true)));
+}
+
+
+/* ===================== Marketing: SMS campaigns (Recall) ===================== */
+// An SMS campaign is an mkt_campaigns document with channel "sms" (js/mkt-sms.js). Its people come from Recall:
+// open recall cards that match the campaign's filters, one text per mobile (the most overdue person on a shared mobile).
+// The list is made when it's time to send (smscQueue_), then runCampaigns (every 10 minutes) texts in batches
+// between 8 am and 8 pm Perth. Each person is mkt_campaigns/{id}/sms/r00000:
+//   st: queued · sending · sent · failed · skipped, with m (mobile), p, n, c (recall card ids), at, tm, text
+// smscTally_ adds dl (Textmagic delivery), rp (their reply), out (opted out) and bk (booked) about every 20 minutes.
+
+const SMSC_SUB_ = 'sms';
+const SMSC_CAP_ = 5000;
+const SMSC_PEOPLE_ = 3000;
+const SMSC_PACE_MINS_ = [10, 20, 30, 60];
+const SMSC_UNITS_ = { days: 1, weeks: 7, months: 30 };
+const SMSC_DUE_ = ['any', 'just', 'over', 'lapsed', 'dates'];
+const SMSC_SPEND_ = ['', 'platinum', 'gold', 'silver', 'pg', 'none'];
+const SMSC_IN_FLOW_ = ['run', 'wait', 'team', 'cycle', 'queued', 'joined', 'released'];
+const SMSC_VAL_KEYS_ = ['first name', 'full name', 'treatment', 'main treatment', 'months', 'due date', 'last visit', 'last seen with', 'clinic phone'];
+const SMSC_REPLY_DAYS_ = 14;
+const SMSC_BOOK_DAYS_ = 60;
+
+function smscPace_(p) {
+  const n = Math.floor(Number(p && p.n) || 0);
+  const mins = Number(p && p.mins) || 0;
+  return n >= 10 && n <= 100 && SMSC_PACE_MINS_.indexOf(mins) !== -1 ? { n: n, mins: mins } : { n: 25, mins: 30 };
+}
+
+function smscAudience_(a) {
+  a = a || {};
+  const d = a.due || {};
+  const q = a.quiet || {};
+  const day = function (k) { return /^\d{4}-\d{2}-\d{2}$/.test(String(k || '')) ? String(k) : ''; };
+  return {
+    source: 'recall',
+    cats: uniq_((Array.isArray(a.cats) ? a.cats : []).map(function (s) { return String(s).slice(0, 80); })).slice(0, 20),
+    due: { mode: SMSC_DUE_.indexOf(d.mode) !== -1 ? d.mode : 'any', from: day(d.from), to: day(d.to) },
+    later: a.later === true,
+    who: String(a.who || 'any').slice(0, 80), whoName: String(a.whoName || '').slice(0, 120),
+    spend: SMSC_SPEND_.indexOf(String(a.spend || '')) !== -1 ? String(a.spend || '') : '',
+    tag: /^t_[a-z0-9_]{2,40}$/.test(String(a.tag || '')) ? String(a.tag) : '', tagName: String(a.tagName || '').slice(0, 60),
+    skipAppt: a.skipAppt !== false,
+    skipFlow: a.skipFlow !== false,
+    quiet: { on: q.on !== false, n: Math.max(1, Math.min(365, Math.floor(Number(q.n) || 30))),
+      unit: SMSC_UNITS_[q.unit] ? q.unit : 'days' },
+    exclude: (Array.isArray(a.exclude) ? a.exclude : []).slice(0, 500).map(function (x) {
+      return { m: recallPhone04_(x && x.m), n: String((x && x.n) || '').slice(0, 120) };
+    }).filter(function (x) { return x.m; }),
+  };
+}
+
+function smscDueOk_(d, due, today) {
+  if (due.mode === 'any') return true;
+  if (!d) return false;
+  const t30 = flowAddDaysKey_(today, -30), t182 = flowAddDaysKey_(today, -182);
+  if (due.mode === 'just') return d >= t30 && d <= today;
+  if (due.mode === 'over') return d < t30 && d >= t182;
+  if (due.mode === 'lapsed') return d < t182;
+  return (!due.from || d >= due.from) && (!due.to || d <= due.to);
+}
+
+// A recipient as the card recallFlowVals_ fills the blanks from
+function smscCard_(x) {
+  return { patientName: x.n, category: x.cat, alsoDue: Array.isArray(x.also) ? x.also : [], lastVisit: x.lv || '',
+    dueDate: x.due || '', lastStaff: x.ls || '' };
+}
+
+// Who the filters reach. stats: every matching patient lands in exactly one bucket, or in list.
+function smscBuild_(cfg, aud, withExclude) {
+  const today = flowKey_(Date.now());
+  const st = { matched: 0, hold: 0, dnc: 0, noMobile: 0, optedOut: 0, appt: 0, flow: 0, texted: 0, shared: 0, leftOut: 0 };
+  const cats = {};
+  aud.cats.forEach(function (k) { cats[k.toLowerCase()] = true; });
+  const tierOk = function (t) {
+    t = String(t || '');
+    if (!aud.spend) return true;
+    if (aud.spend === 'pg') return t === 'platinum' || t === 'gold';
+    return aud.spend === 'none' ? !t : t === aud.spend;
+  };
+  const cards = fsQuery_(cfg, RECALL_COL_, 'status', 'EQUAL', 'open', 10000).filter(function (c) {
+    if (aud.cats.length && !cats[String(c.category || '').toLowerCase()]) return false;
+    if (!smscDueOk_(String(c.dueDate || ''), aud.due, today)) return false;
+    if (c.stage === 'later' && c.onHold !== true && !aud.later) return false;
+    if (aud.who === 'none' ? !!c.assignedToId : (aud.who !== 'any' && c.assignedToId !== aud.who)) return false;
+    if (!tierOk(c.spendTier)) return false;
+    if (aud.tag && (!Array.isArray(c.tags) || c.tags.indexOf(aud.tag) === -1)) return false;
+    return true;
+  });
+
+  const sup = {};
+  fsListAll_(cfg, SMS_SUPPRESS_, ['at']).forEach(function (d) { sup[d.name.split('/').pop()] = true; });
+  const texted = {};
+  if (aud.quiet.on) {
+    const cut = new Date(Date.now() - aud.quiet.n * SMSC_UNITS_[aud.quiet.unit] * 864e5).toISOString();
+    fsQuery_(cfg, RECALL_COL_, 'lastTextAt', 'GREATER_THAN', cut, 10000).forEach(function (c) {
+      const k = recallPhone04_(c.mobileKey || c.mobile);
+      if (k) texted[k] = true;
+    });
+    fsQuery_(cfg, SMS_COL_, 'at', 'GREATER_THAN', cut, 10000).forEach(function (m) {
+      const k = recallPhone04_(m.phone);
+      if (k) texted[k] = true;
+    });
+  }
+  const ex = {};
+  if (withExclude) aud.exclude.forEach(function (x) { ex[x.m] = true; });
+
+  const by = {};
+  cards.forEach(function (c) { const k = c.patientId || ('card:' + c._id); (by[k] = by[k] || []).push(c); });
+  const people = Object.keys(by).map(function (k) {
+    const cs = by[k].sort(function (a, b) { return String(a.dueDate).localeCompare(String(b.dueDate)); });
+    return { cards: cs, lead: cs[0] };
+  }).sort(function (a, b) { return String(a.lead.dueDate).localeCompare(String(b.lead.dueDate)); });   // most overdue first
+
+  const taken = {};
+  const list = [];
+  people.forEach(function (x) {
+    st.matched++;
+    const cs = x.cards, c = x.lead;
+    const any = function (fn) { return cs.some(fn); };
+    const m = recallPhone04_(c.mobileKey || c.mobile);
+    let why = '';
+    if (any(function (y) { return y.onHold === true; })) why = 'hold';
+    else if (any(function (y) { return y.dnc === true; })) why = 'dnc';
+    else if (!m) why = 'noMobile';
+    else if (sup[m] || any(function (y) { return !!y.smsStop; })) why = 'optedOut';
+    else if (aud.skipAppt && any(function (y) { return String(y.nextAppt || '') >= today; })) why = 'appt';
+    else if (aud.skipFlow && any(function (y) { return SMSC_IN_FLOW_.indexOf(String(y.flowState || '')) !== -1; })) why = 'flow';
+    else if (texted[m]) why = 'texted';
+    else if (taken[m]) why = 'shared';
+    else if (ex[m]) why = 'leftOut';
+    if (why) { st[why]++; return; }
+    taken[m] = true;
+    const also = cs.slice(1).map(function (y) { return String(y.category || ''); })
+      .filter(function (k, i, a) { return k && k !== c.category && a.indexOf(k) === i; });
+    list.push({ m: m, p: String(c.patientId || ''), n: String(c.patientName || ''), c: cs.map(function (y) { return y._id; }),
+      cat: String(c.category || ''), also: also, due: String(c.dueDate || ''), lv: String(c.lastVisit || ''), ls: String(c.lastStaff || '') });
+  });
+  return { list: list, stats: st };
+}
+
+/* ---------- From the portal ---------- */
+
+function smscOptions_(cfg, session) {
+  const set = recallSettings_(cfg);
+  const team = {};
+  set.team.forEach(function (id) { team[id] = true; });
+  return {
+    ok: true, ready: !!tmAuth_(), canSend: can_(session, 'sms.send'), phone: set.sms.phone,
+    categories: set.categories.filter(function (c) { return c.on; }).map(function (c) { return { key: c.key, name: c.smsName }; }),
+    staff: getStaffDocs_().filter(function (s) { return s.active !== false && s.name; })
+      .map(function (s) { return { id: s.id, name: String(s.name), team: !!team[s.id] }; })
+      .sort(function (a, b) { return (b.team - a.team) || a.name.localeCompare(b.name); }),
+    tags: tagLib_(cfg),
+  };
+}
+
+function smscCount_(cfg, body, session) {
+  const cache = CacheService.getScriptCache();
+  const rk = 'smsc_count_' + session.uid;
+  const used = Number(cache.get(rk) || 0);
+  if (used >= 40) return { ok: true, problem: "You've counted a lot in the last hour. Try again a bit later." };
+  cache.put(rk, String(used + 1), 3600);
+  const aud = smscAudience_(body.audience);
+  if (aud.due.mode === 'dates' && !aud.due.from && !aud.due.to) return { ok: true, problem: 'Choose the due dates.' };
+  const r = smscBuild_(cfg, aud, false);
+  return {
+    ok: true, count: r.list.length, stats: r.stats,
+    people: r.list.slice(0, SMSC_PEOPLE_).map(function (x) { return { m: x.m, p: x.p, n: x.n, cat: x.cat, also: x.also, due: x.due }; }),
+    more: Math.max(0, r.list.length - SMSC_PEOPLE_),
+    sample: r.list.length ? recallFlowVals_(smscCard_(r.list[0]), recallSettings_(cfg)) : null,
+  };
+}
+
+function smscTextProblem_(text) {
+  if (text.length < 10) return 'Write the message first.';
+  if (text.length > 560) return 'The message is too long. Keep it under 560 characters.';
+  if (!/dermedica/i.test(text)) return "Say it's from Dermedica. Every marketing text has to say who sent it.";
+  return '';
+}
+
+function smscTest_(cfg, body, session) {
+  if (!can_(session, 'sms.send')) return { ok: true, problem: 'You can\'t send texts. Ask an admin to tick "Text patients from their page" for you.' };
+  const auth = tmAuth_();
+  if (!auth) return { ok: true, problem: "Texts aren't set up yet. Add the Textmagic details in Script Properties." };
+  const to = recallPhone61_(body.to);
+  if (!to) return { ok: true, problem: 'Type an Australian mobile number, like 0412 345 678.' };
+  const text = String(body.text || '').replace(/\r/g, '').trim();
+  const bad = smscTextProblem_(text);
+  if (bad) return { ok: true, problem: bad };
+  const cache = CacheService.getScriptCache();
+  const rk = 'smsc_test_' + session.uid;
+  const used = Number(cache.get(rk) || 0);
+  if (used >= 15) return { ok: true, problem: "You've sent a lot of tests in the last hour. Try again a bit later." };
+  const v = body.vals && typeof body.vals === 'object' ? body.vals : {};
+  const vals = {};
+  SMSC_VAL_KEYS_.forEach(function (k) { vals[k] = String(v[k] == null ? '' : v[k]).slice(0, 80); });
+  try { tmSend_(auth, to, '[Test] ' + recallSmsText_(flowFill_(text, vals, false))); }
+  catch (e) { return { ok: true, problem: "The test wasn't sent: " + String(e && e.message ? e.message : e).slice(0, 200) }; }
+  cache.put(rk, String(used + 1), 3600);
+  return { ok: true };
+}
+
+// Called by mktSchedule_ (inside its lock) for SMS campaigns
+function smscSchedule_(cfg, c, id, body, session) {
+  if (!can_(session, 'sms.send')) return { ok: true, problem: 'You can\'t send texts. Ask an admin to tick "Text patients from their page" for you.' };
+  if (!tmAuth_()) return { ok: true, problem: "Texts aren't set up yet. Add the Textmagic details in Script Properties." };
+  const text = String(c.text || '').replace(/\r/g, '').trim();
+  const bad = smscTextProblem_(text);
+  if (bad) return { ok: true, problem: bad };
+  const aud = smscAudience_(c.audience);
+  if (aud.due.mode === 'dates' && !aud.due.from && !aud.due.to) return { ok: true, problem: 'Choose the due dates.' };
+  let at = Date.now();
+  if (body.now !== true) {
+    at = Date.parse(String(body.sendAt || ''));
+    if (!at || at < Date.now() + 4 * 60000) return { ok: true, problem: 'Choose a time at least 5 minutes from now.' };
+    if (at > Date.now() + 90 * 86400000) return { ok: true, problem: 'Choose a time in the next 90 days.' };
+  }
+  const now = new Date().toISOString();
+  fsPatch_(cfg, MKT_CAMPAIGNS_ + '/' + id, {
+    status: 'scheduled', sendAtMs: at, sendAt: new Date(at).toISOString(), text: text, audience: aud,
+    pace: smscPace_(c.pace), weekdaysOnly: c.weekdaysOnly === true, paceAt: 0, paceN: 0,
+    total: 0, sent: 0, skipped: 0, failed: 0, built: false, buildStats: null, waiting: '', lastError: '', note: '',
+    startedAt: '', finishedAt: '', stats: {},
+    scheduledAt: now, scheduledBy: String(session.name || ''), scheduledByUid: String(session.uid || ''),
+  });
+  console.log('SMS campaign "' + c.name + '" scheduled for ' + new Date(at).toISOString() + ' by ' + session.name);
+  return { ok: true, sendAt: new Date(at).toISOString() };
+}
+
+function smscRefresh_(cfg, body) {
+  const id = String(body.campaignId || '');
+  if (!/^[A-Za-z0-9_-]{10,40}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+  const c = fsGetDoc_(cfg, MKT_CAMPAIGNS_ + '/' + id);
+  if (!c || c.channel !== 'sms') return { ok: false, error: 'NOT_FOUND' };
+  c._id = id;
+  const cache = CacheService.getScriptCache();
+  if (cache.get('smsc_refresh_' + id)) return { ok: true, recent: true };
+  cache.put('smsc_refresh_' + id, '1', 120);
+  return { ok: true, stats: smscTally_(cfg, c) };
+}
+
+/* ---------- Sending (runCampaigns → mktRunOne_) ---------- */
+
+function smscRunOne_(cfg, c, deadline) {
+  const path = MKT_CAMPAIGNS_ + '/' + c._id;
+  if (c.status === 'scheduled') {
+    if (Number(c.sendAtMs || 0) > Date.now()) return;
+    const now = new Date().toISOString();
+    fsPatch_(cfg, path, { status: 'building', startedAt: now, waiting: 'Making the list…', lastError: '' });
+    c.status = 'building';
+    c.startedAt = now;
+  }
+  if (c.status === 'building' && !smscQueue_(cfg, c)) return;
+  smscSend_(cfg, c, deadline);
+}
+
+// People in a campaign with this status, in list order (doc ids r00000, r00001…)
+function smscList_(cfg, path, st, max) {
+  const res = UrlFetchApp.fetch('https://firestore.googleapis.com/v1/' + fsBase_(cfg) + '/' + path + ':runQuery', {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) },
+    payload: JSON.stringify({ structuredQuery: {
+      from: [{ collectionId: SMSC_SUB_ }],
+      where: { fieldFilter: { field: { fieldPath: 'st' }, op: 'EQUAL', value: { stringValue: st } } },
+      orderBy: [{ field: { fieldPath: '__name__' } }],
+      limit: Math.max(1, max || 100),
+    } }),
+  });
+  if (res.getResponseCode() !== 200) throw new Error('SMS list not read (' + res.getResponseCode() + '): ' + res.getContentText().slice(0, 200));
+  return JSON.parse(res.getContentText()).filter(function (r) { return r.document; }).map(function (r) {
+    const o = fromFields_(r.document.fields || {});
+    o._id = r.document.name.split('/').pop();
+    return o;
+  });
+}
+
+// Makes the list. Returns true once it's ready to send.
+function smscQueue_(cfg, c) {
+  const path = MKT_CAMPAIGNS_ + '/' + c._id;
+  const old = mktListPath_(cfg, path + '/' + SMSC_SUB_, ['st']);   // a list made before a pause: made again
+  if (old.length) commitWrites_(cfg, old.map(function (d) { return { delete: d.name }; }), 300);
+  const r = smscBuild_(cfg, smscAudience_(c.audience), true);
+  const list = r.list.slice(0, SMSC_CAP_);
+  const pad = function (i) { return 'r' + ('00000' + i).slice(-5); };
+  if (list.length) {
+    commitWrites_(cfg, list.map(function (x, i) {
+      return updateWrite_(cfg, path + '/' + SMSC_SUB_ + '/' + pad(i), {
+        i: i, st: 'queued', m: x.m, p: x.p, n: x.n, c: x.c, cat: x.cat, also: x.also, due: x.due, lv: x.lv, ls: x.ls,
+      });
+    }), 300);
+  }
+  if ((fsGetDoc_(cfg, path) || {}).status !== 'building') return false;   // paused or cancelled meanwhile
+  if (!list.length) {
+    fsPatch_(cfg, path, { status: 'sent', built: true, total: 0, buildStats: r.stats, finishedAt: new Date().toISOString(),
+      waiting: '', note: 'Nobody matched when it was time to send.' });
+    return false;
+  }
+  fsPatch_(cfg, path, { status: 'sending', built: true, total: list.length, buildStats: r.stats, builtAt: new Date().toISOString(),
+    waiting: '', note: r.list.length > list.length
+      ? 'Only the first ' + SMSC_CAP_ + ' (most overdue first) are in this campaign. Send the rest in another one.' : '' });
+  Object.assign(c, { status: 'sending', total: list.length, sent: 0, skipped: 0, failed: 0, waiting: '', paceAt: 0, paceN: 0 });
+  return true;
+}
+
+// The campaign's counters, in the same write as a person's result
+function smscCamp_(cfg, path, field, set) {
+  const w = patchWrite_(cfg, path, Object.assign({ tickAt: new Date().toISOString() }, set || {}));
+  w.updateTransforms = [mktInc_(field)];
+  return w;
+}
+
+function smscSendOne_(auth, phone61, text) {
+  const payload = { text: text, phones: phone61 };
+  if (auth.from) payload.from = auth.from;
+  const r = tmFetch_(auth, 'post', '/messages', payload);
+  return String(r.messageId || r.id || '');
+}
+
+// The text goes on their recall card History. Unclaimed cards wait for a reply before they're shared out.
+function smscCardWrites_(cfg, cards, c, text, at, set, today) {
+  const hold = flowAddDaysKey_(today, (set.sms && set.sms.waitDays) || 7);
+  commitWrites_(cfg, cards.map(function (x) {
+    const p = { lastTextAt: at, lastTextBy: '', lastTextByName: 'SMS campaign', updatedAt: at };
+    if (!x.assignedToId && x.stage === 'due') p.textHoldUntil = hold;
+    const w = patchWrite_(cfg, RECALL_COL_ + '/' + x._id, p);
+    w.updateTransforms = [mktInc_('texts'), { fieldPath: 'log', appendMissingElements: { values: [toValue_({
+      at: at, by: 'SMS campaign', byUid: '', kind: 'text', what: 'Text sent (campaign "' + String(c.name || '') + '")', note: text,
+    })] } }];
+    return w;
+  }));
+}
+
+function smscFinishIfDone_(cfg, c) {
+  const path = MKT_CAMPAIGNS_ + '/' + c._id;
+  if (smscList_(cfg, path, 'queued', 1).length || smscList_(cfg, path, 'sending', 1).length) return false;
+  fsPatch_(cfg, path, { status: 'sent', finishedAt: new Date().toISOString(), waiting: '' });
+  CacheService.getScriptCache().remove('smsc_tally_' + c._id);
+  console.log('SMS campaign "' + c.name + '" finished.');
+  return true;
+}
+
+// One batch. Each person is marked "sending" before the text goes, so a crash never texts anyone twice.
+function smscSend_(cfg, c, deadline) {
+  if (c.status !== 'sending') return;
+  const path = MKT_CAMPAIGNS_ + '/' + c._id;
+  const sub = path + '/' + SMSC_SUB_;
+  const wait = function (txt) { if (String(c.waiting || '') !== txt) { fsPatch_(cfg, path, { waiting: txt }); c.waiting = txt; } };
+
+  // A send that was cut off part-way: it may or may not have gone, so it isn't sent again
+  smscList_(cfg, path, 'sending', 50).forEach(function (r) {
+    if (Date.now() - (Date.parse(String(r.sendingAt || '')) || 0) < 10 * 60000) return;
+    commitWrites_(cfg, [patchWrite_(cfg, sub + '/' + r._id, { st: 'failed',
+      why: 'The send was interrupted, so it may or may not have gone. Check their texts before sending again.' }),
+      smscCamp_(cfg, path, 'failed')]);
+  });
+
+  const p8 = new Date(Date.now() + SCH_PERTH_);
+  const hr = p8.getUTCHours(), dow = p8.getUTCDay();
+  if (c.weekdaysOnly === true && (dow === 0 || dow === 6)) return wait('Waiting for Monday. This campaign only texts on weekdays.');
+  if (hr < 8 || hr >= 20) return wait('Waiting for sending hours. Texts only go out between 8 am and 8 pm.');
+  const auth = tmAuth_();
+  if (!auth) return wait("Textmagic isn't set up, so it can't send. Add the Textmagic details in Script Properties.");
+
+  const pace = smscPace_(c.pace);
+  const span = pace.mins * 60000;
+  let paceAt = Number(c.paceAt || 0);
+  let paceN = Number(c.paceN || 0);
+  if (!paceAt || Date.now() - paceAt >= span) { paceAt = Date.now(); paceN = 0; }
+  const nextAt = function () { return Utilities.formatDate(new Date(paceAt + span), REC_TZ_, 'h:mm a'); };
+  const room = pace.n - paceN;
+  if (room <= 0) return wait('This batch of ' + pace.n + ' has gone. The next batch starts about ' + nextAt() + '.');
+
+  const batch = smscList_(cfg, path, 'queued', room);
+  if (!batch.length) { smscFinishIfDone_(cfg, c); return; }
+  const set = recallSettings_(cfg);
+  const today = flowKey_(Date.now());
+  const started = String(c.startedAt || '');
+  const got = fsBatchGet_(cfg, uniq_([].concat.apply([], batch.map(function (r) {
+    return [SMS_SUPPRESS_ + '/' + r.m].concat((r.c || []).map(function (id) { return RECALL_COL_ + '/' + id; }));
+  }))));
+
+  let n = 0;
+  let stop = '';
+  for (let i = 0; i < batch.length; i++) {
+    if (Date.now() > deadline) break;
+    if (i && i % 20 === 0 && (fsGetDoc_(cfg, path) || {}).status !== 'sending') { stop = 'status'; break; }
+    const r = batch[i];
+    const rp = sub + '/' + r._id;
+    const cards = (r.c || []).map(function (id) {
+      const d = got[RECALL_COL_ + '/' + id];
+      if (d) d._id = id;
+      return d;
+    }).filter(Boolean);
+    const open = cards.filter(function (x) { return x.status === 'open'; });
+    let why = '';
+    if (got[SMS_SUPPRESS_ + '/' + r.m]) why = 'Opted out of texts since the list was made';
+    else if (!open.length) why = cards.some(function (x) { return x.status === 'booked'; }) ? 'Booked since the list was made' : 'Their recall closed since the list was made';
+    else if (open.some(function (x) { return x.dnc === true; })) why = 'Put on the do-not-contact list since the list was made';
+    else if (open.some(function (x) { return x.onHold === true; })) why = 'Put on hold since the list was made';
+    else if (started && open.some(function (x) { return String(x.lastTextAt || '') > started; })) why = 'Texted by someone since the list was made';
+    if (why) {
+      commitWrites_(cfg, [patchWrite_(cfg, rp, { st: 'skipped', why: why, at: new Date().toISOString() }), smscCamp_(cfg, path, 'skipped')]);
+      continue;
+    }
+
+    const text = recallSmsText_(flowFill_(String(c.text || ''), recallFlowVals_(smscCard_(r), set), false));
+    fsPatch_(cfg, rp, { st: 'sending', sendingAt: new Date().toISOString() });
+    let tmId = '';
+    let err = null;
+    try { tmId = smscSendOne_(auth, recallPhone61_(r.m), text); } catch (e) { err = e; }
+    const at = new Date().toISOString();
+    if (err) {
+      const msg = String(err && err.message ? err.message : err).slice(0, 200);
+      if (err.code === 401 || err.code === 402 || err.code === 429 || /credit|balance|funds/i.test(msg)) {
+        fsPatch_(cfg, rp, { st: 'queued' });   // not this person's fault: tried again next time
+        stop = msg;
+        break;
+      }
+      commitWrites_(cfg, [patchWrite_(cfg, rp, { st: 'failed', why: msg, at: at }), smscCamp_(cfg, path, 'failed')]);
+      continue;
+    }
+    n++;
+    paceN++;
+    commitWrites_(cfg, [patchWrite_(cfg, rp, { st: 'sent', at: at, tm: tmId, text: text }),
+      smscCamp_(cfg, path, 'sent', { paceAt: paceAt, paceN: paceN, lastSentAt: at, waiting: '', lastError: '' })]);
+    c.waiting = '';
+    try { smscCardWrites_(cfg, open, c, text, at, set, today); }
+    catch (e) { console.warn('SMS campaign text sent, but the recall card was not updated: ' + e); }
+  }
+  if (stop === 'status') return;
+  if (stop) {
+    fsPatch_(cfg, path, { lastError: 'Textmagic stopped the sending: ' + stop,
+      waiting: 'Sending stopped by Textmagic. It tries again in 10 minutes.' });
+    return;
+  }
+  if (!smscFinishIfDone_(cfg, c) && paceN >= pace.n) wait('This batch of ' + pace.n + ' has gone. The next batch starts about ' + nextAt() + '.');
+}
+
+/* ---------- Results: delivery, replies, opt-outs and bookings ---------- */
+
+function smscTallyAll_(cfg, deadline) {
+  const cache = CacheService.getScriptCache();
+  const cut = Date.now() - 14 * 864e5;
+  fsQuery_(cfg, MKT_CAMPAIGNS_, 'channel', 'EQUAL', 'sms', 200).forEach(function (c) {
+    if (Date.now() > deadline) return;
+    const live = ['sending', 'paused'].indexOf(c.status) !== -1;
+    const recent = ['sent', 'cancelled'].indexOf(c.status) !== -1 && (Date.parse(String(c.finishedAt || '')) || 0) > cut;
+    if ((!live && !recent) || !Number(c.sent || 0) || cache.get('smsc_tally_' + c._id)) return;
+    cache.put('smsc_tally_' + c._id, '1', 1200);
+    try { smscTally_(cfg, c); } catch (e) { console.warn('SMS campaign ' + c._id + ' results: ' + e); }
+  });
+}
+
+function smscTally_(cfg, c) {
+  const path = MKT_CAMPAIGNS_ + '/' + c._id;
+  const sent = mktListPath_(cfg, path + '/' + SMSC_SUB_, ['st', 'm', 'c', 'at', 'tm', 'dl', 'rp', 'out', 'bk']).map(function (d) {
+    const f = fromFields_(d.fields || {});
+    f._path = d.name.split('/documents/')[1];
+    return f;
+  }).filter(function (x) { return x.st === 'sent' && x.at; });
+  const stats = { delivered: 0, undelivered: 0, pending: 0, replied: 0, yes: 0, other: 0, optedOut: 0, booked: 0,
+    tallyAt: new Date().toISOString() };
+  if (!sent.length) { fsPatch_(cfg, path, { stats: stats }); return stats; }
+  const start = sent.reduce(function (m, x) { return x.at < m ? x.at : m; }, sent[0].at);
+  const startMs = Date.parse(start);
+
+  // 1. Delivery, from Textmagic's sent messages (newest first, back to when the campaign started)
+  const tmId = {};
+  const tmPh = {};
+  const auth = tmAuth_();
+  if (auth && sent.some(function (x) { return x.dl !== 'Delivered' && x.dl !== 'Failed'; })) {
+    for (let page = 1; page <= 40; page++) {
+      const r = tmFetch_(auth, 'get', '/messages?page=' + page + '&limit=100&orderBy=id&direction=desc');
+      const list = Array.isArray(r.resources) ? r.resources : [];
+      let old = false;
+      list.forEach(function (m) {
+        const t = Date.parse(tmTime_(m.messageTime)) || 0;
+        if (t && t < startMs - 60000) { old = true; return; }
+        const st = TM_STATUS_[String(m.status || '').toLowerCase()] || '';
+        tmId[String(m.id)] = st;
+        const k = recallPhone04_(m.receiver);
+        if (k) (tmPh[k] = tmPh[k] || []).push({ at: t, st: st });
+      });
+      if (old || list.length < 100 || page >= Number(r.pageCount || page)) break;
+    }
+  }
+
+  // 2. Replies (Recall reads them from Textmagic every 5 minutes)
+  const reps = {};
+  fsQuery_(cfg, RECALL_REPLIES_, 'at', 'GREATER_THAN', start, 5000).forEach(function (r) {
+    const k = recallPhone04_(r.phone);
+    if (k) (reps[k] = reps[k] || []).push(r);
+  });
+
+  // 3 and 4. Opt-outs, and their recall cards (booked or came in)
+  const got = fsBatchGet_(cfg, uniq_([].concat.apply([], sent.map(function (x) {
+    return [SMS_SUPPRESS_ + '/' + x.m].concat((x.c || []).map(function (id) { return RECALL_COL_ + '/' + id; }));
+  }))));
+
+  const writes = [];
+  sent.forEach(function (x) {
+    const t = Date.parse(x.at);
+    const p = {};
+
+    let dl = String(x.dl || '');
+    if (dl !== 'Delivered' && dl !== 'Failed') {
+      const near = (tmPh[x.m] || []).filter(function (y) { return Math.abs(y.at - t) < 10 * 60000; })[0];
+      const now = (x.tm && tmId[String(x.tm)]) || (near ? near.st : '');
+      if (now && now !== dl) { dl = now; p.dl = now; }
+    }
+    if (dl === 'Delivered') stats.delivered++; else if (dl === 'Failed') stats.undelivered++; else stats.pending++;
+
+    const rp = (reps[x.m] || []).filter(function (r) {
+      const a = Date.parse(String(r.at || ''));
+      return a > t && a - t < SMSC_REPLY_DAYS_ * 864e5;
+    }).sort(function (a, b) { return String(a.at).localeCompare(String(b.at)); })[0];
+    const rpv = rp ? { at: String(rp.at), text: String(rp.text || '').slice(0, 300), kind: String(rp.kind || 'other') } : null;
+    if (JSON.stringify(rpv) !== JSON.stringify(x.rp || null)) p.rp = rpv;
+    if (rpv) { stats.replied++; if (rpv.kind === 'yes') stats.yes++; else if (rpv.kind !== 'stop') stats.other++; }
+
+    const sup = got[SMS_SUPPRESS_ + '/' + x.m];
+    const out = (!!rpv && rpv.kind === 'stop') || (!!sup && String(sup.at || '') >= x.at);
+    if (out !== (x.out === true)) p.out = out;
+    if (out) stats.optedOut++;
+
+    let bk = '';
+    (x.c || []).forEach(function (id) {
+      const d = got[RECALL_COL_ + '/' + id];
+      if (!d) return;
+      let w = 0;
+      if (d.status === 'booked' && d.bookedAt) w = Date.parse(String(d.bookedAt));
+      else if (d.status === 'closed' && d.closeReason === 'Came in' && d.visitedOn) w = Date.parse(String(d.visitedOn) + 'T12:00:00+08:00');
+      if (w && w >= t && w - t < SMSC_BOOK_DAYS_ * 864e5) { const k = flowKey_(w); if (!bk || k < bk) bk = k; }
+    });
+    if (bk !== String(x.bk || '')) p.bk = bk;
+    if (bk) stats.booked++;
+
+    if (Object.keys(p).length) writes.push(patchWrite_(cfg, x._path, p));
+  });
+  if (writes.length) commitWrites_(cfg, writes, 300);
+  fsPatch_(cfg, path, { stats: stats });
+  return stats;
 }
