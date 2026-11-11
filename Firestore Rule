@@ -92,22 +92,25 @@ service cloud.firestore {
     allow create: if can('marketing.manage')
       && request.resource.data.status == 'draft'
       && request.resource.data.name is string && request.resource.data.name.size() <= 120
+      && request.resource.data.get('channel', 'email') in ['email', 'sms']
       && request.resource.data.createdByUid == request.auth.uid;
     allow update: if can('marketing.manage')
       && resource.data.status == 'draft'
       && request.resource.data.status in ['draft', 'archived']
       && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
         'name', 'templateId', 'templateName', 'subject', 'fromName', 'replyTo', 'audience', 'dailyCap', 'track', 'pace',
+        'text', 'weekdaysOnly',
         'status', 'updatedAt', 'updatedBy', 'updatedByUid'])
+      && request.resource.data.get('text', '') is string && request.resource.data.get('text', '').size() <= 560
       && request.resource.data.updatedByUid == request.auth.uid;
     allow delete: if false;
     match /queue/{q} {
       allow read: if can('marketing.manage');
       allow write: if false;
     }
-    // Results: written by Apps Script only
+    // Results and SMS recipients: written by Apps Script only
     match /{sub}/{rid} {
-      allow read: if can('marketing.manage') && sub in ['opens', 'clicks', 'unsubs', 'bounces', 'forms'];
+      allow read: if can('marketing.manage') && sub in ['opens', 'clicks', 'unsubs', 'bounces', 'forms', 'sms'];
       allow write: if false;
     }
   }

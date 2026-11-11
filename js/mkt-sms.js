@@ -1,14 +1,15 @@
 // Task Manager → Marketing → Campaigns: SMS campaigns (mkt_campaigns with channel "sms").
-// Who it goes to comes from Recall (Code.gs → smscBuild_): open recall cards that match the filters, one text per mobile.
-// Scheduling hands it to Apps Script, which makes the list when it's time and texts in batches through Textmagic,
-// 8 am to 8 pm Perth. Every text ends with "Reply STOP to opt out." Results (delivered, replies, opt-outs, bookings)
-// are added up by Apps Script (smscTally_) about every 20 minutes, or now with "Update now".
+// One source per campaign: patients (everyone who's visited, or only those who match the filters), Recall, or prospects.
+// Code.gs → smscBuild_ makes the list (one text per mobile). Scheduling hands it to Apps Script, which makes the list again
+// when it's time and texts in batches through Textmagic, 8 am to 8 pm Perth. Every text ends with "Reply STOP to opt out."
+// Results (delivered, replies, opt-outs, bookings) are added up by Apps Script (smscTally_) about every 20 minutes.
 import { db, auth } from "./firebase-config.js";
 import { collection, doc, addDoc, updateDoc, getDocs, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 import { esc } from "./mkt-email.js";
+import { mountRuleBuilder, cleanGroup, groupProblem, describeGroup, blankGroup, loadProductNames } from "./flow-rules.js";
 
 const COL = "mkt_campaigns";
 const LIST_HREF = "#/tasks/marketing/campaigns";
@@ -17,18 +18,71 @@ const STOP_LINE = "Reply STOP to opt out.";
 const MAX_TEXT = 560;
 const PACE_MINS = [[10, "10 minutes"], [20, "20 minutes"], [30, "30 minutes"], [60, "1 hour"]];
 const PACE_DEFAULT = { n: 25, mins: 30 };
+
+/* ---------- Who it goes to ---------- */
+const SOURCES = [
+  ["patients", "Patients", "Everyone who's visited, or only patients who match your filters"],
+  ["recall", "Patients on Recall", "People due for their next treatment"],
+  ["prospects", "Prospects", "People who've enquired, from the Prospect Dashboard"],
+];
+const YEARS = [[0, "Any time"], [1, "In the last year"], [2, "In the last 2 years"], [3, "In the last 3 years"], [5, "In the last 5 years"]];
+const PROS_STAGES = [["new", "New enquiry"], ["contacted", "Contacted"], ["consult_booked", "Consultation booked"],
+  ["consulted", "Consulted"], ["tx_booked", "Treatment booked"], ["treated", "Treated"], ["active", "Active patient"]];
+const PROS_DEFAULT = ["new", "contacted", "consult_booked", "consulted", "tx_booked", "treated"];
+const PROS_SOURCES = ["Web form", "Phone call", "Walk-in", "Online chat", "Instagram", "Facebook", "Referral", "Booked directly", "Other"];
+// The same rules as email campaigns (MKT_RULE_FIELDS_ in Code.gs)
+const RULE_FIELDS = ["hist.bought", "hist.bought_between", "hist.days_since", "appt.has_future", "appt.next_days", "appt.last_days",
+  "appt.visits", "appt.future_service", "appt.past_service", "appt.visit_between", "appt.last_between", "ssp.active", "ssp.age_days",
+  "ssp.expiry_days", "plan.status", "plan.due", "plan.overdue", "form.saved", "pt.age", "pt.birth_year", "pt.birthday", "pt.email"];
 const DUE = [["any", "Any time"], ["just", "Just due · last 30 days"], ["over", "Overdue · 1 to 6 months"],
   ["lapsed", "Lapsed · over 6 months"], ["dates", "Choose dates…"]];
 const SPEND = [["", "Any"], ["platinum", "Platinum"], ["gold", "Gold"], ["silver", "Silver"], ["pg", "Platinum or Gold"], ["none", "No tier"]];
 const UNITS = [["days", "days"], ["weeks", "weeks"], ["months", "months"]];
-const FILLS = [["{First name}", "Their first name"], ["{Treatment}", "Everything they're due for, e.g. anti-wrinkle and filler treatment"],
-  ["{Months}", "Months since their last visit"], ["{Due date}", "When they were due"], ["{Last seen with}", "Who they last saw"],
-  ["{Clinic phone}", "The clinic's number (Recall settings → Texts)"]];
-const KNOWN = ["first name", "full name", "treatment", "main treatment", "months", "due date", "last visit", "last seen with", "clinic phone"];
+
+/* ---------- The blanks, per source ---------- */
+const FILL = {
+  first: ["{First name}", "Their first name"],
+  treatment: ["{Treatment}", "Everything they're due for, e.g. anti-wrinkle and filler treatment"],
+  months: ["{Months}", "Months since their last visit"],
+  due: ["{Due date}", "When they were due"],
+  seen: ["{Last seen with}", "Who they last saw"],
+  last: ["{Last visit}", "The date of their last visit"],
+  next: ["{Next appointment}", "Their next booked appointment, if they have one"],
+  interest: ["{Interest}", "What they enquired about"],
+  phone: ["{Clinic phone}", "The clinic's number (Recall settings → Texts)"],
+};
+const FILLS_BY = {
+  patients: [FILL.first, FILL.last, FILL.next, FILL.phone],
+  recall: [FILL.first, FILL.treatment, FILL.months, FILL.due, FILL.seen, FILL.phone],
+  prospects: [FILL.first, FILL.interest, FILL.phone],
+};
+const KNOWN_BY = {
+  patients: ["first name", "full name", "last visit", "next appointment", "clinic phone"],
+  recall: ["first name", "full name", "treatment", "main treatment", "months", "due date", "last visit", "last seen with", "clinic phone"],
+  prospects: ["first name", "full name", "interest", "clinic phone"],
+};
+const PLACEHOLDER = {
+  patients: "Hi {First name}, it's Dermedica. It's been a while since we've seen you. Reply YES and we'll call you to book.",
+  recall: "Hi {First name}, it's Dermedica. You're due for your {Treatment}. Reply YES and we'll call you to book.",
+  prospects: "Hi {First name}, it's Dermedica following up on your enquiry about {Interest}. Reply YES and we'll give you a call.",
+};
+const REPLY_NOTE = {
+  patients: "Replies show in the text conversation on their patient page, and whoever schedules the campaign is emailed.",
+  recall: "Replies go onto their recall card for the recall team, and YES replies are flagged “Wants to book”.",
+  prospects: "Replies go on the prospect's Timeline, they're flagged as waiting, and the person they're given to is emailed.",
+};
+const ALWAYS = {
+  patients: "Always left out: anyone on the do-not-contact list, with no mobile, or who replied STOP or opted out in Textmagic, " +
+    "and merged duplicates. People who share a mobile get one text between them, to whoever visited most recently.",
+  recall: "Always left out: anyone booked, on hold, on the do-not-contact list, with no mobile, or who replied STOP or opted out " +
+    "in Textmagic. People who share a mobile get one text between them, to whoever is most overdue.",
+  prospects: "Always left out: Lost prospects, anyone on the do-not-contact list, with no mobile, or who replied STOP or opted out " +
+    "in Textmagic. People who share a mobile get one text between them, to whoever enquired most recently.",
+};
 // Why people weren't included, in the order Apps Script checks them
 const OUT = [["hold", "on hold"], ["dnc", "on the do-not-contact list"], ["noMobile", "no mobile"], ["optedOut", "opted out of texts"],
-  ["appt", "have an appointment booked"], ["flow", "in the Recall flow"], ["texted", "texted recently"],
-  ["shared", "share a mobile with someone on the list"], ["leftOut", "left out by you"]];
+  ["appt", "have an appointment booked"], ["flow", "in the Recall flow"], ["wasPatient", "were patients before they enquired"],
+  ["texted", "texted recently"], ["shared", "share a mobile with someone on the list"], ["leftOut", "left out by you"]];
 const STATUS = {
   draft: ["Draft", "is-draft"], scheduled: ["Scheduled", "is-sched"], building: ["Getting ready", "is-live"],
   sending: ["Sending", "is-live"], paused: ["Paused", "is-paused"], sent: ["Sent", "is-sent"], cancelled: ["Cancelled", "is-cancel"],
@@ -59,6 +113,10 @@ const errText = (err, fallback) => (err && err.code === "permission-denied"
   : (err && err.message) || fallback);
 const pill = (s) => `<span class="mc-pill ${(STATUS[s] || STATUS.draft)[1]}">${esc((STATUS[s] || [s])[0])}</span>`;
 const isDay = (k) => /^\d{4}-\d{2}-\d{2}$/.test(String(k || ""));
+// The line under a person's name: their treatments (Recall), last visit (patients) or interest (prospects)
+const infoOf = (x) => x.info
+  || (x.cat ? [[x.cat, ...(x.also || [])].join(", "), x.due && `due ${dayText(x.due)}`].filter(Boolean).join(" · ") : "")
+  || x.int || (x.lv ? `last visit ${dayText(x.lv)}` : "");
 
 /* ---------- The text ---------- */
 const GSM = "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà";
@@ -85,33 +143,52 @@ const fill = (t, vals) => String(t || "").replace(/\{\s*([A-Za-z][A-Za-z ]{0,40}
   const key = k.toLowerCase().replace(/\s+/g, " ");
   return vals && key in vals ? String(vals[key] ?? "") : m;
 });
-const unknownTags = (t) => [...String(t || "").matchAll(/\{\s*([^{}]{1,40}?)\s*\}/g)].map((m) => m[1])
-  .filter((k) => !KNOWN.includes(k.toLowerCase().replace(/\s+/g, " ")) && !/^today\b/i.test(k));
+const unknownTags = (t, src) => [...String(t || "").matchAll(/\{\s*([^{}]{1,40}?)\s*\}/g)].map((m) => m[1])
+  .filter((k) => !(KNOWN_BY[src] || []).includes(k.toLowerCase().replace(/\s+/g, " ")) && !/^today\b/i.test(k));
 const sampleVals = (phone) => ({
   "first name": "Sarah", "full name": "Sarah Smith", treatment: "anti-wrinkle treatment", "main treatment": "anti-wrinkle treatment",
-  months: "5", "due date": dayText(new Date(Date.now() - 20 * 864e5).toISOString()), "last visit": "", "last seen with": "Dr Teh",
-  "clinic phone": phone || "08 9000 0000",
+  months: "5", "due date": dayText(new Date(Date.now() - 20 * 864e5).toISOString()),
+  "last visit": dayText(new Date(Date.now() - 200 * 864e5).toISOString()), "last seen with": "Dr Teh",
+  "next appointment": "", interest: "anti-wrinkle treatment", "clinic phone": phone || "08 9000 0000",
 });
 
 /* ---------- The campaign ---------- */
 export function cleanAud(a) {
   a = a || {};
+  const source = SOURCES.some(([k]) => k === a.source) ? a.source : "recall";   // drafts made before sources were added
   const d = a.due || {};
   const q = a.quiet || {};
+  const pt = a.patients || {};
+  const pr = a.prospects || {};
+  const stages = [...new Set((Array.isArray(pr.stages) ? pr.stages : []).filter((s) => PROS_STAGES.some(([k]) => k === s)))];
+  const years = Number(pt.years);
   return {
-    source: "recall",
+    source,
     cats: [...new Set((Array.isArray(a.cats) ? a.cats : []).map(String))].slice(0, 20),
     due: { mode: DUE.some(([k]) => k === d.mode) ? d.mode : "any", from: isDay(d.from) ? d.from : "", to: isDay(d.to) ? d.to : "" },
     later: a.later === true,
     who: String(a.who || "any"), whoName: String(a.whoName || ""),
     spend: SPEND.some(([k]) => k === a.spend) ? a.spend : "",
     tag: String(a.tag || ""), tagName: String(a.tagName || ""),
-    skipAppt: a.skipAppt !== false,
+    skipAppt: a.skipAppt === undefined ? source === "recall" : a.skipAppt === true,
     skipFlow: a.skipFlow !== false,
     quiet: { on: q.on !== false, n: Math.max(1, Math.min(365, Math.floor(Number(q.n) || 30))),
       unit: UNITS.some(([k]) => k === q.unit) ? q.unit : "days" },
     exclude: (Array.isArray(a.exclude) ? a.exclude : []).filter((x) => x && x.m).slice(0, 500)
       .map((x) => ({ m: String(x.m), n: String(x.n || "").slice(0, 120) })),
+    patients: {
+      years: YEARS.some(([y]) => y === years) ? years : 2,
+      rules: cleanGroup(pt.rules || blankGroup()),
+    },
+    prospects: {
+      stages: stages.length ? stages : PROS_DEFAULT.slice(),
+      sources: [...new Set((Array.isArray(pr.sources) ? pr.sources : []).map(String))].slice(0, 12),
+      interest: String(pr.interest || "").slice(0, 60),
+      from: isDay(pr.from) ? pr.from : "", to: isDay(pr.to) ? pr.to : "",
+      who: String(pr.who || "any"), whoName: String(pr.whoName || ""),
+      skipWasPatient: pr.skipWasPatient !== false,
+      older: pr.older === true,
+    },
   };
 }
 const cleanPace = (p) => {
@@ -138,12 +215,13 @@ export function normSms(snap) {
   };
 }
 
+// New campaigns start with Patients
 export async function createSmsCampaign(base, staff) {
   const uid = me();
   const ref = await addDoc(collection(db, COL), {
     name: String(base.name || "").replace(/\s+/g, " ").trim().slice(0, 120) || "Untitled campaign",
     status: "draft", channel: "sms", text: String(base.text || "").slice(0, MAX_TEXT),
-    audience: cleanAud(base.audience), pace: cleanPace(base.pace), weekdaysOnly: base.weekdaysOnly === true,
+    audience: cleanAud(base.audience || { source: "patients" }), pace: cleanPace(base.pace), weekdaysOnly: base.weekdaysOnly === true,
     createdAt: serverTimestamp(), createdBy: whoOf(staff), createdByUid: uid,
     updatedAt: serverTimestamp(), updatedBy: whoOf(staff), updatedByUid: uid,
   });
@@ -160,6 +238,29 @@ async function saveSms(c, staff) {
 }
 
 export function smsAudText(a) {
+  const quiet = a.quiet.on ? `not texted in ${a.quiet.n} ${a.quiet.n === 1 ? a.quiet.unit.replace(/s$/, "") : a.quiet.unit}` : "";
+  if (a.source === "patients") {
+    const y = a.patients.years;
+    const bits = [y ? `visited in the last ${y === 1 ? "year" : `${y} years`}` : "everyone"];
+    if (a.patients.rules.rules.length) bits.push(describeGroup(a.patients.rules));
+    if (a.skipAppt) bits.push("no appointment booked");
+    if (quiet) bits.push(quiet);
+    return `Patients · ${bits.join(" · ")}`;
+  }
+  if (a.source === "prospects") {
+    const p = a.prospects;
+    const same = p.stages.length === PROS_DEFAULT.length && PROS_DEFAULT.every((s) => p.stages.includes(s));
+    const bits = [same ? "every open stage" : p.stages.map((s) => (PROS_STAGES.find(([k]) => k === s) || ["", s])[1]).join(", ")];
+    if (p.sources.length) bits.push(p.sources.join(", "));
+    if (p.interest) bits.push(`interested in “${p.interest}”`);
+    if (p.from || p.to) bits.push(`enquired ${[p.from && dayText(p.from), p.to && dayText(p.to)].filter(Boolean).join(" to ")}`);
+    if (p.who === "none") bits.push("not given to anyone");
+    else if (p.who !== "any") bits.push(`given to ${p.whoName || "someone"}`);
+    if (!p.skipWasPatient) bits.push("including past patients");
+    if (p.older) bits.push("including older enquiries");
+    if (quiet) bits.push(quiet);
+    return `Prospects · ${bits.join(" · ")}`;
+  }
   const bits = [a.cats.length ? a.cats.join(", ") : "every recalled treatment"];
   if (a.due.mode === "dates") bits.push(`due ${[a.due.from && dayText(a.due.from), a.due.to && dayText(a.due.to)].filter(Boolean).join(" to ")}`);
   else if (a.due.mode !== "any") bits.push((DUE.find(([k]) => k === a.due.mode) || ["", ""])[1].toLowerCase());
@@ -167,15 +268,14 @@ export function smsAudText(a) {
   else if (a.who !== "any") bits.push(`given to ${a.whoName || "someone"}`);
   if (a.spend) bits.push(`spend: ${(SPEND.find(([k]) => k === a.spend) || ["", ""])[1]}`);
   if (a.tag) bits.push(`tag: ${a.tagName || "a tag"}`);
-  if (a.quiet.on) bits.push(`not texted in ${a.quiet.n} ${a.quiet.n === 1 ? a.quiet.unit.replace(/s$/, "") : a.quiet.unit}`);
+  if (quiet) bits.push(quiet);
   if (a.later) bits.push("including call-backs");
   if (!a.skipAppt) bits.push("including people with a booking");
   return `Recall · ${bits.join(" · ")}`;
 }
 
 function outText(s, leftOut) {
-  const parts = OUT.filter(([k]) => (k === "leftOut" ? leftOut : s[k])).map(([k, l]) => `${n0(k === "leftOut" ? leftOut : s[k])} ${l}`);
-  return parts.join(" · ");
+  return OUT.filter(([k]) => (k === "leftOut" ? leftOut : s[k])).map(([k, l]) => `${n0(k === "leftOut" ? leftOut : s[k])} ${l}`).join(" · ");
 }
 
 /* ===================== A draft ===================== */
@@ -194,8 +294,11 @@ export function mountSmsDraft(page, c, staff) {
   let whoShown = 100;
   let testTo = "";
   try { testTo = localStorage.getItem("mkt.smsTestTo") || ""; } catch { /* private mode */ }
+  const src = () => c.audience.source;
   const stepHead = (key, title) => `<div class="mc-step-h"><span class="mc-tick" data-tick="${key}" aria-hidden="true"></span>
     <div><h4>${title}</h4><small class="muted" data-sum="${key}"></small></div></div>`;
+  const opt = (list, cur) => list.map(([k, l]) => `<option value="${esc(String(k))}"${String(k) === String(cur) ? " selected" : ""}>${esc(l)}</option>`).join("");
+  const a0 = c.audience;
 
   root.innerHTML = `
     ${BACK}
@@ -210,27 +313,44 @@ export function mountSmsDraft(page, c, staff) {
     <div class="sc-warn" data-role="warn" hidden></div>
 
     <section class="tb-card mc-step">
-      ${stepHead("to", "To: patients on Recall")}
-      <div data-role="filters"><p class="muted">Loading Recall…</p></div>
+      ${stepHead("to", "To")}
+      <div class="mc-opts sc-srcs">${SOURCES.map(([k, l, h]) => `<label class="mc-opt">
+        <input type="radio" name="sc-src" value="${k}"${a0.source === k ? " checked" : ""} />
+        <span><strong>${esc(l)}</strong><small>${esc(h)}</small></span></label>`).join("")}</div>
+
+      <div class="sc-panel" data-src="patients"${a0.source === "patients" ? "" : " hidden"}>
+        <label class="sc-f"><span class="sc-f-l">Last visit</span>
+          <select class="fb-select" data-a="patients.years" aria-label="Last visit">${opt(YEARS, a0.patients.years)}</select></label>
+        <div class="sc-f"><span class="sc-f-l">Only patients who match these filters (optional)</span>
+          <div class="mc-rules" data-role="rules"><p class="muted">Loading…</p></div></div>
+        <small class="fe-note">For example: last visit between two dates, had a service like “laser”, has no appointment booked,
+          bought a product, or birthday this month.</small>
+        <div class="sc-ticks"><label class="fe-check"><input type="checkbox" data-a="skipAppt" data-role="pt-appt"${a0.skipAppt ? " checked" : ""} />
+          Leave out anyone with an appointment booked</label></div>
+      </div>
+      <div class="sc-panel" data-src="recall" data-role="f-recall"${a0.source === "recall" ? "" : " hidden"}><p class="muted">Loading Recall…</p></div>
+      <div class="sc-panel" data-src="prospects" data-role="f-prospects"${a0.source === "prospects" ? "" : " hidden"}><p class="muted">Loading…</p></div>
+
+      <div class="sc-quiet">
+        <label class="fe-check"><input type="checkbox" data-a="quiet.on"${a0.quiet.on ? " checked" : ""} /> Not texted in the last</label>
+        <input type="number" class="fe-input sc-num" data-a="quiet.n" min="1" max="365" value="${a0.quiet.n}" aria-label="How many" />
+        <select class="fb-select" data-a="quiet.unit" aria-label="Days, weeks or months">${opt(UNITS, a0.quiet.unit)}</select>
+      </div>
+      <small class="fe-note">Counts every text from the portal: Recall, the Recall flow, patient pages, prospects and other SMS campaigns.</small>
       <div class="mc-count"><button type="button" class="lh-btn" data-act="count">Count patients</button><span data-role="count"></span></div>
       <div data-role="excl"></div>
       <div class="mc-who" data-role="who" hidden></div>
-      <p class="fe-note">Always left out: anyone booked, on hold, on the do-not-contact list, with no mobile, or who replied STOP or
-        opted out in Textmagic. People who share a mobile get one text between them, to whoever is most overdue. The list is made
-        again when it starts sending, so anyone who books or opts out before then is left out.</p>
+      <p class="fe-note" data-role="always"></p>
     </section>
 
     <section class="tb-card mc-step">
       ${stepHead("msg", "Message")}
       <div class="sc-msg">
         <div>
-          <textarea class="fe-input sc-text" data-role="text" rows="5" maxlength="${MAX_TEXT}" aria-label="Text message"
-            placeholder="Hi {First name}, it's Dermedica. You're due for your {Treatment}. Reply YES and we'll call you to book.">${esc(c.text)}</textarea>
-          <div class="mb-tags"><small class="muted">Insert:</small>${FILLS.map(([t, h]) =>
-            `<button type="button" class="ch-chip" data-fill="${esc(t)}" title="${esc(h)}">${esc(t)}</button>`).join("")}</div>
+          <textarea class="fe-input sc-text" data-role="text" rows="5" maxlength="${MAX_TEXT}" aria-label="Text message">${esc(c.text)}</textarea>
+          <div class="mb-tags" data-role="fills"></div>
           <small class="fe-note" data-role="len"></small>
-          <p class="fe-note">“${STOP_LINE}” is added to the end of every text. Replies go onto their recall card for the recall team,
-            and YES replies are flagged “Wants to book”.</p>
+          <p class="fe-note">“${STOP_LINE}” is added to the end of every text. <span data-role="replyNote"></span></p>
           <div class="sc-test">
             <input class="fe-input" data-role="testTo" inputmode="tel" placeholder="Your mobile" value="${esc(testTo)}" aria-label="Send a test to" />
             <button type="button" class="lh-btn" data-act="test">Send a test</button>
@@ -254,8 +374,7 @@ export function mountSmsDraft(page, c, staff) {
         <div class="mc-pace-row">
           <input type="number" class="fe-input" data-role="pace-n" min="10" max="100" step="5" inputmode="numeric" value="${c.pace.n}" aria-label="Texts in each batch" />
           <span>texts every</span>
-          <select class="fb-select" data-role="pace-mins" aria-label="How often">${PACE_MINS.map(([m, l]) =>
-            `<option value="${m}"${c.pace.mins === m ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
+          <select class="fb-select" data-role="pace-mins" aria-label="How often">${opt(PACE_MINS, c.pace.mins)}</select>
         </div>
         <small class="fe-note" data-role="pace-note"></small></div>
       <label class="fe-check"><input type="checkbox" data-role="weekdays"${c.weekdaysOnly ? " checked" : ""} /> Weekdays only</label>
@@ -293,11 +412,22 @@ export function mountSmsDraft(page, c, staff) {
   const touch = () => { dirty = true; setState("dirty"); clearTimeout(timer); timer = setTimeout(save, 900); refresh(); };
 
   /* ---------- Who it goes to ---------- */
-  function drawFilters() {
+  function drawSource() {
+    const s = src();
+    root.querySelectorAll(".sc-panel").forEach((p) => { p.hidden = p.dataset.src !== s; });
+    $("pt-appt").checked = c.audience.skipAppt;
+    $("fills").innerHTML = `<small class="muted">Insert:</small>${FILLS_BY[s].map(([t, h]) =>
+      `<button type="button" class="ch-chip" data-fill="${esc(t)}" title="${esc(h)}">${esc(t)}</button>`).join("")}`;
+    $("text").placeholder = PLACEHOLDER[s];
+    $("replyNote").textContent = REPLY_NOTE[s];
+    $("always").textContent = `${ALWAYS[s]} The list is made again when it starts sending, so anyone who books or opts out before then is left out.`;
+    root.querySelector('[data-act="count"]').textContent = s === "prospects" ? "Count prospects" : "Count patients";
+  }
+
+  function drawRecall() {
     if (!opts) return;
     const a = c.audience;
-    const opt = (list, cur) => list.map(([k, l]) => `<option value="${esc(k)}"${k === cur ? " selected" : ""}>${esc(l)}</option>`).join("");
-    $("filters").innerHTML = `
+    $("f-recall").innerHTML = `
       <div class="sc-f"><span class="sc-f-l">Treatments</span><div class="sc-chips">
         <button type="button" class="rc-chip${!a.cats.length ? " is-on" : ""}" data-cat="">All</button>
         ${opts.categories.map((x) => `<button type="button" class="rc-chip${a.cats.includes(x.key) ? " is-on" : ""}" data-cat="${esc(x.key)}">${esc(x.key)}</button>`).join("")}
@@ -315,12 +445,6 @@ export function mountSmsDraft(page, c, staff) {
         <label class="sc-f"><span class="sc-f-l">Tag</span>
           <select class="fb-select" data-a="tag">${opt([["", "Any"], ...opts.tags.map((t) => [t.id, t.label])], a.tag)}</select></label>
       </div>
-      <div class="sc-quiet">
-        <label class="fe-check"><input type="checkbox" data-a="quiet.on"${a.quiet.on ? " checked" : ""} /> Not texted in the last</label>
-        <input type="number" class="fe-input sc-num" data-a="quiet.n" min="1" max="365" value="${a.quiet.n}" aria-label="How many" />
-        <select class="fb-select" data-a="quiet.unit" aria-label="Days, weeks or months">${opt(UNITS, a.quiet.unit)}</select>
-      </div>
-      <small class="fe-note">Counts every text from the portal: Recall, the Recall flow, patient pages and other SMS campaigns.</small>
       <div class="sc-ticks">
         <label class="fe-check"><input type="checkbox" data-a="skipAppt"${a.skipAppt ? " checked" : ""} /> Leave out anyone with an appointment booked</label>
         <label class="fe-check"><input type="checkbox" data-a="skipFlow"${a.skipFlow ? " checked" : ""} /> Leave out anyone the Recall flow is texting</label>
@@ -328,11 +452,52 @@ export function mountSmsDraft(page, c, staff) {
       </div>`;
   }
 
+  function drawProspects() {
+    if (!opts) return;
+    const p = c.audience.prospects;
+    const sources = opts.prosSources || PROS_SOURCES;
+    $("f-prospects").innerHTML = `
+      <div class="sc-f"><span class="sc-f-l">Stage</span><div class="sc-chips">
+        ${PROS_STAGES.map(([k, l]) => `<button type="button" class="rc-chip${p.stages.includes(k) ? " is-on" : ""}" data-pstage="${k}">${esc(l)}</button>`).join("")}
+      </div><small class="fe-note">Lost prospects are always left out.</small></div>
+      <div class="sc-f"><span class="sc-f-l">How they found us</span><div class="sc-chips">
+        <button type="button" class="rc-chip${!p.sources.length ? " is-on" : ""}" data-psrc="">Any</button>
+        ${sources.map((s) => `<button type="button" class="rc-chip${p.sources.includes(s) ? " is-on" : ""}" data-psrc="${esc(s)}">${esc(s)}</button>`).join("")}
+      </div></div>
+      <div class="sc-grid">
+        <label class="sc-f"><span class="sc-f-l">Interested in</span>
+          <input class="fe-input" data-a="prospects.interest" maxlength="60" placeholder="e.g. laser" value="${esc(p.interest)}" /></label>
+        <div class="sc-f"><span class="sc-f-l">Enquired</span><span class="sc-dates">
+          <input type="date" class="fe-input" data-a="prospects.from" value="${esc(p.from)}" aria-label="Enquired from" /><span>to</span>
+          <input type="date" class="fe-input" data-a="prospects.to" value="${esc(p.to)}" aria-label="Enquired to" /></span></div>
+        <label class="sc-f"><span class="sc-f-l">Given to</span>
+          <select class="fb-select" data-a="prospects.who">${opt([["any", "Anyone"], ["none", "Nobody yet"],
+            ...opts.staff.map((s) => [s.id, s.name])], p.who)}</select></label>
+      </div>
+      <div class="sc-ticks">
+        <label class="fe-check"><input type="checkbox" data-a="prospects.skipWasPatient"${p.skipWasPatient ? " checked" : ""} />
+          Leave out people who were patients before they enquired</label>
+        <label class="fe-check"><input type="checkbox" data-a="prospects.older"${p.older ? " checked" : ""} />
+          Include older enquiries (more than 90 days ago)</label>
+      </div>`;
+  }
+  const drawFilters = () => { drawRecall(); drawProspects(); };
+
+  // The rule builder is made once and kept (its own changes come back through onChange)
+  loadProductNames().catch(() => []).then((names) => {
+    if (!root.isConnected) return;
+    mountRuleBuilder($("rules"), c.audience.patients.rules, {
+      names, only: RULE_FIELDS, empty: "No filters: everyone who visited in that time.",
+      onChange: () => audChanged(false),
+    });
+  });
+
   const exSet = () => new Set(c.audience.exclude.map((x) => x.m));
   const people = () => (lastCount && Array.isArray(lastCount.people) ? lastCount.people : null);
   const leftOutOf = () => { const p = people(); if (!p) return 0; const s = exSet(); return p.filter((x) => s.has(x.m)).length; };
   const sendCount = () => (lastCount ? Math.max(0, Number(lastCount.count || 0) - leftOutOf()) : 0);
-  const textParts = () => smsLength(withStop(fill(c.text, sample || sampleVals(opts && opts.phone)))).parts;
+  const vals = () => sample || sampleVals(opts && opts.phone);
+  const textParts = () => smsLength(withStop(fill(c.text, vals()))).parts;
 
   function drawCount() {
     const out = $("count");
@@ -340,9 +505,12 @@ export function mountSmsDraft(page, c, staff) {
       const s = lastCount.stats || {};
       const rest = outText(s, leftOutOf());
       const parts = textParts();
-      out.innerHTML = `<strong>${n0(s.matched)} on Recall match</strong>${rest ? ` · ${esc(rest)}` : ""} →
+      const what = { patients: "patients match", recall: "on Recall match", prospects: "prospects match" }[src()];
+      out.innerHTML = `<strong>${n0(s.matched)} ${what}</strong>${rest ? ` · ${esc(rest)}` : ""} →
         <strong class="sc-will">${n0(sendCount())} will get it</strong>
         <button type="button" class="lh-btn is-quiet" data-act="who">${showWho ? "Hide the list" : "See who"}</button>
+        ${lastCount.partial ? `<small class="muted mc-excl">Checked ${n0(lastCount.checked)} of ${n0(lastCount.total)} patients against the
+          filters so far, so there may be more. The full list is worked out when it sends.</small>` : ""}
         <small class="muted mc-excl">About ${n0(sendCount() * parts)} texts from your Textmagic credit (${parts} per person).</small>`;
     } else {
       out.textContent = "";
@@ -354,8 +522,8 @@ export function mountSmsDraft(page, c, staff) {
   }
 
   const personHtml = (x, out) => `<li class="mc-person${out ? " is-out" : ""}">
-    <span class="mc-person-main"><strong>${esc(x.n || "Unknown patient")}</strong>
-      <small>${esc([mobileText(x.m), x.cat && [x.cat, ...(x.also || [])].join(", "), x.due && `due ${dayText(x.due)}`].filter(Boolean).join(" · "))}</small></span>
+    <span class="mc-person-main"><strong>${esc(x.n || "Unknown")}</strong>
+      <small>${esc([mobileText(x.m), infoOf(x)].filter(Boolean).join(" · "))}</small></span>
     <button type="button" class="lh-btn${out ? "" : " is-quiet"}" data-${out ? "incl" : "excl"}="${esc(x.m)}">${out ? "Include again" : "Leave out"}</button></li>`;
 
   function drawWho() {
@@ -364,7 +532,7 @@ export function mountSmsDraft(page, c, staff) {
     if (!showWho) { box.innerHTML = ""; return; }
     if (!box.querySelector('[data-role="who-q"]')) {
       box.innerHTML = `<div class="mc-who-head">
-          <input type="search" class="fe-input" data-role="who-q" placeholder="Find a patient by name or mobile" aria-label="Find a patient" value="${esc(whoQ)}" />
+          <input type="search" class="fe-input" data-role="who-q" placeholder="Find someone by name or mobile" aria-label="Find someone" value="${esc(whoQ)}" />
           <button type="button" class="lh-btn is-quiet" data-act="who">Close</button></div>
         <div data-role="who-list"></div>`;
     }
@@ -389,19 +557,28 @@ export function mountSmsDraft(page, c, staff) {
           : `<p class="muted">${q ? "Nobody matches that search." : "Nobody left on the list."}</p>`}
         ${more > 0 ? `<button type="button" class="lh-btn is-quiet" data-act="who-more">Show ${n0(Math.min(100, more))} more · ${n0(more)} not shown yet</button>` : ""}
         ${lastCount.more ? `<p class="fe-note">Another ${n0(lastCount.more)} match but aren't listed here.</p>` : ""}`
-        : '<p class="fe-note">Press Count patients to see everyone who matches.</p>'}`;
+        : '<p class="fe-note">Press Count to see everyone who matches.</p>'}`;
+  }
+
+  function audProblem() {
+    const a = c.audience;
+    if (a.source === "recall" && a.due.mode === "dates" && !a.due.from && !a.due.to) return "Choose the due dates.";
+    if (a.source === "patients") { const p = groupProblem(a.patients.rules, false); if (p) return p; }
+    if (a.source === "prospects" && !a.prospects.stages.length) return "Choose at least one stage.";
+    return "";
   }
 
   async function count() {
-    const a = c.audience;
-    if (a.due.mode === "dates" && !a.due.from && !a.due.to) { showToast("Choose the due dates."); return; }
+    const bad = audProblem();
+    if (bad) { showToast(bad); return; }
     const btn = root.querySelector('[data-act="count"]');
     const out = $("count");
     btn.disabled = true;
-    out.innerHTML = '<span class="muted">Counting…</span>';
+    out.innerHTML = `<span class="muted">Counting…${src() === "patients" && c.audience.patients.rules.rules.length ? " this can take a few minutes with filters" : ""}</span>`;
     try {
-      const res = await callApi({ action: "marketing", op: "smsCount", audience: cleanAud(a) });
+      const res = await callApi({ action: "marketing", op: "smsCount", audience: cleanAud(c.audience) });
       if (res.problem) { out.innerHTML = `<span class="du-warn">${esc(res.problem)}</span>`; return; }
+      if (res.source && res.source !== src()) return;   // the source was changed while it counted
       lastCount = res;
       if (res.sample) sample = res.sample;
       whoShown = 100;
@@ -418,18 +595,18 @@ export function mountSmsDraft(page, c, staff) {
 
   /* ---------- The message ---------- */
   function drawPreview() {
-    const vals = sample || sampleVals(opts && opts.phone);
-    const full = withStop(fill(c.text, vals));
+    const v = vals();
+    const full = withStop(fill(c.text, v));
     $("pv").textContent = c.text.trim() ? full : "Your message appears here.";
-    $("pvName").textContent = vals["full name"] || "";
-    $("pvNote").textContent = sample ? "As the first person on the list gets it. Each person gets their own name and treatment."
-      : "An example. Press Count patients to see it for a real patient.";
+    $("pvName").textContent = v["full name"] || "";
+    $("pvNote").textContent = sample ? "As the first person on the list gets it. Each person gets their own details."
+      : "An example. Press Count to see it for a real person.";
     const L = smsLength(full);
-    const bad = unknownTags(c.text);
+    const bad = unknownTags(c.text, src());
     $("len").innerHTML = `${n0(L.len)} characters · ${L.parts} text${L.parts === 1 ? "" : "s"} each (names vary a little)` +
       (L.uni ? ` · <span class="du-warn">${esc(L.odd.slice(0, 5).join(" "))} ${L.odd.length === 1 ? "isn't" : "aren't"} a standard text
         character, so each text holds 70 characters, not 160. Straight quotes ' " are fine.</span>` : "") +
-      (bad.length ? ` · <span class="du-warn">{${esc(bad.join("}, {"))}} can't be filled in</span>` : "");
+      (bad.length ? ` · <span class="du-warn">{${esc(bad.join("}, {"))}} can't be filled in for this list</span>` : "");
   }
 
   async function sendTest() {
@@ -439,7 +616,7 @@ export function mountSmsDraft(page, c, staff) {
     const btn = root.querySelector('[data-act="test"]');
     btn.disabled = true;
     try {
-      const res = await callApi({ action: "marketing", op: "smsTest", to, text: c.text, vals: sample || sampleVals(opts && opts.phone) });
+      const res = await callApi({ action: "marketing", op: "smsTest", to, text: c.text, vals: vals() });
       if (res.problem) { showToast(res.problem); return; }
       showToast(`Test sent to ${to}`);
     } catch (err) { showToast(errText(err, "Couldn't send the test.")); }
@@ -458,15 +635,15 @@ export function mountSmsDraft(page, c, staff) {
 
   function problems() {
     const out = [];
-    const a = c.audience;
     const t = c.text.trim();
     if (opts && !opts.ready) out.push("Textmagic isn't set up yet. Add the Textmagic details in Apps Script → Script Properties.");
     if (opts && !opts.canSend) out.push('You can\'t send texts. Ask an admin to tick "Text patients from their page" for you in Staff.');
-    if (a.due.mode === "dates" && !a.due.from && !a.due.to) out.push("To: choose the due dates.");
+    const bad = audProblem();
+    if (bad) out.push(`To: ${bad.replace(/\.$/, "")}.`);
     if (t.length < 10) out.push("Message: write the message.");
     else if (!/dermedica/i.test(t)) out.push("Message: say it's from Dermedica. Every marketing text has to say who sent it.");
-    const bad = unknownTags(t);
-    if (bad.length) out.push(`Message: {${bad.join("}, {")}} isn't a tag it can fill in.`);
+    const tags = unknownTags(t, src());
+    if (tags.length) out.push(`Message: {${tags.join("}, {")}} can't be filled in for this list.`);
     return out;
   }
 
@@ -496,12 +673,14 @@ export function mountSmsDraft(page, c, staff) {
       sendAt = new Date(ms).toISOString();
     }
     if (!(await save())) { showToast("The latest changes couldn't be saved. Try again."); return; }
-    const howMany = lastCount ? `about ${n0(sendCount())} people` : "everyone who matches when it's time";
+    const howMany = lastCount ? `about ${n0(sendCount())} people${lastCount.partial ? " or more" : ""}` : "everyone who matches when it's time";
+    const replies = { patients: "Replies show on their patient page and you're emailed.", recall: "Replies go to the recall team.",
+      prospects: "Replies go on the prospect's Timeline and the team is emailed." }[src()];
     const ok = await confirmDialog({
       title: later() ? `Schedule "${c.name}"?` : `Send "${c.name}" now?`,
       message: `It texts ${howMany}, ${later() ? `starting ${when(new Date(sendAt))}` : "starting within 10 minutes"}, ` +
         `${c.pace.n} every ${minsText(c.pace.mins)}, between 8 am and 8 pm${c.weekdaysOnly ? " on weekdays" : ""}. ` +
-        "Replies go to the recall team. You can pause or cancel it while it's sending.",
+        `${replies} You can pause or cancel it while it's sending.`,
       confirmLabel: later() ? "Schedule" : "Send now", tone: "primary",
     });
     if (!ok) return;
@@ -528,6 +707,7 @@ export function mountSmsDraft(page, c, staff) {
 
   root.addEventListener("input", (e) => {
     const el = e.target;
+    if (el.closest(".mc-rules")) return;   // the rule builder tells us through onChange
     const r = el.dataset.role;
     if (r === "name") { c.name = el.value; touch(); return; }
     if (r === "text") { c.text = el.value; drawPreview(); if (lastCount) drawCount(); touch(); return; }
@@ -540,23 +720,44 @@ export function mountSmsDraft(page, c, staff) {
     if (el.dataset.a === "quiet.n") {
       const n = Math.floor(Number(el.value));
       if (n >= 1 && n <= 365) { c.audience.quiet.n = n; audChanged(false); }
+      return;
     }
+    if (el.dataset.a === "prospects.interest") { c.audience.prospects.interest = el.value.slice(0, 60); audChanged(false); }
   });
   root.addEventListener("change", (e) => {
     const el = e.target;
+    if (el.closest(".mc-rules")) return;
+    if (el.name === "sc-src") {
+      c.audience.source = el.value;
+      c.audience.skipAppt = el.value === "recall";   // each source starts with its own default
+      sample = null;
+      drawSource();
+      drawFilters();
+      drawPreview();
+      audChanged(false);
+      return;
+    }
     const a = el.dataset.a;
     if (a) {
       if (a === "quiet.n") { el.value = c.audience.quiet.n; return; }
-      setA(a, el.type === "checkbox" ? el.checked : el.value);
+      if (a === "prospects.interest") return;   // already saved as it was typed
+      let v = el.type === "checkbox" ? el.checked : el.value;
+      if (a === "patients.years") v = Number(v) || 0;
+      setA(a, v);
       if (a === "who") {
         const s = opts && opts.staff.find((x) => x.id === el.value);
         c.audience.whoName = s ? s.name : "";
+      }
+      if (a === "prospects.who") {
+        const s = opts && opts.staff.find((x) => x.id === el.value);
+        c.audience.prospects.whoName = s ? s.name : "";
       }
       if (a === "tag") {
         const t = opts && opts.tags.find((x) => x.id === el.value);
         c.audience.tagName = t ? t.label : "";
       }
-      audChanged(a === "due.mode");
+      if (a === "skipAppt") $("pt-appt").checked = el.checked;
+      audChanged(a === "due.mode" || (a === "skipAppt" && src() === "patients"));
       return;
     }
     const r = el.dataset.role;
@@ -579,12 +780,34 @@ export function mountSmsDraft(page, c, staff) {
   });
   root.addEventListener("mousedown", (e) => { if (e.target.closest("[data-fill]")) e.preventDefault(); });
   root.addEventListener("click", async (e) => {
+    if (e.target.closest(".mc-rules")) return;
     const cat = e.target.closest("[data-cat]");
     if (cat) {
       const k = cat.dataset.cat;
       const s = new Set(c.audience.cats);
       if (!k) s.clear(); else if (s.has(k)) s.delete(k); else s.add(k);
       c.audience.cats = [...s];
+      audChanged(true);
+      return;
+    }
+    const ps = e.target.closest("[data-pstage]");
+    if (ps) {
+      const k = ps.dataset.pstage;
+      const s = new Set(c.audience.prospects.stages);
+      if (s.has(k)) {
+        if (s.size === 1) { showToast("Keep at least one stage."); return; }
+        s.delete(k);
+      } else s.add(k);
+      c.audience.prospects.stages = PROS_STAGES.map(([x]) => x).filter((x) => s.has(x));
+      audChanged(true);
+      return;
+    }
+    const psrc = e.target.closest("[data-psrc]");
+    if (psrc) {
+      const k = psrc.dataset.psrc;
+      const s = new Set(c.audience.prospects.sources);
+      if (!k) s.clear(); else if (s.has(k)) s.delete(k); else s.add(k);
+      c.audience.prospects.sources = [...s];
       audChanged(true);
       return;
     }
@@ -645,8 +868,12 @@ export function mountSmsDraft(page, c, staff) {
       refresh();
     })
     .catch((err) => {
-      if (root.isConnected) $("filters").innerHTML = `<p class="du-warn">${esc(errText(err, "Couldn't load Recall's treatments and team."))}</p>`;
+      if (!root.isConnected) return;
+      const msg = `<p class="du-warn">${esc(errText(err, "Couldn't load the options."))}</p>`;
+      $("f-recall").innerHTML = msg;
+      $("f-prospects").innerHTML = msg;
     });
+  drawSource();
   drawPreview();
   drawPace();
   drawCount();
@@ -659,7 +886,8 @@ export function mountSmsDraft(page, c, staff) {
 const WHO = [
   ["sent", "Sent", (x) => x.st === "sent"],
   ["delivered", "Delivered", (x) => x.dl === "Delivered"],
-  ["undelivered", "Not delivered", (x) => x.st === "failed" || x.dl === "Failed"],
+  ["undelivered", "Not delivered", (x) => x.st === "sent" && x.dl === "Failed"],
+  ["failed", "Not sent", (x) => x.st === "failed"],
   ["replied", "Replied", (x) => !!x.rp],
   ["yes", "Wants to book", (x) => !!x.rp && x.rp.kind === "yes"],
   ["stop", "Opted out", (x) => !!x.out],
@@ -668,6 +896,11 @@ const WHO = [
   ["queued", "Still to go", (x) => x.st === "queued" || x.st === "sending"],
 ];
 const REPLY_NAME = { yes: "Wants to book", stop: "Replied STOP", other: "Replied" };
+const BOOKED_HELP = {
+  recall: "Booked counts bookings within 60 days, from the appointment book or booked by phone in Recall.",
+  patients: "Booked counts a new appointment within 60 days of the text.",
+  prospects: "Booked counts prospects moved to a booked stage within 60 days of the text.",
+};
 
 const statBox = (label, val, help = "") => `<div class="mc-stat"><small>${esc(label)}</small><strong>${val}</strong>${help ? `<em>${esc(help)}</em>` : ""}</div>`;
 const statLink = (label, val, help, f) => `<button type="button" class="mc-stat is-link" data-whof="${f}" title="See who">` +
@@ -675,8 +908,8 @@ const statLink = (label, val, help, f) => `<button type="button" class="mc-stat 
 
 function whoCsv(c, rows) {
   const cell = (v) => { let s = String(v ?? ""); if (/^[=+\-@]/.test(s)) s = `'${s}`; return `"${s.replace(/"/g, '""')}"`; };
-  const lines = [["Name", "Mobile", "Treatment", "Sent", "Delivery", "Reply", "Opted out", "Booked", "Note"],
-    ...rows.map((x) => [x.n, mobileText(x.m), [x.cat, ...(x.also || [])].filter(Boolean).join(", "), shortWhen(x.at),
+  const lines = [["Name", "Mobile", "Details", "Sent", "Delivery", "Reply", "Opted out", "Booked", "Note"],
+    ...rows.map((x) => [x.n, mobileText(x.m), infoOf(x), shortWhen(x.at),
       x.st === "sent" ? x.dl || "Sent" : x.st, x.rp ? x.rp.text : "", x.out ? "Yes" : "", x.bk || "", x.why || ""])];
   const blob = new Blob(["\ufeff" + lines.map((l) => l.map(cell).join(",")).join("\r\n")], { type: "text/csv;charset=utf-8" });
   const a = document.createElement("a");
@@ -737,7 +970,7 @@ export function mountSmsView(page, c0, staff) {
           <button type="button" class="lh-btn is-quiet" data-act="who-load">Refresh</button>
           <button type="button" class="lh-btn is-quiet" data-act="who-csv">Download CSV</button></div>
         <div class="pt-tabs mc-filters" data-role="who-f" role="group" aria-label="Show"></div>
-        <div class="mc-who-head"><input type="search" class="fe-input" data-role="who-q" placeholder="Find a patient by name or mobile" aria-label="Find a patient" /></div>
+        <div class="mc-who-head"><input type="search" class="fe-input" data-role="who-q" placeholder="Find someone by name or mobile" aria-label="Find someone" /></div>
         <div data-role="who-list"></div>`;
     }
     drawWhoList();
@@ -761,12 +994,16 @@ export function mountSmsView(page, c0, staff) {
       : x.st === "queued" || x.st === "sending" ? '<span class="muted">Still to go</span>'
       : x.dl === "Delivered" ? '<span class="mc-pill is-sent">Delivered</span>'
       : x.dl === "Failed" ? '<span class="mc-pill is-cancel">Not delivered</span>' : '<span class="muted">Sent</span>');
+    const nameCell = (x) => {
+      const href = x.pr ? `#/prospects/${encodeURIComponent(x.pr)}` : x.p ? `#/patient/${encodeURIComponent(x.p)}` : "";
+      const nm = `<strong>${esc(x.n || "Unknown")}</strong>`;
+      return href ? `<a href="${href}">${nm}</a>` : nm;
+    };
     box.querySelector('[data-role="who-list"]').innerHTML = rows.length ? `
       <div class="mk-scroll"><table class="inv-table mc-whotable">
-        <thead><tr><th>Patient</th><th>Sent</th><th>Delivery</th><th>Reply</th><th>Booked</th></tr></thead>
+        <thead><tr><th>Who</th><th>Sent</th><th>Delivery</th><th>Reply</th><th>Booked</th></tr></thead>
         <tbody>${rows.slice(0, who.shown).map((x) => `<tr>
-          <td>${x.p ? `<a href="#/patient/${encodeURIComponent(x.p)}"><strong>${esc(x.n || "Patient")}</strong></a>` : `<strong>${esc(x.n || "Patient")}</strong>`}
-            <small>${esc([mobileText(x.m), [x.cat, ...(x.also || [])].filter(Boolean).join(", ")].filter(Boolean).join(" · "))}</small></td>
+          <td>${nameCell(x)}<small>${esc([mobileText(x.m), infoOf(x)].filter(Boolean).join(" · "))}</small></td>
           <td>${x.at ? esc(shortWhen(x.at)) : dash}</td>
           <td>${delivery(x)}${x.why ? `<small>${esc(x.why)}</small>` : ""}</td>
           <td>${x.rp ? `<span class="mc-pill ${x.rp.kind === "yes" ? "is-yes" : x.rp.kind === "stop" ? "is-cancel" : "is-sched"}">${esc(REPLY_NAME[x.rp.kind] || "Replied")}</span>
@@ -857,14 +1094,14 @@ export function mountSmsView(page, c0, staff) {
     const hrs = left > 0 ? Math.ceil(left / ((c.pace.n * 60) / c.pace.mins)) : 0;
     v("prog").innerHTML = c.status === "scheduled"
       ? `<p class="mc-big">Scheduled for <strong>${esc(when(new Date(c.sendAtMs)))}</strong>. The list is made then, so anyone who books or opts out before then is left out.</p>`
-      : c.status === "building" ? '<p class="mc-big">Making the list…</p>'
+      : c.status === "building" ? `<p class="mc-big">Making the list…</p>`
       : `<div class="mc-bar"><span style="width:${pct(done, c.total)}%"></span></div>
         <small class="muted">${n0(c.sent)} of ${n0(c.total)} sent</small>
         <div class="mc-stats">
           ${statBox("People", n0(c.total))}
           ${c.sent ? statLink("Sent", n0(c.sent), "", "sent") : statBox("Sent", "0")}
           ${c.skipped ? statLink("Skipped", n0(c.skipped), "Booked, opted out or texted since the list was made", "skipped") : statBox("Skipped", "0")}
-          ${c.failed ? statLink("Couldn't send", n0(c.failed), "", "undelivered") : statBox("Couldn't send", "0")}
+          ${c.failed ? statLink("Not sent", n0(c.failed), "", "failed") : statBox("Not sent", "0")}
         </div>
         ${["sending", "paused"].includes(c.status) && left > 0 ? `<p class="muted mc-eta">${n0(left)} still to go: about ${hrs <= 1 ? "an hour" : `${hrs} hours`}
           of sending at ${c.pace.n} every ${esc(minsText(c.pace.mins))}, between 8 am and 8 pm${c.weekdaysOnly ? " on weekdays" : ""}.</p>` : ""}`;
@@ -884,7 +1121,7 @@ export function mountSmsView(page, c0, staff) {
         </div>
         <p class="fe-note">${s.tallyAt ? `Updated ${esc(shortWhen(s.tallyAt))}.` : "The first results come within about 20 minutes."}
           <button type="button" class="lh-btn is-quiet" data-act="tally">Update now</button>
-          A reply counts if it comes within 14 days of the text. Booked counts bookings within 60 days, from the appointment book or booked by phone in Recall.</p>`;
+          A reply counts if it comes within 14 days of the text. ${esc(BOOKED_HELP[c.audience.source] || BOOKED_HELP.recall)}</p>`;
     }
 
     v("text").textContent = withStop(c.text);

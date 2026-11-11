@@ -210,7 +210,7 @@ function newDialog(staff, templates) {
         <label class="mc-opt"><input type="radio" name="kind" value="email" checked />
           <span><strong>Email</strong><small>A designed email from Email templates</small></span></label>
         <label class="mc-opt"><input type="radio" name="kind" value="sms" />
-          <span><strong>SMS</strong><small>A text to patients on Recall, through Textmagic</small></span></label>
+          <span><strong>SMS</strong><small>A text to patients, people on Recall or prospects, through Textmagic</small></span></label>
       </div>
       <label class="lh-field"><span class="lh-label">Name</span>
         <input name="name" maxlength="120" placeholder="October newsletter" autocomplete="off" /></label>
