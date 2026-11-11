@@ -34,9 +34,9 @@ const PROS_SOURCES = ["Web form", "Phone call", "Walk-in", "Online chat", "Insta
 const RULE_FIELDS = ["hist.bought", "hist.bought_between", "hist.days_since", "appt.has_future", "appt.next_days", "appt.last_days",
   "appt.visits", "appt.future_service", "appt.past_service", "appt.visit_between", "appt.last_between", "ssp.active", "ssp.age_days",
   "ssp.expiry_days", "plan.status", "plan.due", "plan.overdue", "form.saved", "pt.age", "pt.birth_year", "pt.birthday", "pt.email"];
-const DUE = [["any", "Any time"], ["just", "Just due · last 30 days"], ["over", "Overdue · 1 to 6 months"],
+const DUE = [["notyet", "Not due yet"], ["just", "Just due · last 30 days"], ["over", "Overdue · 1 to 6 months"],
   ["lapsed", "Lapsed · over 6 months"], ["dates", "Choose dates…"]];
-const SPEND = [["", "Any"], ["platinum", "Platinum"], ["gold", "Gold"], ["silver", "Silver"], ["pg", "Platinum or Gold"], ["none", "No tier"]];
+const SPEND = [["platinum", "Platinum"], ["gold", "Gold"], ["silver", "Silver"], ["none", "No tier"]];
 const UNITS = [["days", "days"], ["weeks", "weeks"], ["months", "months"]];
 
 /* ---------- The blanks, per source ---------- */
@@ -165,11 +165,17 @@ export function cleanAud(a) {
   return {
     source,
     cats: [...new Set((Array.isArray(a.cats) ? a.cats : []).map(String))].slice(0, 20),
-    due: { mode: DUE.some(([k]) => k === d.mode) ? d.mode : "any", from: isDay(d.from) ? d.from : "", to: isDay(d.to) ? d.to : "" },
+    // Several can be ticked; none ticked = any. Older drafts kept one of each.
+    dues: [...new Set(Array.isArray(a.dues) ? a.dues.map(String) : d.mode && d.mode !== "any" ? [String(d.mode)] : [])]
+      .filter((k) => DUE.some(([x]) => x === k)),
+    due: { from: isDay(d.from) ? d.from : "", to: isDay(d.to) ? d.to : "" },
     later: a.later === true,
-    who: String(a.who || "any"), whoName: String(a.whoName || ""),
-    spend: SPEND.some(([k]) => k === a.spend) ? a.spend : "",
-    tag: String(a.tag || ""), tagName: String(a.tagName || ""),
+    whos: [...new Set(Array.isArray(a.whos) ? a.whos.map(String) : a.who && a.who !== "any" ? [String(a.who)] : [])].slice(0, 40),
+    whoNames: (Array.isArray(a.whoNames) ? a.whoNames.map(String) : a.whoName ? [String(a.whoName)] : []).slice(0, 40),
+    spends: [...new Set(Array.isArray(a.spends) ? a.spends.map(String)
+      : a.spend === "pg" ? ["platinum", "gold"] : a.spend ? [String(a.spend)] : [])].filter((k) => SPEND.some(([x]) => x === k)),
+    tags: [...new Set(Array.isArray(a.tags) ? a.tags.map(String) : a.tag ? [String(a.tag)] : [])].slice(0, 20),
+    tagNames: (Array.isArray(a.tagNames) ? a.tagNames.map(String) : a.tagName ? [String(a.tagName)] : []).slice(0, 20),
     skipAppt: a.skipAppt === undefined ? source === "recall" : a.skipAppt === true,
     skipFlow: a.skipFlow !== false,
     quiet: { on: q.on !== false, n: Math.max(1, Math.min(365, Math.floor(Number(q.n) || 30))),
@@ -261,13 +267,16 @@ export function smsAudText(a) {
     if (quiet) bits.push(quiet);
     return `Prospects · ${bits.join(" · ")}`;
   }
+  const nameOf = (list, k) => (list.find(([x]) => x === k) || ["", k])[1];
   const bits = [a.cats.length ? a.cats.join(", ") : "every recalled treatment"];
-  if (a.due.mode === "dates") bits.push(`due ${[a.due.from && dayText(a.due.from), a.due.to && dayText(a.due.to)].filter(Boolean).join(" to ")}`);
-  else if (a.due.mode !== "any") bits.push((DUE.find(([k]) => k === a.due.mode) || ["", ""])[1].toLowerCase());
-  if (a.who === "none") bits.push("nobody given yet");
-  else if (a.who !== "any") bits.push(`given to ${a.whoName || "someone"}`);
-  if (a.spend) bits.push(`spend: ${(SPEND.find(([k]) => k === a.spend) || ["", ""])[1]}`);
-  if (a.tag) bits.push(`tag: ${a.tagName || "a tag"}`);
+  if (a.dues.length) {
+    bits.push(a.dues.map((k) => (k === "dates"
+      ? `due ${[a.due.from && dayText(a.due.from), a.due.to && dayText(a.due.to)].filter(Boolean).join(" to ") || "between dates"}`
+      : nameOf(DUE, k).toLowerCase())).join(" or "));
+  }
+  if (a.whos.length) bits.push(`given to ${a.whoNames.length === a.whos.length ? a.whoNames.join(" or ") : `${a.whos.length} people`}`);
+  if (a.spends.length) bits.push(`spend: ${a.spends.map((k) => nameOf(SPEND, k)).join(" or ")}`);
+  if (a.tags.length) bits.push(`tag: ${a.tagNames.length === a.tags.length ? a.tagNames.join(" or ") : `${a.tags.length} tags`}`);
   if (quiet) bits.push(quiet);
   if (a.later) bits.push("including call-backs");
   if (!a.skipAppt) bits.push("including people with a booking");
@@ -424,6 +433,15 @@ export function mountSmsDraft(page, c, staff) {
     root.querySelector('[data-act="count"]').textContent = s === "prospects" ? "Count prospects" : "Count patients";
   }
 
+  // A row of tick-chips: tick as many as you like; the first chip ("All" / "Any") clears the row
+  const chips = (key, list, allLabel) => {
+    const on = c.audience[key];
+    return `<div class="sc-chips">
+      <button type="button" class="rc-chip${!on.length ? " is-on" : ""}" data-multi="${key}" data-mv="">${esc(allLabel)}</button>
+      ${list.map(([k, l]) => `<button type="button" class="rc-chip${on.includes(k) ? " is-on" : ""}" data-multi="${key}" data-mv="${esc(k)}">${esc(l)}</button>`).join("")}
+    </div>`;
+  };
+
   function drawRecall() {
     if (!opts) return;
     const a = c.audience;
@@ -432,19 +450,15 @@ export function mountSmsDraft(page, c, staff) {
         <button type="button" class="rc-chip${!a.cats.length ? " is-on" : ""}" data-cat="">All</button>
         ${opts.categories.map((x) => `<button type="button" class="rc-chip${a.cats.includes(x.key) ? " is-on" : ""}" data-cat="${esc(x.key)}">${esc(x.key)}</button>`).join("")}
       </div></div>
-      <div class="sc-grid">
-        <div class="sc-f"><span class="sc-f-l">Due</span>
-          <select class="fb-select" data-a="due.mode" aria-label="Due">${opt(DUE, a.due.mode)}</select>
-          ${a.due.mode === "dates" ? `<span class="sc-dates">
-            <input type="date" class="fe-input" data-a="due.from" value="${esc(a.due.from)}" aria-label="Due from" /><span>to</span>
-            <input type="date" class="fe-input" data-a="due.to" value="${esc(a.due.to)}" aria-label="Due to" /></span>` : ""}</div>
-        <label class="sc-f"><span class="sc-f-l">Given to</span>
-          <select class="fb-select" data-a="who">${opt([["any", "Anyone"], ["none", "Nobody yet (waiting)"],
-            ...opts.staff.map((s) => [s.id, s.team ? s.name : `${s.name} (not in the recall team)`])], a.who)}</select></label>
-        <label class="sc-f"><span class="sc-f-l">Spend</span><select class="fb-select" data-a="spend">${opt(SPEND, a.spend)}</select></label>
-        <label class="sc-f"><span class="sc-f-l">Tag</span>
-          <select class="fb-select" data-a="tag">${opt([["", "Any"], ...opts.tags.map((t) => [t.id, t.label])], a.tag)}</select></label>
-      </div>
+      <div class="sc-f"><span class="sc-f-l">Due</span>${chips("dues", DUE, "Any time")}
+        ${a.dues.includes("dates") ? `<span class="sc-dates">
+          <input type="date" class="fe-input" data-a="due.from" value="${esc(a.due.from)}" aria-label="Due from" /><span>to</span>
+          <input type="date" class="fe-input" data-a="due.to" value="${esc(a.due.to)}" aria-label="Due to" /></span>` : ""}</div>
+      <div class="sc-f"><span class="sc-f-l">Given to</span>${chips("whos", [["none", "Nobody yet"],
+        ...opts.staff.map((s) => [s.id, s.team ? s.name : `${s.name} (not in the recall team)`])], "Anyone")}</div>
+      <div class="sc-f"><span class="sc-f-l">Spend</span>${chips("spends", SPEND, "Any")}</div>
+      <div class="sc-f"><span class="sc-f-l">Tag</span>${chips("tags", [["none", "No tag"], ...opts.tags.map((t) => [t.id, t.label])], "Any")}</div>
+      <small class="fe-note">Tick as many as you like in each row. Someone is included if they match any ticked option in a row, and every row.</small>
       <div class="sc-ticks">
         <label class="fe-check"><input type="checkbox" data-a="skipAppt"${a.skipAppt ? " checked" : ""} /> Leave out anyone with an appointment booked</label>
         <label class="fe-check"><input type="checkbox" data-a="skipFlow"${a.skipFlow ? " checked" : ""} /> Leave out anyone the Recall flow is texting</label>
@@ -562,7 +576,7 @@ export function mountSmsDraft(page, c, staff) {
 
   function audProblem() {
     const a = c.audience;
-    if (a.source === "recall" && a.due.mode === "dates" && !a.due.from && !a.due.to) return "Choose the due dates.";
+    if (a.source === "recall" && a.dues.includes("dates") && !a.due.from && !a.due.to) return "Choose the due dates.";
     if (a.source === "patients") { const p = groupProblem(a.patients.rules, false); if (p) return p; }
     if (a.source === "prospects" && !a.prospects.stages.length) return "Choose at least one stage.";
     return "";
@@ -787,6 +801,24 @@ export function mountSmsDraft(page, c, staff) {
       const s = new Set(c.audience.cats);
       if (!k) s.clear(); else if (s.has(k)) s.delete(k); else s.add(k);
       c.audience.cats = [...s];
+      audChanged(true);
+      return;
+    }
+    const mc = e.target.closest("[data-multi]");
+    if (mc) {
+      const key = mc.dataset.multi;
+      const v = mc.dataset.mv;
+      const s = new Set(c.audience[key]);
+      if (!v) s.clear(); else if (s.has(v)) s.delete(v); else s.add(v);
+      c.audience[key] = [...s];
+      if (key === "whos") {
+        c.audience.whoNames = c.audience.whos.map((id) => (id === "none" ? "nobody yet"
+          : ((opts && opts.staff.find((x) => x.id === id)) || {}).name || "someone"));
+      }
+      if (key === "tags") {
+        c.audience.tagNames = c.audience.tags.map((id) => (id === "none" ? "no tag"
+          : ((opts && opts.tags.find((x) => x.id === id)) || {}).label || "a tag"));
+      }
       audChanged(true);
       return;
     }
