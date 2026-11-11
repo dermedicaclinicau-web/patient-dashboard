@@ -9,7 +9,7 @@ import { traceShape, valueSvg, valueText, SHAPE_TEXT, textSize, shapeBottom, bel
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const I = {
   pen: ic('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'),
-  dot: ic('<line x1="7.5" y1="16.5" x2="16.5" y2="7.5"/><circle cx="6" cy="18" r="2.6" fill="currentColor"/><circle cx="18" cy="6" r="2.6" fill="currentColor"/>'),
+  dot: ic('<line x1="7.5" y1="16.5" x2="17" y2="7"/><polyline points="10 6 18 6 18 14"/><circle cx="6" cy="18" r="2.6" fill="currentColor"/>'),
   mark: ic('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3" fill="currentColor"/>'),
   erase: ic('<path d="M20 20H8l-4.3-4.3a2 2 0 0 1 0-2.8L13.2 3.4a2 2 0 0 1 2.8 0l4.6 4.6a2 2 0 0 1 0 2.8L11 20"/><line x1="7.5" y1="9.5" x2="14.5" y2="16.5"/>'),
   undo: ic('<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>'),
@@ -55,7 +55,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   box.classList.add("is-drawing");
   const toolBtns = `${marking ? `<button type="button" class="an-btn is-on" data-tool="mark" aria-pressed="true"${compact ? " hidden" : ""}>${I.mark}<span>Mark</span></button>` : ""}
       <button type="button" class="an-btn${marking ? "" : " is-on"}" data-tool="pen" aria-pressed="${!marking}" title="Draw">${I.pen}<span>Draw</span></button>
-      <button type="button" class="an-btn" data-tool="dot" aria-pressed="false" title="Tap point A, then point B, to join them with a line">${I.dot}<span>Dot</span></button>
+      <button type="button" class="an-btn" data-tool="dot" aria-pressed="false" title="Tap where it starts (A), then where it goes (B), for an arrow from A to B">${I.dot}<span>Dot</span></button>
       <button type="button" class="an-btn" data-tool="erase" aria-pressed="false" title="Tap one mark, dot or line to remove it">${I.erase}<span>Erase</span></button>`;
   const styleBtns = `<div class="an-colours"${marking ? " hidden" : ""}>${COLOURS.map(([c, l], i) =>
       `<button type="button" class="an-swatch${i === 0 ? " is-on" : ""}" data-colour="${c}" style="--c:${c}" aria-label="${l}" aria-pressed="${i === 0}"></button>`).join("")}</div>
@@ -110,8 +110,8 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   const penWidth = () => (size === "thick" ? 7 : 3) * scale();
   const dotRadius = () => (size === "thick" ? 12 : 7) * scale();
   const linkWidth = () => (size === "thick" ? 5 : 3) * scale();
-  const dotHint = () => (pending ? "Now tap point B to join it to point A."
-    : "Tap point A, then point B, to draw a line between them.");
+  const dotHint = () => (pending ? "Now tap point B, where the arrow goes."
+    : "Tap point A, where it starts, then point B, where it goes. An arrow joins them.");
   // n screen pixels, in drawing pixels (the picture may be shown smaller or bigger than it's drawn)
   const px = (n) => n * W / (canvas.getBoundingClientRect().width || W);
   // Marks are about 13px on screen, whatever size the picture is shown at
@@ -219,25 +219,38 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   function drawOp(op) {
     if (op.type === "mark") { drawMark(op); return; }
     g.fillStyle = g.strokeStyle = op.colour;
-    if (op.type === "link") {   // Dot: point A, point B and the line between them
+    if (op.type === "link") {   // Dot: an arrow from point A (a dot) to point B (the arrowhead)
       const [ax, ay] = op.a;
       const end = op.b || (op === pending ? hover : null);
       if (end) {
+        const [bx, by] = end;
+        const dist = Math.hypot(bx - ax, by - ay);
+        const ang = Math.atan2(by - ay, bx - ax);
+        const len = Math.min(Math.max(op.r * 2.2, op.width * 4), dist * 0.6);   // the arrowhead's length
+        const cx = bx - len * Math.cos(ang);                                     // where the line meets it
+        const cy = by - len * Math.sin(ang);
+        const half = len * 0.55;
         g.lineWidth = op.width;
         g.lineCap = "round";
         if (!op.b) g.setLineDash([op.width * 2, op.width * 2]);   // the guide line while choosing point B
         g.beginPath();
         g.moveTo(ax, ay);
-        g.lineTo(end[0], end[1]);
+        g.lineTo(cx, cy);
         g.stroke();
         g.setLineDash([]);
-      }
-      [op.a, op.b].forEach((p) => {
-        if (!p) return;
-        g.beginPath();
-        g.arc(p[0], p[1], op.r, 0, Math.PI * 2);
+        g.beginPath();   // the arrowhead, its tip on point B
+        g.moveTo(bx, by);
+        g.lineTo(cx + half * Math.sin(ang), cy - half * Math.cos(ang));
+        g.lineTo(cx - half * Math.sin(ang), cy + half * Math.cos(ang));
+        g.closePath();
+        g.lineJoin = "round";
+        g.lineWidth = Math.max(1, op.width / 2);
         g.fill();
-      });
+        g.stroke();
+      }
+      g.beginPath();   // point A
+      g.arc(ax, ay, op.r, 0, Math.PI * 2);
+      g.fill();
       if (op === pending) {   // a faint ring: point A is waiting for point B
         g.save();
         g.globalAlpha = 0.35;
