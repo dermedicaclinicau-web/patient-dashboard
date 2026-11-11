@@ -442,30 +442,56 @@ export function mountSmsDraft(page, c, staff) {
     </div>`;
   };
 
+  /* ---------- Recall filters: compact dropdowns of tick boxes ---------- */
+  // Ticking "Any" clears the others; ticking an option unticks "Any"
+  const DD = {
+    cats: { label: "Treatments", any: "All treatments", list: () => opts.categories.map((x) => [x.key, x.key]) },
+    dues: { label: "Due", any: "Any time", list: () => DUE },
+    whos: { label: "Given to", any: "Anyone",
+      list: () => [["none", "Nobody yet"], ...opts.staff.filter((s) => s.team).map((s) => [s.id, s.name])],
+      more: () => opts.staff.filter((s) => !s.team).map((s) => [s.id, s.name]), moreLabel: "Not in the recall team" },
+    spends: { label: "Spend", any: "Any spend", list: () => SPEND },
+    tags: { label: "Tag", any: "Any tag", list: () => [["none", "No tag"], ...opts.tags.map((t) => [t.id, t.label])] },
+  };
+  const ddAll = (key) => [...DD[key].list(), ...(DD[key].more ? DD[key].more() : [])];
+  const ddText = (key) => {
+    const on = c.audience[key];
+    if (!on.length) return DD[key].any;
+    const names = on.map((k) => (ddAll(key).find(([x]) => x === k) || ["", k])[1]);
+    return names.length <= 2 ? names.join(", ") : `${names.length} selected`;
+  };
+  const ddHtml = (key) => {
+    const d = DD[key];
+    const on = c.audience[key];
+    const box = ([k, l]) => `<label class="sc-dd-opt"><input type="checkbox" data-dd="${key}" value="${esc(k)}"${on.includes(k) ? " checked" : ""} /> ${esc(l)}</label>`;
+    const more = d.more ? d.more() : [];
+    return `<details class="sc-dd${on.length ? " is-set" : ""}" data-ddkey="${key}">
+      <summary><small>${esc(d.label)}</small><span data-ddtext="${key}">${esc(ddText(key))}</span></summary>
+      <div class="sc-dd-menu">
+        <label class="sc-dd-opt is-any"><input type="checkbox" data-dd="${key}" value=""${!on.length ? " checked" : ""} /> ${esc(d.any)}</label>
+        ${d.list().map(box).join("")}
+        ${more.length ? `<div class="sc-dd-h">${esc(d.moreLabel)}</div>${more.map(box).join("")}` : ""}
+        ${key === "dues" ? `<div class="sc-dd-dates" data-role="due-dates"${on.includes("dates") ? "" : " hidden"}>
+          <input type="date" class="fe-input" data-a="due.from" value="${esc(c.audience.due.from)}" aria-label="Due from" /><span>to</span>
+          <input type="date" class="fe-input" data-a="due.to" value="${esc(c.audience.due.to)}" aria-label="Due to" /></div>` : ""}
+      </div>
+    </details>`;
+  };
+
   function drawRecall() {
     if (!opts) return;
     const a = c.audience;
     $("f-recall").innerHTML = `
-      <div class="sc-f"><span class="sc-f-l">Treatments</span><div class="sc-chips">
-        <button type="button" class="rc-chip${!a.cats.length ? " is-on" : ""}" data-cat="">All</button>
-        ${opts.categories.map((x) => `<button type="button" class="rc-chip${a.cats.includes(x.key) ? " is-on" : ""}" data-cat="${esc(x.key)}">${esc(x.key)}</button>`).join("")}
-      </div></div>
-      <div class="sc-f"><span class="sc-f-l">Due</span>${chips("dues", DUE, "Any time")}
-        ${a.dues.includes("dates") ? `<span class="sc-dates">
-          <input type="date" class="fe-input" data-a="due.from" value="${esc(a.due.from)}" aria-label="Due from" /><span>to</span>
-          <input type="date" class="fe-input" data-a="due.to" value="${esc(a.due.to)}" aria-label="Due to" /></span>` : ""}</div>
-      <div class="sc-f"><span class="sc-f-l">Given to</span>${chips("whos", [["none", "Nobody yet"],
-        ...opts.staff.map((s) => [s.id, s.team ? s.name : `${s.name} (not in the recall team)`])], "Anyone")}</div>
-      <div class="sc-f"><span class="sc-f-l">Spend</span>${chips("spends", SPEND, "Any")}</div>
-      <div class="sc-f"><span class="sc-f-l">Tag</span>${chips("tags", [["none", "No tag"], ...opts.tags.map((t) => [t.id, t.label])], "Any")}</div>
-      <small class="fe-note">Tick as many as you like in each row. Someone is included if they match any ticked option in a row, and every row.</small>
-      <div class="sc-ticks">
-        <label class="fe-check"><input type="checkbox" data-a="skipAppt"${a.skipAppt ? " checked" : ""} /> Leave out anyone with an appointment booked</label>
-        <label class="fe-check"><input type="checkbox" data-a="skipFlow"${a.skipFlow ? " checked" : ""} /> Leave out anyone the Recall flow is texting</label>
-        <label class="fe-check"><input type="checkbox" data-a="later"${a.later ? " checked" : ""} /> Include call-backs and paused recalls</label>
-      </div>`;
+      <div class="sc-dds">${["cats", "dues", "whos", "spends", "tags"].map(ddHtml).join("")}</div>
+      <details class="sc-more"><summary>More options</summary>
+        <div class="sc-ticks">
+          <label class="fe-check"><input type="checkbox" data-a="skipAppt"${a.skipAppt ? " checked" : ""} /> Leave out anyone with an appointment booked</label>
+          <label class="fe-check"><input type="checkbox" data-a="skipFlow"${a.skipFlow ? " checked" : ""} /> Leave out anyone the Recall flow is texting</label>
+          <label class="fe-check"><input type="checkbox" data-a="later"${a.later ? " checked" : ""} /> Include call-backs and paused recalls</label>
+        </div>
+      </details>`;
   }
-
+  
   function drawProspects() {
     if (!opts) return;
     const p = c.audience.prospects;
@@ -741,6 +767,32 @@ export function mountSmsDraft(page, c, staff) {
   root.addEventListener("change", (e) => {
     const el = e.target;
     if (el.closest(".mc-rules")) return;
+    if (el.dataset.dd !== undefined) {
+      const key = el.dataset.dd;
+      if (!el.value) c.audience[key] = [];   // "Any" clears the rest
+      else {
+        const s = new Set(c.audience[key]);
+        if (el.checked) s.add(el.value); else s.delete(el.value);
+        c.audience[key] = [...s];
+      }
+      const on = c.audience[key];
+      el.closest(".sc-dd-menu").querySelectorAll(`input[data-dd="${key}"]`).forEach((b) => {
+        b.checked = b.value ? on.includes(b.value) : !on.length;
+      });
+      root.querySelector(`[data-ddtext="${key}"]`).textContent = ddText(key);
+      root.querySelector(`[data-ddkey="${key}"]`).classList.toggle("is-set", on.length > 0);
+      if (key === "dues") $("due-dates").hidden = !on.includes("dates");
+      if (key === "whos") {
+        c.audience.whoNames = on.map((id) => (id === "none" ? "nobody yet"
+          : ((opts && opts.staff.find((x) => x.id === id)) || {}).name || "someone"));
+      }
+      if (key === "tags") {
+        c.audience.tagNames = on.map((id) => (id === "none" ? "no tag"
+          : ((opts && opts.tags.find((x) => x.id === id)) || {}).label || "a tag"));
+      }
+      audChanged(false);
+      return;
+    }
     if (el.name === "sc-src") {
       c.audience.source = el.value;
       c.audience.skipAppt = el.value === "recall";   // each source starts with its own default
@@ -889,7 +941,23 @@ export function mountSmsDraft(page, c, staff) {
       } catch (err) { showToast(errText(err, "Couldn't delete it.")); }
     }
   });
-
+  // One dropdown open at a time; a click elsewhere (or Esc) closes them
+  root.addEventListener("toggle", (e) => {
+    const d = e.target;
+    if (!d.matches || !d.matches("details.sc-dd") || !d.open) return;
+    root.querySelectorAll("details.sc-dd[open]").forEach((x) => { if (x !== d) x.open = false; });
+  }, true);
+  const closeDropdowns = (e) => {
+    if (!root.isConnected) {
+      document.removeEventListener("click", closeDropdowns);
+      document.removeEventListener("keydown", closeDropdowns);
+      return;
+    }
+    if (e.type === "keydown" && e.key !== "Escape") return;
+    root.querySelectorAll("details.sc-dd[open]").forEach((x) => { if (e.type === "keydown" || !x.contains(e.target)) x.open = false; });
+  };
+  document.addEventListener("click", closeDropdowns);
+  document.addEventListener("keydown", closeDropdowns);
   callApi({ action: "marketing", op: "smsOptions" })
     .then((r) => {
       if (!root.isConnected) return;

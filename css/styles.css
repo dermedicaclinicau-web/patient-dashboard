@@ -13631,3 +13631,30 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 .sc-srcs { margin-bottom: 4px; }
 .sc-panel { display: grid; gap: 12px; margin: 12px 0 4px; }
 .sc-panel[hidden] { display: none; }
+
+/* SMS campaigns: Recall filters as dropdowns of tick boxes */
+.sc-dds { display: flex; flex-wrap: wrap; gap: 8px; }
+.sc-dd { position: relative; }
+.sc-dd > summary {
+  list-style: none; cursor: pointer; position: relative; display: flex; flex-direction: column; gap: 1px;
+  min-width: 150px; padding: 7px 34px 7px 12px; border: 1px solid #d8dee6; border-radius: 10px; background: #fff;
+}
+.sc-dd > summary::-webkit-details-marker { display: none; }
+.sc-dd > summary::after { content: "▾"; position: absolute; right: 12px; top: 50%; transform: translateY(-50%); color: #64748b; }
+.sc-dd > summary small { font-size: 11px; color: #64748b; }
+.sc-dd > summary span { font-size: 14px; font-weight: 500; max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sc-dd.is-set > summary { border-color: #0f766e; background: #f0fdfa; }
+.sc-dd[open] > summary { border-color: #0f766e; }
+.sc-dd-menu {
+  position: absolute; z-index: 30; top: calc(100% + 4px); left: 0; min-width: 240px; max-height: 320px; overflow-y: auto;
+  padding: 6px; background: #fff; border: 1px solid #d8dee6; border-radius: 10px; box-shadow: 0 10px 30px rgba(15, 23, 42, .12);
+}
+.sc-dd-opt { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 14px; white-space: nowrap; }
+.sc-dd-opt:hover { background: #f1f5f9; }
+.sc-dd-opt.is-any { margin-bottom: 4px; border-bottom: 1px solid #eef2f6; border-radius: 6px 6px 0 0; }
+.sc-dd-h { padding: 8px 8px 4px; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: #64748b; }
+.sc-dd-dates { display: flex; align-items: center; gap: 6px; padding: 6px 8px; }
+.sc-dd-dates[hidden] { display: none; }
+.sc-more { margin-top: 10px; }
+.sc-more > summary { cursor: pointer; color: #0f766e; font-size: 14px; font-weight: 500; }
+.sc-more .sc-ticks { margin-top: 8px; }
