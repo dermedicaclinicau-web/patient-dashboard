@@ -9,7 +9,7 @@ import { traceShape, valueSvg, valueText, SHAPE_TEXT, textSize, shapeBottom, bel
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const I = {
   pen: ic('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'),
-  dot: ic('<circle cx="12" cy="12" r="5" fill="currentColor"/>'),
+  dot: ic('<line x1="7.5" y1="16.5" x2="16.5" y2="7.5"/><circle cx="6" cy="18" r="2.6" fill="currentColor"/><circle cx="18" cy="6" r="2.6" fill="currentColor"/>'),
   mark: ic('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3" fill="currentColor"/>'),
   erase: ic('<path d="M20 20H8l-4.3-4.3a2 2 0 0 1 0-2.8L13.2 3.4a2 2 0 0 1 2.8 0l4.6 4.6a2 2 0 0 1 0 2.8L11 20"/><line x1="7.5" y1="9.5" x2="14.5" y2="16.5"/>'),
   undo: ic('<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>'),
@@ -55,7 +55,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   box.classList.add("is-drawing");
   const toolBtns = `${marking ? `<button type="button" class="an-btn is-on" data-tool="mark" aria-pressed="true"${compact ? " hidden" : ""}>${I.mark}<span>Mark</span></button>` : ""}
       <button type="button" class="an-btn${marking ? "" : " is-on"}" data-tool="pen" aria-pressed="${!marking}" title="Draw">${I.pen}<span>Draw</span></button>
-      <button type="button" class="an-btn" data-tool="dot" aria-pressed="false" title="Dot">${I.dot}<span>Dot</span></button>
+      <button type="button" class="an-btn" data-tool="dot" aria-pressed="false" title="Tap point A, then point B, to join them with a line">${I.dot}<span>Dot</span></button>
       <button type="button" class="an-btn" data-tool="erase" aria-pressed="false" title="Tap one mark, dot or line to remove it">${I.erase}<span>Erase</span></button>`;
   const styleBtns = `<div class="an-colours"${marking ? " hidden" : ""}>${COLOURS.map(([c, l], i) =>
       `<button type="button" class="an-swatch${i === 0 ? " is-on" : ""}" data-colour="${c}" style="--c:${c}" aria-label="${l}" aria-pressed="${i === 0}"></button>`).join("")}</div>
@@ -96,6 +96,8 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   // { add: op } · { removed: op, at } · { replaced: oldOp, by: newOp } · { cleared: [...ops], base }
   const history = [];
   let current = null;
+  let pending = null;   // Dot: point A is placed, waiting for point B
+  let hover = null;     // where the mouse is, for the dashed guide line to point B
   // Earlier markings to keep drawing on top of
   let baseImg = null;
   if (base) {
@@ -107,6 +109,9 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   const scale = () => (W || 1000) / 1000;
   const penWidth = () => (size === "thick" ? 7 : 3) * scale();
   const dotRadius = () => (size === "thick" ? 12 : 7) * scale();
+  const linkWidth = () => (size === "thick" ? 5 : 3) * scale();
+  const dotHint = () => (pending ? "Now tap point B to join it to point A."
+    : "Tap point A, then point B, to draw a line between them.");
   // n screen pixels, in drawing pixels (the picture may be shown smaller or bigger than it's drawn)
   const px = (n) => n * W / (canvas.getBoundingClientRect().width || W);
   // Marks are about 13px on screen, whatever size the picture is shown at
@@ -214,6 +219,36 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   function drawOp(op) {
     if (op.type === "mark") { drawMark(op); return; }
     g.fillStyle = g.strokeStyle = op.colour;
+    if (op.type === "link") {   // Dot: point A, point B and the line between them
+      const [ax, ay] = op.a;
+      const end = op.b || (op === pending ? hover : null);
+      if (end) {
+        g.lineWidth = op.width;
+        g.lineCap = "round";
+        if (!op.b) g.setLineDash([op.width * 2, op.width * 2]);   // the guide line while choosing point B
+        g.beginPath();
+        g.moveTo(ax, ay);
+        g.lineTo(end[0], end[1]);
+        g.stroke();
+        g.setLineDash([]);
+      }
+      [op.a, op.b].forEach((p) => {
+        if (!p) return;
+        g.beginPath();
+        g.arc(p[0], p[1], op.r, 0, Math.PI * 2);
+        g.fill();
+      });
+      if (op === pending) {   // a faint ring: point A is waiting for point B
+        g.save();
+        g.globalAlpha = 0.35;
+        g.lineWidth = Math.max(2, op.r / 3);
+        g.beginPath();
+        g.arc(ax, ay, op.r * 2, 0, Math.PI * 2);
+        g.stroke();
+        g.restore();
+      }
+      return;
+    }
     if (op.type === "dot") {
       g.beginPath();
       g.arc(op.x, op.y, op.r, 0, Math.PI * 2);
@@ -282,6 +317,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
         : `${x.name}: ${fmt(x.total)}${x.unit ? ` ${x.unit}` : ""}`));
       totalEl.innerHTML = `<span>${tool === "erase"
         ? "Tap a mark, dot or line to remove it · Undo brings it back"
+        : tool === "dot" ? dotHint()
         : "Tap the picture to place the chosen value · tap it again to remove it · Erase removes dots and lines"}</span>${
         others.map((o) => `<span><b>${esc(o)}</b></span>`).join("")}`;
       return;
@@ -291,6 +327,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       ? "Tap a mark, dot or line to remove it. Undo brings it back."
       : tool === "mark"
         ? `Placing <b>${esc(placingText())}</b>. Tap the picture to add it, or tap a mark again to remove it.`
+        : tool === "dot" ? dotHint()
         : "Draw on the picture. Choose a value above to place marks again."}</span>`;
   }
 
@@ -307,7 +344,15 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   function undo() {
     const h = history.pop();
     if (!h) return;
-    if (h.add) { const i = ops.indexOf(h.add); if (i >= 0) ops.splice(i, 1); }
+    if (h.add) {
+      const i = ops.indexOf(h.add);
+      if (i >= 0) ops.splice(i, 1);
+      if (h.add === pending) { pending = null; hover = null; }
+    }
+    else if (h.joined) {   // point B goes; point A waits again
+      h.joined.b = null;
+      if (ops.includes(h.joined) && tool === "dot") pending = h.joined;
+    }
     else if (h.removed) ops.splice(Math.min(h.at, ops.length), 0, h.removed);
     else if (h.replaced) { const i = ops.indexOf(h.by); if (i >= 0) ops[i] = h.replaced; }
     else if (h.cleared) { ops.splice(0, ops.length, ...h.cleared); baseImg = h.base; }
@@ -333,6 +378,10 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       const o = ops[i];
       if (o.type === "mark" && Math.hypot(o.x - x, o.y - y) <= o.r * 1.2 + tol * 0.3) return i;
       if (o.type === "dot" && Math.hypot(o.x - x, o.y - y) <= o.r + tol) return i;
+      if (o.type === "link") {   // either dot, or anywhere on the line
+        if (Math.hypot(o.a[0] - x, o.a[1] - y) <= o.r + tol) return i;
+        if (o.b && segDist(x, y, o.a[0], o.a[1], o.b[0], o.b[1]) <= Math.max(o.r, o.width / 2) + tol) return i;
+      }
       if (o.type === "pen") {
         const lim = o.width / 2 + tol;
         const pts = o.points;
@@ -353,6 +402,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     if (tool === "erase") {
       const i = hitAny(x, y);
       if (i >= 0) {
+        if (ops[i] === pending) { pending = null; hover = null; }
         history.push({ removed: ops[i], at: i });
         ops.splice(i, 1);
         changed();
@@ -375,9 +425,16 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       return;
     }
     if (tool === "dot") {
-      const d = { type: "dot", colour, r: dotRadius(), x, y };
-      ops.push(d);
-      history.push({ add: d });
+      if (pending && ops.includes(pending)) {   // point B: join it to point A
+        pending.b = [x, y];
+        history.push({ joined: pending });
+        pending = null;
+        hover = null;
+      } else {                                  // point A
+        pending = { type: "link", colour, r: dotRadius(), width: linkWidth(), a: [x, y], b: null };
+        ops.push(pending);
+        history.push({ add: pending });
+      }
       changed();
       return;
     }
@@ -388,6 +445,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     redraw();
   });
   canvas.addEventListener("pointermove", (e) => {
+    if (pending && tool === "dot" && e.pointerType === "mouse") { hover = pos(e); redraw(); return; }
     if (!current) return;
     current.points.push(pos(e));
     redraw();
@@ -395,6 +453,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   const finish = () => { if (current) { current = null; changed(); } };
   canvas.addEventListener("pointerup", finish);
   canvas.addEventListener("pointercancel", finish);
+  canvas.addEventListener("pointerleave", () => { if (hover) { hover = null; redraw(); } });
 
   const pickOne = (list, b) => list.forEach((x) => {
     const on = x === b;
@@ -413,7 +472,8 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     box.querySelector('[data-role="sizes"]').hidden = !plain;
     if (marksRow) marksRow.classList.toggle("is-idle", t !== "mark");
     stage.classList.toggle("is-erasing", t === "erase");
-    showTotal();
+    if (t !== "dot") { pending = null; hover = null; }   // a lone point A stays as a single dot
+    redraw();
   };
 
   box.addEventListener("click", (e) => {
@@ -439,6 +499,8 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       if (!ops.length && !baseImg) return;
       history.push({ cleared: ops.slice(), base: baseImg });
       ops.length = 0;
+      pending = null;
+      hover = null;
       baseImg = null;
       changed();
     }
@@ -447,7 +509,18 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
 
   return {
     isEmpty: () => !ops.length && !baseImg,
-    toDataURL: () => ((ops.length || baseImg) && W ? canvas.toDataURL("image/png") : ""),
+    toDataURL: () => {
+      if (!(ops.length || baseImg) || !W) return "";
+      const p = pending, h = hover;
+      pending = null;   // draw without the waiting ring or the guide line
+      hover = null;
+      redraw();
+      const url = canvas.toDataURL("image/png");
+      pending = p;
+      hover = h;
+      redraw();
+      return url;
+    },
     // The first number set's total (for Calculations and Consumables)
     total: primary ? () => sum(marksOf(primary)) : null,
     markData: marking ? () => {
