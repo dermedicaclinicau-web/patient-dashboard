@@ -33,6 +33,15 @@ export const textSize = (text, shape, tsize = "m") => {
   return (t.length > 3 ? 0.62 : t.length > 2 ? 0.78 : 1) * (SHAPE_TEXT[shape] || SHAPE_TEXT.circle).fs * (TSIZE[tsize] || 1);
 };
 
+// A label below the shape: how far each shape reaches below its centre (× radius), so the label starts just under it
+const SHAPE_BOTTOM = { circle: 1, target: 1, square: 0.88, diamond: 1.18, triangle: 0.85, hexagon: 0.92, star: 1.05 };
+export const shapeBottom = (shape) => SHAPE_BOTTOM[shape] ?? 1;
+export const showsText = (shape, tpos) => tpos === "below" || shapeHasText(shape);
+export const belowSize = (text, tsize = "m") => (String(text || "").length > 3 ? 0.72 : 0.9) * (TSIZE[tsize] || 1);
+// White text would vanish on the picture, so a label below uses the shape's colour unless another colour was chosen
+export const belowColour = (textColour, colour) =>
+  (!textColour || String(textColour).toLowerCase() === "#ffffff" ? colour : textColour);
+
 // A value's look, with defaults (white text on a filled shape; shape-coloured text when see-through)
 function styleOf(x, j) {
   const colour = HEX.test((x && x.colour) || "") ? x.colour.toLowerCase() : MARK_COLOURS[j % MARK_COLOURS.length];
@@ -43,9 +52,10 @@ function styleOf(x, j) {
     fill,
     text: HEX.test((x && x.text) || "") ? x.text.toLowerCase() : (fill === "none" ? colour : "#ffffff"),
     tsize: ["s", "m", "l"].includes(x && x.tsize) ? x.tsize : "m",
+    tpos: x && x.tpos === "below" ? "below" : "in",   // the code inside the shape, or below it
   };
 }
-const newStyle = (colour) => ({ colour, shape: "circle", fill: "solid", text: "#ffffff", tsize: "m" });
+const newStyle = (colour) => ({ colour, shape: "circle", fill: "solid", text: "#ffffff", tsize: "m", tpos: "in" });
 
 const DEFAULT_SETS = [{
   id: "wr_units", name: "Wrinkle relaxer units", type: "number", unit: "units",
@@ -115,7 +125,7 @@ export function traceShape(g, shape, x, y, r) {
 }
 
 // opts: { size, fill: "solid"|"none", textColour, tsize: "s"|"m"|"l" }
-export function shapeSvg(shape, colour, text = "", { size = 30, fill = "solid", textColour = "", tsize = "m" } = {}) {
+export function shapeSvg(shape, colour, text = "", { size = 30, fill = "solid", textColour = "", tsize = "m", tpos = "in" } = {}) {
   const r = 12, c = 20;
   const col = HEX.test(colour || "") ? colour : "#4b5563";
   const see = fill === "none";
@@ -139,14 +149,19 @@ export function shapeSvg(shape, colour, text = "", { size = 30, fill = "solid", 
     }))}"/>`; break;
     default: el = `<circle cx="${c}" cy="${c}" r="${r}"/>`;
   }
-  const t = shapeHasText(shape) ? String(text || "") : "";
+  const bt = tpos === "below" ? String(text || "") : "";   // a label below the shape
+  const t = !bt && shapeHasText(shape) ? String(text || "") : "";
   const st = SHAPE_TEXT[shape] || SHAPE_TEXT.circle;
-  return `<svg class="ms-shape" viewBox="0 0 40 40" width="${size}" height="${size}" aria-hidden="true">` +
+  const vh = bt ? 54 : 40;   // taller, to make room for the label
+  return `<svg class="ms-shape" viewBox="0 0 40 ${vh}" width="${size}" height="${Math.round(size * vh / 40)}" aria-hidden="true">` +
     `<g fill="${see ? "none" : col}" stroke="${see ? col : "#fff"}" stroke-width="${see ? 2.6 : 2}" stroke-linejoin="round">${el}</g>` +
     (shape === "target" ? `<circle cx="${c}" cy="${c}" r="${(r * 0.3).toFixed(1)}" fill="${see ? col : "#fff"}"/>` : "") +
     (t ? `<text x="${c}" y="${(c + r * st.dy).toFixed(1)}" text-anchor="middle" dominant-baseline="central" font-family="Arial, Helvetica, sans-serif"` +
       ` font-weight="700" font-size="${(r * textSize(t, shape, tsize)).toFixed(1)}" fill="${tc}"${
         see ? ' stroke="#fff" stroke-width="2" paint-order="stroke"' : ""}>${esc(t)}</text>` : "") +
+    (bt ? `<text x="${c}" y="${(c + r * (shapeBottom(shape) + 0.2)).toFixed(1)}" text-anchor="middle" dominant-baseline="hanging"` +
+      ` font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="${(r * belowSize(bt, tsize)).toFixed(1)}"` +
+      ` fill="${belowColour(tc, col)}" stroke="#fff" stroke-width="2" paint-order="stroke">${esc(bt)}</text>` : "") +
     "</svg>";
 }
 
@@ -154,7 +169,7 @@ export function shapeSvg(shape, colour, text = "", { size = 30, fill = "solid", 
 export const valueText = (s, x) => (s.type === "label" ? x.code || ""
   : x.v === "" || x.v === null || x.v === undefined ? "" : fmtMark(x.v));
 export const valueSvg = (s, x, size = 30) =>
-  shapeSvg(x.shape || "circle", x.colour, valueText(s, x), { size, fill: x.fill, textColour: x.text, tsize: x.tsize });
+  shapeSvg(x.shape || "circle", x.colour, valueText(s, x), { size, fill: x.fill, textColour: x.text, tsize: x.tsize, tpos: x.tpos });
 
 /* ---------- Loading and saving ---------- */
 
@@ -242,7 +257,7 @@ export async function openMarkingSetsDialog({ staff } = {}) {
       `<option value="${k}"${k === cur ? " selected" : ""}>${l}</option>`).join("")}</select>`;
     const valHtml = (s, x, j) => {
       const label = s.type === "label";
-      const noText = !shapeHasText(x.shape);
+      const noText = !showsText(x.shape, x.tpos);
       return `<div class="ms-val${label ? " is-label" : ""}" data-v="${j}">
         <span class="ms-prev">${valueSvg(s, x, 34)}</span>
         ${label
@@ -252,6 +267,8 @@ export async function openMarkingSetsDialog({ staff } = {}) {
         ${sel("shape", MARK_SHAPES, x.shape || "circle", "Shape")}
         <label class="ms-sw" title="Shape colour"><span>Shape</span><input type="color" data-vk="colour" value="${esc(x.colour)}" aria-label="Shape colour" /></label>
         ${sel("fill", [["solid", "Filled"], ["none", "See-through"]], x.fill || "solid", "Background")}
+        ${sel("tpos", shapeHasText(x.shape) ? [["in", "Text inside"], ["below", "Text below"]] : [["in", "No label"], ["below", "Label below"]],
+          x.tpos || "in", "Label")}
         ${noText ? "" : `<label class="ms-sw" title="Text colour"><span>Text</span><input type="color" data-vk="text" value="${esc(x.text || "#ffffff")}" aria-label="Text colour" /></label>
         ${sel("tsize", TEXT_SIZES, x.tsize || "m", "Text size")}`}
         <button type="button" class="hx-x" data-vdel aria-label="Remove this value">×</button>
@@ -305,8 +322,8 @@ export async function openMarkingSetsDialog({ staff } = {}) {
       const x = s.values[Number(vb.dataset.v)];
       x[t.dataset.vk] = t.value;
       // Circle with dot: see-through (a ring and a dot, like it's drawn by hand); the text settings go
-      if (t.dataset.vk === "shape") {
-        if (!shapeHasText(t.value) && x.fill !== "none") { x.fill = "none"; x.text = x.colour; }
+      if (t.dataset.vk === "shape" || t.dataset.vk === "tpos") {   // both change which text settings show
+        if (t.dataset.vk === "shape" && !shapeHasText(t.value) && x.fill !== "none") { x.fill = "none"; x.text = x.colour; }
         draw();
         return;
       }

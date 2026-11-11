@@ -4,7 +4,7 @@
 // Erase removes one mark, dot or line. Undo steps back through every change (including Erase and Clear).
 // The markings are kept separately from the picture, so the Image Bank picture never changes.
 import { bankImage } from "./image-bank-api.js";
-import { traceShape, valueSvg, valueText, SHAPE_TEXT, textSize } from "./marking-sets.js";
+import { traceShape, valueSvg, valueText, SHAPE_TEXT, textSize, shapeBottom, belowSize, belowColour } from "./marking-sets.js";
 
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const I = {
@@ -168,6 +168,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       ...at, type: "mark", si: active, setId: s.id, label,
       v: label ? null : x.v, code: label ? x.code : "", text: valueText(s, x),
       shape: x.shape || "circle", colour: x.colour, fill: x.fill || "solid", tcolour: x.text, tsize: x.tsize || "m",
+      tpos: x.tpos || "in",
       tag: tagsOf(s).length ? tagSel[active] : 0,
     };
   }
@@ -191,18 +192,22 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       g.fill();
     }
 
-    const fs = Math.round(op.r * textSize(op.text, shape, op.tsize));
-    if (!fs) return;   // a shape with no text (Circle with dot)
-    const ty = op.y + op.r * (SHAPE_TEXT[shape] || SHAPE_TEXT.circle).dy;
+    const below = op.tpos === "below";
+    const fs = Math.round(op.r * (below ? belowSize(op.text, op.tsize) : textSize(op.text, shape, op.tsize)));
+    if (!fs || !op.text) return;   // no text: Circle with dot, unless its label shows below
+    const ty = below
+      ? op.y + op.r * (shapeBottom(shape) + 0.25) + fs / 2
+      : op.y + op.r * (SHAPE_TEXT[shape] || SHAPE_TEXT.circle).dy;
     g.font = `bold ${fs}px Arial, Helvetica, sans-serif`;
     g.textAlign = "center";
     g.textBaseline = "middle";
-    if (see) { // a soft white halo so the text reads on any skin tone
+    if (see || below) { // a soft white halo so the text reads on any skin tone
       g.lineWidth = Math.max(2, fs / 4);
       g.strokeStyle = "rgba(255,255,255,0.9)";
       g.strokeText(op.text, op.x, ty);
     }
-    g.fillStyle = dashed && !see ? op.colour : (op.tcolour || (see ? op.colour : "#ffffff"));
+    g.fillStyle = below ? belowColour(op.tcolour, op.colour)
+      : dashed && !see ? op.colour : (op.tcolour || (see ? op.colour : "#ffffff"));
     g.fillText(op.text, op.x, ty);
   }
 
