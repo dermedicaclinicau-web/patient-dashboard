@@ -215,6 +215,7 @@ export function normSms(snap) {
     stats: { delivered: num(st.delivered), undelivered: num(st.undelivered), pending: num(st.pending), replied: num(st.replied),
       yes: num(st.yes), other: num(st.other), optedOut: num(st.optedOut), booked: num(st.booked), tallyAt: String(st.tallyAt || "") },
     buildStats: x.buildStats && typeof x.buildStats === "object" ? x.buildStats : null,
+    paceChanges: Array.isArray(x.paceChanges) ? x.paceChanges : [],
     waiting: String(x.waiting || ""), lastError: String(x.lastError || ""), note: String(x.note || ""),
     startedAt: toDate(x.startedAt), finishedAt: toDate(x.finishedAt), updatedAt: toDate(x.updatedAt),
     createdBy: String(x.createdBy || ""), scheduledBy: String(x.scheduledBy || ""),
@@ -1144,6 +1145,7 @@ export function mountSmsView(page, c0, staff) {
     const act = e.target.closest("[data-act]");
     if (!act) return;
     const a = act.dataset.act;
+    if (a === "pace") { paceDialog(); return; }
     if (a === "who-load") { loadWho(); return; }
     if (a === "who-csv") { if (who.rows) whoCsv(c, whoRows()); return; }
     if (a === "who-more") { who.shown += 200; drawWhoList(); return; }
@@ -1167,7 +1169,69 @@ export function mountSmsView(page, c0, staff) {
   root.addEventListener("input", (e) => {
     if (e.target.dataset.role === "who-q") { who.q = e.target.value; who.shown = 200; drawWhoList(); }
   });
-
+  /* ---------- Change batches (while it's sending or paused) ---------- */
+  function paceDialog() {
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog mk-dlg";
+    dlg.innerHTML = `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>Change batches</h3>
+          <p>Applies from the next batch. Texts already sent aren't affected, and the list of people stays the same.</p></div>
+        <div class="lh-field"><span class="lh-label">Send in batches</span>
+          <div class="mc-pace-row">
+            <input type="number" class="fe-input" name="n" min="10" max="100" step="5" inputmode="numeric" value="${c.pace.n}" aria-label="Texts in each batch" />
+            <span>texts every</span>
+            <select class="fb-select" name="mins" aria-label="How often">${PACE_MINS.map(([m, l]) =>
+              `<option value="${m}"${c.pace.mins === m ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
+          </div>
+          <small class="fe-note" data-x="note"></small></div>
+        <label class="fe-check"><input type="checkbox" name="wd"${c.weekdaysOnly ? " checked" : ""} /> Weekdays only</label>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-x="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">Save</button>
+        </div>
+      </form>`;
+    document.body.appendChild(dlg);
+    dlg.addEventListener("close", () => dlg.remove());
+    dlg.showModal();
+    const f = dlg.querySelector("form");
+    const err = dlg.querySelector(".lh-error");
+    const note = () => {
+      const n = Math.round(Number(f.elements.n.value) || 0);
+      const mins = Number(f.elements.mins.value) || 30;
+      const left = Math.max(0, c.total - (c.sent + c.skipped + c.failed));
+      if (!(n >= 10 && n <= 100)) { dlg.querySelector('[data-x="note"]').textContent = "A batch can be 10 to 100 texts."; return; }
+      const perHour = Math.round((n * 60) / mins);
+      const hrs = left ? Math.ceil(left / perHour) : 0;
+      dlg.querySelector('[data-x="note"]').textContent = `About ${n0(perHour)} texts an hour.` +
+        (left ? ` ${n0(left)} still to go: about ${hrs <= 1 ? "an hour" : `${hrs} hours`} of sending${hrs > 12 ? `, over about ${Math.ceil(hrs / 12)} days` : ""}.` : "") +
+        (c.status === "paused" ? " Press Resume when you're ready." : "");
+    };
+    f.addEventListener("input", note);
+    f.addEventListener("change", note);
+    note();
+    dlg.querySelector('[data-x="cancel"]').addEventListener("click", () => dlg.close());
+    f.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const n = Math.round(Number(f.elements.n.value) || 0);
+      const mins = Number(f.elements.mins.value) || 0;
+      if (!(n >= 10 && n <= 100)) { err.textContent = "A batch can be 10 to 100 texts."; err.hidden = false; return; }
+      const btn = f.querySelector('[type="submit"]');
+      btn.disabled = true;
+      try {
+        const res = await callApi({ action: "marketing", op: "smsPace", campaignId: c.id, n, mins, weekdaysOnly: f.elements.wd.checked });
+        if (res.problem) throw new Error(res.problem);
+        dlg.close();
+        showToast(res.same ? "Nothing changed." : c.status === "paused"
+          ? "Batches changed. Press Resume when you're ready." : "Batches changed. The next batch uses the new pace.");
+      } catch (ex) {
+        err.textContent = errText(ex, "Couldn't change the batches. Try again.");
+        err.hidden = false;
+        btn.disabled = false;
+      }
+    });
+  }
   function update(next) {
     c = next;
     v("name").textContent = c.name;
@@ -1177,6 +1241,10 @@ export function mountSmsView(page, c0, staff) {
     v("sub").innerHTML = `${pill(c.status)} <span class="mc-pill is-sms">SMS</span> <span class="muted">${esc(sub)}</span>`;
     const btn = (act, label, cls = "btn-ghost") => `<button type="button" class="${cls}" data-ctl="${act}">${label}</button>`;
     v("acts").innerHTML = [
+    v("acts").innerHTML = [
+      ["scheduled", "building", "sending", "paused"].includes(c.status)
+        ? '<button type="button" class="btn-ghost" data-act="pace">Change batches</button>' : "",
+      c.status === "scheduled" ? btn("unschedule", "Change it") : "",
       c.status === "scheduled" ? btn("unschedule", "Change it") : "",
       ["scheduled", "building", "sending"].includes(c.status) ? btn("pause", "Pause") : "",
       c.status === "paused" ? btn("resume", "Resume", "btn-primary") : "",
@@ -1231,6 +1299,8 @@ export function mountSmsView(page, c0, staff) {
       row("When the list was made", b ? `${n0(b.matched)} matched${outText(b, b.leftOut || 0) ? ` · ${outText(b, b.leftOut || 0)}` : ""} → ${n0(c.total)} texted` : "") +
       row("Left out by you", c.audience.exclude.length ? `${n0(c.audience.exclude.length)} people` : "") +
       row("Batches", `${c.pace.n} every ${minsText(c.pace.mins)}`) +
+      row("Batches changed", c.paceChanges.length
+        ? c.paceChanges.slice(-3).reverse().map((x) => `${shortWhen(x.at)} by ${x.by || "staff"}: ${x.from} → ${x.to}`).join(" · ") : "") +
       row("Hours", `8 am to 8 pm${c.weekdaysOnly ? ", weekdays only" : ""}`) +
       row("Scheduled by", c.scheduledBy) + row("Made by", c.createdBy);
 
