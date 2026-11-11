@@ -1241,17 +1241,14 @@ export function mountSmsView(page, c0, staff) {
     v("sub").innerHTML = `${pill(c.status)} <span class="mc-pill is-sms">SMS</span> <span class="muted">${esc(sub)}</span>`;
     const btn = (act, label, cls = "btn-ghost") => `<button type="button" class="${cls}" data-ctl="${act}">${label}</button>`;
     v("acts").innerHTML = [
-    v("acts").innerHTML = [
       ["scheduled", "building", "sending", "paused"].includes(c.status)
         ? '<button type="button" class="btn-ghost" data-act="pace">Change batches</button>' : "",
-      c.status === "scheduled" ? btn("unschedule", "Change it") : "",
       c.status === "scheduled" ? btn("unschedule", "Change it") : "",
       ["scheduled", "building", "sending"].includes(c.status) ? btn("pause", "Pause") : "",
       c.status === "paused" ? btn("resume", "Resume", "btn-primary") : "",
       !["sent", "cancelled"].includes(c.status) ? btn("cancel", "Cancel") : "",
       '<button type="button" class="btn-ghost" data-act="dup">Duplicate</button>',
     ].join("");
-
     const wait = c.lastError ? `Problem: ${c.lastError}` : c.note || (["building", "sending"].includes(c.status) ? c.waiting : "");
     v("wait").textContent = wait;
     v("wait").hidden = !wait;
