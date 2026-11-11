@@ -25,7 +25,7 @@ export const STAGES = [
   { key: "lost", name: "Lost", tone: "slate" },
 ];
 const OPEN = ["new", "contacted", "consult_booked", "consulted", "tx_booked", "treated"];
-const SOURCES = ["Web form", "Phone call", "Walk-in", "Online chat", "Instagram", "Facebook", "Referral", "Booked directly", "Other"];
+const SOURCES = ["Web form", "Phone call", "Email", "Walk-in", "Online chat", "Instagram", "Facebook", "Referral", "Booked directly", "Other"];
 const AGES = ["Under 22", "22 to 30", "31 to 40", "41 to 50", "51 to 60", "Over 60"];
 const PREFS = ["SMS", "Call", "Email"];
 const OUTCOMES = [["spoke", "Spoke to them"], ["no_answer", "No answer"], ["voicemail", "Left voicemail"], ["met", "Met in clinic"]];
@@ -46,6 +46,37 @@ function junkReason(reason, set) {
 }
 const isJunk = (p, set) => p.stage === "lost" && junkReason(p.lostReason, set);
 
+// "How they got in touch": the standard sources, then any typed in under "Other" before (kept for next time), then Other.
+// skip: standard ones not offered here (e.g. Web form when adding by hand)
+function sourceList(list, skip = []) {
+  const std = new Set(SOURCES.map(normR));
+  const extra = new Map();
+  (list || []).forEach((p) => {
+    const s = String((p && p.source) || "").replace(/\s+/g, " ").trim();
+    if (s && !std.has(normR(s)) && !extra.has(normR(s))) extra.set(normR(s), s);
+  });
+  return [...SOURCES.filter((s) => s !== "Other" && !skip.includes(s)),
+    ...[...extra.values()].sort((a, b) => a.localeCompare(b, "en-AU")), "Other"];
+}
+const sourceField = (list, cur) => `<label class="lh-field"><span class="lh-label">How they got in touch</span>
+    <select name="source" class="fe-input" data-role="srcsel">${opts(list, cur)}</select>
+    <input name="sourceOther" class="fe-input pr-src-other" maxlength="40" autocomplete="off"
+      placeholder="What was it? e.g. Newsletter" aria-label="What the other source was"${cur === "Other" ? "" : " hidden"} /></label>`;
+// Shows the "What was it?" box only when Other is chosen
+function syncSourceOther(sel) {
+  const box = sel.closest("form").querySelector('[name="sourceOther"]');
+  if (!box) return;
+  box.hidden = sel.value !== "Other";
+  if (!box.hidden) box.focus();
+}
+// The source to save. Typing one that's already a choice uses it as written there ("email" → "Email").
+function sourceValue(form, list) {
+  const picked = form.elements.source.value;
+  if (picked !== "Other") return { source: picked };
+  const typed = form.elements.sourceOther.value.replace(/\s+/g, " ").trim().slice(0, 40);
+  if (!typed) return { problem: "Say how they got in touch, e.g. Newsletter." };
+  return { source: list.find((s) => normR(s) === normR(typed)) || typed };
+}
 /* ---------- Dates ---------- */
 const PERTH = { timeZone: "Australia/Perth" };
 const keyOf = (iso) => (iso ? new Date(iso).toLocaleDateString("en-CA", PERTH) : "");
@@ -205,7 +236,8 @@ const showVia = (p, v) => !!v && !(isAdVia(v) && p.ads);
   s.id = "pr-via-css";
   s.textContent = `.pr-tag.is-via{background:#dcfce7;color:#166534;border-color:#bbf7d0}
     .pr-chip.is-via{background:#f0fdf4;color:#166534;border-color:#bbf7d0}
-    .pr-enq-via{display:block;color:#166534;margin-top:2px}`;
+    .pr-enq-via{display:block;color:#166534;margin-top:2px}
+    .pr-src-other{margin-top:6px}.pr-src-other[hidden]{display:none}`;
   document.head.appendChild(s);
 })();
 const monthYear = (k) => { if (!/^\d{4}-\d{2}/.test(k || "")) return ""; const [y, m] = k.split("-").map(Number);
@@ -796,6 +828,7 @@ async function mountBoard(container, { view, staff }) {
 async function newDialog(all, onDone) {
   const me = auth.currentUser && auth.currentUser.uid;
   const concerns = [...new Set(all.map((p) => p.concern).filter(Boolean))].slice(0, 60);
+  const sources = sourceList(all, ["Web form", "Booked directly"]);
   let force = false;
   const ctl = openDialog({
     title: "New prospect", sub: "Someone who called, walked in, chatted online or messaged. Web form enquiries are added by themselves.",
@@ -803,7 +836,7 @@ async function newDialog(all, onDone) {
     body: `
       <div class="pr-grid2">
         <label class="lh-field"><span class="lh-label">Full name</span><input name="name" class="fe-input" maxlength="120" required /></label>
-        <label class="lh-field"><span class="lh-label">How they got in touch</span><select name="source" class="fe-input">${opts(SOURCES.filter((s) => !["Web form", "Booked directly"].includes(s)), "Phone call")}</select></label>
+        ${sourceField(sources, "Phone call")}
         <label class="lh-field"><span class="lh-label">Mobile</span><input name="phone" class="fe-input" inputmode="tel" maxlength="30" /></label>
         <label class="lh-field"><span class="lh-label">Email</span><input name="email" type="email" class="fe-input" maxlength="254" /></label>
         <label class="lh-field"><span class="lh-label">Interested in</span><input name="concern" class="fe-input" maxlength="150" list="pr-concerns" placeholder="e.g. Wrinkle Relaxer, acne scars" />
@@ -817,6 +850,7 @@ async function newDialog(all, onDone) {
       ${followHtml()}
       <div class="pr-dup" data-role="dup" hidden></div>`,
     onOpen: async (c) => {
+      c.form.addEventListener("change", (e) => { if (e.target.dataset.role === "srcsel") syncSourceOther(e.target); });
       const sel = c.form.querySelector('[data-role="staff"]');
       const list = await staffList();
       sel.innerHTML = '<option value="">Nobody yet</option>' + list.map((s) =>
@@ -827,8 +861,10 @@ async function newDialog(all, onDone) {
       const f = c.form.elements;
       const fp = fuProblem(f.followUp.value, f.followTime.value);
       if (fp) { c.fail(fp); return; }
+      const src = sourceValue(c.form, sources);
+      if (src.problem) { c.fail(src.problem); f.sourceOther.focus(); return; }
       const r = await api("add", {
-        name: f.name.value, phone: f.phone.value, email: f.email.value, source: f.source.value, concern: f.concern.value,
+        name: f.name.value, phone: f.phone.value, email: f.email.value, source: src.source, concern: f.concern.value,
         age: f.age.value, pref: f.pref.value, assignTo: f.assignTo.value, message: f.message.value,
         spoke: f.spoke.checked, followUp: f.followUp.value, followNote: f.followNote.value, followTime: f.followTime.value, force,
       });
@@ -845,7 +881,10 @@ async function newDialog(all, onDone) {
         return;
       }
       c.close();
-      showToast("Prospect added");
+      // Apps Script may only accept the standard sources: if it changed it, say so
+      const kept = !r.prospect || normR(r.prospect.source) === normR(src.source);
+      showToast(kept ? "Prospect added"
+        : `Prospect added, but its source was saved as “${r.prospect.source || "nothing"}”. Apps Script needs the update for new sources.`);
       if (r.prospect) justAdded.set(r.id, r.prospect);
       onDone(r.id);
     },
@@ -1198,6 +1237,8 @@ async function mountProspect(container, id, staff) {
   const fuStartTime = () => (fuStart(p.nextFollowUp) ? p.nextFollowUpTime || "" : "");
   const fuWhat = (d, tm) => (d ? `Follow up on ${fullDay(d)}${tm ? ` at ${hmText(tm)}` : ""}` : "Follow-up cleared");
   let hitsHtml = "", ptQ = "";
+  // Their own source is always a choice, plus any typed in before
+  const srcsHere = () => sourceList([p, ...((boardCache && boardCache.list) || [])]);
 
   function stepper() {
     const lost = p.stage === "lost";
@@ -1320,7 +1361,7 @@ async function mountProspect(container, id, staff) {
               <label class="lh-field"><span class="lh-label">Mobile</span><input name="phone" class="fe-input" value="${esc(p.phone || "")}" /></label>
               <label class="lh-field"><span class="lh-label">Email</span><input name="email" class="fe-input" value="${esc(p.email || "")}" /></label>
               <label class="lh-field"><span class="lh-label">Interested in</span><input name="concern" class="fe-input" value="${esc(p.concern || "")}" /></label>
-              <label class="lh-field"><span class="lh-label">Source</span><select name="source" class="fe-input">${opts(SOURCES, p.source)}</select></label>
+              ${sourceField(srcsHere(), p.source)}
               <label class="lh-field"><span class="lh-label">Age group</span><select name="age" class="fe-input"><option value="">Not asked</option>${opts(AGES, p.ageGroup)}</select></label>
               <label class="lh-field"><span class="lh-label">Prefers</span><select name="pref" class="fe-input"><option value="">Not asked</option>${opts(PREFS, p.pref)}</select></label>
               <button type="submit" class="lh-btn">Save details</button>
@@ -1465,6 +1506,7 @@ async function mountProspect(container, id, staff) {
   });
 
   root.addEventListener("change", async (e) => {
+    if (e.target.dataset.role === "srcsel") { syncSourceOther(e.target); return; }
     if (e.target.dataset.role === "assign") {
       const v = e.target.value;
       const nm = v ? e.target.selectedOptions[0].textContent.trim() : "";
@@ -1500,10 +1542,12 @@ async function mountProspect(container, id, staff) {
       const email = f.email.value.trim();
       if (!name) { showToast("Add their name."); return; }
       if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showToast("Check the email address."); return; }
+      const src = sourceValue(form, srcsHere());
+      if (src.problem) { showToast(src.problem); f.sourceOther.focus(); return; }
       document.activeElement.blur();
-      saveFast("update", { name, phone: f.phone.value, email, concern: f.concern.value, source: f.source.value, age: f.age.value, pref: f.pref.value }, {
+      saveFast("update", { name, phone: f.phone.value, email, concern: f.concern.value, source: src.source, age: f.age.value, pref: f.pref.value }, {
         patch: { name, phone: f.phone.value.trim(), email: email.toLowerCase(), concern: f.concern.value.trim(),
-          source: f.source.value, ageGroup: f.age.value, pref: f.pref.value },
+          source: src.source, ageGroup: f.age.value, pref: f.pref.value },
         msg: "Details saved",
       });
     }
