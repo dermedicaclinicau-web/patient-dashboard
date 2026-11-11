@@ -13478,12 +13478,12 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 
 /* Consultation notes → Treatment plan: one row per treatment */
 .pe-concern { container-type: inline-size; }
-.pe-tx { margin: 6px 0 0; }
+.pe-tx { margin: 6px 18px 0; }
 .pe-tx-head, .pe-tx-row {
   display: grid;
   grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.1fr) minmax(0, .85fr) minmax(0, 1.6fr);
-  gap: 12px;
-  align-items: start;
+  gap: 14px;
+  align-items: center;
 }
 .pe-tx-head {
   padding: 0 0 6px;
@@ -13496,12 +13496,12 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 }
 .pe-tx-head span { display: inline-flex; align-items: center; gap: 5px; }
 .pe-tx-head svg { width: 13px; height: 13px; }
-.pe-tx-row { padding: 8px 0; border-bottom: 1px solid #f1f5f9; }
-.pe-tx-row.is-add { grid-template-columns: 1fr; border-bottom: 0; padding-top: 6px; }
+.pe-tx-row { padding: 9px 0; border-bottom: 1px solid #f1f5f9; }
+.pe-tx-row.is-add { grid-template-columns: 1fr; border-bottom: 0; padding: 8px 0 2px; }
 .pe-tx-row.is-add .pe-ph { color: #059669; font-style: normal; font-weight: 600; }
-.pe-tx-c .pe-freq { max-width: 100%; text-align: left; white-space: normal; }
+.pe-tx-c .pe-freq { max-width: 100%; text-align: left; white-space: normal; margin: 0; }
 .pe-tx-c.is-note .pe-field { font-style: italic; color: #475569; }
-.pe-cnote { display: flex; align-items: flex-start; gap: 6px; margin-top: 6px; font-size: 13px; color: #64748b; }
+.pe-cnote { display: flex; align-items: flex-start; gap: 6px; margin: 2px 18px 14px; font-size: 13px; color: #64748b; }
 .pe-cnote svg { width: 14px; height: 14px; margin-top: 3px; flex-shrink: 0; }
 .pe-cnote .pe-field { flex: 1; }
 
