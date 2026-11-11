@@ -69,7 +69,11 @@ export function lineNote(l) {
 }
 
 // "starts 6 months after the last Ulthera" ("" when it starts as planned)
-export const startsText = (l) => (l ? afterText(l.afterN, l.afterUnit, l.afterService) : "");
+export const startsText = (l) => {
+  const t = l ? afterText(l.afterN, l.afterUnit, l.afterService) : "";
+  // No schedule: the frequency wording is shown as it is, and it already says this
+  return t && !(!scheduleText(l) && String(l.frequency || "").includes(t)) ? t : "";
+};
 /* ---------- Clean shapes ---------- */
 
 export function cleanLine(l = {}) {
