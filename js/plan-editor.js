@@ -103,12 +103,15 @@ export function schedulesOf(c) {
   return Array.from({ length: Math.max(1, treatmentLines(c).length) }, (_, i) => {
     if (saved[i]) return cleanSched(saved[i]);
     const text = freqs[i] || "";
+    // "1 every 2 weeks · Neck to be trialled first": the schedule, then the comment
+    const [head, ...rest] = text.split(/\s+·\s+/);
+    const note = rest.join(" · ");
     if (i === 0 && !saved.length && ((c.pattern && c.pattern !== "unknown") || whole(c.interval_weeks))) {
       return cleanSched({ pattern: c.pattern, sessions: c.sessions, interval_weeks: c.interval_weeks,
-        interval_unit: c.interval_unit || (/month|mth/i.test(text) ? "m" : /week|wk/i.test(text) ? "w" : "") });
+        interval_unit: c.interval_unit || (/month|mth/i.test(text) ? "m" : /week|wk/i.test(text) ? "w" : ""), note });
     }
-    const p = parseFreq(text);
-    return p ? cleanSched({ pattern: p.pattern, sessions: p.sessions, interval_weeks: p.intervalWeeks, interval_unit: p.intervalUnit })
+    const p = parseFreq(head);
+    return p ? cleanSched({ pattern: p.pattern, sessions: p.sessions, interval_weeks: p.intervalWeeks, interval_unit: p.intervalUnit, note })
       : cleanSched({ note: text });
   });
 }
@@ -125,11 +128,142 @@ export function setSchedule(c, i, s) {
   const freqs = freqLines(c);
   const saved = Array.isArray(c.schedules) ? c.schedules : [];
   const all = schedulesOf(c);
-  c.schedules = all.map((x, k) => (k === i ? cleanSched(s) : saved[k] ? cleanSched(saved[k]) : null));
+  const keep = s.note === undefined ? { ...s, note: all[i] ? all[i].note : "" } : s;   // no comment given: the one there stays
+  c.schedules = all.map((x, k) => (k === i ? cleanSched(keep) : saved[k] ? cleanSched(saved[k]) : null));
   const lines = all.map((x, k) => (c.schedules[k] ? schedText(c.schedules[k]) : freqs[k] || ""));
   c.frequency_interval = lines.some(Boolean) ? lines.map((l) => l || "—").join("\n") : "";
   const first = c.schedules[0] || all[0];
   Object.assign(c, { pattern: first.pattern, sessions: first.sessions, interval_weeks: first.interval_weeks, interval_unit: first.interval_unit });
+}
+
+/* ===================== One row per treatment: its quote and comment ===================== */
+
+const Q_STOP = new Set(["and", "the", "for", "with", "per", "session", "sessions", "treatment", "treatments", "area", "areas", "add"]);
+const allWords = (s) => String(s || "").toLowerCase().replace(/\bwr\b/g, "wrinkle relaxer").split(/[^a-z0-9]+/).filter(Boolean);
+const keyWords = (s) => allWords(s).filter((w) => w.length > 2 && !Q_STOP.has(w));
+const shared = (a, b) => { const y = new Set(keyWords(b)); return keyWords(a).filter((w) => y.has(w)).length; };
+const schedLabel = (s) => scheduleText({ pattern: s.pattern, sessions: s.sessions, intervalWeeks: s.interval_weeks, intervalUnit: s.interval_unit });
+
+// The concern's quote, one entry per treatment. Each quote line goes to the treatment it names best;
+// lines that name none go under the first treatment, so nothing is ever lost.
+export function quoteRows(c) {
+  const names = treatmentLines(c);
+  const lines = String((c && c.quote) || "").split(/\n+/).map((s) => s.trim()).filter(Boolean);
+  if (!names.length) return [];
+  const rows = names.map(() => []);
+  const pairs = [];
+  lines.forEach((q, qi) => names.forEach((t, ti) => { const n = shared(q, t); if (n) pairs.push({ qi, ti, n }); }));
+  pairs.sort((a, b) => b.n - a.n);
+  const usedQ = new Set();
+  const usedT = new Set();
+  pairs.forEach((p) => {
+    if (usedQ.has(p.qi) || usedT.has(p.ti)) return;
+    usedQ.add(p.qi); usedT.add(p.ti);
+    rows[p.ti].push(lines[p.qi]);
+  });
+  lines.forEach((q, qi) => { if (!usedQ.has(qi)) rows[0].push(q); });
+  return rows.map((r) => r.join("\n"));
+}
+
+// "Add on Collagen Activator $198" beside "Add on Collagen activator Face" shows as "$198"
+function quoteShown(q, name) {
+  const tw = new Set(allWords(name));
+  return String(q || "").split("\n").map((line) => {
+    const m = /^(.*?)\s*[-–—:]?\s*(\$.*)$/.exec(line);
+    if (!m || !m[1].trim()) return line;
+    const pw = allWords(m[1]);
+    return pw.length && pw.every((w) => tw.has(w)) ? m[2] : line;
+  }).join("\n");
+}
+// Saved with the treatment's name, so the Master Plan and the patient copy find it
+const composeQuote = (name, v) => (v.includes("\n") || shared(v, name) ? v : `${name} - ${v}`);
+
+const ROW_FIELDS = ["row_treatment", "row_quote", "row_note"];
+
+function rowValue(c, pf, i) {
+  const names = treatmentLines(c);
+  if (pf === "row_treatment") return names[i] || "";
+  if (i >= names.length) return "";
+  if (pf === "row_quote") return quoteShown(quoteRows(c)[i] || "", names[i]);
+  return (schedulesOf(c)[i] || {}).note || "";
+}
+
+// Takes one treatment out, with its schedule and quote
+function removeRow(c, i) {
+  const names = treatmentLines(c);
+  const rows = quoteRows(c);
+  const freqs = freqLines(c);
+  const gone = names[i];
+  const stray = String(rows[i] || "").split("\n").filter((l) => l && !shared(l, gone));   // lines that weren't really its
+  names.splice(i, 1); rows.splice(i, 1); freqs.splice(i, 1);
+  if (stray.length && rows.length) rows[0] = [rows[0], ...stray].filter(Boolean).join("\n");
+  c.treatment = names.join("\n");
+  c.quote = rows.filter(Boolean).join("\n");
+  c.frequency_interval = freqs.some(Boolean) ? freqs.map((l) => l || "—").join("\n") : "";
+  if (Array.isArray(c.schedules)) {
+    const s = [...c.schedules];
+    s.splice(i, 1);
+    c.schedules = s;
+  }
+  const first = schedulesOf(c)[0];
+  if (first) Object.assign(c, { pattern: first.pattern, sessions: first.sessions, interval_weeks: first.interval_weeks, interval_unit: first.interval_unit });
+}
+
+function setRowValue(c, pf, i, value) {
+  const v = str(value);
+  const names = treatmentLines(c);
+  if (pf === "row_treatment") {
+    const name = v.replace(/\s*\n+\s*/g, " ");
+    if (!name) { if (i < names.length) removeRow(c, i); return; }   // emptied: the treatment is removed
+    if (i >= names.length) {                                        // the "+ Add treatment" row
+      names.push(name);
+      c.treatment = names.join("\n");
+      if (Array.isArray(c.schedules)) c.schedules = [...c.schedules, null];
+      return;
+    }
+    const rows = quoteRows(c);
+    const old = names[i];
+    names[i] = name;
+    c.treatment = names.join("\n");
+    // Its quote follows the new name
+    if (rows[i] && !shared(rows[i], name)) {
+      rows[i] = composeQuote(name, quoteShown(rows[i], old));
+      c.quote = rows.filter(Boolean).join("\n");
+    }
+    return;
+  }
+  if (i >= names.length) return;
+  if (pf === "row_quote") {
+    const rows = quoteRows(c);
+    rows[i] = v ? composeQuote(names[i], v) : "";
+    c.quote = rows.filter(Boolean).join("\n");
+    return;
+  }
+  setSchedule(c, i, { ...schedulesOf(c)[i], note: v.replace(/\s*\n+\s*/g, " ") });   // row_note: the treatment's comment
+}
+
+// Treatment | Frequency | Quote | Comment, one row each (stacked as small cards when the card is narrow)
+function txTableHtml(c, ci) {
+  const names = treatmentLines(c);
+  const sch = schedulesOf(c);
+  const quotes = quoteRows(c);
+  const rows = names.map((name, k) => {
+    const s = sch[k] || {};
+    const label = schedLabel(s);
+    return `<div class="pe-tx-row">
+      <div class="pe-tx-c" data-lbl="Treatment">${fieldHtml({ pf: "row_treatment", ci, si: k }, name)}</div>
+      <div class="pe-tx-c" data-lbl="Frequency"><button type="button" class="pe-freq${label ? "" : " is-empty"}" data-pe="freq" data-ci="${ci}" data-si="${k}" title="Set how often">
+        <span class="pe-freq-v">${label ? escapeHtml(label) : "Set how often"}</span></button></div>
+      <div class="pe-tx-c" data-lbl="Quote">${fieldHtml({ pf: "row_quote", ci, si: k }, quoteShown(quotes[k] || "", name))}</div>
+      <div class="pe-tx-c is-note" data-lbl="Comment">${fieldHtml({ pf: "row_note", ci, si: k }, s.note)}</div>
+    </div>`;
+  }).join("");
+  return `<div class="pe-tx">
+    ${names.length ? `<div class="pe-tx-head" aria-hidden="true"><span>${I.syringe}Treatment</span><span>${I.repeat}Frequency</span>
+      <span>${I.tag}Quote</span><span>${I.chat}Comment</span></div>` : ""}
+    ${rows}
+    <div class="pe-tx-row is-add">${fieldHtml({ pf: "row_treatment", ci, si: names.length }, "")}</div>
+  </div>`;
 }
 
 function freqRowHtml(c, ci) {
@@ -305,18 +439,27 @@ export function priorCategories(soap) {
 
 // ref = { pf: field name, ci?: concern index, ti?: timeline index } (values come from data-* attributes)
 export function getPlanValue(plan, ref) {
+  if (ROW_FIELDS.includes(ref.pf)) {
+    const c = plan.concerns[Number(ref.ci)];
+    return c ? rowValue(c, ref.pf, Number(ref.si)) : "";
+  }
   if (ref.ci !== undefined) return (plan.concerns[Number(ref.ci)] || {})[ref.pf] || "";
   if (ref.ti !== undefined) return (plan.timeline[Number(ref.ti)] || {})[ref.pf] || "";
   return plan[ref.pf] || "";
 }
 
 export function setPlanValue(plan, ref, value) {
+  if (ROW_FIELDS.includes(ref.pf)) {
+    const c = plan.concerns[Number(ref.ci)];
+    if (c) setRowValue(c, ref.pf, Number(ref.si), value);
+    return;
+  }
   if (ref.ci !== undefined) { if (plan.concerns[Number(ref.ci)]) plan.concerns[Number(ref.ci)][ref.pf] = value; }
   else if (ref.ti !== undefined) { if (plan.timeline[Number(ref.ti)]) plan.timeline[Number(ref.ti)][ref.pf] = value; }
   else plan[ref.pf] = value;
 }
 
-export const refFrom = (el) => ({ pf: el.dataset.pf, ci: el.dataset.ci, ti: el.dataset.ti });
+export const refFrom = (el) => ({ pf: el.dataset.pf, ci: el.dataset.ci, ti: el.dataset.ti, si: el.dataset.si });
 
 /* ===================== Rendering ===================== */
 
@@ -326,7 +469,10 @@ const FIELD_META = {
   treatment: { cls: "pe-strong", ph: "Add treatment…" },
   frequency_interval: { ph: "Add frequency…" },
   quote: { cls: "pe-quote", ph: "Add quote…", view: quoteHtml },
-  comments: { cls: "pe-italic", ph: "Add comments…" },
+  comments: { cls: "pe-italic", ph: "Note for this concern…" },
+  row_treatment: { cls: "pe-strong", ph: "+ Add treatment" },
+  row_quote: { cls: "pe-quote", ph: "Add quote", view: quoteHtml },
+  row_note: { cls: "pe-italic", ph: "Add comment" },
   discussion_notes: { ph: "Summary of the review…" },
   tl_date: { cls: "pe-tl-date", ph: "Month Year" },
   tl_treatment: { cls: "pe-strong", ph: "Treatment…" },
@@ -352,6 +498,7 @@ export function fieldHtml(ref, value) {
   const attrs = `data-pf="${ref.pf}"` +
     (ref.ci !== undefined ? ` data-ci="${ref.ci}"` : "") +
     (ref.ti !== undefined ? ` data-ti="${ref.ti}"` : "") +
+    (ref.si !== undefined ? ` data-si="${ref.si}"` : "") +
     ` data-ph="${escapeHtml(meta.ph || "")}"`;
   const v = str(value);
   const inner = v
@@ -390,12 +537,15 @@ function concernHtml(c, i, priorCats, showBadges) {
         </span>
       </div>
       ${fieldHtml({ pf: "description", ci: i }, c.description)}
-      <div class="pe-rows">
+      ${treatmentLines(c).length || !(str(c.quote) || str(c.frequency_interval)) ? `
+        ${txTableHtml(c, i)}
+        <div class="pe-cnote">${I.chat}${fieldHtml({ pf: "comments", ci: i }, c.comments)}</div>`
+      : `<div class="pe-rows">
         ${row(I.syringe, "Treatment", fieldHtml({ pf: "treatment", ci: i }, c.treatment))}
         ${row(I.repeat, "Frequency", freqRowHtml(c, i))}
         ${row(I.tag, "Quote", fieldHtml({ pf: "quote", ci: i }, c.quote))}
         ${row(I.chat, "Comments", fieldHtml({ pf: "comments", ci: i }, c.comments))}
-      </div>
+      </div>`}
     </article>`;
 }
 

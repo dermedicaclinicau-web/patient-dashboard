@@ -13475,3 +13475,55 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
   line-height: 1.4;
   color: #64748b;
 }
+
+/* Consultation notes → Treatment plan: one row per treatment */
+.pe-concern { container-type: inline-size; }
+.pe-tx { margin: 6px 0 0; }
+.pe-tx-head, .pe-tx-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.1fr) minmax(0, .85fr) minmax(0, 1.6fr);
+  gap: 12px;
+  align-items: start;
+}
+.pe-tx-head {
+  padding: 0 0 6px;
+  border-bottom: 1px solid #e2e8f0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+.pe-tx-head span { display: inline-flex; align-items: center; gap: 5px; }
+.pe-tx-head svg { width: 13px; height: 13px; }
+.pe-tx-row { padding: 8px 0; border-bottom: 1px solid #f1f5f9; }
+.pe-tx-row.is-add { grid-template-columns: 1fr; border-bottom: 0; padding-top: 6px; }
+.pe-tx-row.is-add .pe-ph { color: #059669; font-style: normal; font-weight: 600; }
+.pe-tx-c .pe-freq { max-width: 100%; text-align: left; white-space: normal; }
+.pe-tx-c.is-note .pe-field { font-style: italic; color: #475569; }
+.pe-cnote { display: flex; align-items: flex-start; gap: 6px; margin-top: 6px; font-size: 13px; color: #64748b; }
+.pe-cnote svg { width: 14px; height: 14px; margin-top: 3px; flex-shrink: 0; }
+.pe-cnote .pe-field { flex: 1; }
+
+/* A narrow card (phone, iPad, or the notes panel beside a page): each treatment as a small card */
+@container (max-width: 640px) {
+  .pe-tx-head { display: none; }
+  .pe-tx-row:not(.is-add) {
+    grid-template-columns: 1fr;
+    gap: 6px;
+    margin: 8px 0;
+    padding: 10px 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+  }
+  .pe-tx-c[data-lbl]:not([data-lbl="Treatment"])::before {
+    content: attr(data-lbl);
+    display: block;
+    margin-bottom: 2px;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: #94a3b8;
+  }
+}
