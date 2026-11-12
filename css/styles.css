@@ -13658,3 +13658,12 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 .sc-more { margin-top: 10px; }
 .sc-more > summary { cursor: pointer; color: #0f766e; font-size: 14px; font-weight: 500; }
 .sc-more .sc-ticks { margin-top: 8px; }
+
+/* Recording bar: paused for another patient */
+.rec-parked { display: flex; align-items: center; gap: 10px; padding: 6px 14px; font-size: 13px;
+  border-top: 1px solid rgba(15, 23, 42, .08); background: #fffbeb; }
+.rec-park-ic svg { width: 14px; height: 14px; color: #b45309; display: block; }
+.rec-park-st { color: #92400e; }
+.rec-parked .rec-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.rec-prior { font-size: 12px; color: #64748b; margin-left: 4px; white-space: nowrap; }
+.tb-rec-btn.is-continue { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }

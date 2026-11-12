@@ -1,8 +1,9 @@
-// The recording bar: the live recording (timer, Pause, Complete), and a chip for each recording
-// still uploading or becoming notes in the background.
+// The recording bar: the live recording (timer, Pause, Complete), recordings paused for another patient
+// (Continue), and a chip for each recording still uploading or becoming notes in the background.
 import {
   subscribe, getState, startRecording, pauseRecording, resumeRecording, completeRecording, cancelRecording,
   uploadNow, retryProcessing, discardJob, dismissJob, markAnnounced, checkForUnfinished,
+  checkContinuation, unpark,
 } from "./recorder.js";
 import { escapeHtml, showToast, getInitials, hueFromString } from "./utils.js";
 import { showSoapPanel } from "./soap-panel.js";
@@ -22,16 +23,35 @@ let slot = null;      // the top-bar spot: "Start appointment", or the live time
 let staff = null;
 let context = null;   // the patient page currently open
 let lastKey = "";
+let lastJobSig = "";
 const toasted = new Set();   // "notes ready" toasts already shown
 
 const fmt = (ms) => {
-  const total = Math.floor(ms / 1000);
+  const total = Math.floor((ms || 0) / 1000);
   const h = Math.floor(total / 3600);
   const m = Math.floor((total % 3600) / 60);
   const s = total % 60;
   const mm = String(m).padStart(h ? 2 : 1, "0");
   return h ? `${h}:${mm}:${String(s).padStart(2, "0")}` : `${mm}:${String(s).padStart(2, "0")}`;
 };
+const firstName = (n) => String(n || "").split(" ")[0];
+
+/* ---------- Can this patient's recording be continued? (asked once a minute at most) ---------- */
+
+const contCache = new Map();   // patient id → { info, at, loading }
+
+function contFor(p) {
+  if (!p || !p.id) return null;
+  const c = contCache.get(p.id);
+  if (c && (c.loading || Date.now() - c.at < 60000)) return c.info;
+  contCache.set(p.id, { info: c ? c.info : null, at: c ? c.at : 0, loading: true });
+  checkContinuation(p)
+    .then((info) => { contCache.set(p.id, { info, at: Date.now(), loading: false }); })
+    .catch(() => { contCache.set(p.id, { info: null, at: Date.now(), loading: false }); })
+    .finally(() => { lastKey = ""; render(getState()); });
+  return c ? c.info : null;
+}
+const contKnown = (p) => (p && contCache.has(p.id) ? contCache.get(p.id).info : null);
 
 // Initials + name: opens that patient's page from anywhere in the app
 const patientChip = (p, act = "open", id = "") => (p ? `
@@ -114,6 +134,7 @@ export function mountRecordingJobs(el) {
   jobViews.add(draw);
   draw(getState().jobs);
 }
+
 export function initRecordingBar(currentStaff) {
   staff = currentStaff;
   bar = document.getElementById("rec-bar");
@@ -127,11 +148,11 @@ export function initRecordingBar(currentStaff) {
     bar.dataset.wired = "1";
     bar.addEventListener("click", onClick);
     subscribe(render);
-    // This tab's recording was completed because another one started
+    // This tab's recording was paused because another one started
     window.addEventListener("recording-taken-over", (e) => {
       const { stopped, by } = e.detail || {};
-      showToast(`Stopped recording of ${stopped ? stopped.name : "the last patient"}${
-        by && by.name ? `: ${by.name}'s recording is now starting` : ""}. It's saved and its notes are being written.`);
+      showToast(`${stopped ? `${stopped.name}'s` : "The last"} recording is paused and saved${
+        by && by.name ? ` while ${by.name} is recorded` : ""}. Continue it from the recording bar when you're ready.`);
     });
     // Notes deleted: their chip goes too
     window.addEventListener("recording-deleted", (e) => {
@@ -147,16 +168,20 @@ export function initRecordingBar(currentStaff) {
 // Called by the patient page (patient) or other pages (null)
 export function setRecordingPatient(patient) {
   context = patient;
+  if (patient) contCache.delete(patient.id);   // opening their page asks again
   lastKey = "";
   if (bar) render(getState());
 }
 
-/* ---------- Notes ready ---------- */
+/* ===================== Notes ready ===================== */
 
 // Not recording: the notes tab slides out. Recording someone else: just a toast, so nothing covers the consultation.
+// A paused patient's notes don't slide out: they change again when the appointment is continued.
 function announce(s) {
   if (document.body.classList.contains("is-consult")) return;   // the Consultation tab shows its own notes
-  const ready = s.jobs.filter((j) => j.status === "ready" && !j.announced && j.transcriptId);
+  const parked = new Set((s.parked || []).map((p) => p.patient.id));
+  const ready = s.jobs.filter((j) => j.status === "ready" && !j.announced && j.transcriptId
+    && !(j.patient && parked.has(j.patient.id)));
   if (!ready.length) return;
   if (s.live.status === "idle") {
     showSoapPanel(ready[ready.length - 1].transcriptId, { mode: "min" });
@@ -169,7 +194,7 @@ function announce(s) {
   showToast(`Notes are ready for ${fresh.length} recording${fresh.length === 1 ? "" : "s"}. They're on My dashboard when you're done.`);
 }
 
-/* ---------- Drawing ---------- */
+/* ===================== Drawing ===================== */
 
 function liveParts(L, remote) {
   if (L.status === "idle") {
@@ -182,11 +207,19 @@ function liveParts(L, remote) {
     }
     if (!context) return { cls: "", html: "", top: "" };
     const other = remote && remote.patient ? remote.patient.name : "";
-    return { cls: "", html: "", top: `<button type="button" class="tb-rec-btn" data-rec="start"
-      title="${other
-        ? `Stops ${escapeHtml(other)}'s recording (it's kept and becomes notes), then records ${escapeHtml(context.name)}`
-        : `Opens a new tab to record ${escapeHtml(context.name)}'s appointment`}">${ICONS.mic}<span>Start appointment</span>${
-      other ? `<em class="tb-rec-note">stops ${escapeHtml(other.split(" ")[0])}</em>` : ""}</button>` };
+    const ci = contFor(context);
+    const cont = !!(ci && ci.id);
+    const name = escapeHtml(context.name);
+    const joins = cont ? (ci.time ? `the ${escapeHtml(ci.time)} recording` : "today's recording") : "";
+    const title = other
+      ? `Pauses ${escapeHtml(other)}'s recording (it's saved and can be continued), then ${cont ? `continues ${name}'s appointment` : `records ${name}`}`
+      : cont ? `Records ${name} again. It joins ${joins} (${fmt(ci.ms)} so far), so it's one set of notes.`
+      : ci && ci.reviewed ? `Today's notes for ${name} are signed off, so this makes a new set of notes.`
+      : `Opens a new tab to record ${name}'s appointment`;
+    const note = other ? `${escapeHtml(firstName(other))} continues later` : cont ? `${fmt(ci.ms)} so far` : "";
+    return { cls: "", html: "", top: `<button type="button" class="tb-rec-btn${cont ? " is-continue" : ""}" data-rec="start" title="${title}">${
+      cont ? ICONS.play : ICONS.mic}<span>${cont ? "Continue appointment" : "Start appointment"}</span>${
+      note ? `<em class="tb-rec-note">${note}</em>` : ""}</button>` };
   }
   const chip = patientChip(L.patient);
   const warn = otherPatientWarning(L);
@@ -195,15 +228,18 @@ function liveParts(L, remote) {
       html: `<span class="rec-spin"></span>${chip}<strong class="rec-live-msg">Saving the last few seconds…</strong>${warn}` };
   }
   const paused = L.status === "paused";
+  const prior = L.priorMs || 0;
   return {
     cls: paused ? "is-paused" : "is-recording",
     top: `<button type="button" class="tb-rec-btn ${paused ? "is-paused" : "is-live"}" data-rec="open"
-      title="${paused ? "Paused" : "Recording"}${L.patient ? ` · ${escapeHtml(L.patient.name)}` : ""}">
-      <span class="rec-dot"></span><span class="tb-rec-time">${fmt(L.elapsedMs)}</span></button>`,
+      title="${paused ? "Paused" : "Recording"}${L.patient ? ` · ${escapeHtml(L.patient.name)}` : ""}${
+        prior ? ` · continuing, ${fmt(prior)} recorded earlier` : ""}">
+      <span class="rec-dot"></span><span class="tb-rec-time">${fmt(prior + L.elapsedMs)}</span></button>`,
     html: `
       <span class="rec-dot"></span>
       ${chip}
-      <span class="rec-timer">${fmt(L.elapsedMs)}</span>
+      <span class="rec-timer">${fmt(L.elapsedMs)}</span>${prior
+        ? `<span class="rec-prior" title="Recorded earlier today. This part joins the same notes.">+ ${fmt(prior)} earlier</span>` : ""}
       ${warn}
       <span class="rec-actions">
         ${paused
@@ -213,6 +249,27 @@ function liveParts(L, remote) {
         <button type="button" class="rec-link" data-rec="cancel">Cancel</button>
       </span>`,
   };
+}
+
+// Recordings paused for another patient (not the one recording now)
+function parkedHtml(s) {
+  const liveId = s.live.patient && s.live.patient.id;
+  const list = (s.parked || []).filter((p) => p.patient.id !== liveId);
+  return list.map((p) => {
+    const id = escapeHtml(p.patient.id);
+    contFor(p.patient);   // so Continue knows whether the notes were edited
+    return `<div class="rec-parked">
+      <span class="rec-park-ic">${ICONS.pause}</span>
+      ${patientChip(p.patient, "park-open", p.patient.id)}
+      <span class="rec-park-st">Paused · ${fmt(p.elapsedMs)} recorded</span>
+      <span class="rec-actions">
+        <button type="button" class="rec-btn" data-rec="park-continue" data-id="${id}"
+          title="Continue ${escapeHtml(p.patient.name)}'s appointment. It joins the same notes.">${ICONS.mic}Continue</button>
+        <button type="button" class="rec-jx" data-rec="park-dismiss" data-id="${id}"
+          title="Done with this patient: hide it. The notes are already saved." aria-label="Hide">×</button>
+      </span>
+    </div>`;
+  }).join("");
 }
 
 function jobHtml(j) {
@@ -263,7 +320,15 @@ function render(s) {
   if (!bar) return;
   const L = s.live;
   announce(s);
-  const key = [L.status, L.recId, context && context.id, s.remote ? `${s.remote.recId}:${s.remote.status}` : "",
+
+  // A recording finished or changed: ask again what can be continued
+  const jobSig = s.jobs.map((j) => `${j.recId}:${j.status}`).join(",");
+  if (jobSig !== lastJobSig) { lastJobSig = jobSig; contCache.clear(); }
+
+  const key = [L.status, L.recId, L.continuesId, L.priorMs, context && context.id,
+    s.remote ? `${s.remote.recId}:${s.remote.status}` : "",
+    (s.parked || []).map((p) => `${p.patient.id}:${p.elapsedMs}`).join(","),
+    context ? JSON.stringify(contKnown(context)) : "",
     s.jobs.map((j) => `${j.recId}:${j.status}:${j.stage}`).join(",")].join("|");
 
   // Same layout: just update the live numbers
@@ -271,7 +336,7 @@ function render(s) {
     const timer = bar.querySelector(".rec-timer");
     if (timer) timer.textContent = fmt(L.elapsedMs);
     const t = slot && slot.querySelector(".tb-rec-time");
-    if (t) t.textContent = fmt(L.elapsedMs);
+    if (t) t.textContent = fmt((L.priorMs || 0) + L.elapsedMs);
     s.jobs.forEach((j) => {
       if (j.status !== "uploading") return;
       const pct = Math.round((j.progress || 0) * 100);
@@ -288,9 +353,10 @@ function render(s) {
 
   const { cls, html, top } = liveParts(L, s.remote);
   const liveRow = html ? `<div class="rec-live ${cls}">${html}</div>` : "";
+  const parked = parkedHtml(s);
   bar.className = "rec-bar is-stack";
-  bar.innerHTML = liveRow;          // only the live recording; the background ones are on My dashboard
-  bar.hidden = !liveRow;
+  bar.innerHTML = liveRow + parked;   // the live recording and the paused ones; background ones are on My dashboard
+  bar.hidden = !liveRow && !parked;
   renderNavBadge(s.jobs);
   jobViews.forEach((fn) => fn(s.jobs));
   if (slot) { slot.innerHTML = top; slot.hidden = !top; }
@@ -298,7 +364,7 @@ function render(s) {
   document.documentElement.style.setProperty("--recbar-h", bar.hidden ? "0px" : `${bar.offsetHeight}px`);
 }
 
-/* ---------- Buttons ---------- */
+/* ===================== Buttons ===================== */
 
 function openPatient(p) {
   if (!p || !p.id) return;
@@ -307,29 +373,48 @@ function openPatient(p) {
   else location.hash = target;
 }
 
+// Records a patient (or continues their appointment): in the Consultation tab, or here if pop-ups are blocked.
+// Nothing is awaited before window.open, so the browser still lets the tab open.
+async function startFor(patient, btn) {
+  const rem = getState().remote;
+  if (rem && rem.patient && rem.patient.id === patient.id) {
+    showToast(`${patient.name}'s appointment is already recording in another tab.`);
+    return;
+  }
+  const ci = contKnown(patient);
+  if (ci && ci.id && ci.edited && !confirm(`${patient.name}'s notes from earlier today were edited${
+    ci.editedBy ? ` by ${ci.editedBy}` : ""}. Continuing writes them again from both recordings, and the edited version is kept as the previous notes.\n\nContinue the appointment?`)) return;
+
+  const url = `${location.href.split("#")[0]}#/consult/new/${encodeURIComponent(patient.id)}`;
+  if (window.open(url, "_blank")) return;   // the Consultation tab records it (and pauses the other one)
+  // Pop-ups blocked: record in this tab, as before
+  if (btn) btn.disabled = true;
+  const res = await startRecording(patient, staff, {
+    takeOver: true, continuesId: (ci && ci.id) || "", priorMs: (ci && ci.ms) || 0,
+  });
+  showToast(res && res.stopped
+    ? `${res.stopped.name}'s recording is paused and saved. ${patient.name}'s is recording now.`
+    : res && res.continues ? `Continuing ${patient.name}'s appointment in this tab (pop-ups are blocked).`
+    : "Pop-ups are blocked, so this appointment is recording in this tab.");
+}
+
 async function onClick(e) {
   const btn = e.target.closest("[data-rec]");
   if (!btn) return;
   const action = btn.dataset.rec;
   const id = btn.dataset.id || "";
   const job = id ? getState().jobs.find((j) => j.recId === id) : null;
+  const parked = id ? (getState().parked || []).find((p) => p.patient.id === id) : null;
 
   try {
     if (action === "start") {
-      if (!context) return;
-      const rem = getState().remote;
-      if (rem && rem.patient && rem.patient.id === context.id) {
-        showToast(`${context.name}'s appointment is already recording in another tab.`);
-        return;
-      }
-      const url = `${location.href.split("#")[0]}#/consult/new/${encodeURIComponent(context.id)}`;
-      if (window.open(url, "_blank")) return;   // the Consultation tab records it (and stops the other one)
-      // Pop-ups blocked: record in this tab, as before
-      btn.disabled = true;
-      const res = await startRecording(context, staff, { takeOver: true });
-      showToast(res && res.stopped
-        ? `Stopped recording of ${res.stopped.name}. ${context.name}'s recording is now starting.`
-        : "Pop-ups are blocked, so this appointment is recording in this tab.");
+      if (context) await startFor(context, btn);
+    } else if (action === "park-continue") {
+      if (parked) await startFor(parked.patient, btn);
+    } else if (action === "park-open") {
+      if (parked) openPatient(parked.patient);
+    } else if (action === "park-dismiss") {
+      unpark(id);
     } else if (action === "pause") {
       pauseRecording();
     } else if (action === "resume") {

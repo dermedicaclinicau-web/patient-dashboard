@@ -12,7 +12,8 @@ import { toDateKey } from "./utils.js";
 
 /* ===================== State ===================== */
 
-const IDLE = { status: "idle", recId: null, patient: null, staff: null, elapsedMs: 0, startedAt: null, mime: "" };
+const IDLE = { status: "idle", recId: null, patient: null, staff: null, elapsedMs: 0, startedAt: null, mime: "",
+  continuesId: "", priorMs: 0 };   // continuesId: the earlier recording this one joins; priorMs: how long that was
 const live = { ...IDLE };   // status: idle | recording | paused | stopping
 
 // recId → { recId, patient, staff, elapsedMs, startedAt, at, status, stage, progress, error, transcriptId, announced }
@@ -43,6 +44,7 @@ export function getState() {
     live: l,
     remote: remote ? { ...remote } : null,   // a recording in another tab
     jobs: [...jobs.values()].sort((a, b) => (a.at || 0) - (b.at || 0)).map((j) => ({ ...j })),
+    parked: parkedMine(),   // paused for another patient, ready to continue
   };
 }
 
@@ -115,7 +117,7 @@ if (bc) {
     if (m.type === "stop-request") {
       if (live.status === "recording" || live.status === "paused") {
         const stopped = live.patient;
-        completeRecording()
+        completeRecording({ park: true })
           .then(() => window.dispatchEvent(new CustomEvent("recording-taken-over", { detail: { stopped, by: m.patient || null } })))
           .catch((err) => console.error("Couldn't stop this recording for the new one:", err));
       }
@@ -199,10 +201,123 @@ function metaFromLive() {
   return {
     recId: live.recId, patient: live.patient, staff: live.staff,
     startedAt: live.startedAt, mime: live.mime, elapsedMs: elapsed(),
+    continuesId: live.continuesId || "", priorMs: live.priorMs || 0,
   };
 }
 
 /* ===================== Recordings still becoming notes (remembered across a refresh) ===================== */
+
+/* ===================== Paused for another patient ("continues later") ===================== */
+// A recording stopped because another patient's started is noted here (this device, today, the person logged in).
+// Recording that patient again continues it: the new part carries continuesId, so it joins the same notes.
+// Kept in localStorage, so every tab (the patient page and the Consultation tab) sees the same list.
+
+const PARK_KEY = "dm-rec-parked-v1";
+const REC_ID_RE = /^REC-[A-Z0-9-]{6,40}$/;
+let lastUnparked = null;   // put back if the continuing recording is cancelled
+
+function readParkedAll() {
+  try {
+    const v = JSON.parse(localStorage.getItem(PARK_KEY) || "[]");
+    return Array.isArray(v) ? v : [];
+  } catch { return []; }
+}
+function writeParkedAll(list) {
+  try { localStorage.setItem(PARK_KEY, JSON.stringify(list.slice(-30))); } catch { /* not essential */ }
+}
+function parkedMine() {
+  const me = myUid();
+  const today = toDateKey();
+  return readParkedAll().filter((p) => p && p.uid === me && p.day === today && p.patient && p.patient.id);
+}
+
+function park(meta) {
+  const me = myUid();
+  if (!me || !meta || !meta.patient) return;
+  const today = toDateKey();
+  const all = readParkedAll().filter((p) => p && p.day === today);   // yesterday's are tidied away
+  const i = all.findIndex((p) => p.uid === me && p.patient && p.patient.id === meta.patient.id);
+  const entry = {
+    uid: me, day: today, patient: meta.patient, at: Date.now(),
+    recId: meta.continuesId || meta.recId,                      // the first part: the notes every part joins
+    elapsedMs: (meta.priorMs || 0) + (meta.elapsedMs || 0),     // the whole appointment so far
+  };
+  if (i >= 0) all[i] = entry; else all.push(entry);
+  writeParkedAll(all);
+  emit();
+}
+
+// No longer paused: being recorded again, or hidden with ×. Returns what was there.
+export function unpark(patientId) {
+  const me = myUid();
+  const all = readParkedAll();
+  const hit = all.find((p) => p && p.uid === me && p.patient && p.patient.id === patientId);
+  if (!hit) return null;
+  writeParkedAll(all.filter((p) => p !== hit));
+  emit();
+  return hit;
+}
+
+window.addEventListener("storage", (e) => { if (e.key === PARK_KEY) emit(); });
+
+// From this device: a paused recording, or this person's recordings of the patient today in this tab.
+// pending: it may not be on the server yet (still uploading, or paused in the last 15 minutes)
+function localContinuation(patientId) {
+  const me = myUid();
+  const today = toDateKey();
+  const mine = [...jobs.values()].filter((j) => j.patient && j.patient.id === patientId
+    && j.staff && j.staff.uid === me && j.startedAt && toDateKey(new Date(j.startedAt)) === today
+    && ["uploading", "processing", "ready"].includes(j.status))
+    .sort((a, b) => (a.at || 0) - (b.at || 0));
+  const uploading = mine.some((j) => j.status === "uploading");
+  const p = parkedMine().find((x) => x.patient.id === patientId);
+  if (p && REC_ID_RE.test(String(p.recId || ""))) {
+    return { id: p.recId, ms: p.elapsedMs || 0, pending: uploading || Date.now() - (p.at || 0) < 15 * 60000 };
+  }
+  if (!mine.length) return null;
+  return { id: mine[0].continuesId || mine[0].recId, ms: mine.reduce((t, j) => t + (j.elapsedMs || 0), 0), pending: uploading };
+}
+
+// What recording this patient again would continue, for the patient page and the bar.
+// → { id, ms, time, edited, editedBy } · { none: true, reviewed } (the server found nothing to join) · null (couldn't check)
+export async function checkContinuation(patient) {
+  if (!patient || !patient.id) return null;
+  const local = localContinuation(patient.id);
+  let res = null;
+  try { res = await callApi({ action: "recordingContinue", ids: [patient.id, patient.pttId].filter(Boolean) }); }
+  catch (err) { console.warn("Continue check failed:", err); }
+  const answered = !!(res && res.ok !== false && !res.problem);
+  const t = answered ? res.target : null;
+  if (t && REC_ID_RE.test(String(t.id || ""))) {
+    return {
+      id: t.id, ms: Math.max((Number(t.seconds) || 0) * 1000, local ? local.ms : 0),
+      time: String(t.time || ""), edited: !!t.edited, editedBy: String(t.editedBy || ""),
+    };
+  }
+  // Not on the server yet, or the server couldn't be asked: what's on this device
+  if (local && (!answered || local.pending)) return { id: local.id, ms: local.ms, time: "", edited: false, editedBy: "" };
+  if (answered) return { none: true, reviewed: !!res.reviewed };
+  return null;
+}
+
+// Asked while the recording is already running (the microphone never waits), and corrects what this device guessed
+function lookupContinuation(patient, recId) {
+  checkContinuation(patient).then((info) => {
+    if (!info || live.recId !== recId) return;
+    if (info.id) {
+      const same = info.id === live.continuesId;
+      live.priorMs = same ? Math.max(live.priorMs || 0, info.ms || 0) : (info.ms || 0);
+      live.continuesId = info.id;
+    } else if (info.none && live.continuesId) {
+      live.continuesId = "";   // nothing to join (e.g. today's notes are signed off): this makes new notes
+      live.priorMs = 0;
+    } else {
+      return;
+    }
+    putMeta(metaFromLive()).catch(() => {});
+    emit();
+  }).catch(() => {});
+}
 
 const TRACK_KEY = "dm-rec-jobs-v1";
 const DAY = 864e5;
@@ -219,6 +334,7 @@ function saveTracked() {
   if (!me) return;
   const mine = [...jobs.values()].filter((j) => ["processing", "failed", "ready"].includes(j.status))
     .map((j) => ({ recId: j.recId, patient: j.patient, staff: j.staff, elapsedMs: j.elapsedMs, at: j.at,
+      startedAt: j.startedAt || "", continuesId: j.continuesId || "", priorMs: j.priorMs || 0,
       merged: !!j.merged, announced: !!j.announced, uid: me }));
   // Someone else's on a shared iPad are kept (for a day)
   const others = readTracked().filter((t) => t.uid !== me && Date.now() - (t.at || 0) < DAY);
@@ -232,6 +348,7 @@ function addJob(meta, status) {
     recId: meta.recId, patient: meta.patient || null, staff: meta.staff || null, elapsedMs: meta.elapsedMs || 0,
     startedAt: meta.startedAt || "", at: meta.at || Date.now(), status, stage: "", progress: 0, error: "",
     transcriptId: "", merged: !!meta.merged, announced: !!meta.announced,
+    continuesId: meta.continuesId || "", priorMs: meta.priorMs || 0,
   });
 }
 
@@ -304,17 +421,17 @@ async function stopRecorder() {
 }
 
 /* ===================== The live recording ===================== */
-
-// takeOver: a recording already running (here or in another tab) is completed first, then this one starts.
-// → { recId, stopped } where stopped is the patient whose recording was completed (or null).
-export async function startRecording(patient, staff, { takeOver = false } = {}) {
+// takeOver: a recording already running (here or in another tab) is paused for later, then this one starts.
+// continuesId / priorMs: the earlier recording this one joins (found here if not given).
+// → { recId, stopped, continues } where stopped is the patient whose recording was paused (or null).
+export async function startRecording(patient, staff, { takeOver = false, continuesId = "", priorMs = 0 } = {}) {
   let stopped = null;
   if (isRecorderBusy()) {
     if (!takeOver || live.status === "stopping") {
       throw new Error(`The recording for ${live.patient ? live.patient.name : "another patient"} is still going. Complete or cancel it first.`);
     }
     stopped = live.patient;
-    await completeRecording();   // kept: it uploads and becomes notes as usual
+    await completeRecording({ park: true });   // saved and uploading now, and it can be continued later
   }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === "undefined") {
     throw new Error("This browser can't record audio. Please use Chrome, Edge or Safari.");
@@ -322,7 +439,7 @@ export async function startRecording(patient, staff, { takeOver = false } = {}) 
 
   if (!(await holdLock(MIC_LOCK))) {
     if (takeOver) {
-      // Ask the tab that's recording to complete it, then wait (up to 10 seconds) for the microphone
+      // Ask the tab that's recording to pause it, then wait (up to 10 seconds) for the microphone
       stopped = (remote && remote.patient) || stopped || { name: "the other patient" };
       try { if (bc) bc.postMessage({ type: "stop-request", tab: TAB_ID, patient: { name: patient.name } }); } catch { /* no channel */ }
       for (let i = 0; i < 40 && !(await holdLock(MIC_LOCK)); i++) await new Promise((r) => setTimeout(r, 250));
@@ -346,13 +463,18 @@ export async function startRecording(patient, staff, { takeOver = false } = {}) 
   }
 
   const recId = `REC-${toDateKey().replace(/-/g, "")}-${Date.now().toString(36).toUpperCase()}`;
+  // Continuing this patient's recording from earlier today: the new part joins the same notes
+  const cont = REC_ID_RE.test(String(continuesId || "")) ? { id: String(continuesId), ms: Number(priorMs) || 0 }
+    : localContinuation(patient.id);
   Object.assign(live, {
     status: "recording", recId,
     patient: { id: patient.id, pttId: patient.pttId || "", name: patient.name },
     staff: { uid: staff.uid, name: staff.name },
     elapsedMs: 0, startedAt: new Date().toISOString(),
     mime: mediaRecorder.mimeType || mime || "audio/webm",
+    continuesId: cont ? cont.id : "", priorMs: cont ? cont.ms : 0,
   });
+  lastUnparked = unpark(patient.id);   // it's being recorded again, so it's no longer paused
   chunkSeq = 0;
   await holdLock(recLock(recId));   // this tab looks after this recording until it's uploaded
   await putMeta(metaFromLive());
@@ -376,7 +498,8 @@ export async function startRecording(patient, staff, { takeOver = false } = {}) 
   acquireWakeLock();
   startTick();
   emit();
-  return { recId, stopped };
+  lookupContinuation(patient, recId);   // checks with the server even when this device found one
+  return { recId, stopped, continues: cont ? cont.id : "" };
 }
 
 export function pauseRecording() {
@@ -395,24 +518,25 @@ export function resumeRecording() {
   live.status = "recording";
   emit();
 }
-
-// Saves the last seconds, frees the microphone, and sends the recording on in the background
-export async function completeRecording() {
+// Saves the last seconds, frees the microphone, and sends the recording on in the background.
+// park: stopped for another patient, so it shows as paused and can be continued
+export async function completeRecording({ park: parkIt = false } = {}) {
   if (live.status !== "recording" && live.status !== "paused") return;
   if (live.status === "recording") live.elapsedMs += performance.now() - runStart;
   live.status = "stopping";
   emit();
 
   await stopRecorder();
-  dropLock(MIC_LOCK);          // the microphone is free; the recording itself stays this tab's until uploaded
   const meta = metaFromLive();
+  if (parkIt) park(meta);      // noted BEFORE the microphone is free, so the tab taking over always sees it
+  dropLock(MIC_LOCK);          // the microphone is free; the recording itself stays this tab's until uploaded
   await putMeta(meta).catch(() => {});
+  lastUnparked = null;
   resetLive();                 // ready for the next patient straight away
   addJob(meta, "uploading");
   emit();
   runUpload(meta.recId);       // not awaited: it carries on in the background
 }
-
 export async function cancelRecording() {
   if (live.status !== "recording" && live.status !== "paused") return;
   const id = live.recId;
@@ -420,6 +544,8 @@ export async function cancelRecording() {
   await deleteRecording(id).catch(() => {});
   dropLock(MIC_LOCK);
   dropLock(recLock(id));
+  // Cancelled while continuing: the earlier recording is paused again, ready to continue
+  if (lastUnparked) { writeParkedAll(readParkedAll().concat([lastUnparked])); lastUnparked = null; }
   resetLive();
 }
 
@@ -539,6 +665,7 @@ async function runUpload(recId) {
       staffName: (meta.staff && meta.staff.name) || "",
       createdByUid: myUid(),
       startedAt: meta.startedAt,
+      continuesId: REC_ID_RE.test(String(meta.continuesId || "")) ? meta.continuesId : "",
       consent: true,
       createdAt: serverTimestamp(),
     });
