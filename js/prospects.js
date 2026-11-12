@@ -979,7 +979,9 @@ function settingsDialog(set, onSaved, onImported) {
   const sec = (ic, tone, title, sub, inner) => `<section class="prs-sec">
       <header class="prs-sec-h"><span class="prs-ic is-${tone}">${I(IC[ic])}</span><div><h4>${esc(title)}</h4><p>${esc(sub)}</p></div></header>
       ${inner}</section>`;
-
+  const toggle = (name, on, title, help) => `<div class="prs-block"><label class="prs-toggle">
+      <input type="checkbox" name="${name}"${on ? " checked" : ""} /><span class="prs-sw" aria-hidden="true"></span>
+      <span><b>${esc(title)}</b><small>${esc(help)}</small></span></label></div>`;
   openDialog({
     title: "Prospect settings", sub: "These apply to everyone using the Prospect Dashboard.", submit: "Save settings",
     body: `<div class="prs-wrap">
@@ -1004,6 +1006,17 @@ function settingsDialog(set, onSaved, onImported) {
             <button type="button" class="lh-btn" data-role="import">Check now</button>
             <small class="prs-msg" data-role="imsg"></small>
           </div>`)}
+
+      ${sec("mail", "teal", "Automatic emails", "Turn each one on or off for everyone.",
+        toggle("emailDaily", set.emailDaily !== false, "Daily “Prospects to follow up today” email",
+          "After 8 am, each person gets their follow-ups due today or overdue, and anyone not contacted yet. Prospects given to nobody go to the people ticked under “Email these people”, or the Admins.")
+        + toggle("emailNew", set.emailNew !== false, "Email when a new enquiry arrives",
+          "To the person it's given to and the people ticked above. Replies to campaign texts are still emailed.")
+        + toggle("emailFollowTime", set.emailFollowTime !== false, "Email at the follow-up time",
+          "For follow-ups with a time. The reminder in the corner of the portal still shows either way.")
+        + toggle("cancelFollow", set.cancelFollow !== false, "Add a follow-up when someone cancels",
+          "When a prospect cancels or doesn't come and hasn't rebooked, a follow-up is set for that day to call them. Turn off if these are filling up the daily email."))}
+
       ${sec("text", "sky", "Online chat (Tawk.to)", "Chats from the website come in as prospects.",
         `<div class="prs-block"><label class="prs-toggle"><input type="checkbox" name="tawkSkip"${set.tawkSkipPatients ? " checked" : ""} />
             <span class="prs-sw" aria-hidden="true"></span>
@@ -1141,6 +1154,10 @@ function settingsDialog(set, onSaved, onImported) {
       if (!rows.some((r) => r.counts)) { c.fail("Keep at least one reason that counts as lost."); return; }
       const pick = (n) => [...f.querySelectorAll(`[name="${n}"]:checked`)].map((x) => x.value);
       await api("saveSettings", {
+        emailDaily: f.elements.emailDaily.checked,
+        emailNew: f.elements.emailNew.checked,
+        emailFollowTime: f.elements.emailFollowTime.checked,
+        cancelFollow: f.elements.cancelFollow.checked,
         notify: pick("notify"), team: pick("team"),
         respondHours: Math.min(168, Math.max(1, Math.round(Number(f.elements.hours.value) || 24))),
         tawkSkipPatients: f.elements.tawkSkip.checked,
@@ -1149,8 +1166,8 @@ function settingsDialog(set, onSaved, onImported) {
       });
       const back = await loadSettings(true);
       c.close();
-      showToast(Array.isArray(back.lostIgnore) ? "Prospect settings saved"
-        : "Saved, but “Not counted” wasn't kept. Apps Script needs the update.");
+      const kept = Array.isArray(back.lostIgnore) && typeof back.emailDaily === "boolean";
+      showToast(kept ? "Prospect settings saved" : "Saved, but some settings weren't kept. Apps Script needs the update.");
       onSaved();
     },
   });
