@@ -453,6 +453,59 @@ const picTag = (p, w = 536) => `<img src="${esc(p.src)}" alt="${esc(String(p.nam
 const pieceOptions = () => CUSTOM_PIECES.map(([g, list]) => `<optgroup label="${esc(g)}">${list.map(([k, l]) =>
   `<option value="${esc(k)}">${esc(l)}</option>`).join("")}</optgroup>`).join("");
 
+  /* ---------- Custom HTML: editing on the page (words, pictures and links; the layout never changes) ---------- */
+// Tags that can sit inside a piece of text without making it a layout
+const ED_INLINE = new Set(["A", "ABBR", "B", "BR", "CODE", "EM", "FONT", "I", "MARK", "S", "SMALL", "SPAN", "STRIKE", "STRONG", "SUB", "SUP", "U"]);
+const ED_SKIP = new Set(["STYLE", "SCRIPT", "TITLE", "NOSCRIPT", "TEMPLATE"]);
+// What typing on the page can add (Ctrl+B, Ctrl+I, Enter)
+const ED_NEW = new Set(["B", "STRONG", "I", "EM", "U", "BR"]);
+
+// The block's HTML as elements, numbered. Every element gets data-ed="n"; pictures and links data-edk;
+// the biggest pieces of plain text data-edt (they become editable). Returns the numbered copy to draw,
+// and the session { doc, els } whose elements edits are written into.
+function edOpen(b) {
+  const code = String(b.code || "");
+  const doc = new DOMParser().parseFromString(code, "text/html");
+  const els = [...doc.body.querySelectorAll("*")];
+  els.forEach((el, i) => {
+    el.setAttribute("data-ed", String(i));
+    if (el.tagName === "IMG" || el.tagName === "A") el.setAttribute("data-edk", el.tagName.toLowerCase());
+  });
+  els.forEach((el) => {
+    if (ED_SKIP.has(el.tagName) || el.closest("[data-edt]") || !el.textContent.trim()) return;
+    if ([...el.querySelectorAll("*")].every((x) => ED_INLINE.has(x.tagName))) el.setAttribute("data-edt", "");
+  });
+  const s = { bid: b.id, doc, els, full: /<html[\s>]/i.test(code), doctype: /^\s*<!doctype/i.test(code) };
+  const annotated = edSerial(s);
+  els.forEach((el) => { el.removeAttribute("data-ed"); el.removeAttribute("data-edk"); el.removeAttribute("data-edt"); });
+  return { annotated, s };
+}
+// The session back to HTML (a whole page stays a whole page)
+function edSerial(s) {
+  return s.full ? `${s.doctype ? "<!DOCTYPE html>\n" : ""}${s.doc.documentElement.outerHTML}` : s.doc.head.innerHTML + s.doc.body.innerHTML;
+}
+// The words typed on the page → the element's content in the code. Elements that were there keep all their
+// own attributes; bold, italic and line breaks typed are added; anything else the browser added is unwrapped.
+function edRebuild(s, src, shown) {
+  const d = s.doc;
+  const walk = (from, into) => {
+    from.childNodes.forEach((n) => {
+      if (n.nodeType === 3) { into.appendChild(d.createTextNode(n.nodeValue)); return; }
+      if (n.nodeType !== 1) return;
+      const i = n.hasAttribute("data-ed") ? Number(n.getAttribute("data-ed")) : -1;
+      const orig = i > -1 ? s.els[i] : null;
+      const el = orig ? orig.cloneNode(false) : ED_NEW.has(n.tagName) ? d.createElement(n.tagName.toLowerCase()) : null;
+      if (!el) { walk(n, into); return; }
+      walk(n, el);
+      into.appendChild(el);
+      if (orig) s.els[i] = el;   // later changes find the new copy
+    });
+  };
+  const frag = d.createDocumentFragment();
+  walk(shown, frag);
+  src.replaceChildren(frag);
+}
+
 export async function mountTemplateBuilder(container, { id, staff = null } = {}) {
   const backHref = builderBack();
   const backLink = `<a class="back-link" href="${esc(backHref)}">← ${backHref === "#/forms" ? "Form Builder"
@@ -519,6 +572,13 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
   let raf = 0;
   let savingP = null;
   let tagTarget = null;
+    // On-page editing of the selected Custom HTML block (edOpen)
+  let ed = null;            // { bid, doc, els, full, doctype }: the block's HTML, as elements
+  let edPick = null;        // { idx, el }: the picture or link chosen on the page
+  let edStart = null;       // { bid, code }: the block as it was when it was clicked (for Undo)
+  let edTimer = 0;
+  const edPending = new Set();
+  let codeOpen = false;     // the "HTML code" box stays open or closed as it was left
   const blocks = () => t.design.blocks;
   const selBlock = () => blocks().find((b) => b.id === sel) || null;
   const target = () => selBlock() || t;
@@ -531,6 +591,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     saveNow.textContent = s === "saving" ? "Saving…" : s === "saved" ? "Saved" : "Save";
   }
   async function save() {
+    if (edPending.size) edFlush();   // words typed on the page a moment ago
     clearTimeout(timer);
     if (savingP) await savingP;
     if (!dirty) return true;
@@ -566,6 +627,11 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
   }
   function drawCanvas() {
     raf = 0;
+    if (edPending.size) edFlush();
+    // Keep the chosen picture or link chosen after redrawing (only within the same block)
+    if (edPick && (!ed || ed.bid !== sel)) edPick = null;
+    if (ed && edPick && edPick.el) edPick.idx = [...ed.doc.body.querySelectorAll("*")].indexOf(edPick.el);
+    ed = null;
     const st = styleOf(t.design);
     stage.style.background = st.bg;
     $("inbox").innerHTML = `<small>Dermedica Clinic</small><b>${esc(t.subject || "No subject yet")}</b><span>${esc(t.preview || "No preview text")}</span>`;
@@ -575,7 +641,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     canvas.style.maxWidth = mobile ? "" : "100%";
     const list = blocks();
     canvas.innerHTML = (list.length ? list.map((b, i) => `
-      <div class="mb-blk${b.id === sel ? " is-sel" : ""}" data-blk="${esc(b.id)}" draggable="true" tabindex="0" role="button" aria-label="${esc(BLOCKS[b.type].label)}: click to change">
+      <div class="mb-blk${b.id === sel ? " is-sel" : ""}" data-blk="${esc(b.id)}" draggable="${b.type === "html" && b.id === sel ? "false" : "true"}" tabindex="0" role="button" aria-label="${esc(BLOCKS[b.type].label)}: click to change">
         <span class="mb-tag">${esc(BLOCKS[b.type].label)}</span>
         <div class="mb-tools">
           <button type="button" data-tool="up" aria-label="Move up" title="Move up"${i ? "" : " disabled"}>${ICONS.up}</button>
@@ -583,9 +649,10 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
           <button type="button" data-tool="copy" aria-label="Duplicate" title="Duplicate">${ICONS.copy}</button>
           <button type="button" data-tool="del" aria-label="Delete" title="Delete">${ICONS.trash}</button>
         </div>
-        ${blockHtml(b, st, true)}
+        ${shownHtml(b, st)}
       </div>`).join("") : '<div class="mb-empty">Add a block from the left, or drag one here.</div>') +
       `<div class="mb-foot" title="Added automatically to every marketing email">${footerPreview()}</div>`;
+    edArm();
     const ch = side.querySelector('[data-role="checks"]');
     if (ch) ch.outerHTML = checksHtml();
   }
@@ -711,14 +778,18 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
         fCheck("clickable", "Also a link, for people reading on a computer", b.clickable) + fAlign(b.align);
       case "divider": return fColor("color", "Line colour", b.color, "#e2e8f0", false);
       case "spacer": return fRange("size", "Height", b.size, 4, 120, "px");
-      case "html": return fCheck("pad", "Side margins (turn off for designs 600px wide)", b.pad !== false) +
+      case "html": return '<p class="mb-onpage-hint">Click words in the email to change them, like a document. Click a picture or a button to change it here.</p>' +
+        `<div data-role="edpick">${edPickHtml()}</div>` + tagChips() +
+        `<details class="mb-codebox"${codeOpen ? " open" : ""}><summary>HTML code</summary>` +
+        fCheck("pad", "Side margins (turn off for designs 600px wide)", b.pad !== false) +
         `<div class="fe-insp-field"><span class="fe-insp-label">HTML</span>
           <textarea class="fe-input mb-code" data-k="code" rows="12" spellcheck="false" aria-label="HTML">${esc(b.code)}</textarea>
           <div class="mb-row mb-code-acts">
             <button type="button" class="lh-btn is-primary" data-act="html-big">Open the big editor</button>
             <select class="fb-select" data-act="snip" aria-label="Add a piece"><option value="">Add a piece…</option>${pieceOptions()}</select>
-          </div></div>` +
-        tagChips() + `<div class="fe-insp-field"><span class="fe-insp-label">Checks</span><div data-role="htmlnotes">${htmlNotes(b, st.width)}</div></div>`;
+          </div></div></details>` +
+        `<div class="fe-insp-field"><span class="fe-insp-label">Checks</span><div data-role="htmlnotes">${htmlNotes(b, st.width)}</div></div>` +
+        '<button type="button" class="lh-btn is-quiet mb-edundo" data-act="ed-undo">Undo my changes to this block</button>';
       case "social": return fText("facebook", "Facebook", b.facebook, "https://facebook.com/…") +
         fText("instagram", "Instagram", b.instagram, "https://instagram.com/…") + fText("tiktok", "TikTok", b.tiktok, "https://tiktok.com/@…") +
         fText("website", "Website", b.website, "https://dermedica.com.au") + fAlign(b.align) +
@@ -746,6 +817,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     tagTarget = null;
     const b = selBlock();
     if (!b) { side.innerHTML = emailForm(); return; }
+    if (b.type === "html" && (!edStart || edStart.bid !== b.id)) edStart = { bid: b.id, code: b.code };
     side.innerHTML = `<div class="fe-insp-head">${ICONS[b.type]}<span>${esc(BLOCKS[b.type].label)}</span></div>${blockForm(b)}
       <div class="mb-side-acts"><button type="button" class="lh-btn" data-act="done">Done</button>
         <button type="button" class="fe-remove" data-act="remove">${ICONS.trash}Remove</button></div>`;
@@ -836,7 +908,179 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       showToast(errText(err, "Couldn't make the QR code. Try again."));
     }
   }
+  /* ---------- Custom HTML: editing on the page ---------- */
+  // The selected Custom HTML block is drawn numbered, ready to edit
+  function shownHtml(b, st) {
+    if (b.type !== "html" || b.id !== sel) return blockHtml(b, st, true);
+    const o = edOpen(b);
+    ed = o.s;
+    return blockHtml({ ...b, code: o.annotated }, st, true);
+  }
+  function edArm() {
+    if (!ed) { edPick = null; return; }
+    const host = canvas.querySelector(`[data-blk="${CSS.escape(ed.bid)}"]`);
+    if (!host) return;
+    host.classList.add("is-onpage");
+    host.querySelectorAll("[data-edt]").forEach((x) => { x.contentEditable = "true"; x.spellcheck = true; });
+    if (edPick) { edPick.el = edPick.idx > -1 ? ed.els[edPick.idx] || null : null; if (!edPick.el) edPick = null; }
+    edMark();
+  }
+  function edMark() {
+    canvas.querySelectorAll(".is-picked").forEach((x) => x.classList.remove("is-picked"));
+    if (!ed || !edPick) return;
+    const el = canvas.querySelector(`[data-blk="${CSS.escape(ed.bid)}"] [data-ed="${edPick.idx}"]`);
+    if (el) el.classList.add("is-picked");
+  }
+  function edPickEl() { return ed && edPick && ed.bid === sel ? edPick.el : null; }
+  function edLinkEl() { const el = edPickEl(); return el ? (el.tagName === "A" ? el : el.closest("a")) : null; }
 
+  // Words typed on the page → the block's code (a moment after typing stops, and before saving)
+  function edFlush() {
+    clearTimeout(edTimer);
+    if (!ed || !edPending.size) { edPending.clear(); return; }
+    edPending.forEach((shown) => {
+      const src = ed.els[Number(shown.getAttribute("data-ed"))];
+      if (src) edRebuild(ed, src, shown);
+    });
+    edPending.clear();
+    if (edPick) edPick.el = ed.els[edPick.idx] || null;
+    const b = blocks().find((x) => x.id === ed.bid);
+    if (b) edCommit(b);
+  }
+  function edCommit(b) {
+    b.code = edSerial(ed);
+    const ta = side.querySelector('textarea[data-k="code"]');
+    if (ta && ta.value !== b.code) ta.value = b.code;
+    drawHtmlNotes();
+    touch();
+  }
+
+  // The panel for the chosen picture or link
+  function drawPick() {
+    const box = side.querySelector('[data-role="edpick"]');
+    if (!box) return;
+    box.innerHTML = edPickHtml();
+    const a = edLinkEl();
+    if (a && !formsCache) loadOnlineForms().then(() => { if (edLinkEl() === a) drawPick(); });
+  }
+  function edPickHtml() {
+    const el = edPickEl();
+    if (!el) return "";
+    if (el.tagName === "IMG") {
+      const src = safeUrl(el.getAttribute("src"));
+      const a = el.closest("a");
+      return `<div class="fe-insp-field"><span class="fe-insp-label mb-colh">Picture</span>
+          ${src ? `<div class="fe-img-pick"><span class="fe-img-thumb mb-thumb"><img src="${esc(src)}" alt="" /></span></div>` : ""}
+          <div class="fe-img-btns">
+            <button type="button" class="lh-btn" data-edimg>Change from Image Bank</button>
+            <label class="lh-btn">Upload from computer<input type="file" data-edup accept="image/png,image/jpeg,image/webp,image/gif" hidden /></label>
+          </div>
+          <small class="fe-note">Use a picture the same shape as this one, so the layout stays the same.</small></div>` +
+        setting("Describe the picture", `<input class="fe-input" data-edalt value="${esc(el.getAttribute("alt") || "")}" maxlength="200" autocomplete="off" />`,
+          "Read out by screen readers, and shown if pictures are blocked.") +
+        (a ? edLinkHtml(a, "When the picture is clicked") : "");
+    }
+    return edLinkHtml(el, "Link or button");
+  }
+  function edLinkHtml(a, title) {
+    const href = String(a.getAttribute("href") || "").trim();
+    const fl = readFormLink(href);
+    const pl = fl ? null : readPayLink(href);
+    const forms = formsCache || [];
+    const gone = fl && !forms.some((f) => f.id === fl.id);
+    const url = !fl && !pl && /^(https?:|mailto:|tel:)/i.test(href) && href !== "https://" ? href : "";
+    const qs = fl ? questionsOf(fl.id) : [];
+    const q = fl && qs.find((x) => x.id === fl.q);
+    const words = a.textContent.replace(/\s+/g, " ").trim().slice(0, 60);
+    return `<div class="fe-insp-field"><span class="fe-insp-label mb-colh">${esc(title)}</span>${words
+        ? `<small class="fe-note">“${esc(words)}”. To change the words, type on the email.</small>` : ""}</div>` +
+      setting("Opens", `<select class="fb-select" data-edkind>
+          <option value="url"${fl || pl ? "" : " selected"}>A web page</option>
+          <option value="pay"${pl ? " selected" : ""}>A payment (Pin)</option>
+          <optgroup label="A form to fill in">${forms.length
+            ? forms.map((f) => `<option value="form:${esc(f.id)}"${fl && f.id === fl.id ? " selected" : ""}>${esc(f.name)}</option>`).join("")
+            : `<option disabled>${formsCache ? "No forms are set up for online filling" : "Loading forms…"}</option>`}${
+            gone ? `<option value="form:${esc(fl.id)}" selected>This form (not online any more)</option>` : ""}</optgroup>
+        </select>`) +
+      (pl ? setting("What they're buying", `<input class="fe-input" data-edpay="name" value="${esc(pl.name)}" autocomplete="off" />`) +
+          setting("Price", `<input class="fe-input" data-edpay="price" value="${esc(pl.price ? `$${pl.price}` : "")}" placeholder="$995" autocomplete="off" />`) +
+          setting("Thank-you page (optional)", `<input class="fe-input" data-edpay="thanks" value="${esc(pl.thanks)}" placeholder="https://" autocomplete="off" />`,
+            "Where they go after paying. Leave empty for Pin's own receipt page.")
+        : fl ? (qs.length ? setting("Answer a question for them (optional)", `<select class="fb-select" data-edansq><option value="">No</option>${
+              qs.map((x) => `<option value="${esc(x.id)}"${x.id === fl.q ? " selected" : ""}>${esc(x.label)}</option>`).join("")}</select>`) +
+            (q ? (q.options.length
+              ? setting("Their answer", `<select class="fb-select" data-edansa><option value="">Choose…</option>${
+                  q.options.map((o) => `<option value="${esc(o)}"${o === fl.a ? " selected" : ""}>${esc(o)}</option>`).join("")}</select>`)
+              : setting("Their answer", `<input class="fe-input" data-edansa value="${esc(fl.a)}" autocomplete="off" />`)) +
+              `<label class="fe-check"><input type="checkbox" data-edanslock${fl.lock ? " checked" : ""} /> Lock it, so they can't change it</label>` : "") : "") +
+            '<p class="fe-note fe-pad">Each patient gets their own link, with their details already filled in.</p>'
+        : setting("Address", `<input class="fe-input" data-edurl value="${esc(url)}" placeholder="https://" autocomplete="off" />`));
+  }
+
+  // A change in that panel → the picture or link in the code. true = it was one of these.
+  function edChange(el) {
+    const b = selBlock();
+    if (!ed || !b || b.id !== ed.bid) return false;
+    const pic = edPickEl();
+    if (el.matches("[data-edalt]")) { if (pic) { pic.setAttribute("alt", el.value.trim()); edCommit(b); } return true; }
+    if (el.matches("[data-edup]")) {
+      const f = el.files && el.files[0];
+      el.value = "";
+      if (f && pic) {
+        uploadPicture(f).then((p) => edSetPicture(pic, p))
+          .catch((err) => { console.error("Upload failed:", err); showToast(errText(err, "Couldn't upload that picture.")); });
+      }
+      return true;
+    }
+    const a = edLinkEl();
+    if (!a) return false;
+    const href = String(a.getAttribute("href") || "").trim();
+    const setHref = (h) => { a.setAttribute("href", h); edCommit(b); drawPick(); };
+    if (el.matches("[data-edkind]")) {
+      const v = el.value;
+      setHref(v.startsWith("form:") ? formLink(v.slice(5))
+        : v === "pay" ? payHrefOf({ name: a.textContent.replace(/\s+/g, " ").trim() }) : "https://");
+      return true;
+    }
+    if (el.matches("[data-edurl]")) { setHref(el.value.trim() || "https://"); return true; }
+    if (el.matches("[data-edpay]")) {
+      const pl = readPayLink(href);
+      if (pl) { pl[el.dataset.edpay] = el.value.trim(); setHref(payHrefOf(pl)); }
+      return true;
+    }
+    if (el.matches("[data-edansq], [data-edansa], [data-edanslock]")) {
+      const fl = readFormLink(href);
+      if (!fl) return true;
+      if (el.matches("[data-edansq]")) { fl.q = el.value; fl.a = ""; }
+      else if (el.matches("[data-edansa]")) fl.a = el.value.trim();
+      else fl.lock = el.checked;
+      setHref(formLink(fl.id, fl));
+      return true;
+    }
+    return false;
+  }
+  function edSetPicture(pic, p) {
+    const b = selBlock();
+    if (!b || !ed || b.id !== ed.bid) return;
+    pic.setAttribute("src", p.src);
+    if (!String(pic.getAttribute("alt") || "").trim()) pic.setAttribute("alt", String(p.name || "").replace(/\.[^.]+$/, ""));
+    edCommit(b);
+    drawCanvas();   // shows the new picture (it stays chosen)
+    drawPick();
+  }
+  async function edUndo() {
+    const b = selBlock();
+    if (!b || !edStart || edStart.bid !== b.id) return;
+    edFlush();
+    if (b.code === edStart.code) { showToast("Nothing to undo."); return; }
+    if (!(await confirmDialog({ title: "Undo your changes?", message: "This block goes back to how it was when you clicked it.",
+      confirmLabel: "Undo changes", tone: "warning" }))) return;
+    b.code = edStart.code;
+    edPick = null;
+    ed = null;
+    changed();
+    drawSide();
+  }
   /* ---------- Custom HTML ---------- */
   const pieceCode = (key) => {
     for (const [, list] of CUSTOM_PIECES) {
@@ -1117,13 +1361,51 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     const blk = e.target.closest("[data-blk]");
     if (!blk) return;
     const tool = e.target.closest("[data-tool]");
-    if (tool) blockTool(tool.dataset.tool, blk.dataset.blk);
-    else select(blk.dataset.blk);
+    if (tool) { blockTool(tool.dataset.tool, blk.dataset.blk); return; }
+    // The selected Custom HTML block: a picture or link opens its settings; words are typed in place
+    if (ed && blk.dataset.blk === ed.bid) {
+      const pk = e.target.closest("[data-edk]");
+      if (pk) {
+        const idx = Number(pk.dataset.ed);
+        edPick = { idx, el: ed.els[idx] || null };
+        edMark();
+        drawPick();
+        return;
+      }
+      if (e.target.closest("[data-edt]")) {
+        if (edPick) { edPick = null; edMark(); drawPick(); }
+        return;
+      }
+    }
+    select(blk.dataset.blk);
   });
+  
   canvas.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target.closest && e.target.closest("[data-edt]")) { e.preventDefault(); document.execCommand("insertLineBreak"); return; }
     const blk = e.target.closest("[data-blk]");
     if (blk && e.target === blk && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); select(blk.dataset.blk); }
   });
+
+  // Typing on the page (Custom HTML)
+  canvas.addEventListener("input", (e) => {
+    const host = e.target.closest && e.target.closest("[data-edt]");
+    if (!host || !ed) return;
+    edPending.add(host);
+    dirty = true;
+    setState("dirty");
+    clearTimeout(edTimer);
+    edTimer = setTimeout(edFlush, 300);
+  });
+  canvas.addEventListener("focusout", (e) => { if (e.target.matches && e.target.matches("[data-edt]")) edFlush(); });
+  canvas.addEventListener("focusin", (e) => { if (e.target.isContentEditable) tagTarget = e.target; });   // tag chips go here
+  // Pasted text comes in as plain words, so it can't bring another page's styles with it
+  canvas.addEventListener("paste", (e) => {
+    if (!e.target.closest || !e.target.closest("[data-edt]")) return;
+    e.preventDefault();
+    const text = (e.clipboardData && e.clipboardData.getData("text/plain")) || "";
+    document.execCommand("insertText", false, text.replace(/\s*\r?\n\s*/g, " "));
+  });
+
   stage.addEventListener("click", (e) => {
     if (e.target.closest("[data-blk]")) return;
     if (sel) { sel = null; drawCanvas(); drawSide(); }
@@ -1143,6 +1425,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     changed();
     if (k === "code") drawHtmlNotes();
   });
+  side.addEventListener("toggle", (e) => { if (e.target.matches && e.target.matches(".mb-codebox")) codeOpen = e.target.open; }, true);
   // Tab in a code box makes a space instead of moving on (Shift+Tab still moves on)
   side.addEventListener("keydown", (e) => {
     if (e.key === "Tab" && !e.shiftKey && e.target.matches("textarea.mb-code")) { e.preventDefault(); insertText(e.target, "  "); }
@@ -1150,6 +1433,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
   side.addEventListener("change", (e) => {
     if (e.target.closest(".re")) return;
     const el = e.target;
+    if (edChange(el)) return;
     // QR code: its link changed, so it's made again
     const qb = selBlock();
     if (qb && qb.type === "qr" && /^(href|utm|campaign)$/.test(el.dataset.k || "")) {
@@ -1228,7 +1512,18 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       el.dispatchEvent(new Event("input", { bubbles: true }));
       return;
     }
-    if (e.target.closest('[data-act="html-big"]')) { const b = selBlock(); if (b) openHtmlEditor(b); return; }
+    if (e.target.closest('[data-act="html-big"]')) { edFlush(); const b = selBlock(); if (b) openHtmlEditor(b); return; }
+    if (e.target.closest('[data-act="ed-undo"]')) { edUndo(); return; }
+    const edImg = e.target.closest("[data-edimg]");
+    if (edImg) {
+      const pic = edPickEl();
+      if (!pic) return;
+      edImg.disabled = true;
+      pickPicture(staff).then((p) => { if (p) edSetPicture(pic, p); })
+        .catch((err) => { console.error("Picture failed:", err); showToast(errText(err, "Couldn't use that picture.")); })
+        .finally(() => { if (edImg.isConnected) edImg.disabled = false; });
+      return;
+    }
     const cr = e.target.closest("[data-crop]");
     if (cr) { cropPicture(target(), cr.dataset.crop, cr); return; }
     if (e.target.closest('[data-act="btn-add"]')) {
@@ -1290,6 +1585,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
   const clearLine = () => canvas.querySelectorAll(".is-drop-before, .is-drop-after").forEach((x) => x.classList.remove("is-drop-before", "is-drop-after"));
   const endDrag = () => { drag = null; dropAt = null; clearLine(); };
   root.addEventListener("dragstart", (e) => {
+    if (!e.target.closest || e.target.closest(".is-onpage")) return;
     const p = e.target.closest("[data-add]");
     const b = e.target.closest(".mb-blk[data-blk]");
     if (p) drag = { type: p.dataset.add };

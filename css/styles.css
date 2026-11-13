@@ -13779,3 +13779,17 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
   .pcs{grid-template-columns:1fr}
   .pcs-preview{position:static;max-height:none}
 }
+
+/* Marketing builder → Custom HTML: editing on the page */
+.mb-blk.is-onpage, .mb-blk.is-onpage *{-webkit-user-select:text;user-select:text;pointer-events:auto}
+.mb-blk.is-onpage [data-edt]{cursor:text;border-radius:2px;outline:1px dashed transparent;outline-offset:2px;transition:outline-color .12s}
+.mb-blk.is-onpage [data-edt]:hover{outline-color:#5eead4}
+.mb-blk.is-onpage [data-edt]:focus{outline:2px solid #0f766e;outline-offset:2px}
+.mb-blk.is-onpage [data-edk="img"]{cursor:pointer}
+.mb-blk.is-onpage [data-edk="img"]:hover, .mb-blk.is-onpage [data-edk="a"]:hover{outline:2px solid #5eead4;outline-offset:2px}
+.mb-blk.is-onpage .is-picked{outline:2px solid #0f766e !important;outline-offset:3px}
+.mb-onpage-hint{margin:0 0 4px;padding:10px 12px;border-radius:10px;background:#f0fdfa;color:#115e59;font-size:12.5px;line-height:1.5}
+.mb-codebox{margin:4px 0;padding:0 12px;border:1px solid #e2e8f0;border-radius:10px}
+.mb-codebox > summary{padding:10px 0;font-size:13px;font-weight:600;color:#334155;cursor:pointer}
+.mb-codebox[open]{padding-bottom:12px}
+.mb-edundo{align-self:flex-start;margin-top:4px}
