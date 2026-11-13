@@ -30,7 +30,7 @@ function filter(menu) {
 const firstShown = (menu) => itemsOf(menu).find((el) => rowOf(menu, el).style.display !== "none");
 
 function enhance(menu) {
-  if (menu.dataset.searchable || itemsOf(menu).length < MIN_ITEMS) return false;
+  if (menu.dataset.searchable || menu.dataset.noAutoSearch || itemsOf(menu).length < MIN_ITEMS) return false;
   menu.dataset.searchable = "1";
   const box = document.createElement("div");
   box.className = "fpm-search";

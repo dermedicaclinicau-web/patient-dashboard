@@ -45,23 +45,42 @@ export function closeFormPicker(returnFocus = false) {
   }
 }
 
+// Each menu sets its size and side when it opens
+let layout = { width: 300, align: "left", maxH: 440 };
+
+// The patient bar redraws itself (e.g. when tags or allergies load): follow the new Email button
+function liveAnchor() {
+  if (anchor && !anchor.isConnected && anchor.dataset.taskPicker) {
+    const again = document.querySelector(`[data-task-picker="${CSS.escape(anchor.dataset.taskPicker)}"]`);
+    if (again) {
+      again.setAttribute("aria-expanded", "true");
+      again.setAttribute("aria-haspopup", "true");
+      anchor = again;
+    }
+  }
+  return anchor && anchor.isConnected ? anchor : null;
+}
+
 function position() {
   if (!menu || !anchor) return;
-  const r = anchor.getBoundingClientRect();
-  const w = Math.min(Math.max(r.width, 300), window.innerWidth - 24);
-  const left = Math.max(12, Math.min(r.left, window.innerWidth - w - 12));
+  const a = liveAnchor();
+  if (!a) { closeFormPicker(); return; }
+  const r = a.getBoundingClientRect();
+  const w = Math.min(Math.max(r.width, layout.width), window.innerWidth - 24);
+  const want = layout.align === "right" ? r.right - w : r.left;   // "right": the menu's right edge lines up with the button
+  const left = Math.max(12, Math.min(want, window.innerWidth - w - 12));
   const below = window.innerHeight - r.bottom - 12;
   const above = r.top - 12;
   menu.style.width = w + "px";
   menu.style.left = left + "px";
   if (below >= 260 || below >= above) {
-    menu.style.top = r.bottom + 6 + "px";
+    menu.style.top = r.bottom + 8 + "px";
     menu.style.bottom = "auto";
-    menu.style.maxHeight = Math.max(160, Math.min(440, below - 6)) + "px";
+    menu.style.maxHeight = Math.max(160, Math.min(layout.maxH, below - 8)) + "px";
   } else {
     menu.style.top = "auto";
-    menu.style.bottom = window.innerHeight - r.top + 6 + "px";
-    menu.style.maxHeight = Math.max(160, Math.min(440, above - 6)) + "px";
+    menu.style.bottom = window.innerHeight - r.top + 8 + "px";
+    menu.style.maxHeight = Math.max(160, Math.min(layout.maxH, above - 8)) + "px";
   }
 }
 
@@ -90,6 +109,7 @@ function items() {
 
 async function open(trigger, category, staff, group, rxKind = "") {
   closeFormPicker();
+  layout = { width: 300, align: "left", maxH: 440 };
   const patientId = patientIdFromHash();
   if (!patientId) return;
 
@@ -217,23 +237,45 @@ async function open(trigger, category, staff, group, rxKind = "") {
   });
 }
 
+const emSvg = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+const EM_IC = {
+  mail: emSvg('<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>'),
+  mkt: emSvg('<path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/>'),
+  pen: emSvg('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'),
+  chev: emSvg('<polyline points="9 18 15 12 9 6"/>'),
+  search: emSvg('<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>'),
+};
+
 // The patient page's Email button: published "To Patient" email tasks and the marketing emails
-// switched on for Task Manager (sorted together, as in Task Manager), plus "Write my own email"
+// switched on for Task Manager, in two groups, plus "Write my own email" pinned at the bottom
 async function openTasks(trigger, staff) {
   closeFormPicker();
   const patientId = patientIdFromHash();
   if (!patientId) return;
   anchor = trigger;
+  layout = { width: 440, align: "right", maxH: 560 };
   trigger.setAttribute("aria-expanded", "true");
   const isAdmin = /^admin$/i.test(String((staff && staff.role) || ""));
   const email = trigger.dataset.email || "";
+  const who = trigger.dataset.name || "the patient";
 
   const thisMenu = document.createElement("div");
   menu = thisMenu;
-  menu.className = "fp-menu";
+  menu.className = "fp-menu em-menu";
   menu.setAttribute("role", "dialog");
-  menu.setAttribute("aria-label", "Email the patient");
-  menu.innerHTML = '<div class="fp-head">Email the patient</div><div class="fp-body"><div class="fp-loading">Loading tasks…</div></div>';
+  menu.setAttribute("aria-label", `Email ${who}`);
+  menu.dataset.noAutoSearch = "true";   // it has its own search
+  keepOwnSearch(thisMenu);
+  menu.innerHTML = `
+    <div class="em-head">
+      <span class="em-head-ic">${EM_IC.mail}</span>
+      <div class="em-head-t">
+        <strong>Email ${esc(who)}</strong>
+        <small${email ? ` title="${esc(email)}"` : ' class="is-none"'}>${
+          email ? esc(email) : "No email on file. You can type one in on the next screen."}</small>
+      </div>
+    </div>
+    <div class="em-scroll"><div class="fp-loading">Loading emails…</div></div>`;
   document.body.appendChild(menu);
   position();
 
@@ -242,32 +284,88 @@ async function openTasks(trigger, staff) {
   if (types.status === "fulfilled") tasks = types.value.filter((t) => t.category === "patient" && t.channel === "email");
   else console.error("Couldn't load tasks:", types.reason);
   if (emails.status === "fulfilled") tasks = tasks.concat(emails.value);   // ids start with "mkt_"
-  tasks.sort((a, b) => String(a.name).localeCompare(String(b.name), "en-AU"));
-  if (menu !== thisMenu) return;
+  if (menu !== thisMenu) return;   // closed while loading
 
-  menu.querySelector(".fp-body").innerHTML = `
-    <div class="fp-list" role="menu">
-      ${tasks.map((t) => `
-        <button type="button" class="fp-item" role="menuitem" data-runtask="${esc(t.id)}">
-          <span>${esc(t.name)}${t.mkt ? ' <span class="tm-tag">Marketing email</span>' : ""}</span>${
-            t.description ? `<small>${esc(t.description)}</small>` : ""}
-        </button>`).join("")}
-      ${tasks.length ? "" : `<div class="fp-empty">No patient email tasks are published yet.${
-        isAdmin ? ' <a href="#/tasks/types">Set them up in Task types</a>' : ""}</div>`}
-      ${email ? `<a class="fp-item fp-plain" role="menuitem" href="mailto:${esc(email)}">
-        <span>Write my own email</span><small>Opens your email app</small></a>` : ""}
-    </div>`;
+  const byName = (a, b) => String(a.name).localeCompare(String(b.name), "en-AU");
+  const groups = [
+    ["Patient emails", tasks.filter((t) => !t.mkt).sort(byName)],
+    ["Marketing emails", tasks.filter((t) => t.mkt).sort(byName)],
+  ].filter(([, list]) => list.length);
+
+  const row = (t) => `
+    <button type="button" class="em-item${t.mkt ? " is-mkt" : ""}" role="menuitem" data-runtask="${esc(t.id)}"
+      data-find="${esc(`${t.name} ${t.description || ""}`.toLowerCase())}">
+      <span class="em-ic">${t.mkt ? EM_IC.mkt : EM_IC.mail}</span>
+      <span class="em-t"><b>${esc(t.name)}</b>${t.description ? `<small>${esc(t.description)}</small>` : ""}</span>
+      <span class="em-go">${EM_IC.chev}</span>
+    </button>`;
+
+  thisMenu.querySelector(".em-scroll").innerHTML = `
+    ${tasks.length > 6 ? `<div class="em-search">${EM_IC.search}
+      <input type="search" class="fp-search" placeholder="Search emails" aria-label="Search emails" autocomplete="off" spellcheck="false" /></div>` : ""}
+    <div role="menu">
+      ${groups.map(([title, list]) => `<div class="em-group">
+        <div class="em-group-h">${esc(title)}<span>${list.length}</span></div>${list.map(row).join("")}</div>`).join("")}
+    </div>
+    ${tasks.length
+      ? '<p class="em-none" hidden>No emails match that search.</p>'
+      : `<p class="em-empty">No patient emails are published yet.${isAdmin ? ' <a href="#/tasks/types">Set them up in Task types</a>' : ""}</p>`}`;
+  if (email) {
+    thisMenu.insertAdjacentHTML("beforeend", `
+      <a class="em-own" role="menuitem" href="mailto:${esc(email)}">
+        <span class="em-ic">${EM_IC.pen}</span>
+        <span class="em-t"><b>Write my own email</b><small>Opens your email app</small></span>
+      </a>`);
+  }
   position();
 
-  menu.addEventListener("click", (e) => {
+  const search = thisMenu.querySelector(".fp-search");
+  const navItems = () => [...thisMenu.querySelectorAll(".em-item:not([hidden]), .em-own")];
+  if (search) {
+    search.addEventListener("input", () => {
+      const q = search.value.trim().toLowerCase();
+      const words = q.split(/\s+/).filter(Boolean);
+      let any = false;
+      thisMenu.querySelectorAll(".em-item").forEach((b) => {
+        b.hidden = !words.every((w) => b.dataset.find.includes(w));
+        if (!b.hidden) any = true;
+      });
+      thisMenu.querySelectorAll(".em-group").forEach((g) => { g.hidden = !g.querySelector(".em-item:not([hidden])"); });
+      thisMenu.querySelector(".em-none").hidden = any;
+    });
+  }
+
+  thisMenu.addEventListener("click", (e) => {
+    if (e.target.closest(".em-own")) { setTimeout(() => closeFormPicker(), 0); return; }   // the email app opens
     const item = e.target.closest("[data-runtask]");
     if (!item) return;
     const id = item.dataset.runtask;
     closeFormPicker();
     location.hash = `#/tasks/run/${encodeURIComponent(id)}/${encodeURIComponent(patientId)}`;
   });
-  const first = menu.querySelector(".fp-item");
-  if (first) first.focus();
+
+  thisMenu.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target === search) {
+      e.preventDefault();
+      const first = navItems()[0];
+      if (first) first.click();
+      return;
+    }
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    const list = navItems();
+    if (!list.length) return;
+    e.preventDefault();
+    const i = list.indexOf(document.activeElement);
+    const next = e.key === "ArrowDown"
+      ? list[i < 0 ? 0 : Math.min(i + 1, list.length - 1)]
+      : i <= 0 ? (search || list[0]) : list[i - 1];
+    next.focus();
+  });
+
+  // The cursor goes in the search box on a computer, not on the iPad (the keyboard would pop up)
+  const fine = window.matchMedia && matchMedia("(pointer: fine)").matches;
+  if (search && fine) search.focus();
+  else { const first = navItems()[0]; if (first) first.focus({ preventScroll: true }); }
 }
 
 export function initFormPicker(contentEl, { getStaff }) {
@@ -296,7 +394,8 @@ export function initFormPicker(contentEl, { getStaff }) {
     }, true);
 
   document.addEventListener("pointerdown", (e) => {
-    if (menu && !menu.contains(e.target) && !(anchor && anchor.contains(e.target))) closeFormPicker();
+    const a = menu ? liveAnchor() : null;
+    if (menu && !menu.contains(e.target) && !(a && a.contains(e.target))) closeFormPicker();
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && menu) closeFormPicker(true);
