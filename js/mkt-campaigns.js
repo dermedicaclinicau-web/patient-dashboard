@@ -983,7 +983,7 @@ function reportHtml(c) {
         <tbody>${c.links.map((l, i) => `<tr class="mc-linkrow" data-wholink="${i}" title="See who clicked this">
           <td><strong>${esc(l.text || "Link")}</strong>${l.kind === "buy" ? ' <span class="mc-pill is-sent">Buy now</span>'
             : l.kind === "qr" ? ' <span class="mc-pill is-draft">QR code</span>' : ""}<small>${esc(l.kind === "buy"
-            ? [l.item, l.price ? `$${n0(l.price)}` : ""].filter(Boolean).join(" · ") : host(l.url))}</small></td>`
+            ? [l.item, l.price ? `$${n0(l.price)}` : ""].filter(Boolean).join(" · ") : host(l.url))}</small></td>
           <td><span class="mc-num">${n0(c.linkClicks[`l${i}`])}</span></td>
           <td class="mk-act"><button type="button" class="lh-btn" data-mklist="link" data-link="${i}">Make a list</button></td>
         </tr>`).join("")}</tbody></table></div>` : ""}
