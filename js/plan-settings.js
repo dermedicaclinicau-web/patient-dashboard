@@ -15,14 +15,19 @@ const errText = (err, fb) => (err && err.code === "permission-denied"
   : err && err.code === "FORBIDDEN" ? "Only Admins can use Suggest with AI."
   : err && err.message && !err.code ? err.message : fb);
 
-export async function renderPlanSettings(body, { staff } = {}) {
+// part: "services" (Appointment services), "copy" (Patient copy), or "all" (both)
+export async function renderPlanSettings(body, { staff, part = "all" } = {}) {
+  const showSvc = part !== "copy";
+  const showCopy = part !== "services";
   body.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
   let cfg;
   let seen;
   let docCfg;
   try {
     [cfg, seen, docCfg] = await Promise.all([
-      getPlanSettings(), listServicesSeen(180).catch(() => []), getPlanDocSettings().catch(() => ({ ...PLAN_DOC_DEFAULTS })),
+      getPlanSettings(),
+      showSvc ? listServicesSeen(180).catch(() => []) : [],
+      showCopy ? getPlanDocSettings().catch(() => ({ ...PLAN_DOC_DEFAULTS })) : null,
     ]);
   } catch (err) {
     console.error("Plan settings failed:", err);
@@ -44,13 +49,13 @@ export async function renderPlanSettings(body, { staff } = {}) {
   const con = (name) => cfg.concerns.find((c) => c.name === name) || { label: name, colour: "#888780" };
   const chip = (name) => `<span class="ps-chip" style="--c:${esc(con(name).colour)}">${esc(con(name).label)}</span>`;
 
-  body.innerHTML = `
-
+  const svcHtml = () => `
     <section class="tb-card">
       <h4>Services and concerns</h4>
       <p class="muted ps-note">Which concerns each appointment service treats. The treatment plan uses this to tick off steps when a
         matching visit happens, and downtime to warn about patient events (weddings, holidays). Consultations and reviews:
-        mark them <strong>Not a treatment</strong>.</p>
+        mark them <strong>Not a treatment</strong>. To group services into the treatments staff pick on a plan, open a concern in
+        <strong>Concerns and treatments</strong>.</p>
       <div class="inv-tools">
         <label class="ib-search inv-find">${SEARCH}<input type="search" data-ps-q placeholder="Search services" aria-label="Search services" /></label>
         <div class="fe-seg">${[["todo", "Not set up"], ["done", "Set up"], ["all", "All"]].map(([v, l]) =>
@@ -60,7 +65,9 @@ export async function renderPlanSettings(body, { staff } = {}) {
         <button type="button" class="lh-btn is-primary" data-ps="ai">Suggest with AI</button>
       </div>
       <div class="sl-list" data-role="pslist"></div>
-    </section>
+    </section>`;
+
+  const copyHtml = () => `
     <section class="tb-card">
       <h4>Patient copy</h4>
       <p class="muted ps-note">How a treatment plan looks when it's printed or emailed to a patient. The logo and clinic details
@@ -76,8 +83,9 @@ export async function renderPlanSettings(body, { staff } = {}) {
         <label class="lh-field inv-span"><span class="lh-label">Email message</span><textarea data-pd="emailMessage" rows="5" maxlength="3000">${esc(docCfg.emailMessage)}</textarea></label>
       </div>
       <div class="lh-actions"><button type="button" class="lh-btn is-primary" data-ps="save-doc">Save patient copy</button></div>
-    </section> `;
-    
+    </section>`;
+
+  body.innerHTML = (showSvc ? svcHtml() : "") + (showCopy ? copyHtml() : "");
 
   const listEl = body.querySelector('[data-role="pslist"]');
 
@@ -90,6 +98,7 @@ export async function renderPlanSettings(body, { staff } = {}) {
   }
 
   function drawList() {
+    if (!listEl) return;   // the Patient copy tab has no list
     const list = visible();
     listEl.innerHTML = list.length ? list.map(([k, r]) => `
       <div class="sl-row${isSet(r) ? "" : " is-unlinked"}">
@@ -115,7 +124,7 @@ export async function renderPlanSettings(body, { staff } = {}) {
     rows.forEach((r) => { r.concerns = [...new Set(r.concerns.map((n) => canonicalCategory(n) || n))].filter((n) => names.has(n)); });
     drawList();
   };
-  window.addEventListener("plan-concerns-changed", onConcerns);
+  if (showSvc) window.addEventListener("plan-concerns-changed", onConcerns);
 
   async function persist() {
     await saveServiceConcerns([...rows.values()], staff);

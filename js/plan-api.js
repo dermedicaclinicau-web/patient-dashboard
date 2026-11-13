@@ -98,7 +98,7 @@ export function cleanTreatment(t = {}) {
       : Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4),
     concern: canonicalCategory(t.concern),
     name: clip(t.name, 120),
-    services: list(t.services, 150, 20),   // appointment services that count as this treatment
+    services: list(t.services, 150, 60),   // appointment services that count as this treatment
     areas: list(t.areas, 60, 12),          // the areas it's offered for
     quote: clip(t.quote, 200),             // e.g. "$899 per session"
     description: clip(t.description, 300), // what it does, in the patient's words (shown on their copy)
@@ -188,7 +188,7 @@ export async function deletePlanConcern(name, moveTo, staff) {
     s.treatments.filter((t) => t.concern === name).forEach((t) => {
       const same = treatments.find((y) => y.concern === to.name && y.name.trim().toLowerCase() === t.name.trim().toLowerCase());
       if (!same) { treatments.push({ ...t, concern: to.name }); return; }
-      same.services = [...new Set([...same.services, ...t.services])].slice(0, 20);
+      same.services = [...new Set([...same.services, ...t.services])].slice(0, 60);
       same.areas = [...new Set([...same.areas, ...t.areas])].slice(0, 12);
       if (!same.quote) same.quote = t.quote;
       if (!same.description) same.description = t.description;

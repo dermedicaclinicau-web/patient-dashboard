@@ -16,6 +16,18 @@ const MAX_CONCERNS = 40;
 const MAX_TREATMENTS = 300;
 const CHEV = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>';
 
+// The words service names start with: "Wrinkle Relaxer 3L" + "Wrinkle Relaxer Frown L" → "Wrinkle Relaxer"
+function commonName(names) {
+  const words = names.map((n) => n.replace(/\[[^\]]*\]/g, " ").trim().split(/\s+/));
+  if (words.length === 1) return words[0].join(" ");
+  const out = [];
+  for (let i = 0; i < words[0].length; i++) {
+    const w = words[0][i];
+    if (words.every((x) => x[i] && x[i].toLowerCase() === w.toLowerCase())) out.push(w); else break;
+  }
+  return out.join(" ");
+}
+
 function openDlg(html) {
   const dlg = document.createElement("dialog");
   dlg.className = "lh-dialog inv-dlg pcg-dlg";
@@ -37,6 +49,8 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
       services: s.services || [],
       moved: s.moved || [],                // concerns deleted and moved into another
       seen: seen.map((x) => x.service),   // every service booked in the last 6 months, set up or not
+      seenN: new Map(seen.map((x) => [serviceKey(x.service), x.n || 0])),   // bookings in the last 6 months
+      pick: new Map(),                     // concern name → services ticked for "Make a treatment"
       open: new Set(), status: "", bad: false,
     };
   } catch (err) {
@@ -47,6 +61,15 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
   if (!el.isConnected) return;
 
   const txOf = (name) => st.treatments.filter((t) => t.concern === name);
+  // Appointment services set up for a concern (Appointment services tab), most booked first
+  const svcOf = (name) => {
+    const m = new Map();
+    st.services.filter((r) => r.concerns.includes(name)).forEach((r) => m.set(serviceKey(r.service), r.service));
+    return [...m.entries()].sort(([a, x], [b, y]) =>
+      (st.seenN.get(b) || 0) - (st.seenN.get(a) || 0) || x.localeCompare(y, "en-AU"));
+  };
+  // Services already linked to one of the concern's treatments
+  const usedKeys = (name) => new Set(txOf(name).flatMap((t) => t.services.map(serviceKey)));
   const conOf = (node) => {
     const art = node.closest(".pcg-con");
     return art ? st.concerns[Number(art.dataset.i)] || null : null;
@@ -96,6 +119,7 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
 
   function rowHtml(c, i) {
     const list = txOf(c.name);
+    const svcs = svcOf(c.name);
     const open = st.open.has(c.name);
     return `<article class="pcg-con${c.hidden ? " is-hidden" : ""}${open ? " is-open" : ""}" style="--c:${esc(c.colour)}" data-i="${i}">
       <header class="pcg-con-head">
@@ -107,7 +131,8 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
             ${c.label !== c.name ? `title="Saved in plans as ${esc(c.name)}"` : ""} />
         </span>
         ${c.hidden ? '<span class="pcg-tag">Hidden</span>' : ""}
-        <button type="button" class="pcg-count" data-pcg="toggle">${list.length} treatment${list.length === 1 ? "" : "s"}</button>
+        <button type="button" class="pcg-count" data-pcg="toggle">${list.length} treatment${list.length === 1 ? "" : "s"}${
+          svcs.length ? ` · ${svcs.length} service${svcs.length === 1 ? "" : "s"}` : ""}</button>
         <span class="pcg-acts">
           <button type="button" class="sc-ar-mv" data-pcg="up"${i === 0 ? " disabled" : ""} aria-label="Move ${esc(c.label)} up">▲</button>
           <button type="button" class="sc-ar-mv" data-pcg="down"${i === st.concerns.length - 1 ? " disabled" : ""} aria-label="Move ${esc(c.label)} down">▼</button>
@@ -117,12 +142,44 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
       </header>
       ${open ? `<div class="pcg-body">
         ${list.length ? `<ul class="pcg-tx">${list.map(txHtml).join("")}</ul>`
-          : '<p class="tb-none">No treatments yet. Add the ones you offer for this concern, so staff can pick them on a patient\'s plan.</p>'}
+          : `<p class="tb-none">No treatments yet. ${svcs.length
+            ? "Make them from the appointment services below, or add one by hand."
+            : "Add the ones you offer for this concern, so staff can pick them on a patient's plan."}</p>`}
         <button type="button" class="lh-btn" data-pcg="add-tx">+ Add a treatment</button>
+        ${svcs.length ? svcPanelHtml(c, svcs) : ""}
       </div>` : ""}
     </article>`;
   }
+  // The concern's appointment services: tick the ones that are one treatment, then make it
+  function svcPanelHtml(c, svcs) {
+    const used = usedKeys(c.name);
+    const picked = st.pick.get(c.name) || new Set();
+    const free = svcs.filter(([k]) => !used.has(k));
+    const done = svcs.filter(([k]) => used.has(k));
+    return `<div class="pcg-svcs">
+      <p class="pcg-svcs-h"><strong>Appointment services for this concern</strong>
+        <small>${free.length
+          ? `${free.length} not in a treatment yet. Tick the ones that are the same treatment (e.g. every Wrinkle Relaxer area), then make a treatment from them.`
+          : "Every one is in a treatment."}</small></p>
+      <div class="pcg-svc-chips">
+        ${free.map(([k, s]) => `<label class="pcg-svc${picked.has(k) ? " is-on" : ""}">
+          <input type="checkbox" data-pick="${esc(k)}"${picked.has(k) ? " checked" : ""} />${esc(s)}</label>`).join("")}
+        ${done.map(([, s]) => `<span class="pcg-svc is-used" title="Already in a treatment">✓ ${esc(s)}</span>`).join("")}
+      </div>
+      ${free.length ? `<div class="pcg-svc-acts">
+        <button type="button" class="lh-btn is-primary" data-pcg="make-tx"${picked.size ? "" : " disabled"}>${
+          picked.size ? `Make a treatment from ${picked.size} service${picked.size === 1 ? "" : "s"}` : "Tick services to make a treatment"}</button>
+        ${picked.size ? '<button type="button" class="lh-btn is-quiet" data-pcg="clear-pick">Clear</button>' : ""}
+      </div>` : ""}
+    </div>`;
+  }
 
+  // Redraws one concern only (keeps the page where it is)
+  function redrawRow(c) {
+    const i = st.concerns.indexOf(c);
+    const art = el.querySelector(`.pcg-con[data-i="${i}"]`);
+    if (art) art.outerHTML = rowHtml(c, i); else draw();
+  }
   function draw() {
     if (!el.isConnected) return;
     el.innerHTML = `<section class="tb-card pcg">
@@ -186,11 +243,12 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
 
   /* ---------- Add / edit a treatment ---------- */
 
-  function editTreatment(c, t) {
+  function editTreatment(c, t, preset = null) {
     const isNew = !t;
     if (isNew && st.treatments.length >= MAX_TREATMENTS) { showToast(`You can have up to ${MAX_TREATMENTS} treatments in total.`); return; }
     const x = t ? { ...t, services: [...t.services], areas: [...t.areas] }
-      : { id: newId(), concern: c.name, name: "", services: [], areas: [], quote: "", description: "", pattern: "course", sessions: 3, intervalWeeks: 4 };
+      : { id: newId(), concern: c.name, name: preset ? preset.name : "", services: preset ? [...preset.services] : [],
+          areas: [], quote: "", description: "", pattern: "course", sessions: 3, intervalWeeks: 4 };
     const uniq = (arr) => [...new Map(arr.map((s) => [serviceKey(s), s])).values()];
     const byName = (a, b) => a.localeCompare(b, "en-AU");
     const mine = uniq(st.services.filter((r) => r.concerns.includes(c.name)).map((r) => r.service)).sort(byName);
@@ -303,13 +361,14 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
       }
       const next = {
         id: x.id, concern: c.name, name,
-        services: [...form.querySelectorAll('[name="svc"]:checked')].map((b) => b.value).slice(0, 20),
+        services: [...form.querySelectorAll('[name="svc"]:checked')].map((b) => b.value).slice(0, 60),
         areas: x.areas, quote: f.quote.value.trim(), description: f.desc.value.trim(), ...freq.read(),
         hidden: false,
       };
       const i = st.treatments.findIndex((y) => y.id === x.id);
       if (i > -1) st.treatments[i] = next; else st.treatments.push(next);
       st.open.add(c.name);
+      st.pick.delete(c.name);   // the ticked services are in a treatment now
       dlg.close();
       draw();
       persist("treatments");
@@ -487,6 +546,14 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
       persist("concerns");
     } else if (act === "del-concern") {
       deleteConcern(c);
+    } else if (act === "make-tx") {
+      const set = st.pick.get(c.name);
+      if (!set || !set.size) return;
+      const names = svcOf(c.name).filter(([k]) => set.has(k)).map(([, s]) => s);
+      editTreatment(c, null, { name: commonName(names), services: names });
+    } else if (act === "clear-pick") {
+      st.pick.delete(c.name);
+      redrawRow(c);
     } else if (act === "add-tx") {
       editTreatment(c, null);
     } else if (act === "edit-tx" || act === "del-tx") {
@@ -514,6 +581,16 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
   });
 
   el.addEventListener("change", (e) => {
+    const pk = e.target.closest("[data-pick]");
+    if (pk) {
+      const c = conOf(pk);
+      if (!c) return;
+      const set = st.pick.get(c.name) || new Set();
+      if (pk.checked) set.add(pk.dataset.pick); else set.delete(pk.dataset.pick);
+      st.pick.set(c.name, set);
+      redrawRow(c);
+      return;
+    }
     const f = e.target.dataset.f;
     const c = f ? conOf(e.target) : null;
     if (!c) return;
@@ -530,6 +607,7 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
   const onServices = (e) => {
     if (!el.isConnected) { window.removeEventListener("plan-services-changed", onServices); return; }
     st.services = (e.detail || []).filter((r) => r.service);
+    draw(); 
   };
   window.addEventListener("plan-services-changed", onServices);
 

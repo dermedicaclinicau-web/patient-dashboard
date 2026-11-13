@@ -100,7 +100,7 @@ export function cleanLine(l = {}) {
     description: clip(l.description, 300),   // for the patient's copy (empty: the clinic's description for that treatment)
     startMonth: MONTH_RE.test(l.startMonth || "") ? l.startMonth : "",
     countFrom: /^\d{4}-\d{2}-\d{2}$/.test(l.countFrom || "") ? l.countFrom : "",
-    services: [...new Set((Array.isArray(l.services) ? l.services : []).map((s) => clip(s, 150)).filter(Boolean))].slice(0, 20),
+    services: [...new Set((Array.isArray(l.services) ? l.services : []).map((s) => clip(s, 150)).filter(Boolean))].slice(0, 60),
     overrides: l.overrides && typeof l.overrides === "object" && !Array.isArray(l.overrides) ? l.overrides : {},
   };
 }
@@ -180,7 +180,7 @@ export function matchServices(treatment, concern, services) {
   return (services || [])
     .filter((r) => (r.concerns || []).includes(concern))
     .filter((r) => { const sw = words(r.service); return tw.some((w) => sw.includes(w)); })
-    .map((r) => r.service).slice(0, 20);
+    .map((r) => r.service).slice(0, 60);
 }
 
 // Do a treatment and a service name share a real word? ("Skin Needling full face" ~ "Skin Needling Face")
