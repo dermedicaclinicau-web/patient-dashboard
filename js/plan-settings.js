@@ -5,6 +5,7 @@ import {
   getPlanDocSettings, savePlanDocSettings, PLAN_DOC_DEFAULTS,
 } from "./plan-api.js";
 import { showToast } from "./utils.js";
+import { canonicalCategory } from "./plan-editor.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const SEARCH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
@@ -110,7 +111,8 @@ export async function renderPlanSettings(body, { staff } = {}) {
     if (!body.isConnected) { window.removeEventListener("plan-concerns-changed", onConcerns); return; }
     cfg.concerns = (e.detail || []).map((c) => ({ ...c }));
     const names = new Set(cfg.concerns.map((c) => c.name));
-    rows.forEach((r) => { r.concerns = r.concerns.filter((n) => names.has(n)); });   // a deleted concern comes off its services
+    // A concern moved into another follows it; a deleted one comes off its services
+    rows.forEach((r) => { r.concerns = [...new Set(r.concerns.map((n) => canonicalCategory(n) || n))].filter((n) => names.has(n)); });
     drawList();
   };
   window.addEventListener("plan-concerns-changed", onConcerns);

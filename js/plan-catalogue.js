@@ -1,8 +1,8 @@
 // System configuration → Treatment plans: the clinic's concerns, and the treatments offered for each one.
 // Every change saves by itself.
-import { getPlanSettings, savePlanConcernList, savePlanTreatments } from "./plan-api.js";
+import { getPlanSettings, savePlanConcernList, savePlanTreatments, deletePlanConcern } from "./plan-api.js";
 import { catKey } from "./plan-editor.js";
-import { patternText } from "./master-plan-api.js";
+import { patternText, countPlansWith, syncPlanConcerns } from "./master-plan-api.js";
 import { listServicesSeen, serviceKey } from "./inventory-api.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
@@ -35,6 +35,7 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
       concerns: s.concerns.map((c) => ({ ...c })),
       treatments: (s.treatments || []).map((t) => ({ ...t })),
       services: s.services || [],
+      moved: s.moved || [],                // concerns deleted and moved into another
       seen: seen.map((x) => x.service),   // every service booked in the last 6 months, set up or not
       open: new Set(), status: "", bad: false,
     };
@@ -111,7 +112,7 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
           <button type="button" class="sc-ar-mv" data-pcg="up"${i === 0 ? " disabled" : ""} aria-label="Move ${esc(c.label)} up">▲</button>
           <button type="button" class="sc-ar-mv" data-pcg="down"${i === st.concerns.length - 1 ? " disabled" : ""} aria-label="Move ${esc(c.label)} down">▼</button>
           <button type="button" class="po-mini" data-pcg="hide">${c.hidden ? "Show" : "Hide"}</button>
-          ${c.custom && c.hidden ? '<button type="button" class="po-mini pcg-del" data-pcg="del-concern">Delete</button>' : ""}
+          <button type="button" class="po-mini pcg-del" data-pcg="del-concern">Delete</button>
         </span>
       </header>
       ${open ? `<div class="pcg-body">
@@ -137,6 +138,10 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
       <div class="pcg-list">${st.concerns.map(rowHtml).join("")}</div>
       <p class="fe-note">Hidden concerns can't be chosen for new plans. Plans that already use one keep it.
         Renaming a concern changes what staff and patients see. Plans keep using it as before.</p>
+      ${st.moved.length ? `<p class="fe-note pcg-moved">Deleted and moved: ${st.moved.map((m) =>
+        `${esc(m.from)} → ${esc((st.concerns.find((y) => y.name === m.to) || { label: m.to }).label)}`).join(" · ")}.
+        Older consultations read these as the new concern.
+        <button type="button" class="po-mini" data-pcg="sync-plans">Check patient plans</button></p>` : ""}
     </section>`;
   }
 
@@ -312,6 +317,148 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
     form.elements.txname.focus();
   }
 
+  /* ---------- Delete a concern (and move what uses it) ---------- */
+
+  const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  const failText = (err, fb) => (err && err.code === "permission-denied"
+    ? "Not saved: you don't have access, or the Firestore rules don't allow it yet."
+    : err && err.message && !err.code ? err.message : fb);
+
+  // Saves patient plans still under a moved concern's old name, with a progress bar in the window
+  function runSync(dlg) {
+    const box = dlg.querySelector(".pcg-progress");
+    const prog = dlg.querySelector('[data-role="prog"]');
+    const bar = dlg.querySelector(".pcg-bar i");
+    box.hidden = false;
+    return syncPlanConcerns(staff, (done, total) => {
+      prog.textContent = total ? `Updating patient plans: ${done} of ${total}` : "Every patient plan is up to date.";
+      bar.style.width = `${total ? Math.round((done / total) * 100) : 100}%`;
+    });
+  }
+
+  function deleteConcern(c) {
+    if (!c.hidden && st.concerns.filter((y) => !y.hidden).length <= 1) { showToast("Keep at least one concern showing."); return; }
+    const targets = st.concerns.filter((y) => y !== c && !y.hidden);
+    const txN = txOf(c.name).length;
+    const svcN = st.services.filter((r) => r.concerns.includes(c.name)).length;
+    const dlg = openDlg(`
+      <div class="lh-dialog-head"><h3>Delete ${esc(c.label)}?</h3>
+        <p>It comes off this list and can't be chosen for plans any more.</p></div>
+      <ul class="pcg-uses">
+        <li>${plural(txN, "treatment")} in its list</li>
+        <li>${plural(svcN, "appointment service")} set up for it</li>
+        <li data-role="plans">Checking patient plans…</li>
+      </ul>
+      ${targets.length ? `<label class="pcg-opt"><input type="radio" name="how" value="move" checked />
+        <span><strong>Move everything to another concern</strong>
+          <small>Its treatments and services move across, and every patient plan that uses it is updated (each plan's history keeps the old version). Older consultations read as the new concern too.</small></span></label>
+      <label class="lh-field pcg-to"><span class="lh-label">Move into</span>
+        <select class="fb-select" name="to"><option value="">Choose a concern…</option>${
+          targets.map((y) => `<option value="${esc(y.name)}">${esc(y.label)}</option>`).join("")}</select></label>` : ""}
+      <label class="pcg-opt"><input type="radio" name="how" value="drop"${targets.length ? "" : " checked"} />
+        <span><strong>Delete without moving</strong>
+          <small>Its treatments are deleted and its services are unlinked. Patient plans that use it keep it, shown in grey.
+            If a new consultation picks it, staff are asked to choose a concern.</small></span></label>
+      <div class="pcg-progress" hidden><div class="pcg-bar"><i></i></div><small data-role="prog"></small></div>
+      <p class="lh-error" role="alert" hidden></p>
+      <div class="lh-actions">
+        <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+        <button type="submit" class="lh-btn pcg-danger">Delete</button>
+      </div>`);
+    const form = dlg.querySelector("form");
+    const err = dlg.querySelector(".lh-error");
+    const fail = (t) => { err.textContent = t; err.hidden = false; };
+    const sel = form.elements.to;
+    let busy = false;
+
+    countPlansWith(c.name)
+      .then((n) => { const li = dlg.querySelector('[data-role="plans"]'); if (li) li.textContent = `${plural(n, "patient plan")} use it`; })
+      .catch((ex) => {
+        console.warn("Plans not counted:", ex);
+        const li = dlg.querySelector('[data-role="plans"]');
+        if (li) li.textContent = "Patient plans couldn't be checked";
+      });
+
+    form.addEventListener("change", () => { if (sel) sel.disabled = form.elements.how.value !== "move"; });
+    dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });   // Esc can't close it mid-way
+    form.addEventListener("click", (e) => { if (!busy && e.target.closest('[data-act="cancel"]')) dlg.close(); });
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (busy) return;
+      err.hidden = true;
+      const to = form.elements.how.value === "move" && sel ? sel.value : "";
+      if (form.elements.how.value === "move" && !to) { fail("Choose the concern to move it into."); return; }
+      const toLabel = to ? (st.concerns.find((y) => y.name === to) || { label: to }).label : "";
+      const inputs = [...form.querySelectorAll("input, select, button")];
+      const btn = form.querySelector('[type="submit"]');
+      busy = true;
+      inputs.forEach((x) => { x.disabled = true; });
+      btn.textContent = "Deleting…";
+      try {
+        const job = chain.then(() => deletePlanConcern(c.name, to, staff));   // after any change still saving
+        chain = job.catch(() => {});
+        const s = await job;
+        Object.assign(st, {
+          concerns: s.concerns.map((x) => ({ ...x })), treatments: s.treatments.map((x) => ({ ...x })),
+          services: s.services, moved: s.moved || [],
+        });
+        st.open.delete(c.name);
+        if (to) st.open.add(to);
+        draw();
+        setStatus("All changes saved");
+        window.dispatchEvent(new CustomEvent("plan-concerns-changed", { detail: st.concerns }));
+        if (!to) { busy = false; dlg.close(); showToast(`${c.label} deleted`); return; }
+
+        btn.textContent = "Updating plans…";
+        const r = await runSync(dlg);
+        busy = false;
+        if (!r.failed.length) {
+          dlg.close();
+          showToast(`${c.label} moved into ${toLabel}${r.total ? ` · ${plural(r.total, "patient plan")} updated` : ""}`);
+          return;
+        }
+        fail(`${plural(r.failed.length, "patient plan")} couldn't be updated. They already show ${toLabel}. Press Check patient plans under the list to try them again.`);
+        dlg.querySelector(".lh-actions").innerHTML = '<button type="button" class="lh-btn is-primary" data-act="cancel">Close</button>';
+      } catch (ex) {
+        console.error("Delete concern failed:", ex);
+        busy = false;
+        inputs.forEach((x) => { x.disabled = false; });
+        if (sel) sel.disabled = form.elements.how.value !== "move";
+        btn.textContent = "Delete";
+        fail(failText(ex, "Couldn't delete it. Check your connection and try again."));
+      }
+    });
+  }
+
+  // "Check patient plans": any plan still under a moved concern's old name (e.g. a sync that was interrupted)
+  function syncDialog() {
+    const dlg = openDlg(`
+      <div class="lh-dialog-head"><h3>Check patient plans</h3>
+        <p>Plans still saved under a concern that was moved are saved again under the new one. Each plan's history keeps the old version.</p></div>
+      <div class="pcg-progress"><div class="pcg-bar"><i></i></div><small data-role="prog">Checking…</small></div>
+      <p class="lh-error" role="alert" hidden></p>
+      <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="cancel" disabled>Close</button></div>`);
+    const close = dlg.querySelector('[data-act="cancel"]');
+    const err = dlg.querySelector(".lh-error");
+    let busy = true;
+    dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
+    dlg.querySelector("form").addEventListener("submit", (e) => e.preventDefault());
+    close.addEventListener("click", () => dlg.close());
+    runSync(dlg).then((r) => {
+      dlg.querySelector('[data-role="prog"]').textContent = r.total
+        ? `${plural(r.total - r.failed.length, "patient plan")} updated` : "Every patient plan is up to date.";
+      if (r.failed.length) {
+        err.textContent = `${plural(r.failed.length, "plan")} couldn't be updated. They still show the new concern. Try again later.`;
+        err.hidden = false;
+      }
+    }).catch((ex) => {
+      console.error("Plan check failed:", ex);
+      err.textContent = failText(ex, "Couldn't check the patient plans. Try again.");
+      err.hidden = false;
+    }).finally(() => { busy = false; close.disabled = false; });
+  }
+
   /* ---------- Events ---------- */
 
   el.addEventListener("click", async (e) => {
@@ -319,6 +466,7 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
     if (!b) return;
     const act = b.dataset.pcg;
     if (act === "add-concern") { addConcern(); return; }
+    if (act === "sync-plans") { syncDialog(); return; }
     const c = conOf(b);
     if (!c) return;
     const i = st.concerns.indexOf(c);
@@ -338,19 +486,7 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
       draw();
       persist("concerns");
     } else if (act === "del-concern") {
-      const n = txOf(c.name).length;
-      const ok = await confirmDialog({
-        title: `Delete ${c.label}?`,
-        message: `It's removed from this list${n ? `, along with its ${n} treatment${n === 1 ? "" : "s"}` : ""}. ` +
-          "Patient plans that already use it keep it, shown in grey. This can't be undone.",
-        confirmLabel: "Delete", tone: "danger",
-      });
-      if (!ok) return;
-      st.concerns = st.concerns.filter((y) => y !== c);
-      st.treatments = st.treatments.filter((y) => y.concern !== c.name);
-      st.open.delete(c.name);
-      draw();
-      persist("concerns", "treatments");
+      deleteConcern(c);
     } else if (act === "add-tx") {
       editTreatment(c, null);
     } else if (act === "edit-tx" || act === "del-tx") {

@@ -33,19 +33,31 @@ const LEGACY_CATEGORIES = {
   "Active Acne": "Acne & Acne Scarring",
 };
 const CAT_LOOKUP = new Map();
-function rebuildLookup(known) {
+// known: the concerns on the list. moved: [{ from, to }] concerns deleted in settings and moved into another,
+// so the old name reads as the new one everywhere (consultations, plans, the AI's answers). Follows a chain of moves.
+function rebuildLookup(known, moved = []) {
   CAT_LOOKUP.clear();
   known.forEach((c) => CAT_LOOKUP.set(catKey(c), c));
+  const next = new Map(moved.map((m) => [catKey(m.from), m.to]));
+  moved.forEach((m) => {
+    if (CAT_LOOKUP.has(catKey(m.from))) return;   // it's on the list again
+    let to = m.to;
+    for (let i = 0; i < 6 && to && !CAT_LOOKUP.has(catKey(to)); i++) to = next.get(catKey(to));
+    if (to && CAT_LOOKUP.has(catKey(to))) CAT_LOOKUP.set(catKey(m.from), CAT_LOOKUP.get(catKey(to)));
+  });
+  // Older recorder names follow their concern, wherever it is now
   Object.entries(LEGACY_CATEGORIES).forEach(([old, now]) => {
-    if (!CAT_LOOKUP.has(catKey(old))) CAT_LOOKUP.set(catKey(old), now);
+    if (!CAT_LOOKUP.has(catKey(old)) && CAT_LOOKUP.has(catKey(now))) CAT_LOOKUP.set(catKey(old), CAT_LOOKUP.get(catKey(now)));
   });
 }
 rebuildLookup(BUILT_IN_CATEGORIES);
 
-// active: shown in pickers, in order. known: every concern ever set up (hidden ones too), so older plans still read.
-export function setCategories(active, known = active) {
+// active: shown in pickers, in order. known: every concern on the list (hidden ones too), so older plans still read.
+// moved / removed: concerns deleted in settings (a built-in one that's deleted isn't added back).
+export function setCategories(active, known = active, moved = [], removed = []) {
   CATEGORIES.splice(0, CATEGORIES.length, ...active);
-  rebuildLookup([...new Set([...BUILT_IN_CATEGORIES, ...known])]);
+  const gone = new Set([...moved.map((m) => catKey(m.from)), ...removed.map(catKey)]);
+  rebuildLookup([...new Set([...BUILT_IN_CATEGORIES.filter((b) => !gone.has(catKey(b))), ...known])], moved);
 }
 
 // Any spelling, old or new → today's name ("" if it isn't one of the 9)

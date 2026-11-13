@@ -21,7 +21,7 @@ import {
   fetchTranscriptRecords, socialHistoryEntries, toBullets, allTreatmentPlans,
   parseTimeline, extractSection,
 } from "./transcripts.js";
-import { readSidecar, planFromSidecar, planFromText } from "./plan-editor.js";
+import { readSidecar, planFromSidecar, planFromText, canonicalCategory } from "./plan-editor.js";
 import { createPlanOverview } from "./plan-overview.js";
 import { monthKey, monthLabel } from "./master-plan-api.js";
 import { CONCERN_COLOURS } from "./plan-api.js";
@@ -2031,7 +2031,8 @@ function timelineHtml(lines) {
 
 // Concern names and colours from Treatment plan settings (filled in when the master plan loads)
 const conLook = new Map();
-const conLookOf = (name) => conLook.get(name) || { label: name, colour: CONCERN_COLOURS[name] || "#888780" };
+const conLookOf = (name) => conLook.get(name) || conLook.get(canonicalCategory(name))
+  || { label: name, colour: CONCERN_COLOURS[name] || "#888780" };
 
 // The settings arrived after the timelines were drawn: put the clinic's names and colours on them
 function paintConcerns(root) {

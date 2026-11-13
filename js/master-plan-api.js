@@ -2,7 +2,7 @@
 import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, getDocs, collection, query, orderBy, limit, runTransaction, serverTimestamp }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { CATEGORIES, canonicalCategory, PATTERNS, schedulesOf, afterText, AFTER_RE } from "./plan-editor.js";
+import { CATEGORIES, canonicalCategory, catKey, PATTERNS, schedulesOf, afterText, AFTER_RE } from "./plan-editor.js";
 import { scheduleText } from "./plan-frequency.js";
 
 export const PLAN_STATUS = {
@@ -360,4 +360,56 @@ export async function saveMasterPlan(patient, next, meta, staff) {
     });
     return v;
   });
+}
+
+/* ---------- After a concern is deleted in settings ---------- */
+
+// Patient plans that list this concern (by any spelling)
+export async function countPlansWith(name) {
+  const k = catKey(name);
+  const hit = (key) => catKey(key) === k || canonicalCategory(key) === name;
+  const snap = await getDocs(collection(db, "treatment_plans"));
+  return snap.docs.filter((d) => (d.data().concerns || []).some((c) => hit(c && c.key))).length;
+}
+
+// Every patient plan still saved under an old concern name (a concern moved into another in settings)
+// is saved again under today's name, as a new version with its history. A few at a time.
+// onProgress(done, total). Returns { total, failed: [patientIds] }.
+export async function syncPlanConcerns(staff, onProgress = () => {}) {
+  const stale = (raw) => [...new Set((raw.concerns || []).map((c) => String((c && c.key) || ""))
+    .filter((k) => { const n = canonicalCategory(k); return n && n !== k; }))];
+  const snap = await getDocs(collection(db, "treatment_plans"));
+  const todo = snap.docs.filter((d) => stale(d.data()).length);
+  const failed = [];
+  let done = 0;
+  let next = 0;
+  onProgress(0, todo.length);
+
+  const one = async (d) => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const s = attempt ? await getDoc(d.ref) : d;   // someone saved it meanwhile: read it again, once
+      if (!s.exists()) return;
+      const old = stale(s.data());
+      if (!old.length) return;
+      const p = normalisePlan(s.id, s.data());     // its concerns now carry today's names
+      try {
+        await saveMasterPlan({ id: s.id, pttId: p.patientPttId, name: p.patientName },
+          { status: p.status, concerns: p.concerns, events: p.events },
+          { action: "Concern moved in settings", summary: old.map((k) => `${k} → ${canonicalCategory(k)}`).join(", "),
+            expectedVersion: p.version, opId: newId() }, staff);
+        return;
+      } catch (err) {
+        if (attempt || !/Someone else/.test((err && err.message) || "")) throw err;
+      }
+    }
+  };
+  const worker = async () => {
+    while (next < todo.length) {
+      const d = todo[next++];
+      try { await one(d); } catch (err) { console.warn(`Plan ${d.id} not updated:`, err); failed.push(d.id); }
+      onProgress(++done, todo.length);
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  return { total: todo.length, failed };
 }

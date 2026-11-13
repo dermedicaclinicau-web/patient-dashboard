@@ -13720,3 +13720,19 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 .em-own .em-ic{background:#fff;border:1px solid #e2e8f0}
 .em-none,.em-empty{margin:0;padding:16px;font-size:13px;color:#64748b}
 @media (max-width:760px){.em-item,.em-own{padding:13px 14px}}
+
+/* Concerns and treatments → Delete a concern */
+.pcg-uses{margin:0;padding-left:18px;font-size:13px;line-height:1.7;color:#475569}
+.pcg-opt{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid #e2e8f0;border-radius:10px;cursor:pointer}
+.pcg-opt:has(input:checked){border-color:#0f766e;background:#f0fdfa}
+.pcg-opt input{margin-top:3px}
+.pcg-opt span{display:flex;flex-direction:column;gap:2px}
+.pcg-opt small{font-size:12px;line-height:1.45;color:#64748b}
+.pcg-to{margin:-4px 0 0 30px}
+.pcg-to select:disabled{opacity:.5}
+.pcg-progress{display:flex;flex-direction:column;gap:6px}
+.pcg-bar{height:6px;border-radius:99px;background:#e2e8f0;overflow:hidden}
+.pcg-bar i{display:block;width:0;height:100%;background:#0f766e;transition:width .2s}
+.pcg-progress small{font-size:12px;color:#475569}
+.lh-btn.pcg-danger{background:#b91c1c;border-color:#b91c1c;color:#fff}
+.pcg-moved{display:flex;flex-wrap:wrap;align-items:center;gap:6px}

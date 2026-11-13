@@ -43,13 +43,30 @@ export function cleanServiceRow(r = {}) {
 
 const EXTRA_COLOURS = ["#0F766E", "#9333EA", "#DB2777", "#0891B2", "#CA8A04", "#4F46E5"];
 
-// Saved rows → the full list: the clinic's order, the built-in 9 always present, no duplicates.
-// hidden: removed in settings (kept so older plans still show its name and colour). custom: added by the clinic.
-function concernList(saved) {
+const cleanName = (s) => clip(s, 60).replace(/\s+/g, " ");
+
+// Concerns deleted in settings: moved [{ from, to }] into another concern, or removed [names] without moving.
+// A name that's on the list again (added back) is neither.
+function cleanGone(x, list) {
+  const onList = new Set((list || []).map((c) => catKey(c && c.name)));
+  const seen = new Set();
+  const fresh = (k) => k && !onList.has(k) && !seen.has(k) && seen.add(k);
+  const moved = (Array.isArray(x && x.moved) ? x.moved : [])
+    .map((m) => ({ from: cleanName(m && m.from), to: cleanName(m && m.to) }))
+    .filter((m) => catKey(m.to) && catKey(m.from) !== catKey(m.to) && fresh(catKey(m.from))).slice(0, 100);
+  const removed = (Array.isArray(x && x.removed) ? x.removed : []).map(cleanName)
+    .filter((n) => fresh(catKey(n))).slice(0, 100);
+  return { moved, removed };
+}
+const goneKeysOf = (g) => new Set([...g.moved.map((m) => catKey(m.from)), ...g.removed.map(catKey)]);
+
+// Saved rows → the full list: the clinic's order, the built-in 9 unless deleted, no duplicates.
+// hidden: removed from pickers (kept so older plans still show its name and colour). custom: added by the clinic.
+function concernList(saved, goneKeys = new Set()) {
   const seen = new Set();
   const out = [];
   const add = (x, builtIn) => {
-    const name = builtIn || clip(x && x.name, 60).replace(/\s+/g, " ");
+    const name = builtIn || cleanName(x && x.name);
     const k = catKey(name);
     if (!k || seen.has(k) || (!builtIn && out.length >= 40)) return;
     seen.add(k);
@@ -64,11 +81,13 @@ function concernList(saved) {
   };
   (Array.isArray(saved) ? saved : []).forEach((x) =>
     add(x, BUILT_IN_CATEGORIES.find((b) => catKey(b) === catKey(x && x.name)) || ""));
-  BUILT_IN_CATEGORIES.forEach((b) => add({}, b));   // a built-in that hasn't been saved yet
+  // A built-in that hasn't been saved yet (unless it was deleted)
+  BUILT_IN_CATEGORIES.forEach((b) => { if (!goneKeys.has(catKey(b))) add({}, b); });
   return out;
 }
-const registerConcerns = (list) =>
-  setCategories(list.filter((x) => !x.hidden).map((x) => x.name), list.map((x) => x.name));
+const registerConcerns = (list, gone = { moved: [], removed: [] }) =>
+  setCategories(list.filter((x) => !x.hidden).map((x) => x.name), list.map((x) => x.name), gone.moved, gone.removed);
+
 
 // One treatment in a concern's list (System configuration → Treatment plans)
 export function cleanTreatment(t = {}) {
@@ -91,26 +110,37 @@ export function cleanTreatment(t = {}) {
   };
 }
 
-// { concerns: [{ name, label, colour, hidden, custom }], services: [...], treatments: [...] }
+// { concerns, services, treatments, moved: [{ from, to }], removed: [names] }
 export async function getPlanSettings() {
   const [c, s, t] = await Promise.all([
     getDoc(doc(db, "plan_settings", "concerns")),
     getDoc(doc(db, "plan_settings", "services")),
     getDoc(doc(db, "plan_settings", "treatments")).catch(() => null),
   ]);
-  const concerns = concernList(c.exists() ? c.data().concerns : []);
-  registerConcerns(concerns);   // before the services and treatments are read: they name concerns
+  const raw = c.exists() ? c.data() : {};
+  const saved = Array.isArray(raw.concerns) ? raw.concerns : [];
+  const gone = cleanGone(raw, saved);
+  const concerns = concernList(saved, goneKeysOf(gone));
+  registerConcerns(concerns, gone);   // before the services and treatments are read: they name concerns
   const services = (s.exists() && Array.isArray(s.data().services) ? s.data().services : [])
     .map(cleanServiceRow).filter((r) => r.service);
   const treatments = (t && t.exists() && Array.isArray(t.data().treatments) ? t.data().treatments : [])
     .map(cleanTreatment).filter((x) => x.name && x.concern);
-  return { concerns, services, treatments };
+  return { concerns, services, treatments, moved: gone.moved, removed: gone.removed };
 }
 
-async function writeConcerns(list, staff) {
-  const clean = concernList(list).map(({ name, label, colour, hidden }) => ({ name, label, colour, hidden }));
-  await setDoc(doc(db, "plan_settings", "concerns"), { concerns: clean, ...stamp(staff) });
-  registerConcerns(concernList(clean));
+// gone: { moved, removed } to save. Not given: what's saved now is kept.
+async function writeConcerns(list, staff, gone = null) {
+  let g = gone;
+  if (!g) {
+    const snap = await getDoc(doc(db, "plan_settings", "concerns"));
+    g = snap.exists() ? snap.data() : {};
+  }
+  const kept = cleanGone(g, list);
+  const full = concernList(list, goneKeysOf(kept));
+  const clean = full.map(({ name, label, colour, hidden }) => ({ name, label, colour, hidden }));
+  await setDoc(doc(db, "plan_settings", "concerns"), { concerns: clean, moved: kept.moved, removed: kept.removed, ...stamp(staff) });
+  registerConcerns(full, kept);
 }
 
 // The whole list exactly as given: order, hidden ones and the clinic's own (the Concerns and treatments card)
@@ -118,16 +148,62 @@ export function savePlanConcernList(concerns, staff) {
   return writeConcerns(concerns, staff);
 }
 
-// Names and colours only (the older Concerns card). The order, hidden concerns and the clinic's own stay as saved.
+// Names and colours only (the older Concerns card). The order, hidden, deleted and the clinic's own stay as saved.
 export async function savePlanConcerns(concerns, staff) {
   const snap = await getDoc(doc(db, "plan_settings", "concerns"));
-  const saved = concernList(snap.exists() ? snap.data().concerns : []);
+  const raw = snap.exists() ? snap.data() : {};
+  const saved0 = Array.isArray(raw.concerns) ? raw.concerns : [];
+  const gone = cleanGone(raw, saved0);
+  const saved = concernList(saved0, goneKeysOf(gone));
   const by = new Map((concerns || []).map((x) => [catKey(x && x.name), x]));
   await writeConcerns(saved.map((c) => {
     const x = by.get(catKey(c.name));
     return x ? { ...c, label: x.label, colour: x.colour } : c;
-  }), staff);
+  }), staff, gone);
 }
+
+// Deletes a concern. moveTo given: its treatments and services move into that concern, and from then on
+// its name reads as that concern everywhere (consultations, plans, the AI). Patient plans are then saved
+// again with syncPlanConcerns (master-plan-api.js).
+// No moveTo: its treatments are deleted, services unlinked, and plans that use it keep it (in grey).
+// Returns the settings as they are now.
+export async function deletePlanConcern(name, moveTo, staff) {
+  const s = await getPlanSettings();
+  const c = s.concerns.find((x) => x.name === name);
+  if (!c) throw new Error("That concern has already been deleted. Reload the page.");
+  const to = moveTo ? s.concerns.find((x) => x.name === moveTo && x !== c) : null;
+  if (moveTo && !to) throw new Error("The concern to move it into isn't on the list any more. Reload the page.");
+  const rest = s.concerns.filter((x) => x !== c);
+  if (!rest.some((x) => !x.hidden)) throw new Error("Keep at least one concern showing.");
+
+  // Earlier moves into this concern follow it (or, with nowhere to go, count as deleted)
+  const k = catKey(name);
+  const moved = s.moved.filter((m) => catKey(m.to) !== k || to).map((m) => (catKey(m.to) === k ? { ...m, to: to.name } : m));
+  const removed = [...s.removed, ...(to ? [] : s.moved.filter((m) => catKey(m.to) === k).map((m) => m.from))];
+  if (to) moved.push({ from: name, to: to.name }); else removed.push(name);
+
+  // Treatments: into the other concern. One with the same name there takes this one's services and areas.
+  const treatments = s.treatments.filter((t) => t.concern !== name);
+  if (to) {
+    s.treatments.filter((t) => t.concern === name).forEach((t) => {
+      const same = treatments.find((y) => y.concern === to.name && y.name.trim().toLowerCase() === t.name.trim().toLowerCase());
+      if (!same) { treatments.push({ ...t, concern: to.name }); return; }
+      same.services = [...new Set([...same.services, ...t.services])].slice(0, 20);
+      same.areas = [...new Set([...same.areas, ...t.areas])].slice(0, 12);
+      if (!same.quote) same.quote = t.quote;
+      if (!same.description) same.description = t.description;
+    });
+  }
+  const services = s.services.map((r) => ({
+    ...r, concerns: [...new Set(r.concerns.map((n) => (n === name ? (to ? to.name : "") : n)).filter(Boolean))],
+  }));
+
+  await writeConcerns(rest, staff, { moved, removed });
+  await savePlanTreatments(treatments, staff);
+  await saveServiceConcerns(services, staff);
+  return getPlanSettings();
+}
+
 
 export async function savePlanTreatments(rows, staff) {
   const clean = (rows || []).map(cleanTreatment).filter((t) => t.name && t.concern).slice(0, 300);
