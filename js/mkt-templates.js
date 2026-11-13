@@ -94,6 +94,7 @@ function normTpl(d) {
     updatedAt: toDate(x.updatedAt), updatedBy: String(x.updatedBy || x.createdBy || ""),
     // Task Manager → To Patient
     taskOn: x.taskOn === true, taskName: String(x.taskName || ""), taskDescription: String(x.taskDescription || ""),
+    codeLock: x.codeLock === true,   // only Admins see a Custom HTML block's code
   };
 }
 export async function listTemplates() {
@@ -112,6 +113,7 @@ const clean = (t) => ({
   taskOn: t.taskOn === true,
   taskName: String(t.taskName || "").replace(/\s+/g, " ").trim().slice(0, 120),
   taskDescription: String(t.taskDescription || "").replace(/\s+/g, " ").trim().slice(0, 300),
+  codeLock: t.codeLock === true,
 });
 export async function createTemplate({ name, starter = "blank", from = null }, staff) {
   const s = STARTERS.find((x) => x.key === starter) || STARTERS[0];
@@ -460,9 +462,30 @@ const ED_SKIP = new Set(["STYLE", "SCRIPT", "TITLE", "NOSCRIPT", "TEMPLATE"]);
 // What typing on the page can add (Ctrl+B, Ctrl+I, Enter)
 const ED_NEW = new Set(["B", "STRONG", "I", "EM", "U", "BR"]);
 
+// Sections, for the section tools. A section is one of the big parts of the email: where the layout first splits
+// into 2 or more pieces. A part is one of a row of matching pieces inside a section (package cards, columns).
+const edKids = (el) => [...el.children].filter((x) => !ED_SKIP.has(x.tagName) && !ED_INLINE.has(x.tagName)
+  && !["HEAD", "META", "LINK"].includes(x.tagName));
+function edTopSections(body) {
+  let c = body;
+  for (let d = 0; d < 15; d++) {
+    const kids = edKids(c);
+    if (kids.length === 1) { c = kids[0]; continue; }
+    return kids.length >= 2 ? kids : [];
+  }
+  return [];
+}
+function edRepeat(el, depth = 0) {
+  if (depth > 12) return [];
+  const kids = edKids(el);
+  if (kids.length >= 2 && kids.every((x) => x.tagName === kids[0].tagName)) return kids;
+  for (const k of kids) { const g = edRepeat(k, depth + 1); if (g.length) return g; }
+  return [];
+}
+
 // The block's HTML as elements, numbered. Every element gets data-ed="n"; pictures and links data-edk;
-// the biggest pieces of plain text data-edt (they become editable). Returns the numbered copy to draw,
-// and the session { doc, els } whose elements edits are written into.
+// the biggest pieces of plain text data-edt (they become editable); sections data-eds ("s", or "i" for a part).
+// Returns the numbered copy to draw, and the session { doc, els } whose elements edits are written into.
 function edOpen(b) {
   const code = String(b.code || "");
   const doc = new DOMParser().parseFromString(code, "text/html");
@@ -475,9 +498,13 @@ function edOpen(b) {
     if (ED_SKIP.has(el.tagName) || el.closest("[data-edt]") || !el.textContent.trim()) return;
     if ([...el.querySelectorAll("*")].every((x) => ED_INLINE.has(x.tagName))) el.setAttribute("data-edt", "");
   });
+  edTopSections(doc.body).forEach((sct) => {
+    sct.setAttribute("data-eds", "s");
+    edRepeat(sct).forEach((x) => { if (!x.hasAttribute("data-eds")) x.setAttribute("data-eds", "i"); });
+  });
   const s = { bid: b.id, doc, els, full: /<html[\s>]/i.test(code), doctype: /^\s*<!doctype/i.test(code) };
   const annotated = edSerial(s);
-  els.forEach((el) => { el.removeAttribute("data-ed"); el.removeAttribute("data-edk"); el.removeAttribute("data-edt"); });
+  els.forEach((el) => { ["data-ed", "data-edk", "data-edt", "data-eds"].forEach((a) => el.removeAttribute(a)); });
   return { annotated, s };
 }
 // The session back to HTML (a whole page stays a whole page)
@@ -579,6 +606,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
   let edTimer = 0;
   const edPending = new Set();
   let codeOpen = false;     // the "HTML code" box stays open or closed as it was left
+  let secHover = null;      // the section the section tools are showing for (on the page)
   const blocks = () => t.design.blocks;
   const selBlock = () => blocks().find((b) => b.id === sel) || null;
   const target = () => selBlock() || t;
@@ -674,6 +702,9 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       ${setting("Email width", `<select class="fb-select" data-k="design.style.width">${WIDTHS.map(([w, l]) =>
         `<option value="${w}"${w === st.width ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`,
         "On phones it always fits the screen. Most newsletters use 600–640px.")}
+      ${isAdminOf(staff) ? `<div class="fe-insp-field"><span class="fe-insp-label mb-colh">Custom HTML</span></div>
+        ${fCheck("codeLock", "Only Admins can see the HTML code", t.codeLock)}
+        <p class="fe-note fe-pad">Other staff can still change words, pictures and links on the email, and move, copy or remove sections.</p>` : ""}
       <div class="fe-insp-field"><span class="fe-insp-label mb-colh">Task Manager</span></div>
       ${fCheck("taskOn", "Show in Task Manager → To Patient", t.taskOn)}
       ${t.taskOn ? fText("taskName", "Task name", t.taskName, t.name, "What staff see in the list. Leave empty to use the email's name.")
@@ -778,18 +809,24 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
         fCheck("clickable", "Also a link, for people reading on a computer", b.clickable) + fAlign(b.align);
       case "divider": return fColor("color", "Line colour", b.color, "#e2e8f0", false);
       case "spacer": return fRange("size", "Height", b.size, 4, 120, "px");
-      case "html": return '<p class="mb-onpage-hint">Click words in the email to change them, like a document. Click a picture or a button to change it here.</p>' +
-        `<div data-role="edpick">${edPickHtml()}</div>` + tagChips() +
-        `<details class="mb-codebox"${codeOpen ? " open" : ""}><summary>HTML code</summary>` +
-        fCheck("pad", "Side margins (turn off for designs 600px wide)", b.pad !== false) +
-        `<div class="fe-insp-field"><span class="fe-insp-label">HTML</span>
-          <textarea class="fe-input mb-code" data-k="code" rows="12" spellcheck="false" aria-label="HTML">${esc(b.code)}</textarea>
-          <div class="mb-row mb-code-acts">
-            <button type="button" class="lh-btn is-primary" data-act="html-big">Open the big editor</button>
-            <select class="fb-select" data-act="snip" aria-label="Add a piece"><option value="">Add a piece…</option>${pieceOptions()}</select>
-          </div></div></details>` +
-        `<div class="fe-insp-field"><span class="fe-insp-label">Checks</span><div data-role="htmlnotes">${htmlNotes(b, st.width)}</div></div>` +
-        '<button type="button" class="lh-btn is-quiet mb-edundo" data-act="ed-undo">Undo my changes to this block</button>';
+      case "html": {
+        const codeOk = !t.codeLock || isAdminOf(staff);
+        return '<p class="mb-onpage-hint">Click words in the email to change them, like a document. Click a picture or a button to change it here. ' +
+          'Point at a section to move, copy or remove it.</p>' +
+          `<div data-role="edpick">${edPickHtml()}</div>` + tagChips() +
+          (codeOk ? `<details class="mb-codebox"${codeOpen ? " open" : ""}><summary>HTML code</summary>` +
+            fCheck("pad", "Side margins (turn off for designs 600px wide)", b.pad !== false) +
+            `<div class="fe-insp-field"><span class="fe-insp-label">HTML</span>
+              <textarea class="fe-input mb-code" data-k="code" rows="12" spellcheck="false" aria-label="HTML">${esc(b.code)}</textarea>
+              <div class="mb-row mb-code-acts">
+                <button type="button" class="lh-btn is-primary" data-act="html-big">Open the big editor</button>
+                <select class="fb-select" data-act="snip" aria-label="Add a piece"><option value="">Add a piece…</option>${pieceOptions()}</select>
+              </div></div></details>`
+            : '<p class="fe-note fe-pad">The HTML code is locked by an Admin.</p>') +
+          `<div class="fe-insp-field"><span class="fe-insp-label">Checks</span><div data-role="htmlnotes">${htmlNotes(b, st.width)}</div></div>` +
+          '<button type="button" class="lh-btn is-quiet mb-edundo" data-act="ed-undo">Undo my changes to this block</button>';
+      }
+      
       case "social": return fText("facebook", "Facebook", b.facebook, "https://facebook.com/…") +
         fText("instagram", "Instagram", b.instagram, "https://instagram.com/…") + fText("tiktok", "TikTok", b.tiktok, "https://tiktok.com/@…") +
         fText("website", "Website", b.website, "https://dermedica.com.au") + fAlign(b.align) +
@@ -917,6 +954,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     return blockHtml({ ...b, code: o.annotated }, st, true);
   }
   function edArm() {
+    secHover = null;   // the section tools went with the old drawing
     if (!ed) { edPick = null; return; }
     const host = canvas.querySelector(`[data-blk="${CSS.escape(ed.bid)}"]`);
     if (!host) return;
@@ -1080,6 +1118,70 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     ed = null;
     changed();
     drawSide();
+  }
+  /* ---------- Custom HTML: section tools (move, duplicate, remove) ---------- */
+  // The next section or part beside this one in the code (style tags and the like don't count)
+  const edSib = (x, dir) => {
+    let s = dir < 0 ? x.previousElementSibling : x.nextElementSibling;
+    while (s && ED_SKIP.has(s.tagName)) s = dir < 0 ? s.previousElementSibling : s.nextElementSibling;
+    return s;
+  };
+  function secHide() {
+    canvas.querySelectorAll(".mb-sectools").forEach((x) => x.remove());
+    canvas.querySelectorAll(".is-sechover").forEach((x) => x.classList.remove("is-sechover"));
+    secHover = null;
+  }
+  // A small bar on the section's top edge: ↑ ↓ Duplicate Remove
+  function secShow(el) {
+    if (el === secHover) return;
+    secHide();
+    if (!el || !ed) return;
+    const host = canvas.querySelector(`[data-blk="${CSS.escape(ed.bid)}"]`);
+    if (!host || !host.contains(el)) return;
+    const src = ed.els[Number(el.dataset.ed)];
+    if (!src) return;
+    secHover = el;
+    el.classList.add("is-sechover");
+    const part = el.dataset.eds === "i";
+    const what = part ? "this part" : "this section";
+    const bar = document.createElement("div");
+    bar.className = "mb-sectools";
+    bar.innerHTML = `<span>${part ? "Part" : "Section"}</span>
+      <button type="button" data-sect="up" title="Move ${what} up" aria-label="Move ${what} up"${edSib(src, -1) ? "" : " disabled"}>${ICONS.up}</button>
+      <button type="button" data-sect="down" title="Move ${what} down" aria-label="Move ${what} down"${edSib(src, 1) ? "" : " disabled"}>${ICONS.down}</button>
+      <button type="button" data-sect="copy" title="Duplicate ${what}" aria-label="Duplicate ${what}">${ICONS.copy}</button>
+      <button type="button" data-sect="del" title="Remove ${what}" aria-label="Remove ${what}">${ICONS.trash}</button>`;
+    host.appendChild(bar);
+    const r = el.getBoundingClientRect();
+    const h = host.getBoundingClientRect();
+    bar.style.top = `${Math.max(14, r.top - h.top)}px`;
+    bar.style.left = `${r.left - h.left + r.width / 2}px`;
+  }
+  async function secTool(act) {
+    const el = secHover;
+    const b = selBlock();
+    const s = ed;
+    if (!el || !s || !b || b.id !== s.bid) return;
+    edFlush();
+    const src = s.els[Number(el.dataset.ed)];
+    if (!src || !src.parentNode) return;
+    const part = el.dataset.eds === "i";
+    if (act === "del") {
+      if (!(await confirmDialog({ title: `Remove this ${part ? "part" : "section"}?`,
+        message: "It's taken out of the email. Undo my changes to this block puts it back.", confirmLabel: "Remove", tone: "danger" }))) return;
+      if (ed !== s) return;   // the email was redrawn meanwhile
+      src.remove();
+    } else if (act === "copy") {
+      src.after(src.cloneNode(true));
+    } else {
+      const sib = edSib(src, act === "up" ? -1 : 1);
+      if (!sib) return;
+      if (act === "up") sib.before(src); else sib.after(src);
+    }
+    edPick = null;
+    edCommit(b);
+    drawCanvas();
+    if (act === "copy") showToast(`${part ? "Part" : "Section"} duplicated. Change the words in the copy.`);
   }
   /* ---------- Custom HTML ---------- */
   const pieceCode = (key) => {
@@ -1358,12 +1460,15 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
 
   canvas.addEventListener("click", (e) => {
     if (e.target.closest("a")) e.preventDefault();
+    const sb = e.target.closest("[data-sect]");
+    if (sb) { if (!sb.disabled) secTool(sb.dataset.sect); return; }
     const blk = e.target.closest("[data-blk]");
     if (!blk) return;
     const tool = e.target.closest("[data-tool]");
     if (tool) { blockTool(tool.dataset.tool, blk.dataset.blk); return; }
     // The selected Custom HTML block: a picture or link opens its settings; words are typed in place
     if (ed && blk.dataset.blk === ed.bid) {
+      secShow(e.target.closest("[data-eds]"));   // on an iPad, a tap shows the section tools
       const pk = e.target.closest("[data-edk]");
       if (pk) {
         const idx = Number(pk.dataset.ed);
@@ -1405,7 +1510,13 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     const text = (e.clipboardData && e.clipboardData.getData("text/plain")) || "";
     document.execCommand("insertText", false, text.replace(/\s*\r?\n\s*/g, " "));
   });
-
+  // Section tools follow the mouse (the innermost section or part under it)
+  canvas.addEventListener("mouseover", (e) => {
+    if (!ed || !e.target.closest || e.target.closest(".mb-sectools")) return;
+    if (!e.target.closest(".is-onpage")) { if (secHover) secHide(); return; }
+    secShow(e.target.closest("[data-eds]"));
+  });
+  canvas.addEventListener("mouseleave", () => { if (secHover) secHide(); });
   stage.addEventListener("click", (e) => {
     if (e.target.closest("[data-blk]")) return;
     if (sel) { sel = null; drawCanvas(); drawSide(); }

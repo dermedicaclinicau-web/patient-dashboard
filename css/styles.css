@@ -13793,3 +13793,14 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 .mb-codebox > summary{padding:10px 0;font-size:13px;font-weight:600;color:#334155;cursor:pointer}
 .mb-codebox[open]{padding-bottom:12px}
 .mb-edundo{align-self:flex-start;margin-top:4px}
+
+/* Marketing builder → Custom HTML: section tools */
+.mb-blk.is-onpage{position:relative}
+.mb-blk.is-onpage .is-sechover{outline:2px dashed #14b8a6;outline-offset:-2px}
+.mb-sectools{position:absolute;z-index:8;transform:translate(-50%,-50%);display:flex;align-items:center;gap:2px;padding:3px 5px 3px 10px;
+  border-radius:999px;background:#0f766e;box-shadow:0 4px 14px rgba(15,23,42,.25);color:#fff;user-select:none}
+.mb-sectools span{margin-right:4px;font:600 11px/1 Arial,sans-serif;letter-spacing:.03em;text-transform:uppercase;opacity:.85}
+.mb-sectools button{display:grid;place-items:center;width:26px;height:26px;padding:0;border:0;border-radius:50%;background:none;color:#fff;cursor:pointer}
+.mb-sectools button:hover{background:rgba(255,255,255,.18)}
+.mb-sectools button:disabled{opacity:.35;cursor:default;background:none}
+.mb-sectools svg{width:15px;height:15px}
