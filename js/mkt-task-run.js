@@ -10,7 +10,6 @@ import { searchPatients } from "./task-runner.js";
 import { getPatient } from "./patients.js";
 import { showToast, formatDobLong } from "./utils.js";
 import { EMAIL_RE } from "./task-tokens.js";
-import { listTaskEmails } from "./mkt-task-run.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
