@@ -13755,3 +13755,27 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 .pcg-svc.is-on{border-color:#0f766e;background:#f0fdfa;color:#0f766e}
 .pcg-svc.is-used{background:#f8fafc;color:#94a3b8;cursor:default}
 .pcg-svc-acts{display:flex;gap:8px;margin-top:10px}
+
+/* Treatment plans → Patient copy: settings on the left, a live preview on the right */
+.pcs{display:grid;grid-template-columns:minmax(300px,380px) minmax(0,1fr);gap:18px;align-items:start}
+.pcs-side{display:flex;flex-direction:column;gap:14px;min-width:0}
+.pcs-side .tb-card{display:flex;flex-direction:column;gap:12px}
+.pcs-side .tb-card h4{margin:0}
+.pcs-side .ps-note{margin:0}
+.pcs-status{min-height:1em;font-size:12px;color:#0f766e}
+.pcs-status.is-bad{color:#b91c1c}
+.pcs-edit{align-self:flex-start}
+.pcs-row{display:grid;grid-template-columns:1fr 1fr 76px;gap:10px}
+.pcs-row input[type="color"]{width:100%;height:38px;padding:2px;border:1px solid #e2e8f0;border-radius:8px;background:#fff}
+.pcs-side textarea.fe-input{resize:vertical;min-height:150px;line-height:1.5}
+.pcs-preview{position:sticky;top:12px;max-height:calc(100vh - 40px);overflow:auto;padding:16px 20px 24px;background:#eef2f6;border-radius:14px}
+.pcs-preview-h{margin:0 0 12px;font-size:12px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#475569}
+.pcs-preview-h span{font-weight:500;letter-spacing:0;text-transform:none;color:#94a3b8}
+.pcs-page{width:760px;max-width:100%;margin:0 auto;padding:28px 18px;background:#fff;border-radius:4px;
+  box-shadow:0 6px 24px -8px rgba(15,23,42,.22),0 1px 3px rgba(15,23,42,.06)}
+.pcs-page .pdoc{width:100% !important}
+.pcs-formnote{padding:16px;border:1px dashed #cbd5e1;border-radius:10px;font-size:13px;line-height:1.55;color:#475569}
+@media (max-width:1000px){
+  .pcs{grid-template-columns:1fr}
+  .pcs-preview{position:static;max-height:none}
+}

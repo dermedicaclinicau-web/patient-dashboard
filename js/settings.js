@@ -5,7 +5,7 @@ import { renderPlanSettings } from "./plan-settings.js";
 import { renderPlanCatalogue } from "./plan-catalogue.js";
 import { renderUiTextSettings } from "./ui-text-settings.js";
 import { renderPlanWorkflowSettings } from "./plan-workflow-settings.js";
-
+import { renderPlanCopySettings } from "./plan-copy-settings.js";
 const TABS = [
   ["recording", "Recording rules"],
   ["plans", "Treatment plans"],
@@ -65,6 +65,7 @@ export function mountSettings(container, { param = "", staff = null } = {}) {
       const el = document.createElement("div");   // a fresh box each time, so the last tab's listeners go with it
       body.querySelector('[data-role="sub"]').replaceChildren(el);
       if (k === "concerns") renderPlanCatalogue(el, { staff });
+      else if (k === "copy") renderPlanCopySettings(el, { staff });
       else renderPlanSettings(el, { staff, part: k });
     };
     body.addEventListener("click", (e) => {
