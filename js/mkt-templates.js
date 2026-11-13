@@ -15,7 +15,7 @@ import { createRichEditor } from "./rich-editor.js";
 import { makeResizable } from "./panel-resize.js";
 import {
   esc, safeUrl, uid, BLOCKS, FONTS, MERGE_TAGS, STARTERS, styleOf, cleanDesign, newBlock, blockHtml, renderEmail,
-  footerPreview, checkDesign, CUSTOM_PIECES, customNotes, customLinks, setCustomLink, FORM_PAGE, formLink, readFormLink, qrTarget,
+  footerPreview, checkDesign, CUSTOM_PIECES, customNotes, customLinks, setCustomLink, FORM_PAGE, formLink, readFormLink, qrTarget, WIDTHS,
 } from "./mkt-email.js";
 import { openCropper } from "./mkt-crop.js";
 import { listPublishedForms } from "./form-templates.js";
@@ -435,8 +435,8 @@ function insertText(ta, text) {
   ta.setSelectionRange(s + text.length, s + text.length);
   ta.dispatchEvent(new Event("input", { bubbles: true }));
 }
-const htmlNotes = (b) => {
-  const n = customNotes(b.code, b.pad !== false);
+const htmlNotes = (b, width = 600) => {
+  const n = customNotes(b.code, b.pad !== false, width);
   return n.length ? `<ul class="mb-htmlnotes">${n.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`
     : '<p class="mb-htmlok">Looks email-safe.</p>';
 };
@@ -563,6 +563,8 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     $("inbox").innerHTML = `<small>Dermedica Clinic</small><b>${esc(t.subject || "No subject yet")}</b><span>${esc(t.preview || "No preview text")}</span>`;
     canvas.className = `mb-mail${mobile ? " is-mobile" : ""}`;
     canvas.style.background = st.body;
+    canvas.style.width = mobile ? "" : `${st.width}px`;    // Mobile keeps its phone width
+    canvas.style.maxWidth = mobile ? "" : "100%";
     const list = blocks();
     canvas.innerHTML = (list.length ? list.map((b, i) => `
       <div class="mb-blk${b.id === sel ? " is-sel" : ""}" data-blk="${esc(b.id)}" draggable="true" tabindex="0" role="button" aria-label="${esc(BLOCKS[b.type].label)}: click to change">
@@ -594,6 +596,9 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       <div class="fe-two">${fColor("design.style.text", "Text", st.text, st.text, false)}${fColor("design.style.accent", "Buttons and links", st.accent, st.accent, false)}</div>
       ${setting("Font", `<select class="fb-select" data-k="design.style.font">${FONTS.map(([f, l]) =>
         `<option value="${esc(f)}"${f === st.font ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`)}
+      ${setting("Email width", `<select class="fb-select" data-k="design.style.width">${WIDTHS.map(([w, l]) =>
+        `<option value="${w}"${w === st.width ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`,
+        "On phones it always fits the screen. Most newsletters use 600–640px.")}
       <div class="fe-insp-field"><span class="fe-insp-label">Checks</span>${checksHtml()}</div>
       <p class="fe-note fe-pad">Every marketing email ends with the clinic's details and an Unsubscribe link. It's added automatically.
         Click a block in the email to change it.</p>`;
@@ -698,7 +703,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
             <button type="button" class="lh-btn is-primary" data-act="html-big">Open the big editor</button>
             <select class="fb-select" data-act="snip" aria-label="Add a piece"><option value="">Add a piece…</option>${pieceOptions()}</select>
           </div></div>` +
-        tagChips() + `<div class="fe-insp-field"><span class="fe-insp-label">Checks</span><div data-role="htmlnotes">${htmlNotes(b)}</div></div>`;
+        tagChips() + `<div class="fe-insp-field"><span class="fe-insp-label">Checks</span><div data-role="htmlnotes">${htmlNotes(b, st.width)}</div></div>`;
       case "social": return fText("facebook", "Facebook", b.facebook, "https://facebook.com/…") +
         fText("instagram", "Instagram", b.instagram, "https://instagram.com/…") + fText("tiktok", "TikTok", b.tiktok, "https://tiktok.com/@…") +
         fText("website", "Website", b.website, "https://dermedica.com.au") + fAlign(b.align) +
@@ -828,7 +833,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
   const drawHtmlNotes = () => {
     const box = side.querySelector('[data-role="htmlnotes"]');
     const b = selBlock();
-    if (box && b && b.type === "html") box.innerHTML = htmlNotes(b);
+    if (box && b && b.type === "html") box.innerHTML = htmlNotes(b, styleOf(t.design).width);
   };
   // The block on its own, in the email's colours, kept apart from the portal's styles
   const previewDoc = (b) => {
@@ -836,7 +841,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>` +
       `<body style="margin:0;padding:16px 8px;background:${st.bg};">` +
       `<table role="presentation" align="center" width="100%" cellpadding="0" cellspacing="0" border="0" ` +
-      `style="width:100%;max-width:600px;margin:0 auto;background:${st.body};border-radius:12px;"><tr><td style="padding:0;">` +
+      `style="width:100%;max-width:${st.width}px;margin:0 auto;background:${st.body};border-radius:12px;"><tr><td style="padding:0;">` +
       `${blockHtml(b, st, true)}</td></tr></table></body></html>`;
   };
 
@@ -922,7 +927,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       }).join("");
     }
     
-    const preview = () => { frame.srcdoc = previewDoc(b); notes.innerHTML = htmlNotes(b); drawLinks(); };
+    const preview = () => { frame.srcdoc = previewDoc(b); notes.innerHTML = htmlNotes(b, styleOf(t.design).width); drawLinks(); };
     const update = () => { b.code = ta.value; changed(); clearTimeout(pt); pt = setTimeout(preview, 300); };
     const setLink = (i, href) => { ta.value = setCustomLink(ta.value, i, href); update(); drawLinks(); };
 

@@ -79,7 +79,9 @@ export const FONTS = [
   ["Verdana, Geneva, sans-serif", "Verdana"],
   ["'Trebuchet MS', Arial, sans-serif", "Trebuchet"],
 ];
-export const DEFAULT_STYLE = { bg: "#f1f5f9", body: "#ffffff", text: "#1e293b", accent: "#0f766e", font: FONTS[0][0] };
+export const DEFAULT_STYLE = { bg: "#f1f5f9", body: "#ffffff", text: "#1e293b", accent: "#0f766e", font: FONTS[0][0], width: 600 };
+// How wide the email is on a computer (on phones it always fits the screen)
+export const WIDTHS = [[600, "600px (standard)"], [640, "640px"], [680, "680px"], [720, "720px (widest)"]];
 export const MERGE_TAGS = [
   ["{First name}", "The patient's first name"],
   ["{Last name}", "The patient's last name"],
@@ -138,6 +140,7 @@ export function styleOf(d) {
   return {
     bg: hex(s.bg, DEFAULT_STYLE.bg), body: hex(s.body, DEFAULT_STYLE.body), text: hex(s.text, DEFAULT_STYLE.text),
     accent: hex(s.accent, DEFAULT_STYLE.accent), font: FONTS.some(([f]) => f === s.font) ? s.font : DEFAULT_STYLE.font,
+    width: WIDTHS.some(([w]) => w === Number(s.width)) ? Number(s.width) : 600,
   };
 }
 // A saved design, with every block complete (older or partial blocks get their defaults)
@@ -300,7 +303,7 @@ export function customHtml(code) {
 }
 
 // Notes for the person editing (what was changed, and what won't look right)
-export function customNotes(code, pad = true) {
+export function customNotes(code, pad = true, width = 600) {
   const i = customHtml(code).info;
   const n = [];
   const s = (k, one, many) => (k === 1 ? one : many);
@@ -314,8 +317,8 @@ export function customNotes(code, pad = true) {
   if (i.noAlt) n.push(`${i.noAlt} ${s(i.noAlt, "picture has", "pictures have")} no description (alt="…"). It's shown when pictures are blocked.`);
   if (i.noHref) n.push(`${i.noHref} ${s(i.noHref, "link or button has", "links or buttons have")} no address yet (replace https:// with the real link).`);
   if (i.placeholder) n.push("Swap the placeholder pictures for your own.");
-  const max = pad ? 536 : 600;
-  if (i.maxW > max) n.push(`Something is ${i.maxW}px wide, but there's ${max}px of room.${pad ? " Turn off Side margins, or make it narrower." : " Make it 600px or less."}`);
+  const max = pad ? width - 64 : width;
+  if (i.maxW > max) n.push(`Something is ${i.maxW}px wide, but there's ${max}px of room.${pad ? " Turn off Side margins, or make it narrower." : ` Make it ${width}px or less.`}`);
   return n;
 }
 
@@ -424,7 +427,7 @@ ${["First benefit", "Second benefit", "Third benefit"].map((x) => `  <tr>
 ];
 
 /* ---------- Blocks → email HTML ---------- */
-const IN = 536; // 600px email, 32px each side
+const inner = (st) => st.width - 64; // the email's width, less 32px each side
 const box = (style, inner) => `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;"><tr><td style="${style}">${inner}</td></tr></table>`;
 const font = (st, size = 16) => `font-family:${st.font};font-size:${size}px;line-height:1.6;color:${st.text};`;
 const mg = (a) => (a === "center" ? "0 auto" : a === "right" ? "0 0 0 auto" : "0");
@@ -463,7 +466,7 @@ export function blockHtml(b, st, preview = false) {
         (b.name ? `<div style="margin-top:10px;font-size:14px;font-weight:bold;color:${st.accent};">${esc(b.name)}</div>` : "") + "</div>");
     }
     case "image": {
-      const w = b.edge ? 600 : Math.round(IN * Math.min(100, Math.max(20, Number(b.width) || 100)) / 100);
+      const w = b.edge ? st.width : Math.round(inner(st) * Math.min(100, Math.max(20, Number(b.width) || 100)) / 100);
       const pic = safeUrl(b.src) ? img(b.src, b.alt, w, b.href, b.edge ? "" : `margin:${mg(a)};${shapeCss(b)}`)
         : preview ? ph(w, 200, `margin:${mg(a)};`) : "";
       if (!pic) return "";
@@ -480,7 +483,7 @@ export function blockHtml(b, st, preview = false) {
       const dim = Math.min(80, Math.max(0, Number(b.dim) || 0)) / 100;
       const tc = hex(b.color, "#ffffff");
       const r = b.edge ? 0 : Math.min(32, Math.max(0, Number(b.radius) || 0));
-      const w = ha === "center" ? 440 : 320;   // how wide the text can go
+      const w = Math.round(inner(st) * (ha === "center" ? 0.82 : 0.6));   // how wide the text can go
       // The editor's text, in the hero's text colour (anything coloured in the editor keeps its own colour)
       const words = emailRich(b.html, { ...st, text: tc, accent: tc });
       const inner = (words ? `<div style="${font(st, 16)}color:${tc};">${words}</div>` : "") +
@@ -507,7 +510,7 @@ export function blockHtml(b, st, preview = false) {
       // dir="rtl" puts the picture on the right on wide screens, and still first when they stack on phones
       return box("padding:16px 32px;font-size:0;", `<div dir="${right ? "rtl" : "ltr"}">` +
         `<div dir="ltr" style="display:inline-block;width:100%;max-width:220px;vertical-align:top;">${pic}</div>` +
-        `<div dir="ltr" style="display:inline-block;width:100%;max-width:316px;vertical-align:top;text-align:left;">` +
+        `<div dir="ltr" style="display:inline-block;width:100%;max-width:${inner(st) - 220}px;vertical-align:top;text-align:left;">` +
         `<div style="padding:${right ? "6px 20px 0 0" : "6px 0 0 20px"};">${text}</div></div></div>`);
     }
     case "button":
@@ -528,11 +531,12 @@ export function blockHtml(b, st, preview = false) {
       if (!pic) return box("padding:16px 32px;", text);
       return box("padding:16px 32px;font-size:0;",
         `<div style="display:inline-block;width:100%;max-width:200px;vertical-align:top;">${pic}</div>` +
-        `<div style="display:inline-block;width:100%;max-width:316px;vertical-align:top;"><div style="padding:6px 0 0 20px;">${text}</div></div>`);
+        `<div style="display:inline-block;width:100%;max-width:${inner(st) - 220}px;vertical-align:top;"><div style="padding:6px 0 0 20px;">${text}</div></div>`);
     }
     case "columns": {
-      const cell = (c) => `<div style="display:inline-block;width:100%;max-width:268px;vertical-align:top;"><div style="padding:0 8px 16px;">` +
-        (safeUrl(c.src) ? img(c.src, c.title, 252, c.href, `margin:0 0 12px;${shapeCss(b)}`) : preview ? ph(252, 150, "margin:0 0 12px;") : "") +
+      const cw = Math.floor(inner(st) / 2);
+      const cell = (c) => `<div style="display:inline-block;width:100%;max-width:${cw}px;vertical-align:top;"><div style="padding:0 8px 16px;">` +
+        (safeUrl(c.src) ? img(c.src, c.title, cw - 16, c.href, `margin:0 0 12px;${shapeCss(b)}`) : preview ? ph(cw - 16, 150, "margin:0 0 12px;") : "") +
         `<div style="${font(st, 15)}">` +
         (c.title ? `<div style="font-size:17px;font-weight:bold;margin:0 0 6px;">${esc(c.title)}</div>` : "") +
         emailRich(c.html, st) + (c.label ? btn(c.label, c.href, st.accent, "#ffffff", st) : "") + "</div></div></div>";
@@ -548,7 +552,7 @@ export function blockHtml(b, st, preview = false) {
     case "packages": {
       const items = (b.items || []).slice(0, 3);
       const n = Math.max(1, items.length);
-      const w = n === 3 ? 162 : n === 2 ? 252 : 340;   // + 16px padding: fits the 536px inside the margins
+      const w = (n === 1 ? Math.min(356, inner(st)) : Math.floor(inner(st) / n)) - 16;   // each card + 16px padding fits inside the margins
       const card = (it, i) => {
         const hot = String(b.featured) === String(i);
         return `<div style="display:inline-block;width:100%;max-width:${w + 16}px;vertical-align:top;"><div style="padding:0 8px 16px;">` +
@@ -612,7 +616,7 @@ export function renderEmail(t) {
   const pre = String(t.preview || "").trim();
   return `<div style="margin:0;padding:24px 10px;background:${st.bg};">` +
     (pre ? `<div style="display:none;max-height:0;overflow:hidden;opacity:0;font-size:1px;line-height:1px;color:${st.bg};">${esc(pre)}</div>` : "") +
-    `<table role="presentation" align="center" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;margin:0 auto;background:${st.body};border-collapse:separate;border-radius:12px;overflow:hidden;">` +
+    `<table role="presentation" align="center" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:${st.width}px;margin:0 auto;background:${st.body};border-collapse:separate;border-radius:12px;overflow:hidden;">` +
     `<tr><td style="padding:0;">${blocks}</td></tr>` +
     `<tr><td style="padding:0 32px 24px;"><div data-mkt-footer=""></div></td></tr></table></div>`;
 }
