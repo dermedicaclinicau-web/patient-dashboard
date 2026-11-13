@@ -142,6 +142,7 @@ function normC(snap) {
       opens: Number(st.opens) || 0, opensTotal: Number(st.opensTotal) || 0, clicks: Number(st.clicks) || 0,
       clicksTotal: Number(st.clicksTotal) || 0, unsubscribes: Number(st.unsubscribes) || 0, bounces: Number(st.bounces) || 0,
       forms: Number(st.forms) || 0,
+      sales: Number(st.sales) || 0, revenue: Number(st.revenue) || 0, salesFlagged: Number(st.salesFlagged) || 0,
     },
     dailyCap: Number(x.dailyCap) || 800, sendAtMs: Number(x.sendAtMs) || 0, pace: cleanPace(x.pace),
     total: Number(x.total || 0), sent: Number(x.sent || 0), skipped: Number(x.skipped || 0), failed: Number(x.failed || 0),
@@ -959,6 +960,8 @@ function mountDraft(page, c, staff) {
 
 /* ---------- Scheduled, sending or sent: followed live ---------- */
 const hasForm = (c) => /\/form\.html#f=/.test(c.html) || c.links.some((l) => /\/form\.html#f=/.test(l.url));
+const hasBuy = (c) => c.links.some((l) => l.kind === "buy") || c.stats.sales > 0;
+const money = (v) => `$${Number(v || 0).toLocaleString("en-AU", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 function reportHtml(c) {
   const s = c.stats;
   const sent = c.sent;
@@ -969,6 +972,8 @@ function reportHtml(c) {
         statLink("Clicked", rate(s.clicks, sent), `${n0(s.clicks)} patients${s.opens ? ` · ${pct(s.clicks, s.opens)}% of those who opened` : ""}`, "clicked") : ""}
       ${c.track && c.links.some((l) => l.kind === "buy") ? statBox("Buy now clicks",
         n0(c.links.reduce((t, l, i) => t + (l.kind === "buy" ? Number(c.linkClicks[`l${i}`] || 0) : 0), 0)), "Every click, including repeats") : ""}
+      ${hasBuy(c) ? statLink("Paid", n0(s.sales), s.salesFlagged ? `${n0(s.salesFlagged)} to check` : "Payments through Pin", "paid") +
+        statBox("Revenue", money(s.revenue), sent ? `${money(s.revenue / sent)} per email sent` : "") : ""}
       ${hasForm(c) ? statLink("Filled in the form", rate(s.forms, sent), `${n0(s.forms)} patients`, "forms") : ""}
       ${statLink("Unsubscribed", rate(s.unsubscribes, sent), `${n0(s.unsubscribes)} patients`, "unsub")}
       ${statLink("Bounced", rate(s.bounces, sent), `${n0(s.bounces)} addresses`, "bounced")}
@@ -997,6 +1002,8 @@ const WHO_FILTERS = [
   ["sent", "Everyone sent", () => true],
   ["opened", "Opened", (x) => !!x.open],
   ["clicked", "Clicked", (x, link) => x.clicks.length > 0 && (link < 0 || x.clicks.includes(link))],
+  ["paid", "Paid", (x) => x.paid.length > 0],
+  ["buyNoPay", "Clicked Buy, didn't pay", (x, link, c) => !x.paid.length && x.clicks.some((i) => c.links[i] && c.links[i].kind === "buy")],
   ["forms", "Filled in the form", (x) => !!x.form],
   ["notOpened", "Didn't open", (x) => !x.open && !x.failed],
   ["unsub", "Unsubscribed", (x) => !!x.unsub],
@@ -1018,6 +1025,17 @@ async function loadWho(c) {
       (await getDocs(collection(db, COL, c.id, name))).forEach((d) => m.set(d.id, d.data() || {}));
       return m;
     }));
+  // Payments, by patient (empty until the rules allow reading them)
+  const paid = new Map();
+  try {
+    (await getDocs(collection(db, COL, c.id, "sales"))).forEach((d) => {
+      const x = d.data() || {};
+      const pid = String(x.patientId || "");
+      if (!pid) return;
+      if (!paid.has(pid)) paid.set(pid, []);
+      paid.get(pid).push(x);
+    });
+  } catch (err) { console.warn("Sales not loaded:", err); }
   const failed = new Set(c.failures.map((f) => String(f.patientId || "")));
   const rows = [];
   chunks.forEach((s, q) => {
@@ -1028,7 +1046,7 @@ async function loadWho(c) {
         id, name: String(r.n || "") || "Unknown patient", email: String(r.e || ""),
         open: opens.has(id) ? opens.get(id).at || "yes" : "",
         clicks: ((clicks.get(id) || {}).links || []).map(Number).sort((a, b) => a - b),
-        form: forms.has(id), unsub: unsubs.has(id), bounce: bounces.has(id), failed: failed.has(id),
+        form: forms.has(id), unsub: unsubs.has(id), bounce: bounces.has(id), failed: failed.has(id), paid: paid.get(id) || [],
       });
     });
   });
@@ -1042,9 +1060,10 @@ function whoCsv(c, rows) {
     return `"${s.replace(/"/g, '""')}"`;
   };
   const link = (i) => (c.links[i] || {}).text || `Link ${i + 1}`;
-  const lines = [["Name", "Email", "Opened", "Clicked", "Filled in the form", "Unsubscribed", "Bounced"],
+  const lines = [["Name", "Email", "Opened", "Clicked", "Filled in the form", "Paid", "Unsubscribed", "Bounced"],
     ...rows.map((x) => [x.name, x.email, x.open ? isoWhen(x.open) || "Yes" : "", x.clicks.map(link).join("; "),
-      x.form ? "Yes" : "", x.unsub ? "Yes" : "", x.bounce ? "Yes" : ""])];
+      x.form ? "Yes" : "", (x.paid || []).map((p) => `${p.item || "Payment"} $${Number(p.amount || 0).toFixed(2)}`).join("; "),
+      x.unsub ? "Yes" : "", x.bounce ? "Yes" : ""])];
   const blob = new Blob(["\ufeff" + lines.map((l) => l.map(cell).join(",")).join("\r\n")], { type: "text/csv;charset=utf-8" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -1088,7 +1107,7 @@ function mountView(page, c0, staff) {
   const whoRows = () => {
     const fn = (WHO_FILTERS.find((x) => x[0] === who.f) || WHO_FILTERS[0])[2];
     const q = who.q.trim().toLowerCase();
-    return who.rows.filter((x) => fn(x, who.link) && (!q || `${x.name} ${x.email}`.toLowerCase().includes(q)));
+    return who.rows.filter((x) => fn(x, who.link, c) && (!q || `${x.name} ${x.email}`.toLowerCase().includes(q)));
   };
   // The result box or link row for what's showing is highlighted
   function markActive() {
@@ -1122,10 +1141,11 @@ function mountView(page, c0, staff) {
   function drawWhoList() {
     const box = v("whobox");
     const form = hasForm(c);
+    const buy = hasBuy(c);
     box.querySelector('[data-role="who-f"]').innerHTML = WHO_FILTERS
-      .filter(([k]) => k !== "forms" || form)
+      .filter(([k]) => (k !== "forms" || form) && (!["paid", "buyNoPay"].includes(k) || buy))
       .map(([k, l, fn]) => `<button type="button" data-whof="${k}" class="${who.f === k ? "active" : ""}">${esc(l)} <em>${
-        n0(who.rows.filter((x) => fn(x, -1)).length)}</em></button>`).join("");
+        n0(who.rows.filter((x) => fn(x, -1, c)).length)}</em></button>`).join("");
     const sel = box.querySelector('[data-role="who-link"]');
     sel.hidden = !(who.f === "clicked" && c.links.length);
     sel.innerHTML = `<option value="-1">Any link</option>${c.links.map((l, i) =>
@@ -1137,12 +1157,14 @@ function mountView(page, c0, staff) {
       .filter(Boolean).map((t) => `<span class="mc-pill is-cancel">${t}</span>`).join(" ");
     box.querySelector('[data-role="who-list"]').innerHTML = rows.length ? `
       <div class="mk-scroll"><table class="inv-table mc-whotable">
-        <thead><tr><th>Patient</th><th>Opened</th><th>Clicked</th>${form ? "<th>Form</th>" : ""}<th></th></tr></thead>
+        <thead><tr><th>Patient</th><th>Opened</th><th>Clicked</th>${form ? "<th>Form</th>" : ""}${buy ? "<th>Paid</th>" : ""}<th></th></tr></thead>
         <tbody>${rows.slice(0, who.shown).map((x) => `<tr>
           <td><a href="#/patient/${encodeURIComponent(x.id)}"><strong>${esc(x.name)}</strong></a><small>${esc(x.email)}</small></td>
           <td>${x.open ? esc(shortWhen(x.open) || "Yes") : dash}</td>
           <td>${x.clicks.length ? x.clicks.map(linkText).join(", ") : dash}</td>
           ${form ? `<td>${x.form ? "✓" : ""}</td>` : ""}
+          ${buy ? `<td>${x.paid.length ? x.paid.map((p) => `${esc(money(p.amount))}${p.priceOk === false
+            ? ' <span class="mc-pill is-paused">Check</span>' : ""}`).join(", ") : dash}</td>` : ""}
           <td>${flags(x)}</td></tr>`).join("")}</tbody></table></div>
       ${rows.length > who.shown ? `<button type="button" class="lh-btn is-quiet" data-act="who-more">Show ${n0(Math.min(200, rows.length - who.shown))} more</button>` : ""}
       ${c.skipped ? `<p class="fe-note">${n0(c.skipped)} on this list unsubscribed before it reached them, so weren't sent it.</p>` : ""}`

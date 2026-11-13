@@ -420,7 +420,8 @@ const qrState = (b) => {
   const to = qrTarget(b);
   return !to ? "Add a link that starts with https://."
     : b.srcFor === to && safeUrl(b.src) ? `Opens ${to}` : "Press Make QR code to update it.";
-};const fRich = (k, label) => `<div class="fe-insp-field"><span class="fe-insp-label">${label}</span><div data-rt="${k}"></div></div>`;
+};
+const fRich = (k, label) => `<div class="fe-insp-field"><span class="fe-insp-label">${label}</span><div data-rt="${k}"></div></div>`;
 const tagChips = () => `<div class="fe-insp-field"><span class="fe-insp-label">Insert a tag</span>
   <div class="fe-chiprow">${MERGE_TAGS.map(([tag, help]) =>
     `<button type="button" class="fe-ins is-field" data-taginsert="${esc(tag)}" title="${esc(help)}">${esc(tag)}</button>`).join("")}</div>
@@ -440,8 +441,8 @@ const htmlNotes = (b, width = 600) => {
   return n.length ? `<ul class="mb-htmlnotes">${n.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`
     : '<p class="mb-htmlok">Looks email-safe.</p>';
 };
-const picTag = (p) => `<img src="${esc(p.src)}" alt="${esc(String(p.name || "").replace(/\.[^.]+$/, ""))}" width="536" ` +
-  'style="display:block;width:100%;max-width:536px;height:auto;border:0;border-radius:8px;">\n';
+const picTag = (p, w = 536) => `<img src="${esc(p.src)}" alt="${esc(String(p.name || "").replace(/\.[^.]+$/, ""))}" width="${w}" ` +
+  `style="display:block;width:100%;max-width:${w}px;height:auto;border:0;border-radius:8px;">\n`;
 const pieceOptions = () => CUSTOM_PIECES.map(([g, list]) => `<optgroup label="${esc(g)}">${list.map(([k, l]) =>
   `<option value="${esc(k)}">${esc(l)}</option>`).join("")}</optgroup>`).join("");
 
@@ -962,7 +963,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       }
       if (act.dataset.ch === "pic") {
         act.disabled = true;
-        try { const p = await pickPicture(staff); if (p) insertText(ta, picTag(p)); }
+        try { const p = await pickPicture(staff); if (p) insertText(ta, picTag(p, styleOf(t.design).width - 64)); }
         catch (err) { console.error("Picture failed:", err); showToast(errText(err, "Couldn't use that picture.")); }
         finally { act.disabled = false; }
       }
@@ -991,7 +992,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       if (!f) return;
       el.value = "";
       if (el.dataset.ch === "upload") {
-        try { insertText(ta, picTag(await uploadPicture(f))); showToast("Picture added"); }
+        try { insertText(ta, picTag(await uploadPicture(f), styleOf(t.design).width - 64)); showToast("Picture added"); }
         catch (err) { console.error("Upload failed:", err); showToast(errText(err, "Couldn't upload that picture.")); }
         return;
       }

@@ -110,7 +110,7 @@ service cloud.firestore {
     }
     // Results and SMS recipients: written by Apps Script only
     match /{sub}/{rid} {
-      allow read: if can('marketing.manage') && sub in ['opens', 'clicks', 'unsubs', 'bounces', 'forms', 'sms'];
+      allow read: if can('marketing.manage') && sub in ['opens', 'clicks', 'unsubs', 'bounces', 'forms', 'sms', 'sales'];
       allow write: if false;
     }
   }
