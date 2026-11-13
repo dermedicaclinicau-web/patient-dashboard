@@ -102,8 +102,8 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
           aria-label="${open ? "Close" : "Open"} ${esc(c.label)}">${CHEV}</button>
         <input type="color" value="${esc(c.colour)}" data-f="colour" aria-label="Colour for ${esc(c.label)}" />
         <span class="pcg-con-name">
-          <input class="fe-input" data-f="label" maxlength="60" value="${esc(c.label)}" aria-label="Name staff and patients see" />
-          <small>${esc(c.name)}${c.custom ? " · added by the clinic" : ""}</small>
+          <input class="fe-input" data-f="label" maxlength="60" value="${esc(c.label)}" aria-label="Name staff and patients see"
+            ${c.label !== c.name ? `title="Saved in plans as ${esc(c.name)}"` : ""} />
         </span>
         ${c.hidden ? '<span class="pcg-tag">Hidden</span>' : ""}
         <button type="button" class="pcg-count" data-pcg="toggle">${list.length} treatment${list.length === 1 ? "" : "s"}</button>
@@ -136,7 +136,7 @@ export async function renderPlanCatalogue(el, { staff = null } = {}) {
       </div>
       <div class="pcg-list">${st.concerns.map(rowHtml).join("")}</div>
       <p class="fe-note">Hidden concerns can't be chosen for new plans. Plans that already use one keep it.
-        The name in grey is how plans remember a concern, so it never changes.</p>
+        Renaming a concern changes what staff and patients see. Plans keep using it as before.</p>
     </section>`;
   }
 
