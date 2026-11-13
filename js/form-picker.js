@@ -5,7 +5,7 @@ import { listPublishedForms, categoryLabel, formGroup, rxKindOf } from "./form-t
 import { CATEGORIES } from "./records.js";
 import { esc } from "./form-fields.js";
 import { listTaskTypes } from "./task-types.js";
-
+import { listTaskEmails } from "./mkt-task-run.js";
 // Tile label (its data-soon value) -> form category
 const TILE_CATEGORY = {
   "Consent record": "consent",
@@ -217,7 +217,8 @@ async function open(trigger, category, staff, group, rxKind = "") {
   });
 }
 
-// The patient page's Email button: published "To Patient" tasks, plus "Write my own email"
+// The patient page's Email button: published "To Patient" email tasks and the marketing emails
+// switched on for Task Manager (sorted together, as in Task Manager), plus "Write my own email"
 async function openTasks(trigger, staff) {
   closeFormPicker();
   const patientId = patientIdFromHash();
@@ -237,18 +238,19 @@ async function openTasks(trigger, staff) {
   position();
 
   let tasks = [];
-  try {
-    tasks = (await listTaskTypes({ isAdmin: false })).filter((t) => t.category === "patient" && t.channel === "email");
-  } catch (err) {
-    console.error("Couldn't load tasks:", err);
-  }
+  const [types, emails] = await Promise.allSettled([listTaskTypes({ isAdmin: false }), listTaskEmails()]);
+  if (types.status === "fulfilled") tasks = types.value.filter((t) => t.category === "patient" && t.channel === "email");
+  else console.error("Couldn't load tasks:", types.reason);
+  if (emails.status === "fulfilled") tasks = tasks.concat(emails.value);   // ids start with "mkt_"
+  tasks.sort((a, b) => String(a.name).localeCompare(String(b.name), "en-AU"));
   if (menu !== thisMenu) return;
 
   menu.querySelector(".fp-body").innerHTML = `
     <div class="fp-list" role="menu">
       ${tasks.map((t) => `
         <button type="button" class="fp-item" role="menuitem" data-runtask="${esc(t.id)}">
-          <span>${esc(t.name)}</span>${t.description ? `<small>${esc(t.description)}</small>` : ""}
+          <span>${esc(t.name)}${t.mkt ? ' <span class="tm-tag">Marketing email</span>' : ""}</span>${
+            t.description ? `<small>${esc(t.description)}</small>` : ""}
         </button>`).join("")}
       ${tasks.length ? "" : `<div class="fp-empty">No patient email tasks are published yet.${
         isAdmin ? ' <a href="#/tasks/types">Set them up in Task types</a>' : ""}</div>`}

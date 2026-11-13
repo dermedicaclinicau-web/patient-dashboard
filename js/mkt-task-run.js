@@ -10,6 +10,7 @@ import { searchPatients } from "./task-runner.js";
 import { getPatient } from "./patients.js";
 import { showToast, formatDobLong } from "./utils.js";
 import { EMAIL_RE } from "./task-tokens.js";
+import { listTaskEmails } from "./mkt-task-run.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -38,7 +39,7 @@ const ERR = {
 };
 const errText = (e) => ERR[e && e.code] || (e && e.message && !e.code ? e.message : `Couldn't send${e && e.code ? ` (${e.code})` : ""}. Try again.`);
 
-// The templates switched on for To Patient, as Task Manager rows (none if the list can't be read)
+// The templates switched on for To Patient, shaped like task types (none if the list can't be read)
 export async function listTaskEmails() {
   try {
     const snap = await getDocs(query(collection(db, "mkt_templates"), where("taskOn", "==", true)));
@@ -48,6 +49,8 @@ export async function listTaskEmails() {
         id: MKT_TASK_PREFIX + t.id, mkt: true,
         name: String(t.taskName || t.name || "Marketing email"),
         description: String(t.taskDescription || ""),
+        category: "patient", channel: "email", status: "live",
+        recipients: {}, fields: [], attachments: [],
       }));
   } catch (err) {
     console.warn("Marketing emails not listed in To Patient:", err);
