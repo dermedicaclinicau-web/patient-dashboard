@@ -45,6 +45,7 @@ const ICONS = {
   heading: ic('<path d="M6 4v16M18 4v16M6 12h12"/>'),
   text: ic('<line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="11" x2="20" y2="11"/><line x1="4" y1="16" x2="14" y2="16"/>'),
   image: ic('<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 17l-5-5-8 8"/>'),
+  hero: ic('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 10h8M7 14h5"/>'),
   button: ic('<rect x="3" y="8" width="18" height="8" rx="4"/>'),
   product: ic('<path d="M6 7h12l-1 13H7z"/><path d="M9 7a3 3 0 0 1 6 0"/>'),
   columns: ic('<rect x="3" y="4" width="8" height="16" rx="1"/><rect x="13" y="4" width="8" height="16" rx="1"/>'),
@@ -68,7 +69,7 @@ const ICONS = {
 const PAL = [
   ["Text", ["heading", "text", "quote"]],
   ["Buttons", ["button", "buttons"]],
-  ["Pictures and products", ["image", "imagetext", "product", "packages", "columns", "offer"]],
+  ["Pictures and products", ["image", "hero", "imagetext", "product", "packages", "columns", "offer"]],
   ["Layout", ["header", "divider", "spacer", "social", "qr", "html"]],
 ];
 
@@ -615,6 +616,26 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
         fText("href", "Link (optional)", b.href, "https://") +
         fCheck("edge", "Edge to edge (no side margins)", b.edge) +
         (b.edge ? "" : fRange("width", "Width", b.width, 20, 100, "%") + fAlign(b.align) + fShape(b));
+      case "hero": return fImage("src", "Picture", b.src, "A wide picture works best. Keep faces away from where the text goes.") +
+        fSeg("focus", "Keep in view", [["top", "Top"], ["center", "Middle"], ["bottom", "Bottom"]], b.focus) +
+        fRange("height", "Height", b.height, 180, 520, "px") +
+        fArea("title", "Title", b.title) +
+        fSeg("size", "Title size", [["large", "Large"], ["medium", "Medium"], ["small", "Small"]], b.size) +
+        fArea("text", "Text (optional)", b.text) + tagChips() +
+        fSeg("align", "Text across", [["left", "Left"], ["center", "Centre"], ["right", "Right"]], b.align) +
+        fSeg("valign", "Text up and down", [["top", "Top"], ["middle", "Middle"], ["bottom", "Bottom"]], b.valign) +
+        fColor("color", "Text colour", b.color, "#ffffff", false) +
+        fRange("dim", "Darken the picture", b.dim, 0, 80, "%") +
+        fColor("dimColor", "Darken with", b.dimColor, "#000000", false) +
+        '<div class="fe-insp-field"><span class="fe-insp-label mb-colh">Button</span></div>' +
+        fText("label", "Button text", b.label, "Leave empty for no button") + fLink("", b) +
+        fSeg("btnStyle", "Style", [["filled", "Filled"], ["outline", "Outline"]], b.btnStyle) +
+        `<div class="fe-two">${fColor("btnBg", "Button colour", b.btnBg, st.accent)}${fColor("btnColor", "Text colour", b.btnColor, "#ffffff")}</div>` +
+        fCheck("edge", "Edge to edge (no side margins)", b.edge) +
+        (b.edge ? "" : fRange("radius", "Rounded corners", b.radius, 0, 32, "px")) +
+        fColor("fallback", "Colour if the picture doesn't show", b.fallback, "#334155", false) +
+        '<p class="fe-note fe-pad">Outlook on Windows doesn\'t show pictures behind text, so it shows this colour with your text on top. ' +
+        'Put the important words in the title, not in the picture.</p>';
       case "imagetext": return fImage("src", "Picture", b.src) +
         fText("alt", "Describe the picture", b.alt) +
         fSeg("side", "Picture on the", [["left", "Left"], ["right", "Right"]], b.side) + fShape(b) +
@@ -707,7 +728,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       <div class="mb-side-acts"><button type="button" class="lh-btn" data-act="done">Done</button>
         <button type="button" class="fe-remove" data-act="remove">${ICONS.trash}Remove</button></div>`;
     mountEditors();
-    if (["button", "buttons", "product", "packages"].includes(b.type) && !formsCache) {
+    if (["button", "buttons", "product", "packages", "hero"].includes(b.type) && !formsCache) {
       loadOnlineForms().then(() => { if (sel === b.id) drawSide(); });
     }
     if (b.type === "product" && !sspCache) {
@@ -1297,6 +1318,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     (b.type === "buttons" && (b.items || []).some((it) => it.link === "form" && it.formId)) ||
     (b.type === "packages" && (b.items || []).some((it) => it.link === "form" && it.formId)) ||
     (b.type === "product" && b.link === "form" && b.formId) ||
+    (b.type === "hero" && b.link === "form" && b.formId) ||
     (b.type === "html" && customLinks(b.code).some((l) => l.formId)));
 
   /* ---------- Send a test ---------- */

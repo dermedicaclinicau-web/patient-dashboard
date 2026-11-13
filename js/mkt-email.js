@@ -65,6 +65,12 @@ const linkProblem = (x, label) => (x.link === "form" ? `The "${label}" button ne
 export const uid = () => Math.random().toString(36).slice(2, 10);
 const hex = (c, d) => (/^#[0-9a-f]{3,8}$/i.test(String(c || "")) ? String(c) : d);
 const oneOf = (v, list, d) => (list.includes(v) ? v : d);
+// "#0f766e" → "15,118,110" (for see-through colours)
+const rgbOf = (c) => {
+  let h = hex(c, "#000000").slice(1);
+  if (h.length === 3) h = h.replace(/./g, "$&$&");
+  return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) || 0).join(",");
+};
 
 export const FONTS = [
   ["Arial, Helvetica, sans-serif", "Arial"],
@@ -101,6 +107,11 @@ export const BLOCKS = {
   text: { label: "Text", make: () => ({ html: "<p>Write your message here.</p>", align: "left" }) },
   quote: { label: "Quote", make: () => ({ text: "“The team made me feel so comfortable, and my skin has never looked better.”", name: "A happy patient", align: "center", bg: "" }) },
   image: { label: "Image", make: () => ({ src: "", alt: "", href: "", caption: "", width: 100, align: "center", edge: false, ...SHAPE() }) },
+  hero: { label: "Hero picture with text", make: () => ({ src: "", title: "Christmas specials", size: "large",
+    text: "Our best Hydrate packages, for a limited time.", label: "See the packages", href: "", link: "url",
+    formId: "", formName: "", ansQ: "", ansA: "", ansLock: false, ...PAY(), btnStyle: "filled", btnBg: "", btnColor: "#ffffff",
+    align: "left", valign: "middle", focus: "center", height: 320, dim: 35, dimColor: "#000000", color: "#ffffff",
+    fallback: "#334155", edge: true, radius: 12 }) },
   imagetext: { label: "Picture and text", make: () => ({ src: "", alt: "", href: "", side: "left", title: "A title",
     html: "<p>A few words to go with the picture.</p>", label: "", btnHref: "", ...SHAPE() }) },
   button: { label: "Button", make: () => ({ label: "Book now", href: "", link: "url", formId: "", formName: "",
@@ -451,6 +462,34 @@ export function blockHtml(b, st, preview = false) {
       const cap = b.caption ? `<div style="padding:6px ${b.edge ? "32px" : "0"} 0;font-family:${st.font};font-size:13px;line-height:1.4;color:#64748b;text-align:${b.edge ? "center" : a};">${esc(b.caption)}</div>` : "";
       return box(b.edge ? "padding:0 0 4px;" : "padding:12px 32px;", pic + cap);
     }
+    case "hero": {
+      const H = Math.min(520, Math.max(180, Number(b.height) || 320));
+      const src = safeUrl(b.src);
+      const fb = hex(b.fallback, "#334155");
+      const ha = oneOf(b.align, ["left", "center", "right"], "left");
+      const va = oneOf(b.valign, ["top", "middle", "bottom"], "middle");
+      const fo = oneOf(b.focus, ["top", "center", "bottom"], "center");
+      const dim = Math.min(80, Math.max(0, Number(b.dim) || 0)) / 100;
+      const tc = hex(b.color, "#ffffff");
+      const r = b.edge ? 0 : Math.min(32, Math.max(0, Number(b.radius) || 0));
+      const w = ha === "center" ? 440 : 320;   // how wide the text can go
+      const size = { large: 32, medium: 26, small: 21 }[b.size] || 32;
+      const inner =
+        (b.title ? `<h1 style="margin:0 0 10px;font-family:${st.font};font-size:${size}px;line-height:1.2;font-weight:bold;color:${tc};">${lines(b.title)}</h1>` : "") +
+        (b.text ? `<div style="margin:0 0 18px;font-family:${st.font};font-size:16px;line-height:1.55;color:${tc};">${lines(b.text)}</div>` : "") +
+        (b.label ? btn(b.label, linkOf(b), hex(b.btnBg, st.accent), hex(b.btnColor, "#ffffff"), st, false, b.btnStyle === "outline") : "");
+      // The picture sits behind the text. Where pictures behind text aren't shown (Outlook on Windows), the colour is.
+      const bgCss = src ? `background-image:url('${esc(src)}');background-size:cover;background-repeat:no-repeat;` +
+        `background-position:center ${fo === "center" ? "center" : fo};` : "";
+      const hero = `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;"><tr>` +
+        `<td${src ? ` background="${esc(src)}"` : ""} bgcolor="${fb}" style="background-color:${fb};${bgCss}border-radius:${r}px;">` +
+        `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;"><tr>` +
+        `<td height="${H}" valign="${va}" align="${ha}" style="height:${H}px;padding:32px;vertical-align:${va};text-align:${ha};border-radius:${r}px;` +
+        `${dim ? `background-color:rgba(${rgbOf(b.dimColor)},${dim});` : ""}">` +
+        `<div style="display:inline-block;width:100%;max-width:${w}px;text-align:${ha};">${inner}</div>` +
+        `</td></tr></table></td></tr></table>`;
+      return box(b.edge ? "padding:0 0 4px;" : "padding:12px 32px;", hero);
+    }
     case "imagetext": {
       const right = b.side === "right";
       const pic = safeUrl(b.src) ? img(b.src, b.alt || b.title, 220, b.href, shapeCss(b)) : preview ? ph(220, 180) : "";
@@ -591,6 +630,12 @@ export function checkDesign(t) {
       out.push("A button in a custom HTML block answers a question, but no answer is chosen.");
     }
     if (b.type === "image" && !safeUrl(b.src)) out.push("An image block has no picture yet.");
+    if (b.type === "hero") {
+      if (!safeUrl(b.src)) out.push("A hero block has no picture yet.");
+      if (b.label && !safeUrl(linkOf(b))) out.push(linkProblem(b, b.label));
+      payWhat(b, b.label || "Button");
+      if (!String(b.title || "").trim() && !String(b.text || "").trim()) out.push("A hero block has no title or text.");
+    }
     if (b.type === "imagetext") {
       if (!safeUrl(b.src)) out.push("A picture and text block has no picture yet.");
       if (b.label && !safeUrl(b.btnHref)) out.push(`The "${b.label}" button has no link yet.`);
@@ -613,7 +658,8 @@ export function checkDesign(t) {
       if (bracket.test(words)) out.push("Some text still has [square-bracket] placeholders to fill in.");
     }
     if ((b.type === "text" && bracket.test(b.html || "")) || (b.type === "imagetext" && bracket.test(b.html || "")) ||
-        (b.type === "quote" && bracket.test(b.text || "")) || (b.type === "offer" && bracket.test(`${b.title} ${b.text} ${b.note}`))) {
+        (b.type === "quote" && bracket.test(b.text || "")) || (b.type === "offer" && bracket.test(`${b.title} ${b.text} ${b.note}`)) ||
+        (b.type === "hero" && bracket.test(`${b.title} ${b.text}`))) {
       out.push("Some text still has [square-bracket] placeholders to fill in.");
     }
   });
