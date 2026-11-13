@@ -12,8 +12,36 @@ export const safeUrl = (u) => {
 };
 // "Open a form" buttons: the form page. Each patient's own link is put in when the email is sent (Code.gs mktFormLinks_).
 export const FORM_PAGE = "https://dermedicaclinicau-web.github.io/patient-dashboard/form.html";
+// "Buy now" buttons: the clinic's Pin Payments page. Code.gs adds each patient's email and a reference when they click.
+export const PIN_PAGE = "https://pay.pinpayments.com/quw3";
+// "$1,495" / "1495" / "995.00" → 1495 (0 if it isn't a price)
+export const priceOf = (v) => {
+  const n = Number(String(v ?? "").replace(/[$,\s]/g, ""));
+  return isFinite(n) && n > 0 && n < 100000 ? Math.round(n * 100) / 100 : 0;
+};
+// The Pin link for a payment button (falls back to the card's name and price)
+export function payLink(x) {
+  const amt = priceOf((x && x.payPrice) || (x && x.price));
+  if (!amt) return "";
+  const what = String((x && (x.payName || [x.tag, x.name].filter(Boolean).join(": ") || x.label)) || "Dermedica")
+    .replace(/\s+/g, " ").trim().slice(0, 150);
+  let u = `${PIN_PAGE}?amount=${Number.isInteger(amt) ? amt : amt.toFixed(2)}&description=${encodeURIComponent(what)}&amount_editable=false`;
+  const thanks = String((x && x.payThanks) || "").trim();
+  if (/^https:\/\/[^\s"'<>]+$/i.test(thanks)) u += `&success_url=${encodeURIComponent(thanks)}`;
+  return u;
+}
+// What a QR code opens: the link, with utm tags so the website knows the visit came from the QR code
+export function qrTarget(b) {
+  const h = safeUrl(b && b.href);
+  if (!/^https:\/\//i.test(h)) return "";
+  if (!b.utm) return h;
+  const tag = String(b.campaign || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "email";
+  const [base, hash = ""] = h.split("#");
+  return `${base}${base.includes("?") ? "&" : "?"}utm_source=email&utm_medium=qr&utm_campaign=${tag}${hash ? `#${hash}` : ""}`;
+}
 export const linkOf = (x) => (x && x.link === "form"
   ? (/^[A-Za-z0-9_-]{10,40}$/.test(String(x.formId || "")) ? formLink(x.formId, { q: x.ansQ, a: x.ansA, lock: x.ansLock }) : "")
+  : x && x.link === "pay" ? payLink(x)
   : String((x && x.href) || ""));
 // A form link, optionally answering one question: form.html#f=<id>&a=<question id>:<answer>[&lock=1]
 export function formLink(id, ans) {
@@ -31,8 +59,9 @@ export function readFormLink(href) {
   const i = a.indexOf(":");
   return { id: m[1], q: i > 0 ? a.slice(0, i) : "", a: i > 0 ? a.slice(i + 1) : "", lock: p.get("lock") === "1" };
 }
-const linkProblem = (x, label) => (x.link === "form"
-  ? `The "${label}" button needs a form chosen.` : `The "${label}" button has no link yet.`);
+const linkProblem = (x, label) => (x.link === "form" ? `The "${label}" button needs a form chosen.`
+  : x.link === "pay" ? `The "${label}" button needs a price to take payment.`
+  : `The "${label}" button has no link yet.`);
 export const uid = () => Math.random().toString(36).slice(2, 10);
 const hex = (c, d) => (/^#[0-9a-f]{3,8}$/i.test(String(c || "")) ? String(c) : d);
 const oneOf = (v, list, d) => (list.includes(v) ? v : d);
@@ -60,8 +89,12 @@ export function shapeCss(b) {
 }
 
 const col = () => ({ src: "", title: "A title", html: "<p>A few words about it.</p>", label: "", href: "" });
+const PAY = () => ({ payName: "", payPrice: "", payThanks: "" });
 const btnItem = (label = "Button", style = "filled") => ({ label, href: "", style, link: "url", formId: "", formName: "",
-  ansQ: "", ansA: "", ansLock: false });
+  ansQ: "", ansA: "", ansLock: false, ...PAY() });
+// One card in a Packages block
+const pkg = (tag, name, price) => ({ tag, name, price, desc: "What's included.", label: "Buy now", link: "pay", href: "",
+  formId: "", formName: "", ansQ: "", ansA: "", ansLock: false, ...PAY() });
 export const BLOCKS = {
   header: { label: "Logo header", make: () => ({ logo: "", logoWidth: 160, align: "center", bg: "", text: "DERMEDICA" }) },
   heading: { label: "Heading", make: () => ({ text: "A heading", size: "large", align: "left" }) },
@@ -71,12 +104,17 @@ export const BLOCKS = {
   imagetext: { label: "Picture and text", make: () => ({ src: "", alt: "", href: "", side: "left", title: "A title",
     html: "<p>A few words to go with the picture.</p>", label: "", btnHref: "", ...SHAPE() }) },
   button: { label: "Button", make: () => ({ label: "Book now", href: "", link: "url", formId: "", formName: "",
-    ansQ: "", ansA: "", ansLock: false, bg: "", color: "#ffffff", align: "center", full: false }) },
+    ansQ: "", ansA: "", ansLock: false, ...PAY(), bg: "", color: "#ffffff", align: "center", full: false }) },
   buttons: { label: "Buttons side by side", make: () => ({ items: [btnItem("Book now"), btnItem("Shop skincare", "outline")],
     bg: "", color: "#ffffff", align: "center", same: false }) },
-  product: { label: "Product", make: () => ({ src: "", name: "Product name", price: "", desc: "A short line about the product.", href: "", label: "Shop now", ...SHAPE() }) },
+  product: { label: "Product", make: () => ({ src: "", name: "Product name", price: "", desc: "A short line about the product.", href: "", label: "Shop now",
+    link: "url", formId: "", formName: "", ansQ: "", ansA: "", ansLock: false, ...PAY(), ...SHAPE() }) },
   columns: { label: "Two columns", make: () => ({ items: [col(), col()], ...SHAPE() }) },
   offer: { label: "Offer", make: () => ({ title: "20% off", text: "Your next skin treatment", code: "", note: "Offer ends [date].", bg: "" }) },
+  packages: { label: "Packages", make: () => ({ title: "", items: [pkg("Package C", "Starter", "$550"), pkg("Package B", "Classic", "$995"),
+    pkg("Package A", "Complete", "$1,495")], featured: "1", featuredLabel: "Most popular", bg: "" }) },
+  qr: { label: "QR code", make: () => ({ href: "", utm: true, campaign: "", src: "", srcFor: "", size: 160,
+    caption: "Scan to find out more", clickable: true, align: "center" }) },
   divider: { label: "Divider", make: () => ({ color: "#e2e8f0" }) },
   spacer: { label: "Space", make: () => ({ size: 24 }) },
   social: { label: "Social links", make: () => ({ facebook: "", instagram: "", tiktok: "", website: "", align: "center" }) },
@@ -102,9 +140,18 @@ export function cleanDesign(d) {
     if (b.type === "buttons") {
       const list = Array.isArray(b.items) && b.items.length ? b.items : BLOCKS.buttons.make().items;
       b.items = list.slice(0, 3).map((it) => ({ label: String((it && it.label) || "Button"), href: String((it && it.href) || ""),
-        style: it && it.style === "outline" ? "outline" : "filled", link: it && it.link === "form" ? "form" : "url",
+        style: it && it.style === "outline" ? "outline" : "filled", link: oneOf(it && it.link, ["url", "form", "pay"], "url"),
         formId: String((it && it.formId) || ""), formName: String((it && it.formName) || ""),
-        ansQ: String((it && it.ansQ) || ""), ansA: String((it && it.ansA) || ""), ansLock: !!(it && it.ansLock) }));    }
+        ansQ: String((it && it.ansQ) || ""), ansA: String((it && it.ansA) || ""), ansLock: !!(it && it.ansLock),
+        payName: String((it && it.payName) || ""), payPrice: String((it && it.payPrice) || ""), payThanks: String((it && it.payThanks) || "") }));
+    }
+    if (b.type === "packages") {
+      const list = Array.isArray(b.items) && b.items.length ? b.items : BLOCKS.packages.make().items;
+      b.items = list.slice(0, 3).map((it) => ({ ...pkg("", "Package", ""), ...(it || {}),
+        link: oneOf(it && it.link, ["url", "form", "pay"], "pay") }));
+      b.featured = String(b.featured ?? "-1");
+    }
+    if (b.type === "qr") b.size = Math.min(280, Math.max(100, Number(b.size) || 160));
   });
   return { style: styleOf(d), blocks };
 }
@@ -426,12 +473,12 @@ export function blockHtml(b, st, preview = false) {
         btn(it.label || "Button", linkOf(it), bg, fg, st, false, it.style === "outline", `margin:0 6px 10px;${b.same ? "min-width:150px;" : ""}`)).join(""));
     }
     case "product": {
-      const pic = safeUrl(b.src) ? img(b.src, b.name, 200, b.href, shapeCss(b)) : preview ? ph(200, 200) : "";
+      const pic = safeUrl(b.src) ? img(b.src, b.name, 200, linkOf(b), shapeCss(b)) : preview ? ph(200, 200) : "";
       const text = `<div style="${font(st, 15)}">` +
         `<div style="font-size:18px;font-weight:bold;margin:0 0 4px;">${esc(b.name)}</div>` +
         (b.price ? `<div style="font-weight:bold;color:${st.accent};margin:0 0 8px;">${esc(b.price)}</div>` : "") +
         (b.desc ? `<div style="margin:0 0 14px;">${lines(b.desc)}</div>` : "") +
-        (b.label ? btn(b.label, b.href, st.accent, "#ffffff", st) : "") + "</div>";
+        (b.label ? btn(b.label, linkOf(b), st.accent, "#ffffff", st) : "") + "</div>";
       if (!pic) return box("padding:16px 32px;", text);
       return box("padding:16px 32px;font-size:0;",
         `<div style="display:inline-block;width:100%;max-width:200px;vertical-align:top;">${pic}</div>` +
@@ -451,6 +498,37 @@ export function blockHtml(b, st, preview = false) {
         (b.text ? `<div style="margin:6px 0 0;">${lines(b.text)}</div>` : "") +
         (b.code ? `<div style="margin:14px 0 0;"><span style="display:inline-block;padding:8px 18px;border-radius:8px;background:#ffffff;border:1px solid ${st.accent};font-family:'Courier New',Courier,monospace;font-size:18px;font-weight:bold;letter-spacing:2px;color:${st.text};">${esc(b.code)}</span></div>` : "") +
         (b.note ? `<div style="margin:12px 0 0;font-size:12px;color:#64748b;">${esc(b.note)}</div>` : "") + "</div>");
+    }
+    case "packages": {
+      const items = (b.items || []).slice(0, 3);
+      const n = Math.max(1, items.length);
+      const w = n === 3 ? 162 : n === 2 ? 252 : 340;   // + 16px padding: fits the 536px inside the margins
+      const card = (it, i) => {
+        const hot = String(b.featured) === String(i);
+        return `<div style="display:inline-block;width:100%;max-width:${w + 16}px;vertical-align:top;"><div style="padding:0 8px 16px;">` +
+          `<div style="padding:18px 14px;border-radius:12px;border:${hot ? `2px solid ${st.accent}` : "1px solid #e2e8f0"};background:${hex(b.bg, st.body)};text-align:center;${font(st, 14)}">` +
+          (hot && b.featuredLabel ? `<div style="margin:0 0 8px;"><span style="display:inline-block;padding:3px 10px;border-radius:999px;background:${st.accent};color:#ffffff;font-size:11px;font-weight:bold;">${esc(b.featuredLabel)}</span></div>` : "") +
+          (it.tag ? `<div style="font-size:12px;color:#64748b;">${esc(it.tag)}</div>` : "") +
+          `<div style="font-size:18px;font-weight:bold;margin:2px 0 6px;">${esc(it.name)}</div>` +
+          (it.price ? `<div style="font-size:24px;font-weight:bold;color:${st.accent};margin:0 0 8px;">${esc(it.price)}</div>` : "") +
+          (it.desc ? `<div style="margin:0 0 14px;line-height:1.5;">${lines(it.desc)}</div>` : "") +
+          (it.label ? btn(it.label, linkOf(it), st.accent, "#ffffff", st, true) : "") +
+          "</div></div></div>";
+      };
+      return (b.title ? box("padding:18px 32px 4px;text-align:center;",
+          `<h2 style="margin:0;font-family:${st.font};font-size:22px;line-height:1.3;font-weight:bold;color:${st.text};">${lines(b.title)}</h2>`) : "") +
+        box("padding:14px 24px 0;font-size:0;text-align:center;", items.map(card).join(""));
+    }
+    case "qr": {
+      const size = Math.min(280, Math.max(100, Number(b.size) || 160));
+      const to = qrTarget(b);
+      const ready = safeUrl(b.src) && b.srcFor === to;
+      const site = to.replace(/^https:\/\/(www\.)?/, "").split(/[/?#]/)[0];
+      const pic = ready ? img(b.src, `QR code: scan to open ${site}`, size, b.clickable ? to : "", `margin:${mg(a)};`)
+        : preview ? `<div style="width:${size}px;height:${size}px;line-height:${size}px;margin:${mg(a)};background:#e2e8f0;color:#64748b;border-radius:8px;font-family:Arial,sans-serif;font-size:13px;text-align:center;">${to ? "Press Make QR code" : "Add a link"}</div>` : "";
+      if (!pic) return "";
+      return box(`padding:14px 32px;text-align:${a};`, pic + (b.caption
+        ? `<div style="padding:8px 0 0;font-family:${st.font};font-size:14px;line-height:1.4;color:${st.text};text-align:${a};">${esc(b.caption)}</div>` : ""));
     }
     case "divider":
       return box("padding:10px 32px;", `<div style="height:1px;line-height:1px;font-size:1px;background:${hex(b.color, "#e2e8f0")};">&nbsp;</div>`);
@@ -505,6 +583,9 @@ export function checkDesign(t) {
     if (b.type === "buttons") (b.items || []).forEach((it) => { if (!safeUrl(linkOf(it))) out.push(linkProblem(it, it.label || "Button")); });
     const noAns = (x, label) => { if (x.link === "form" && x.ansQ && !String(x.ansA || "").trim()) out.push(`The "${label}" button answers a question, but no answer is chosen.`); };
     if (b.type === "button") noAns(b, b.label || "Button");
+    const payWhat = (x, label) => { if (x.link === "pay" && !String(x.payName || "").trim()) out.push(`The "${label}" button takes payment: add what they're buying.`); };
+    if (b.type === "button") payWhat(b, b.label || "Button");
+    if (b.type === "buttons") (b.items || []).forEach((it) => payWhat(it, it.label || "Button"));
     if (b.type === "buttons") (b.items || []).forEach((it) => noAns(it, it.label || "Button"));
     if (b.type === "html" && customLinks(b.code).some((l) => { const f = readFormLink(l.href); return f && f.q && !f.a.trim(); })) {
       out.push("A button in a custom HTML block answers a question, but no answer is chosen.");
@@ -514,7 +595,14 @@ export function checkDesign(t) {
       if (!safeUrl(b.src)) out.push("A picture and text block has no picture yet.");
       if (b.label && !safeUrl(b.btnHref)) out.push(`The "${b.label}" button has no link yet.`);
     }
-    if (b.type === "product" && b.label && !safeUrl(b.href)) out.push(`The product "${b.name}" has no link yet.`);
+    if (b.type === "product" && b.label && !safeUrl(linkOf(b))) out.push(`"${b.name || "Product"}": ${linkProblem(b, b.label)}`);
+    if (b.type === "packages") (b.items || []).forEach((it) => {
+      if (it.label && !safeUrl(linkOf(it))) out.push(`"${it.name || "A package"}": ${linkProblem(it, it.label)}`);
+    });
+    if (b.type === "qr") {
+      if (!qrTarget(b)) out.push("A QR code has no link yet (it needs https://).");
+      else if (!safeUrl(b.src) || b.srcFor !== qrTarget(b)) out.push("A QR code needs making. Click it, then press Make QR code.");
+    }
     if (b.type === "columns") (b.items || []).forEach((c) => { if (c.label && !safeUrl(c.href)) out.push(`The "${c.label}" button in two columns has no link yet.`); });
     if (b.type === "html") {
       const c = customHtml(b.code);

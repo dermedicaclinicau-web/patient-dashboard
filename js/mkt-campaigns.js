@@ -135,7 +135,8 @@ function normC(snap) {
       skip: cleanSkip(a.skip) },
     // Drafts track by default; a scheduled campaign shows what it was actually sent with
     track: status === "draft" ? x.track !== false : x.track === true,
-    links: (Array.isArray(x.links) ? x.links : []).map((l) => ({ url: String((l && l.url) || ""), text: String((l && l.text) || "") })),
+    links: (Array.isArray(x.links) ? x.links : []).map((l) => ({ url: String((l && l.url) || ""), text: String((l && l.text) || ""),
+      kind: String((l && l.kind) || "link"), price: Number((l && l.price) || 0), item: String((l && l.item) || "") })),
     linkClicks: x.linkClicks && typeof x.linkClicks === "object" ? x.linkClicks : {},
     stats: {
       opens: Number(st.opens) || 0, opensTotal: Number(st.opensTotal) || 0, clicks: Number(st.clicks) || 0,
@@ -966,6 +967,8 @@ function reportHtml(c) {
     <div class="mc-stats">
       ${c.track ? statLink("Opened", rate(s.opens, sent), `${n0(s.opens)} patients`, "opened") +
         statLink("Clicked", rate(s.clicks, sent), `${n0(s.clicks)} patients${s.opens ? ` · ${pct(s.clicks, s.opens)}% of those who opened` : ""}`, "clicked") : ""}
+      ${c.track && c.links.some((l) => l.kind === "buy") ? statBox("Buy now clicks",
+        n0(c.links.reduce((t, l, i) => t + (l.kind === "buy" ? Number(c.linkClicks[`l${i}`] || 0) : 0), 0)), "Every click, including repeats") : ""}
       ${hasForm(c) ? statLink("Filled in the form", rate(s.forms, sent), `${n0(s.forms)} patients`, "forms") : ""}
       ${statLink("Unsubscribed", rate(s.unsubscribes, sent), `${n0(s.unsubscribes)} patients`, "unsub")}
       ${statLink("Bounced", rate(s.bounces, sent), `${n0(s.bounces)} addresses`, "bounced")}
@@ -978,7 +981,9 @@ function reportHtml(c) {
       <div class="mk-scroll"><table class="inv-table mc-links">
         <thead><tr><th>Link</th><th>Clicks</th><th></th></tr></thead>
         <tbody>${c.links.map((l, i) => `<tr class="mc-linkrow" data-wholink="${i}" title="See who clicked this">
-          <td><strong>${esc(l.text || "Link")}</strong><small>${esc(host(l.url))}</small></td>
+          <td><strong>${esc(l.text || "Link")}</strong>${l.kind === "buy" ? ' <span class="mc-pill is-sent">Buy now</span>'
+            : l.kind === "qr" ? ' <span class="mc-pill is-draft">QR code</span>' : ""}<small>${esc(l.kind === "buy"
+            ? [l.item, l.price ? `$${n0(l.price)}` : ""].filter(Boolean).join(" · ") : host(l.url))}</small></td>`
           <td><span class="mc-num">${n0(c.linkClicks[`l${i}`])}</span></td>
           <td class="mk-act"><button type="button" class="lh-btn" data-mklist="link" data-link="${i}">Make a list</button></td>
         </tr>`).join("")}</tbody></table></div>` : ""}

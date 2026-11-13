@@ -15,7 +15,7 @@ import { createRichEditor } from "./rich-editor.js";
 import { makeResizable } from "./panel-resize.js";
 import {
   esc, safeUrl, uid, BLOCKS, FONTS, MERGE_TAGS, STARTERS, styleOf, cleanDesign, newBlock, blockHtml, renderEmail,
-  footerPreview, checkDesign, CUSTOM_PIECES, customNotes, customLinks, setCustomLink, FORM_PAGE, formLink, readFormLink,
+  footerPreview, checkDesign, CUSTOM_PIECES, customNotes, customLinks, setCustomLink, FORM_PAGE, formLink, readFormLink, qrTarget,
 } from "./mkt-email.js";
 import { openCropper } from "./mkt-crop.js";
 import { listPublishedForms } from "./form-templates.js";
@@ -56,6 +56,8 @@ const ICONS = {
   quote: ic('<path d="M7 7h4v4H8a3 3 0 0 0 3 3v2a5 5 0 0 1-5-5zM14 7h4v4h-3a3 3 0 0 0 3 3v2a5 5 0 0 1-5-5z"/>'),
   offer: ic('<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>'),
   html: ic('<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>'),
+  packages: ic('<rect x="3" y="8" width="18" height="13" rx="2"/><path d="M12 8v13M3 12h18"/><path d="M12 8c-2-4-6-4-6-1s6 1 6 1zM12 8c2-4 6-4 6-1s-6 1-6 1z"/>'),
+  qr: ic('<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM18 18h3v3h-3zM14 20h2M20 14v2"/>'),
   up: ic('<polyline points="18 15 12 9 6 15"/>'),
   down: ic('<polyline points="6 9 12 15 18 9"/>'),
   copy: ic('<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>'),
@@ -66,8 +68,8 @@ const ICONS = {
 const PAL = [
   ["Text", ["heading", "text", "quote"]],
   ["Buttons", ["button", "buttons"]],
-  ["Pictures and products", ["image", "imagetext", "product", "columns", "offer"]],
-  ["Layout", ["header", "divider", "spacer", "social", "html"]],
+  ["Pictures and products", ["image", "imagetext", "product", "packages", "columns", "offer"]],
+  ["Layout", ["header", "divider", "spacer", "social", "qr", "html"]],
 ];
 
 function openDialog(html, cls = "") {
@@ -389,8 +391,20 @@ const fAnswer = (p, it) => {
       : fText(`${p}ansA`, "Their answer", it.ansA)) + fCheck(`${p}ansLock`, "Lock it, so they can't change it", it.ansLock) : "");
 };
 // Where a button goes: a web page, or a form for the patient to fill in
-const fLink = (p, it) => fSeg(`${p}link`, "Button opens", [["url", "A web page"], ["form", "A form to fill in"]], it.link === "form" ? "form" : "url") +
-  (it.link === "form"
+// A payment button: what they're buying and the price. The Pin link is made from these (mkt-email.js payLink).
+const fPay = (p, it) => fText(`${p}payName`, "What they're buying", it.payName,
+    it.name ? [it.tag, it.name].filter(Boolean).join(": ") : "Package B (Hydrate Classic)",
+    it.name !== undefined ? "Leave empty to use the name above." : "Shown on the payment page and the receipt.") +
+  fText(`${p}payPrice`, "Price", it.payPrice, it.price || "$995", it.price !== undefined ? "Leave empty to use the price above." : "") +
+  fText(`${p}payThanks`, "Thank-you page (optional)", it.payThanks, "https://dermedica.com.au/thank-you",
+    "Where they go after paying. Leave empty for Pin's own receipt page.") +
+  '<p class="fe-note fe-pad">Paid through Pin Payments. Each patient\'s email is filled in for them, and a reference is added so the payment can be matched to them.</p>';
+
+// Where a button goes: a web page, a form for the patient to fill in, or a payment
+const fLink = (p, it) => fSeg(`${p}link`, "Button opens", [["url", "A web page"], ["form", "A form to fill in"], ["pay", "A payment"]],
+    ["form", "pay"].includes(it.link) ? it.link : "url") +
+  (it.link === "pay" ? fPay(p, it)
+  : it.link === "form"
     ? setting("Form", `<select class="fb-select" data-k="${p}formId"><option value="">${
         formsCache ? (formsCache.length ? "Choose a form…" : "No forms are set up for online filling yet") : "Loading forms…"}</option>${
         (formsCache || []).map((x) => `<option value="${esc(x.id)}"${x.id === it.formId ? " selected" : ""}>${esc(x.name)}</option>`).join("")}${
@@ -399,7 +413,13 @@ const fLink = (p, it) => fSeg(`${p}link`, "Button opens", [["url", "A web page"]
         "Each patient gets their own link, with their details already filled in. To list a form here, tick “Patients can fill this in online” in its Form settings.") +
       (it.formId ? fAnswer(p, it) : "")
     : fText(`${p}href`, "Link", it.href, "https://"));
-const fRich = (k, label) => `<div class="fe-insp-field"><span class="fe-insp-label">${label}</span><div data-rt="${k}"></div></div>`;
+
+// What the QR settings say under the code
+const qrState = (b) => {
+  const to = qrTarget(b);
+  return !to ? "Add a link that starts with https://."
+    : b.srcFor === to && safeUrl(b.src) ? `Opens ${to}` : "Press Make QR code to update it.";
+};const fRich = (k, label) => `<div class="fe-insp-field"><span class="fe-insp-label">${label}</span><div data-rt="${k}"></div></div>`;
 const tagChips = () => `<div class="fe-insp-field"><span class="fe-insp-label">Insert a tag</span>
   <div class="fe-chiprow">${MERGE_TAGS.map(([tag, help]) =>
     `<button type="button" class="fe-ins is-field" data-taginsert="${esc(tag)}" title="${esc(help)}">${esc(tag)}</button>`).join("")}</div>
@@ -618,7 +638,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
           `<select class="fb-select" data-act="catalogue"><option value="">${sspCache ? "Choose a product…" : "Loading the catalogue…"}</option>${
             (sspCache || []).map((p) => `<option value="${esc(p.id)}">${esc(p.name)}${p.size ? ` · ${esc(p.size)}` : ""}</option>`).join("")}</select>`) +
         fImage("src", "Picture", b.src) + fShape(b) + fText("name", "Name", b.name) + fText("price", "Price (optional)", b.price, "$89") +
-        fArea("desc", "Description", b.desc) + fText("label", "Button text (optional)", b.label) + fText("href", "Link", b.href, "https://");
+        fArea("desc", "Description", b.desc) + fText("label", "Button text (optional)", b.label) + fLink("", b);
       case "columns": return [0, 1].map((i) => `<div class="fe-insp-field"><span class="fe-insp-label mb-colh">${i ? "Right" : "Left"} column</span></div>` +
         fImage(`items.${i}.src`, "Picture (optional)", b.items[i].src) + fText(`items.${i}.title`, "Title", b.items[i].title) +
         fRich(`items.${i}.html`, "Text") + fText(`items.${i}.label`, "Button text (optional)", b.items[i].label) +
@@ -628,6 +648,26 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       case "offer": return fText("title", "Headline", b.title, "20% off") + fArea("text", "Details", b.text, "Your next skin treatment") +
         fText("code", "Code (optional)", b.code, "GLOW20") + fText("note", "Small print (optional)", b.note, "Ends 31 October") +
         tagChips() + fColor("bg", "Background", b.bg, "#f0fdfa");
+      case "packages": return fArea("title", "Heading (optional)", b.title, "Christmas specials") +
+        b.items.map((it, i) => `<div class="fe-insp-field mb-subhead"><span class="fe-insp-label mb-colh">Card ${i + 1}</span>${
+            b.items.length > 1 ? `<button type="button" class="lh-btn is-quiet" data-pkg-del="${i}">Remove</button>` : ""}</div>` +
+          fText(`items.${i}.tag`, "Small label (optional)", it.tag, "Package A") + fText(`items.${i}.name`, "Name", it.name) +
+          fText(`items.${i}.price`, "Price shown", it.price, "$995") + fArea(`items.${i}.desc`, "What's included", it.desc) +
+          fText(`items.${i}.label`, "Button text", it.label) + fLink(`items.${i}.`, it)).join("") +
+        (b.items.length < 3 ? '<button type="button" class="lh-btn mb-addbtn" data-act="pkg-add">+ Add a card</button>' : "") +
+        fSeg("featured", "Highlight", [["-1", "None"], ...b.items.map((_, i) => [String(i), `Card ${i + 1}`])], String(b.featured)) +
+        (String(b.featured) !== "-1" ? fText("featuredLabel", "Highlight label", b.featuredLabel, "Most popular") : "") +
+        tagChips() + fColor("bg", "Card background", b.bg, st.body) +
+        '<p class="fe-note fe-pad">On phones the cards go one under the other.</p>';
+      case "qr": return fText("href", "Link it opens", b.href, "https://dermedica.com.au/christmas") +
+        fCheck("utm", "Add tracking, so the website can tell visits came from this QR code", b.utm) +
+        (b.utm ? fText("campaign", "Name in the tracking (optional)", b.campaign, "christmas-2026") : "") +
+        `<div class="fe-insp-field"><span class="fe-insp-label">QR code</span>${
+          safeUrl(b.src) ? `<div class="fe-img-pick"><span class="fe-img-thumb mb-thumb"><img src="${esc(b.src)}" alt="" /></span></div>` : ""}
+          <div class="fe-img-btns"><button type="button" class="lh-btn is-primary" data-act="qr-make">${safeUrl(b.src) ? "Make it again" : "Make QR code"}</button></div>
+          <small class="fe-note" data-role="qrstate">${esc(qrState(b))}</small></div>` +
+        fRange("size", "Size", b.size, 100, 280, "px") + fText("caption", "Caption (optional)", b.caption, "Scan to see our specials") +
+        fCheck("clickable", "Also a link, for people reading on a computer", b.clickable) + fAlign(b.align);
       case "divider": return fColor("color", "Line colour", b.color, "#e2e8f0", false);
       case "spacer": return fRange("size", "Height", b.size, 4, 120, "px");
       case "html": return fCheck("pad", "Side margins (turn off for designs 600px wide)", b.pad !== false) +
@@ -667,7 +707,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       <div class="mb-side-acts"><button type="button" class="lh-btn" data-act="done">Done</button>
         <button type="button" class="fe-remove" data-act="remove">${ICONS.trash}Remove</button></div>`;
     mountEditors();
-    if ((b.type === "button" || b.type === "buttons") && !formsCache) {
+    if (["button", "buttons", "product", "packages"].includes(b.type) && !formsCache) {
       loadOnlineForms().then(() => { if (sel === b.id) drawSide(); });
     }
     if (b.type === "product" && !sspCache) {
@@ -714,6 +754,46 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       showToast(errText(err, "Couldn't save the cropped picture."));
     }
   }
+  /* ---------- QR codes: drawn here, saved with the other email pictures (mkt_images/) ---------- */
+  let qrLib = null;
+  async function makeQr(b, quiet = false) {
+    const to = qrTarget(b);
+    if (!to) { if (!quiet) showToast("Add a link that starts with https:// first."); return; }
+    if (b.srcFor === to && safeUrl(b.src)) return;
+    try {
+      if (!quiet) showToast("Making the QR code…");
+      if (!qrLib) {
+        const m = await import("https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/+esm");
+        qrLib = m.default || m.qrcode || m;
+      }
+      const qr = qrLib(0, "M");
+      qr.addData(to);
+      qr.make();
+      const n = qr.getModuleCount();
+      const cell = Math.max(4, Math.floor(600 / (n + 8)));   // a 4-square white edge all round, so phones can read it
+      const c = document.createElement("canvas");
+      c.width = c.height = cell * (n + 8);
+      const g = c.getContext("2d");
+      g.fillStyle = "#ffffff";
+      g.fillRect(0, 0, c.width, c.height);
+      g.fillStyle = "#000000";
+      for (let r = 0; r < n; r++) for (let k = 0; k < n; k++) if (qr.isDark(r, k)) g.fillRect((k + 4) * cell, (r + 4) * cell, cell, cell);
+      const blob = await new Promise((res) => c.toBlob(res, "image/png"));
+      if (!blob) throw new Error("The QR code couldn't be drawn.");
+      b.src = await hostBlob(blob);
+      b.srcFor = to;
+      if (sel === b.id) {
+        if (quiet) { const s = side.querySelector('[data-role="qrstate"]'); if (s) s.textContent = qrState(b); }
+        else drawSide();
+      }
+      changed();
+      if (!quiet) showToast("QR code ready");
+    } catch (err) {
+      console.error("QR code failed:", err);
+      showToast(errText(err, "Couldn't make the QR code. Try again."));
+    }
+  }
+
   /* ---------- Custom HTML ---------- */
   const pieceCode = (key) => {
     for (const [, list] of CUSTOM_PIECES) {
@@ -1007,6 +1087,13 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
   side.addEventListener("change", (e) => {
     if (e.target.closest(".re")) return;
     const el = e.target;
+    // QR code: its link changed, so it's made again
+    const qb = selBlock();
+    if (qb && qb.type === "qr" && /^(href|utm|campaign)$/.test(el.dataset.k || "")) {
+      if (el.type === "checkbox") { qb.utm = el.checked; drawSide(); changed(); }
+      makeQr(qb, el.type !== "checkbox");
+      return;
+    }
     if (el.matches("[data-upload]")) {
       const f = el.files && el.files[0];
       el.value = "";
@@ -1090,6 +1177,24 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     if (bd) {
       const b = selBlock();
       if (b && b.items.length > 1) { b.items.splice(Number(bd.dataset.btnDel), 1); drawSide(); changed(); }
+      return;
+    }
+    if (e.target.closest('[data-act="qr-make"]')) { const b = selBlock(); if (b) { b.srcFor = ""; makeQr(b); } return; }
+    if (e.target.closest('[data-act="pkg-add"]')) {
+      const b = selBlock();
+      if (b && b.items.length < 3) { b.items.push({ ...newBlock("packages").items[0], tag: "", name: "Package", price: "" }); drawSide(); changed(); }
+      return;
+    }
+    const pd = e.target.closest("[data-pkg-del]");
+    if (pd) {
+      const b = selBlock();
+      const i = Number(pd.dataset.pkgDel);
+      if (b && b.items.length > 1) {
+        b.items.splice(i, 1);
+        const f = Number(b.featured);
+        if (f === i) b.featured = "-1"; else if (f > i) b.featured = String(f - 1);
+        drawSide(); changed();
+      }
       return;
     }
     
@@ -1190,6 +1295,8 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
   const hasFormButton = () => blocks().some((b) =>
     (b.type === "button" && b.link === "form" && b.formId) ||
     (b.type === "buttons" && (b.items || []).some((it) => it.link === "form" && it.formId)) ||
+    (b.type === "packages" && (b.items || []).some((it) => it.link === "form" && it.formId)) ||
+    (b.type === "product" && b.link === "form" && b.formId) ||
     (b.type === "html" && customLinks(b.code).some((l) => l.formId)));
 
   /* ---------- Send a test ---------- */
