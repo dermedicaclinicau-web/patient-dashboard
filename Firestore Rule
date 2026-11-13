@@ -63,6 +63,7 @@ service cloud.firestore {
     }
 
     match /mkt_templates/{id} {
+    allow read: if request.auth != null && resource.data.taskOn == true;  
     allow read: if can('marketing.manage');
     allow create: if can('marketing.manage')
       && request.resource.data.name is string && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 120

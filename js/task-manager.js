@@ -21,7 +21,7 @@ import { mountDataUploader } from "./data-uploader.js";
 import { mountMarketing } from "./marketing.js";
 import { mountTemplateBuilder } from "./mkt-templates.js";
 import { mountCampaignEditor } from "./mkt-campaigns.js";
-
+import { mountMktTaskRunner, listTaskEmails, MKT_TASK_PREFIX } from "./mkt-task-run.js";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -70,6 +70,11 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
   // Full-page screens
   if (view === "run" && sub) {
     if (!can("tasks.run") || !(can("tasks.patient") || can("tasks.staff"))) { noAccess("Ask an Admin for access to run tasks."); return; }
+    if (sub.startsWith(MKT_TASK_PREFIX)) {   // a marketing email switched on for To Patient
+      if (!can("tasks.patient")) { noAccess("Ask an Admin for access to To Patient tasks."); return; }
+      mountMktTaskRunner(container, { templateId: sub.slice(MKT_TASK_PREFIX.length), patientId: parts[2] || "", staff });
+      return;
+    }
     mountTaskRunner(container, { taskId: sub, patientId: parts[2] || "", staff });
     return;
   }
@@ -308,7 +313,12 @@ async function renderCategory(main, key, isAdmin) {
       return;
     }
     
-    const tasks = (await listTaskTypes({ isAdmin: false })).filter((t) => t.category === key && !t.useFor);
+    const [types, emails] = await Promise.all([
+      listTaskTypes({ isAdmin: false }),
+      key === "patient" ? listTaskEmails() : Promise.resolve([]),
+    ]);
+    const tasks = [...types.filter((t) => t.category === key && !t.useFor), ...emails]
+      .sort((a, b) => a.name.localeCompare(b.name, "en-AU"));
     if (!list.isConnected) return;
     if (!tasks.length) {
       list.innerHTML = `<div class="tm-empty">No ${esc(cat.title)} tasks are published yet.${isAdmin
@@ -319,9 +329,10 @@ async function renderCategory(main, key, isAdmin) {
 
     const row = (t) => `
       <button type="button" class="tm-task" data-run="${esc(t.id)}"
-        data-find="${esc(`${t.name} ${t.description || ""}`.toLowerCase())}">
-        <span class="tm-task-icon">${I.mail}</span>
-        <span class="tm-task-main"><strong>${esc(t.name)}</strong><small>${esc(t.description || "Email")}${
+        data-find="${esc(`${t.name} ${t.description || ""}${t.mkt ? " marketing newsletter" : ""}`.toLowerCase())}">
+        <span class="tm-task-icon">${t.mkt ? I.megaphone : I.mail}</span>
+        <span class="tm-task-main"><strong>${esc(t.name)}${t.mkt ? '<span class="tm-tag">Marketing email</span>' : ""}</strong><small>${esc(
+          t.description || (t.mkt ? "A marketing email, sent to one patient" : "Email"))}${
           t.schedule && t.schedule.enabled && !t.schedule.paused ? " · 🔁 Also sends automatically" : ""}</small></span>
         <span class="tm-task-go">${I.chev}</span>
       </button>`;

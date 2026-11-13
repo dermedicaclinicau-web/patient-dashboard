@@ -92,6 +92,8 @@ function normTpl(d) {
     id: d.id, name: String(x.name || "Untitled"), subject: String(x.subject || ""), preview: String(x.preview || ""),
     design: cleanDesign(x.design), status: x.status === "archived" ? "archived" : "active",
     updatedAt: toDate(x.updatedAt), updatedBy: String(x.updatedBy || x.createdBy || ""),
+    // Task Manager → To Patient
+    taskOn: x.taskOn === true, taskName: String(x.taskName || ""), taskDescription: String(x.taskDescription || ""),
   };
 }
 export async function listTemplates() {
@@ -107,12 +109,15 @@ const clean = (t) => ({
   name: String(t.name || "").replace(/\s+/g, " ").trim().slice(0, 120) || "Untitled",
   subject: String(t.subject || "").slice(0, 200), preview: String(t.preview || "").slice(0, 200),
   design: cleanDesign(t.design),
+  taskOn: t.taskOn === true,
+  taskName: String(t.taskName || "").replace(/\s+/g, " ").trim().slice(0, 120),
+  taskDescription: String(t.taskDescription || "").replace(/\s+/g, " ").trim().slice(0, 300),
 });
 export async function createTemplate({ name, starter = "blank", from = null }, staff) {
   const s = STARTERS.find((x) => x.key === starter) || STARTERS[0];
   const data = clean(from ? { ...from, name } : { name, subject: s.subject, preview: s.preview, design: s.design() });
   const ref = await addDoc(collection(db, COL), {
-    ...data, html: renderEmail(data), status: "active",
+    ...data, taskOn: false, html: renderEmail(data), status: "active",   // a copy isn't in Task Manager until it's switched on
     createdAt: serverTimestamp(), createdBy: who(staff), createdByUid: me(),
     updatedAt: serverTimestamp(), updatedBy: who(staff), updatedByUid: me(),
   });
@@ -125,7 +130,7 @@ export async function saveTemplate(t, staff) {
   });
 }
 export async function archiveTemplate(id, staff) {
-  await updateDoc(doc(db, COL, id), { status: "archived", updatedAt: serverTimestamp(), updatedBy: who(staff), updatedByUid: me() });
+  await updateDoc(doc(db, COL, id), { status: "archived", taskOn: false, updatedAt: serverTimestamp(), updatedBy: who(staff), updatedByUid: me() });
 }
 
 /* ===================== Pictures: from the Image Bank, hosted so emails can load them ===================== */
@@ -301,6 +306,7 @@ export function mountTemplateList(box, { staff = null } = {}) {
           <strong>${esc(t.name)}</strong>
           <small>${esc(t.subject || "No subject yet")}</small>
           <small>Edited ${esc(day(t.updatedAt))}${t.updatedBy ? ` · ${esc(t.updatedBy)}` : ""}</small>
+          ${t.taskOn ? '<small class="mt-intask">In Task Manager → To Patient</small>' : ""}
         </div>
         <div class="mt-acts">
           <a class="lh-btn is-primary" href="${LIST_HREF}/${encodeURIComponent(t.id)}" data-open>Edit</a>
@@ -601,6 +607,13 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       ${setting("Email width", `<select class="fb-select" data-k="design.style.width">${WIDTHS.map(([w, l]) =>
         `<option value="${w}"${w === st.width ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`,
         "On phones it always fits the screen. Most newsletters use 600–640px.")}
+      <div class="fe-insp-field"><span class="fe-insp-label mb-colh">Task Manager</span></div>
+      ${fCheck("taskOn", "Show in Task Manager → To Patient", t.taskOn)}
+      ${t.taskOn ? fText("taskName", "Task name", t.taskName, t.name, "What staff see in the list. Leave empty to use the email's name.")
+        + fText("taskDescription", "Description (optional)", t.taskDescription, "For a patient who asked about our packages") : ""}
+      <p class="fe-note fe-pad">${t.taskOn
+        ? "Staff can send this to one patient at a time from Task Manager. Their name, form and payment links are filled in, the Unsubscribe link is added, and the do-not-contact list is checked first. Changes here are used from the next send."
+        : "Tick it to let staff send this email to one patient at a time, like a To Patient task."}</p>
       <div class="fe-insp-field"><span class="fe-insp-label">Checks</span>${checksHtml()}</div>
       <p class="fe-note fe-pad">Every marketing email ends with the clinic's details and an Unsubscribe link. It's added automatically.
         Click a block in the email to change it.</p>`;
