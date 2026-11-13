@@ -619,9 +619,9 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       case "hero": return fImage("src", "Picture", b.src, "A wide picture works best. Keep faces away from where the text goes.") +
         fSeg("focus", "Keep in view", [["top", "Top"], ["center", "Middle"], ["bottom", "Bottom"]], b.focus) +
         fRange("height", "Height", b.height, 180, 520, "px") +
-        fArea("title", "Title", b.title) +
-        fSeg("size", "Title size", [["large", "Large"], ["medium", "Medium"], ["small", "Small"]], b.size) +
-        fArea("text", "Text (optional)", b.text) + tagChips() +
+        fRich("html", "Text") + tagChips() +
+        '<p class="fe-note fe-pad">Text you don\'t colour in the editor uses the Text colour below. ' +
+        'Keep titles under about 40px so they fit on phones.</p>' +
         fSeg("align", "Text across", [["left", "Left"], ["center", "Centre"], ["right", "Right"]], b.align) +
         fSeg("valign", "Text up and down", [["top", "Top"], ["middle", "Middle"], ["bottom", "Bottom"]], b.valign) +
         fColor("color", "Text colour", b.color, "#ffffff", false) +
@@ -713,7 +713,9 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       const tgt = target();
       const ed = createRichEditor(host, {
         button: false,
+        fonts: true,
         accent: () => styleOf(t.design).accent,
+        look: tgt.type === "hero" ? () => ({ bg: tgt.fallback || "#334155", color: tgt.color || "#ffffff" }) : null,
         onInput: () => { setPath(tgt, key, ed.getHtml()); changed(); },
       });
       ed.setHtml(getPath(tgt, key) || "");

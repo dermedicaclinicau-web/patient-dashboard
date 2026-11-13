@@ -107,8 +107,8 @@ export const BLOCKS = {
   text: { label: "Text", make: () => ({ html: "<p>Write your message here.</p>", align: "left" }) },
   quote: { label: "Quote", make: () => ({ text: "“The team made me feel so comfortable, and my skin has never looked better.”", name: "A happy patient", align: "center", bg: "" }) },
   image: { label: "Image", make: () => ({ src: "", alt: "", href: "", caption: "", width: 100, align: "center", edge: false, ...SHAPE() }) },
-  hero: { label: "Hero picture with text", make: () => ({ src: "", title: "Christmas specials", size: "large",
-    text: "Our best Hydrate packages, for a limited time.", label: "See the packages", href: "", link: "url",
+  hero: { label: "Hero picture with text", make: () => ({ src: "",
+    html: "<h1>Christmas specials</h1><p>Our best Hydrate packages, for a limited time.</p>", label: "See the packages", href: "", link: "url",
     formId: "", formName: "", ansQ: "", ansA: "", ansLock: false, ...PAY(), btnStyle: "filled", btnBg: "", btnColor: "#ffffff",
     align: "left", valign: "middle", focus: "center", height: 320, dim: 35, dimColor: "#000000", color: "#ffffff",
     fallback: "#334155", edge: true, radius: 12 }) },
@@ -163,6 +163,14 @@ export function cleanDesign(d) {
       b.featured = String(b.featured ?? "-1");
     }
     if (b.type === "qr") b.size = Math.min(280, Math.max(100, Number(b.size) || 160));
+    // Hero blocks made before it had the text editor: their title and text become a heading and a paragraph
+    if (b.type === "hero" && ("title" in b || "text" in b)) {
+      const px = { large: 32, medium: 26, small: 21 }[b.size] || 32;
+      const br = (s) => esc(s).replace(/\n/g, "<br>");
+      b.html = (String(b.title || "").trim() ? `<h1 style="font-size:${px}px;">${br(b.title)}</h1>` : "") +
+        (String(b.text || "").trim() ? `<p>${br(b.text)}</p>` : "");
+      delete b.title; delete b.text; delete b.size;
+    }
   });
   return { style: styleOf(d), blocks };
 }
@@ -473,11 +481,10 @@ export function blockHtml(b, st, preview = false) {
       const tc = hex(b.color, "#ffffff");
       const r = b.edge ? 0 : Math.min(32, Math.max(0, Number(b.radius) || 0));
       const w = ha === "center" ? 440 : 320;   // how wide the text can go
-      const size = { large: 32, medium: 26, small: 21 }[b.size] || 32;
-      const inner =
-        (b.title ? `<h1 style="margin:0 0 10px;font-family:${st.font};font-size:${size}px;line-height:1.2;font-weight:bold;color:${tc};">${lines(b.title)}</h1>` : "") +
-        (b.text ? `<div style="margin:0 0 18px;font-family:${st.font};font-size:16px;line-height:1.55;color:${tc};">${lines(b.text)}</div>` : "") +
-        (b.label ? btn(b.label, linkOf(b), hex(b.btnBg, st.accent), hex(b.btnColor, "#ffffff"), st, false, b.btnStyle === "outline") : "");
+      // The editor's text, in the hero's text colour (anything coloured in the editor keeps its own colour)
+      const words = emailRich(b.html, { ...st, text: tc, accent: tc });
+      const inner = (words ? `<div style="${font(st, 16)}color:${tc};">${words}</div>` : "") +
+        (b.label ? `<div style="padding:4px 0 0;">${btn(b.label, linkOf(b), hex(b.btnBg, st.accent), hex(b.btnColor, "#ffffff"), st, false, b.btnStyle === "outline")}</div>` : "");
       // The picture sits behind the text. Where pictures behind text aren't shown (Outlook on Windows), the colour is.
       const bgCss = src ? `background-image:url('${esc(src)}');background-size:cover;background-repeat:no-repeat;` +
         `background-position:center ${fo === "center" ? "center" : fo};` : "";
@@ -634,7 +641,7 @@ export function checkDesign(t) {
       if (!safeUrl(b.src)) out.push("A hero block has no picture yet.");
       if (b.label && !safeUrl(linkOf(b))) out.push(linkProblem(b, b.label));
       payWhat(b, b.label || "Button");
-      if (!String(b.title || "").trim() && !String(b.text || "").trim()) out.push("A hero block has no title or text.");
+      if (!String(b.html || "").replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").trim()) out.push("A hero block has no text.");
     }
     if (b.type === "imagetext") {
       if (!safeUrl(b.src)) out.push("A picture and text block has no picture yet.");
@@ -659,7 +666,7 @@ export function checkDesign(t) {
     }
     if ((b.type === "text" && bracket.test(b.html || "")) || (b.type === "imagetext" && bracket.test(b.html || "")) ||
         (b.type === "quote" && bracket.test(b.text || "")) || (b.type === "offer" && bracket.test(`${b.title} ${b.text} ${b.note}`)) ||
-        (b.type === "hero" && bracket.test(`${b.title} ${b.text}`))) {
+        (b.type === "hero" && bracket.test(b.html || ""))) {
       out.push("Some text still has [square-bracket] placeholders to fill in.");
     }
   });

@@ -1,6 +1,6 @@
 // A small rich text editor for emails: headings, bold, colours, lists, links,
 // Image Bank pictures, buttons, dividers and spacing.
-import { cleanRichHtml, hydrateRichImages, textToRichHtml } from "./rich-html.js";
+import { cleanRichHtml, hydrateRichImages, textToRichHtml, RICH_FONTS } from "./rich-html.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -24,7 +24,8 @@ const I = {
   undo: ic('<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>'),
   redo: ic('<polyline points="15 14 20 9 15 4"/><path d="M4 20v-7a4 4 0 0 1 4-4h12"/>'),
 };
-const COLOURS = ["#1e293b", "#475569", "#0f766e", "#2563eb", "#7c3aed", "#db2777", "#dc2626", "#ea580c", "#ca8a04", "#16a34a"];
+const COLOURS = ["#ffffff", "#000000", "#1e293b", "#475569", "#0f766e", "#2563eb", "#7c3aed", "#db2777", "#dc2626", "#ea580c", "#ca8a04", "#16a34a"];
+const SIZES = [12, 14, 16, 18, 20, 24, 28, 32, 40, 48];
 const STATE_CMDS = ["bold", "italic", "underline", "justifyLeft", "justifyCenter", "justifyRight", "insertUnorderedList", "insertOrderedList"];
 
 function askDialog({ title, fields, confirm = "Add" }) {
@@ -95,7 +96,7 @@ const fixUrl = (u) => {
 
 export function createRichEditor(host, {
   onInput = () => {}, onFocus = () => {}, pickImage = null, button: showButton = true,
-  accent = () => "#0f766e", logo = () => "", tokens = null,
+  accent = () => "#0f766e", logo = () => "", tokens = null, fonts = false, look = null,
 } = {}) {
   
 const btn = (cmd, icon, title) =>
@@ -107,14 +108,17 @@ const btn = (cmd, icon, title) =>
           <option value="p">Normal text</option><option value="h1">Title</option>
           <option value="h2">Heading</option><option value="h3">Subheading</option>
         </select>
+        ${fonts ? `<select class="re-font" aria-label="Font"><option value="">Font</option>${RICH_FONTS.map(([f, l]) =>
+          `<option value="${esc(f)}" style="font-family:${esc(f)}">${esc(l)}</option>`).join("")}</select>` : ""}
         <select class="re-size" aria-label="Text size">
-          <option value="">Size</option><option value="2">Small</option><option value="3">Normal</option>
-          <option value="5">Large</option><option value="6">Extra large</option>
+          <option value="">Size</option>${SIZES.map((s) => `<option value="${s}">${s}${s === 16 ? " (normal)" : ""}</option>`).join("")}
         </select>
         <span class="re-sep"></span>
         ${btn("bold", I.bold, "Bold")}${btn("italic", I.italic, "Italic")}${btn("underline", I.underline, "Underline")}
         <span class="re-pop-wrap">${btn("colour", I.colour, "Text colour")}
-          <div class="re-pop" hidden>${COLOURS.map((c) => `<button type="button" class="re-sw" data-colour="${c}" style="background:${c}" aria-label="Colour ${c}"></button>`).join("")}</div>
+          <div class="re-pop" hidden>${COLOURS.map((c) => `<button type="button" class="re-sw" data-colour="${c}" style="background:${c};${
+            c === "#ffffff" ? "box-shadow:inset 0 0 0 1px #cbd5e1;" : ""}" aria-label="Colour ${c}"></button>`).join("")}
+            <input type="color" class="re-sw re-sw-pick" value="#0f766e" title="Any colour" aria-label="Any colour" style="padding:0;border:0;cursor:pointer;" /></div>
         </span>
         <span class="re-sep"></span>
         ${btn("justifyLeft", I.left, "Align left")}${btn("justifyCenter", I.center, "Centre")}${btn("justifyRight", I.right, "Align right")}
@@ -146,6 +150,13 @@ const btn = (cmd, icon, title) =>
 
   const changed = () => onInput();
   const hydrate = () => hydrateRichImages(area, { logo: logo() });
+  // Text on a dark picture: the box shows that background, so white text can be seen while typing
+  const setLook = () => {
+    const l = look ? look() : null;
+    area.style.background = (l && l.bg) || "";
+    area.style.color = (l && l.color) || "";
+  };
+  setLook();
 
   /* ---------- Keeping the cursor while using the toolbar ---------- */
   const onSel = () => {
@@ -164,7 +175,7 @@ const btn = (cmd, icon, title) =>
   }
   function exec(cmd, val = null) {
     restore();
-    document.execCommand("styleWithCSS", false, cmd === "foreColor" || cmd === "fontSize");
+    document.execCommand("styleWithCSS", false, cmd === "foreColor" || cmd === "fontSize" || cmd === "fontName");
     document.execCommand(cmd, false, val);
     changed();
     updateState();
@@ -186,11 +197,32 @@ const btn = (cmd, icon, title) =>
   /* ---------- Toolbar ---------- */
   bar.addEventListener("mousedown", (e) => { if (e.target.closest("button")) e.preventDefault(); });
   blockSel.addEventListener("change", () => exec("formatBlock", `<${blockSel.value}>`));
+  // Size in pixels: the browser marks the text with its biggest size, which is then swapped for the pixels chosen
   const sizeSel = host.querySelector(".re-size");
   sizeSel.addEventListener("change", () => {
-    if (sizeSel.value) exec("fontSize", sizeSel.value);
+    const px = Number(sizeSel.value);
     sizeSel.value = "";
+    if (!px) return;
+    exec("fontSize", "7");
+    area.querySelectorAll('font[size="7"]').forEach((f) => {
+      const s = document.createElement("span");
+      s.style.fontSize = `${px}px`;
+      s.append(...f.childNodes);
+      f.replaceWith(s);
+    });
+    area.querySelectorAll("span").forEach((s) => { if (/xxx-large/.test(s.style.fontSize)) s.style.fontSize = `${px}px`; });
+    changed();
   });
+  const fontSel = host.querySelector(".re-font");
+  if (fontSel) {
+    fontSel.addEventListener("change", () => {
+      const f = fontSel.value;
+      fontSel.value = "";
+      if (f) exec("fontName", f);
+    });
+  }
+  const pick = host.querySelector(".re-sw-pick");
+  pick.addEventListener("change", () => { pop.hidden = true; exec("foreColor", pick.value); });
 
   bar.addEventListener("click", async (e) => {
     const sw = e.target.closest("[data-colour]");
@@ -316,6 +348,7 @@ const btn = (cmd, icon, title) =>
     text: () => area.textContent || "",
     focus: () => area.focus(),
     hydrate,
+    setLook,
     area,
   };
 }
