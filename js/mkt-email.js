@@ -39,6 +39,24 @@ export function qrTarget(b) {
   const [base, hash = ""] = h.split("#");
   return `${base}${base.includes("?") ? "&" : "?"}utm_source=email&utm_medium=qr&utm_campaign=${tag}${hash ? `#${hash}` : ""}`;
 }
+// A Pin link → { name, price, thanks, page } (or null if it isn't one)
+export function readPayLink(href) {
+  const s = String(href || "").replace(/&amp;/g, "&").trim();
+  if (!/^https:\/\/pay\.pinpayments\.com\//i.test(s)) return null;
+  let p;
+  try { p = new URL(s).searchParams; } catch { return null; }
+  return { name: p.get("description") || "", price: p.get("amount") || "", thanks: p.get("success_url") || "", page: s.split("?")[0] };
+}
+// …and back to a link (it keeps the Pin page it was made with)
+export function payHrefOf(pl) {
+  const amt = priceOf(pl && pl.price);
+  let u = `${(pl && pl.page) || PIN_PAGE}?`;
+  if (amt) u += `amount=${Number.isInteger(amt) ? amt : amt.toFixed(2)}&`;
+  u += `description=${encodeURIComponent(String((pl && pl.name) || "Dermedica").replace(/\s+/g, " ").trim().slice(0, 150))}&amount_editable=false`;
+  const t = String((pl && pl.thanks) || "").trim();
+  if (/^https:\/\/[^\s"'<>]+$/i.test(t)) u += `&success_url=${encodeURIComponent(t)}`;
+  return u;
+}
 export const linkOf = (x) => (x && x.link === "form"
   ? (/^[A-Za-z0-9_-]{10,40}$/.test(String(x.formId || "")) ? formLink(x.formId, { q: x.ansQ, a: x.ansA, lock: x.ansLock }) : "")
   : x && x.link === "pay" ? payLink(x)
@@ -486,7 +504,7 @@ export function blockHtml(b, st, preview = false) {
       const w = Math.round(inner(st) * (ha === "center" ? 0.82 : 0.6));   // how wide the text can go
       // The editor's text, in the hero's text colour (anything coloured in the editor keeps its own colour)
       const words = emailRich(b.html, { ...st, text: tc, accent: tc });
-      const inner = (words ? `<div style="${font(st, 16)}color:${tc};">${words}</div>` : "") +
+      const content = (words ? `<div style="${font(st, 16)}color:${tc};">${words}</div>` : "") +
         (b.label ? `<div style="padding:4px 0 0;">${btn(b.label, linkOf(b), hex(b.btnBg, st.accent), hex(b.btnColor, "#ffffff"), st, false, b.btnStyle === "outline")}</div>` : "");
       // The picture sits behind the text. Where pictures behind text aren't shown (Outlook on Windows), the colour is.
       const bgCss = src ? `background-image:url('${esc(src)}');background-size:cover;background-repeat:no-repeat;` +
@@ -496,7 +514,7 @@ export function blockHtml(b, st, preview = false) {
         `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;"><tr>` +
         `<td height="${H}" valign="${va}" align="${ha}" style="height:${H}px;padding:32px;vertical-align:${va};text-align:${ha};border-radius:${r}px;` +
         `${dim ? `background-color:rgba(${rgbOf(b.dimColor)},${dim});` : ""}">` +
-        `<div style="display:inline-block;width:100%;max-width:${w}px;text-align:${ha};">${inner}</div>` +
+        `<div style="display:inline-block;width:100%;max-width:${w}px;text-align:${ha};">${content}</div>` +
         `</td></tr></table></td></tr></table>`;
       return box(b.edge ? "padding:0 0 4px;" : "padding:12px 32px;", hero);
     }
@@ -639,6 +657,9 @@ export function checkDesign(t) {
     if (b.type === "buttons") (b.items || []).forEach((it) => noAns(it, it.label || "Button"));
     if (b.type === "html" && customLinks(b.code).some((l) => { const f = readFormLink(l.href); return f && f.q && !f.a.trim(); })) {
       out.push("A button in a custom HTML block answers a question, but no answer is chosen.");
+    }
+    if (b.type === "html" && customLinks(b.code).some((l) => { const p = readPayLink(l.href); return p && !priceOf(p.price); })) {
+      out.push("A payment button in a custom HTML block has no price yet.");
     }
     if (b.type === "image" && !safeUrl(b.src)) out.push("An image block has no picture yet.");
     if (b.type === "hero") {

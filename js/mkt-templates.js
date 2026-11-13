@@ -16,6 +16,7 @@ import { makeResizable } from "./panel-resize.js";
 import {
   esc, safeUrl, uid, BLOCKS, FONTS, MERGE_TAGS, STARTERS, styleOf, cleanDesign, newBlock, blockHtml, renderEmail,
   footerPreview, checkDesign, CUSTOM_PIECES, customNotes, customLinks, setCustomLink, FORM_PAGE, formLink, readFormLink, qrTarget, WIDTHS,
+  readPayLink, payHrefOf,
 } from "./mkt-email.js";
 import { openCropper } from "./mkt-crop.js";
 import { listPublishedForms } from "./form-templates.js";
@@ -898,6 +899,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       const forms = formsCache || [];
       linksBox.innerHTML = list.map((l, i) => {
         const fl = readFormLink(l.href);
+        const pl = fl ? null : readPayLink(l.href);
         const gone = fl && !forms.some((f) => f.id === fl.id);
         const url = /^(https?:|mailto:|tel:)/i.test(l.href) && l.href !== "https://" ? l.href : "";
         const qs = fl ? questionsOf(fl.id) : [];
@@ -905,13 +907,19 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
         return `<div class="ch-link">
           <span class="ch-link-text" title="${esc(l.text)}">${esc(l.text)}</span>
           <select class="fb-select" data-linkkind="${i}" aria-label="Where ${esc(l.text)} goes">
-            <option value="url"${fl ? "" : " selected"}>A web page</option>
+            <option value="url"${fl || pl ? "" : " selected"}>A web page</option>
+            <option value="pay"${pl ? " selected" : ""}>A payment (Pin)</option>
             <optgroup label="A form to fill in">${forms.length
               ? forms.map((f) => `<option value="form:${esc(f.id)}"${fl && f.id === fl.id ? " selected" : ""}>${esc(f.name)}</option>`).join("")
               : `<option disabled>${formsCache ? "No forms are set up for online filling" : "Loading forms…"}</option>`}${
               gone ? `<option value="form:${esc(fl.id)}" selected>This form (not online any more)</option>` : ""}</optgroup>
           </select>
           ${fl ? '<small class="ch-link-note">Each patient gets their own link</small>'
+            : pl ? `<span class="ch-pay">
+                <input class="fe-input" data-payname="${i}" value="${esc(pl.name)}" placeholder="What they're buying" aria-label="What ${esc(l.text)} buys" />
+                <input class="fe-input" data-payprice="${i}" value="${esc(pl.price ? `$${pl.price}` : "")}" placeholder="$995" aria-label="Price" />
+                <input class="fe-input" data-paythanks="${i}" value="${esc(pl.thanks)}" placeholder="Thank-you page (optional)" aria-label="Thank-you page" />
+              </span>`
             : `<input class="fe-input" data-linkurl="${i}" value="${esc(url)}" placeholder="https://" aria-label="Link for ${esc(l.text)}" />`}
           ${fl && qs.length ? `<div class="ch-ans">
             <select class="fb-select" data-ansq="${i}" aria-label="Answer a question for them">
@@ -973,7 +981,20 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       const el = e.target;
       if (el.matches("[data-linkkind]")) {
         const v = el.value;
-        setLink(Number(el.dataset.linkkind), v.startsWith("form:") ? formLink(v.slice(5)) : "https://");
+        const i = Number(el.dataset.linkkind);
+        const l = customLinks(ta.value)[i] || {};
+        setLink(i, v.startsWith("form:") ? formLink(v.slice(5)) : v === "pay" ? payHrefOf({ name: l.text || "" }) : "https://");
+        return;
+      }
+      if (el.matches("[data-payname], [data-payprice], [data-paythanks]")) {
+        const i = Number(el.dataset.payname ?? el.dataset.payprice ?? el.dataset.paythanks);
+        const l = customLinks(ta.value)[i];
+        const pl = l && readPayLink(l.href);
+        if (!pl) return;
+        if (el.matches("[data-payname]")) pl.name = el.value.trim();
+        else if (el.matches("[data-payprice]")) pl.price = el.value.trim();
+        else pl.thanks = el.value.trim();
+        setLink(i, payHrefOf(pl));
         return;
       }
       if (el.matches("[data-ansq], [data-ansa], [data-anslock]")) {

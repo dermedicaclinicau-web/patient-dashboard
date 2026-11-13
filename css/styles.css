@@ -13667,3 +13667,6 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 .rec-parked .rec-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
 .rec-prior { font-size: 12px; color: #64748b; margin-left: 4px; white-space: nowrap; }
 .tb-rec-btn.is-continue { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
+
+.ch-pay { display: flex; flex-wrap: wrap; gap: 6px; }
+.ch-pay .fe-input { flex: 1 1 120px; min-width: 0; }
