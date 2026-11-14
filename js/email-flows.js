@@ -692,7 +692,7 @@ async function mountFlowList(container, { staff }) {
   load();
 }
 
-function newFlowDialog(staff) {function newFlowGallery(staff) {
+function newFlowGallery(staff) {
   const dlg = document.createElement("dialog");
   dlg.className = "lh-dialog ef-gallery-dlg";
   dlg.innerHTML = `
