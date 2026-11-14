@@ -36,7 +36,7 @@ export const PLAN_STATUSES = [
 
 export const RECALL_OUTCOMES = [["none", "No calls yet"], ["no_answer", "No answer"], ["voicemail", "Left voicemail"],
   ["spoke", "Spoke to them"], ["texted", "Sent a text"]];
-
+export const SPEND_TIERS = [["platinum", "Platinum"], ["gold", "Gold"], ["silver", "Silver"], ["none", "No tier"]];
 export const RULE_FIELDS = [
   // Recall flow only (recall: true): about this recall card
   { key: "rc.category", group: "This recall", label: "Treatment category", type: "names", recall: true },
@@ -107,6 +107,8 @@ export const RULE_FIELDS = [
   { key: "pt.email", group: "Patient", label: "Has an email address", type: "bool" },
   { key: "pt.mobile", group: "Patient", label: "Has a mobile number", type: "bool" },
   { key: "pt.marketing", group: "Patient", label: "Agreed to marketing emails", type: "bool" },
+  { key: "pt.spend_tier", group: "Patient", label: "Spend tier (last 12 months)", type: "choice", options: SPEND_TIERS },
+  { key: "pt.tag", group: "Patient", label: "Patient tag", type: "names" },
 ];
 const FIELD = Object.fromEntries(RULE_FIELDS.map((f) => [f.key, f]));
 // What the Recall flow offers: this recall, plus everything about the patient (not "this purchase" or "this visit")
@@ -331,7 +333,21 @@ export async function loadServiceNames() {
   }
   return servicesCache;
 }
-
+// The clinic's patient tags, by name (ui_settings/patient_tags), for the "Patient tag" rule
+const STARTER_TAG_NAMES = ["Doesn't live in Perth", "Prefers text", "Prefers email", "Call after 3pm", "VIP"];
+let tagNamesCache = null;
+export async function loadTagNames() {
+  if (tagNamesCache) return tagNamesCache;
+  try {
+    const d = await getDoc(doc(db, "ui_settings", "patient_tags"));
+    const list = d.exists() && Array.isArray(d.data().tags) ? d.data().tags : null;
+    tagNamesCache = list ? list.map((t) => String((t && t.label) || "").trim()).filter(Boolean) : STARTER_TAG_NAMES.slice();
+  } catch (err) {
+    console.warn("Patient tags not loaded:", err);
+    tagNamesCache = [];
+  }
+  return tagNamesCache;
+}
 // A list of names (chips) with a box to add more. arr is changed in place.
 export function mountProductPicker(host, arr, { onChange = () => {}, names = [], placeholder = "Type a product name", none = "No products chosen yet" } = {}) {
   const listId = "pp_" + Math.random().toString(36).slice(2, 8);
@@ -509,7 +525,8 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       if (!Array.isArray(r.value)) r.value = [];
       const f = FIELD[r.field];
       if (f && f.type === "names") {
-        mountProductPicker(el, r.value, { onChange, names: lists[r.field] || [], placeholder: "Choose or type one", none: "None chosen yet" });
+        mountProductPicker(el, r.value, { onChange, names: lists[r.field] || (r.field === "pt.tag" ? tagNamesCache || [] : []),
+          placeholder: "Choose or type one", none: "None chosen yet" });
       } else if (f && (f.type === "prange" || f.type === "pdays")) {
         mountProductPicker(el, r.value, { onChange, names, placeholder: "Type a product, or leave empty for any", none: "Any product" });
       } else {

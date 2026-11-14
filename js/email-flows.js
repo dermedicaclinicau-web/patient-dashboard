@@ -10,7 +10,7 @@ import { callApi } from "./appointments.js";
 import { searchPatients } from "./task-runner.js";
 import {
   blankGroup, cleanGroup, groupProblem, describeGroup, ruleCount, loadProductNames, loadServiceNames,
-  mountRuleBuilder, mountProductPicker, TASK_RULE_KEYS,
+  mountRuleBuilder, mountProductPicker, TASK_RULE_KEYS, newRule, loadTagNames,
 } from "./flow-rules.js";
 import { loadSource } from "./task-sources.js";
 
@@ -31,7 +31,8 @@ const COL = "email_flows";
 const BASE = "#/settings/flows";
 const MAX_STEPS = 40;
 const MAX_DEPTH = 3; // If / else inside If / else, at most 3 deep
-
+// "[Add your offer here]" in a ready-made flow: must be replaced before it can be turned on
+const PLACEHOLDER_RE = /\[(?:add|your|replace|change)\b[^\]]{0,80}\]/i;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -265,6 +266,7 @@ function stepProblems(s, depth) {
   if (s.type === "email") {
     if (!c.subject.trim()) out.push("Add a subject");
     if (c.mode === "html" ? !String(c.code || "").trim() : !plainText(c.body)) out.push("Write the message");
+    if (PLACEHOLDER_RE.test(`${c.subject} ${c.mode === "html" ? c.code : c.body}`)) out.push("Replace the text in [square brackets]");
   } else if (s.type === "wait" || s.type === "reply") {
     const max = (UNITS.find((u) => u[0] === c.unit) || UNITS[0])[2];
     const n = Number(c.num);
@@ -274,8 +276,10 @@ function stepProblems(s, depth) {
     if (c.to === "staff" && !c.staffIds.length) out.push("Choose at least one staff member");
     if (!c.subject.trim()) out.push("Add a subject");
     if (!c.message.trim()) out.push("Write the message");
+    if (PLACEHOLDER_RE.test(`${c.subject} ${c.message}`)) out.push("Replace the text in [square brackets]");
   } else if (s.type === "todo") {
     if (!String(c.text || "").trim()) out.push("Write the to-do");
+    if (PLACEHOLDER_RE.test(String(c.text || ""))) out.push("Replace the text in [square brackets]");
     if (c.to === "roles" && !c.roles.length) out.push("Choose at least one role");
     if (c.to === "staff" && !c.staffIds.length) out.push("Choose at least one staff member");
   } else if (s.type === "update") {
@@ -466,7 +470,159 @@ function starterFlow() {
     steps: [branch("has_ssp", [branch("in_ssp", inSsp, notInSsp)], noSsp)],
   };
 }
+/* ===================== Ready-made flows (New flow → gallery) ===================== */
 
+const rp = (...lines) => lines.map((l) => `<p>${l}</p>`).join("");
+const SIGN = "Kind regards,<br>The Dermedica team";
+const rc = (type, cfg) => ({ id: newId(), type, cfg: { ...blank(type).cfg, ...cfg } });
+const rEmail = (subject, body, promo = false, more = {}) => rc("email", { subject, body, promo, ...more });
+const rWait = (num, unit) => rc("wait", { num, unit });
+const rTodo = (text, roles = ["Reception"]) => rc("todo", { to: "roles", roles, text, dueDays: 0 });
+const rRule = (field, op, value = "", more = {}) => ({ ...newRule(field), op, value, ...more });
+const rAll = (...rules) => ({ match: "all", rules });
+
+const RECIPES = [
+  {
+    key: "welcome", icon: "user", title: "Welcome new patients",
+    who: "After a new patient's first visit: a welcome, a check-in a week later, then a request for a review.",
+    build: () => ({
+      name: "Welcome new patients",
+      description: "Starts the morning after a new patient's first visit.",
+      trigger: { event: "visit", serviceScope: "any", rules: rAll(rRule("appt.visits", "lt", 2)) },
+      stop: { booking: false },
+      steps: [
+        rEmail("Welcome to Dermedica, {First name}", rp("Hi {First name},",
+          "Thank you for coming in to see us. It was lovely to meet you.",
+          "If you have any questions about your visit, just reply to this email or call us on {Clinic phone}. We're always happy to help.", SIGN)),
+        rWait(1, "weeks"),
+        rEmail("How are you going, {First name}?", rp("Hi {First name},",
+          "It's been a week since your visit, so we wanted to check in. How is everything going?",
+          "If anything doesn't feel right, or you have a question, reply to this email or call us on {Clinic phone}.", SIGN)),
+        rWait(3, "weeks"),
+        rEmail("How did we do?", rp("Hi {First name},",
+          "We'd love to hear how your first visit went. It only takes a minute, and it helps other people find us.",
+          "[Add your Google review link here]", "Thank you for choosing Dermedica.", SIGN)),
+      ],
+    }),
+  },
+  {
+    key: "aftercare", icon: "cal", title: "Check in after a treatment",
+    who: "The morning after the treatments you choose: a check-in, then an invitation to book the next one.",
+    build: () => ({
+      name: "Check in after a treatment",
+      description: "Choose which treatments start it in Flow settings → Which visits.",
+      trigger: { event: "visit", serviceScope: "some", services: [] },
+      stop: { booking: true },
+      steps: [
+        rEmail("How are you feeling, {First name}?", rp("Hi {First name},",
+          "Just checking in after your {Visit services} on {Visit date}. We hope you're feeling great.",
+          "If anything doesn't feel right, or you have a question about your aftercare, reply to this email or call us on {Clinic phone} and we'll look after you.", SIGN)),
+        rWait(3, "weeks"),
+        rEmail("How are your results, {First name}?", rp("Hi {First name},",
+          "We'd love to know how you're finding your results.",
+          "Many treatments work best as a course or with regular maintenance. If you'd like to book your next one, call us on {Clinic phone} or just reply to this email.", SIGN), true),
+      ],
+    }),
+  },
+  {
+    key: "lapsed", icon: "sun", title: "Bring back lapsed patients",
+    who: "Patients who haven't been in for 9 months and have nothing booked. Checked every morning.",
+    build: () => ({
+      name: "Bring back lapsed patients",
+      description: "Up to 25 patients a day. Each patient at most once a year.",
+      trigger: { event: "daily", repeatDays: 365, dailyMax: 25, existing: true,
+        rules: rAll(rRule("appt.visits", "gt", 0), rRule("appt.last_days", "gt", 270), rRule("appt.has_future", "no")) },
+      stop: { booking: true },
+      steps: [
+        rEmail("We miss you, {First name}", rp("Hi {First name},",
+          "It's been a while since we've seen you at Dermedica, and we'd love to catch up.",
+          "Your skin changes through the year, so it's a great time for a check-in and a plan for the months ahead.",
+          "[Add your offer here, or delete this line]",
+          "Call us on {Clinic phone} or reply to this email to book.", SIGN), true),
+        rWait(3, "weeks"),
+        rEmail("Still thinking about it, {First name}?", rp("Hi {First name},",
+          "Just a reminder that we'd love to see you again. Reply to this email or call us on {Clinic phone} and we'll find a time that suits you.", SIGN), true),
+      ],
+    }),
+  },
+  {
+    key: "plan", icon: "check", title: "Treatment plan: treatment due",
+    who: "Patients with a treatment due in their plan and nothing booked: an email, then a call from Reception.",
+    build: () => ({
+      name: "Treatment plan: treatment due",
+      description: "Each patient at most every 60 days.",
+      trigger: { event: "daily", repeatDays: 60, dailyMax: 25, existing: true,
+        rules: rAll(rRule("plan.due", "yes"), rRule("appt.has_future", "no")) },
+      stop: { booking: true },
+      steps: [
+        rEmail("Your next treatment is due, {First name}", rp("Hi {First name},",
+          "Your treatment plan has a treatment that's due now. Keeping to your plan is what gets the best results.",
+          "Call us on {Clinic phone} or reply to this email and we'll find a time that suits you.", SIGN), true),
+        rWait(1, "weeks"),
+        rTodo("Call {Patient name}: a treatment in their plan is due and nothing is booked."),
+      ],
+    }),
+  },
+  {
+    key: "ssp", icon: "doc", title: "Skin Script expiring",
+    who: "Patients whose Skin Script expires within a month, with nothing booked: a review invitation, then a call.",
+    build: () => ({
+      name: "Skin Script review",
+      description: "Each patient at most every 6 months.",
+      trigger: { event: "daily", repeatDays: 180, dailyMax: 25, existing: true,
+        rules: rAll(rRule("ssp.active", "yes"), rRule("ssp.expiry_days", "lt", 31), rRule("appt.has_future", "no")) },
+      stop: { booking: true },
+      steps: [
+        rEmail("Time to review your Skin Script", rp("Hi {First name},",
+          "Your Skin Script from {SSP date} is due for a review by {SSP expiry date}. Your skin changes over time, so a quick check makes sure your routine is still right for you.",
+          "Here's what you're using now:", "{Skin Script table}",
+          "Call us on {Clinic phone} or reply to this email to book your review.", SIGN), true),
+        rWait(2, "weeks"),
+        rTodo("Call {Patient name} to book a Skin Script review (it expires {SSP expiry date})."),
+      ],
+    }),
+  },
+  { key: "purchase", icon: "cart", title: "After a product purchase",
+    who: "How to use it, a check-in, then a reorder reminder, depending on whether it's in their Skin Script.",
+    build: starterFlow },
+  {
+    key: "birthday", icon: "sun", title: "Birthday",
+    who: "On each patient's birthday, a birthday email with an offer.",
+    build: () => ({
+      name: "Birthday",
+      description: "Sent on the morning of their birthday.",
+      trigger: { event: "daily", repeatDays: 365, dailyMax: 50, existing: true, rules: rAll(rRule("pt.birthday", "today")) },
+      stop: { booking: false },
+      steps: [rEmail("Happy birthday, {First name}!", "", true, { mode: "html", code: STARTER_HTML })],
+    }),
+  },
+  {
+    key: "vip", icon: "user", title: "Thank our top patients",
+    who: "Platinum patients (the top spenders in the last 12 months): a thank-you, once a year.",
+    build: () => ({
+      name: "Thank our top patients",
+      description: "Spend tiers come from Recall's daily check.",
+      trigger: { event: "daily", repeatDays: 365, dailyMax: 25, existing: true, rules: rAll(rRule("pt.spend_tier", "is", "platinum")) },
+      stop: { booking: false },
+      steps: [
+        rEmail("Thank you, {First name}", rp("Hi {First name},",
+          "We just wanted to say thank you. You're one of our most valued patients, and we love looking after you.",
+          "[Add a thank-you gift or offer here, or delete this line]", "See you soon,<br>The Dermedica team"), true),
+      ],
+    }),
+  },
+  {
+    key: "tag", icon: "flow", title: "When a patient is tagged",
+    who: "Whenever staff give a patient a tag you choose (for example VIP), they get these emails.",
+    build: () => ({
+      name: "Tagged patients",
+      description: "Choose the tag in Flow settings → Patients who…",
+      trigger: { event: "daily", repeatDays: 0, dailyMax: 25, existing: true, rules: rAll(rRule("pt.tag", "any", [])) },
+      stop: { booking: false },
+      steps: [rEmail("A note from Dermedica", rp("Hi {First name},", "[Add your message here]", SIGN))],
+    }),
+  },
+];
 /* ===================== Entry ===================== */
 
 export async function mountEmailFlows(container, { param = "", staff } = {}) {
@@ -489,7 +645,6 @@ async function mountFlowList(container, { staff }) {
           that finds patients who match your rules. Each flow is a set of cards that run from top to bottom.</p>
       </div>
       <div class="ff-bar-actions">
-        <button type="button" class="ff-btn" data-act="starter">Add Skin Script starter</button>
         <button type="button" class="ff-btn is-primary" data-act="new">${I.plus}<span>New flow</span></button>
       </div>
     </div>
@@ -510,10 +665,9 @@ async function mountFlowList(container, { staff }) {
     if (!list.isConnected) return;
     if (!flows.length) {
       list.innerHTML = `<div class="tm-empty"><strong>No email flows yet.</strong><br>
-        Start with the Skin Script follow-up (emails after a purchase, depending on the patient's Skin Script), or build your own.
+        Pick a ready-made flow (welcome new patients, bring back lapsed patients, birthdays and more), or build your own.
         <div class="tm-empty-act">
-          <button type="button" class="ff-btn is-primary" data-act="starter">Add Skin Script starter</button>
-          <button type="button" class="ff-btn" data-act="new">New flow</button>
+          <button type="button" class="ff-btn is-primary" data-act="new">New flow</button>
         </div></div>`;
       return;
     }
@@ -532,65 +686,60 @@ async function mountFlowList(container, { staff }) {
     }).join("");
   }
 
-  root.addEventListener("click", async (e) => {
-    if (e.target.closest('[data-act="new"]')) { newFlowDialog(staff); return; }
-    const s = e.target.closest('[data-act="starter"]');
-    if (!s) return;
-    s.disabled = true;
-    try {
-      const id = await createFlow(starterFlow(), staff);
-      showToast("Starter flow added as a draft. Check the wording, then turn it on.");
-      location.hash = `${BASE}/${encodeURIComponent(id)}`;
-    } catch (err) {
-      console.error("Starter flow failed:", err);
-      showToast(err.code === "permission-denied" ? "You don't have Build email flows access." : "Couldn't add the starter flow. Try again.");
-      if (s.isConnected) s.disabled = false;
-    }
+  root.addEventListener("click", (e) => {
+    if (e.target.closest('[data-act="new"]')) newFlowGallery(staff);
   });
-
   load();
 }
 
-function newFlowDialog(staff) {
+function newFlowDialog(staff) {function newFlowGallery(staff) {
   const dlg = document.createElement("dialog");
-  dlg.className = "lh-dialog fe-confirm";
+  dlg.className = "lh-dialog ef-gallery-dlg";
   dlg.innerHTML = `
-    <form class="lh-form" novalidate>
-      <div class="lh-dialog-head"><h3>New email flow</h3><p>You can change the name later.</p></div>
-      <label class="lh-field"><span class="lh-label">Name</span>
-        <input type="text" name="name" maxlength="120" placeholder="e.g. After a peel" /></label>
-      <p class="lh-error" role="alert" hidden></p>
-      <div class="lh-actions">
-        <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
-        <button type="submit" class="lh-btn is-primary">Create flow</button>
+    <div class="lh-form">
+      <div class="lh-dialog-head"><h3>New email flow</h3>
+        <p>Pick what you want it to do. It's made as a draft with the wording filled in: check it, fill in anything orange, then turn it on.</p></div>
+      <div class="ef-gallery">
+        ${RECIPES.map((r) => `<button type="button" class="ef-recipe" data-recipe="${r.key}">
+          <span class="ef-recipe-ico">${I[r.icon] || I.flow}</span>
+          <span><strong>${esc(r.title)}</strong><small>${esc(r.who)}</small></span></button>`).join("")}
+        <button type="button" class="ef-recipe is-blank" data-recipe="blank">
+          <span class="ef-recipe-ico">${I.plus}</span>
+          <span><strong>Start from scratch</strong><small>An empty flow. Choose what starts it, then add your own cards.</small></span></button>
       </div>
-    </form>`;
-  const form = dlg.querySelector("form");
+      <p class="muted ef-gallery-note">Recall reminders have their own flow in Recall settings → Flow, so patients don't hear about a recall twice.</p>
+      <p class="lh-error" role="alert" hidden></p>
+      <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button></div>
+    </div>`;
   const err = dlg.querySelector(".lh-error");
-  dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const name = form.elements.name.value.trim();
-    if (!name) { err.textContent = "Give the flow a name."; err.hidden = false; return; }
-    const btn = form.querySelector('[type="submit"]');
-    btn.disabled = true;
-    btn.textContent = "Creating…";
+  const buttons = () => dlg.querySelectorAll("[data-recipe]");
+  dlg.addEventListener("click", async (e) => {
+    if (e.target.closest('[data-act="cancel"]')) { dlg.close(); return; }
+    const b = e.target.closest("[data-recipe]");
+    if (!b || b.disabled) return;
+    const r = RECIPES.find((x) => x.key === b.dataset.recipe) || null;
+    const title = b.querySelector("strong");
+    const was = title.textContent;
+    buttons().forEach((x) => { x.disabled = true; });
+    title.textContent = "Creating…";
+    err.hidden = true;
     try {
-      const id = await createFlow({ name }, staff);
+      const id = await createFlow(r ? r.build() : { name: "New flow" }, staff);
       dlg.close();
+      showToast(r ? "Made as a draft. Check the wording, fill in anything orange, then turn it on."
+        : "New flow made. Choose what starts it, then add cards.");
       location.hash = `${BASE}/${encodeURIComponent(id)}`;
     } catch (ex) {
       console.error("Create flow failed:", ex);
       err.textContent = ex.code === "permission-denied" ? "You don't have Build email flows access." : "Couldn't create the flow. Try again.";
       err.hidden = false;
-      btn.disabled = false;
-      btn.textContent = "Create flow";
+      title.textContent = was;
+      buttons().forEach((x) => { x.disabled = false; });
     }
   });
   dlg.addEventListener("close", () => dlg.remove());
   document.body.appendChild(dlg);
   dlg.showModal();
-  form.elements.name.focus();
 }
 
 /* ===================== Flow builder ===================== */
@@ -655,6 +804,10 @@ async function mountFlowEditor(container, { id, staff }) {
       </div>
       <div class="ef-grid">
         <div class="ef-stage">
+          <details class="ef-story" open>
+            <summary>What this flow does</summary>
+            <div class="ef-story-body" data-role="story-body"></div>
+          </details>
           <div class="ef-pal" role="group" aria-label="Add a card">
             <span>Add after the selected card</span>
             ${ADDABLE.map((t) => `<button type="button" class="ef-pal-btn" data-pal="${t}">${I[TYPES[t].icon]}<span>${esc(TYPES[t].short)}</span></button>`).join("")}
@@ -680,7 +833,7 @@ async function mountFlowEditor(container, { id, staff }) {
   const stateEl = $('[data-role="state"]');
   const msgEl = $('[data-role="msg"]');
   const liveBtn = $('[data-act="live"]');
-
+  const storyBody = $('[data-role="story-body"]');
   /* ---------- Saving ---------- */
   function setState(s) {
     stateEl.textContent = s === "saving" ? "Saving…" : s === "dirty" ? "Unsaved changes" : s === "error" ? "Couldn't save. Retrying…" : "All changes saved";
@@ -744,6 +897,7 @@ async function mountFlowEditor(container, { id, staff }) {
     modeBtn.hidden = !live;
     modeBtn.querySelector("span").textContent = mode === "real" ? "Back to testing" : "Send to patients";
     modeBtn.classList.toggle("is-primary", live && mode !== "real");
+    renderStory();
   }
 
   /* ---------- The canvas: a tree of cards you can drag around and zoom ---------- */
@@ -874,8 +1028,47 @@ async function mountFlowEditor(container, { id, staff }) {
         `<button type="button" data-ins="${esc(menu.key)}" data-type="${t}">${I[TYPES[t].icon]}<span>${esc(TYPES[t].short)}</span></button>`).join("")}</div>` : ""}`;
     if (!view.ready && canvas.clientWidth) { fit(true); view.ready = true; }
     applyView();
+    renderStory();
   }
-
+  /* ---------- What this flow does, in plain words ---------- */
+  const joinOr = (a) => (a.length < 2 ? a.join("") : `${a.slice(0, -1).join(", ")} or ${a[a.length - 1]}`);
+  function storyStep(s) {
+    const c = s.cfg;
+    const path = (title, items) => `<div class="ef-story-path"><b>${title}</b>${items.length
+      ? `<ol>${items.map(storyStep).join("")}</ol>` : '<p class="ef-story-none">Nothing on this path.</p>'}</div>`;
+    if (s.type === "branch") return `<li><span>Check: ${esc(summary(s))}</span>${path("Yes", c.yes)}${path("No", c.no)}</li>`;
+    if (s.type === "reply") {
+      return `<li><span>Wait up to ${esc(`${Number(c.num) || 0} ${unitWord(c.num, c.unit)}`)} for a reply</span>${
+        path("Replied", c.yes)}${path("No reply", c.no)}</li>`;
+    }
+    const text = s.type === "email" ? `Email them “${c.subject.trim() || "no subject yet"}”${c.promo ? " (promotional)" : ""}`
+      : s.type === "task" ? (c.taskName ? `Send the “${c.taskName}” task email` : "Send a task's email (none chosen yet)")
+      : s.type === "wait" ? `Wait ${summary(s)}`
+      : s.type === "staff" ? `Email staff: ${summary(s)}`
+      : s.type === "todo" ? `Give staff a to-do: “${summary(s)}”`
+      : s.type === "update" ? `Update their details: ${summary(s)}`
+      : "End the flow";
+    return `<li><span>${esc(text)}</span></li>`;
+  }
+  function renderStory() {
+    if (!storyBody) return;
+    const t = flow.trigger, st = flow.stop;
+    const stops = ["they unsubscribe", "there's no email address for them"];
+    if (st.rebuy && t.event === "purchase") stops.push("they buy the same product again (it starts over)");
+    if (st.rebuy && t.event === "visit") stops.push("they come in again (it starts over)");
+    if (st.booking) stops.push("they book an appointment");
+    if (ruleCount(st.rules)) stops.push(`this matches: ${describeGroup(st.rules)}`);
+    const gap = Number(st.gapDays) || 0;
+    const probs = flowProblems(flow, taskTypes);
+    storyBody.innerHTML = `
+      <p><b>Starts:</b> ${esc(triggerText())}.${ruleCount(t.rules) ? ` Patients who match: ${esc(describeGroup(t.rules))}.` : ""}</p>
+      ${flow.steps.length ? `<ol class="ef-story-steps">${flow.steps.map(storyStep).join("")}</ol>`
+        : '<p class="ef-story-none">No cards yet. Press + under the trigger to add the first one.</p>'}
+      <p><b>Stops if</b> ${esc(joinOr(stops))}.${gap ? ` No patient gets more than one automatic email every ${gap} day${gap === 1 ? "" : "s"}.` : ""}
+        Patient emails go out between 9 am and 6 pm.</p>
+      ${probs.length ? `<p class="ef-story-warn"><b>${probs.length} thing${probs.length === 1 ? "" : "s"} to finish before it can be turned on.</b> ${esc(probs[0])}</p>`
+        : status === "live" ? "" : '<p class="ef-story-ok">Ready to turn on.</p>'}`;
+  }
   /* ---------- Moving and zooming ---------- */
   const clampZ = (z) => Math.min(1.6, Math.max(0.3, z));
   function applyView() {
@@ -1969,7 +2162,16 @@ async function mountFlowEditor(container, { id, staff }) {
         <small>Held by ${esc(h.by || "staff")}${h.at ? ` · ${esc(new Date(h.at).toLocaleDateString("en-AU", { day: "numeric", month: "short" }))}` : ""}</small>
       </div>`).join("")}`;
   }
-
+  // Patients in this flow waiting at this card, or at any card inside it
+  async function waitingAt(s) {
+    while (runsLoading) await new Promise((r) => setTimeout(r, 100));
+    runs = null;
+    await loadRuns();
+    if (!Array.isArray(runs)) return 0;
+    const ids = new Set();
+    walk([s], (x) => ids.add(x.id));
+    return runs.filter((r) => r.status === "active" && ids.has(String(r.next || ""))).length;
+  }
   side.addEventListener("click", async (e) => {
     const pm = e.target.closest('[data-act="preview-match"]');
     if (pm) { previewMatches(pm); return; }
@@ -2091,12 +2293,18 @@ async function mountFlowEditor(container, { id, staff }) {
       if (!r) return;
       const s = r.list[r.i];
       const inside = REPLY_PATHS(s) ? count(s.cfg.yes) + count(s.cfg.no) : 0;
-      if (inside && !(await confirmDialog({
-        title: "Remove this If / else?",
-        message: `The ${inside} card${inside === 1 ? "" : "s"} inside Yes and No will be removed too.`,
+      const waiting = await waitingAt(s);
+      if ((inside || waiting) && !(await confirmDialog({
+        title: inside ? "Remove this If / else?" : "Remove this card?",
+        message: [
+          inside ? `The ${inside} card${inside === 1 ? "" : "s"} inside ${s.type === "reply" ? "Replied and No reply" : "Yes and No"} will be removed too.` : "",
+          waiting ? `${waiting} patient${waiting === 1 ? " is" : "s are"} waiting at ${inside ? "these cards" : "this card"} right now. If you remove ${inside ? "them" : "it"}, the flow stops for ${waiting === 1 ? "them" : "those patients"} and they get nothing more from it.` : "",
+        ].filter(Boolean).join("\n\n"),
         confirmLabel: "Remove", tone: "danger",
       }))) return;
-      r.list.splice(r.i, 1);
+      const at = find(flow.steps, s.id);   // still there after the question
+      if (!at) return;
+      at.list.splice(at.i, 1);
       sel = null;
       changed();
       renderCanvas();
@@ -2438,7 +2646,7 @@ async function mountFlowEditor(container, { id, staff }) {
     .catch((err) => { console.warn("Online forms not loaded:", err); onlineForms = []; })
     .finally(() => { if (root.isConnected) { renderCanvas(); redrawSideSoon(); } });
   lhReady.finally(() => { if (root.isConnected) renderPreview(); });
-  Promise.all([loadProductNames(), loadServiceNames()]).then(([p, s]) => {
+  Promise.all([loadProductNames(), loadServiceNames(), loadTagNames()]).then(([p, s]) => {
     productNames = p;
     serviceNames = s;
     // The suggestions appear once the names have loaded
