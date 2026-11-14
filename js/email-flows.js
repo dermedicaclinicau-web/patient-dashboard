@@ -4,7 +4,7 @@
 
 import { db } from "./firebase-config.js";
 import {
-  collection, doc, getDoc, getDocs, addDoc, updateDoc, serverTimestamp, query, where, limit,
+  collection, doc, getDoc, getDocs, addDoc, updateDoc, serverTimestamp, query, where, limit, orderBy,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
 import { searchPatients } from "./task-runner.js";
@@ -1076,7 +1076,7 @@ async function mountFlowEditor(container, { id, staff }) {
     if (taskSrcAsked.has(src)) return;
     taskSrcAsked.add(src);
     loadSource(src).then((o) => { taskSrc[src] = o; }).catch(() => { taskSrc[src] = null; })
-      .finally(() => { if (root.isConnected && !editor) renderSide(); });
+      .finally(redrawSideSoon);
   }
   const taskOpts = (f) => ((f.source || "list") === "list" ? (f.options || []) : (taskSrc[f.source] || []));
   const taskChosen = (f, v) => (Array.isArray(v) ? v : v ? [v] : []).map((l) => taskOpts(f).find((o) => o.label === l) || { label: l, link: "" });
@@ -1424,7 +1424,18 @@ async function mountFlowEditor(container, { id, staff }) {
     }
     return '<section class="ef-sec"><p class="tb-info">This path stops here. Paths without End flow also stop after their last card.</p></section>';
   }
-
+  // Background loads redraw the panel only when nobody is typing in it (otherwise straight after)
+  const sideBusy = () => side.contains(document.activeElement)
+    && document.activeElement.matches("input, textarea, select, [contenteditable]");
+  let sideRedrawDue = false;
+  function redrawSideSoon() {
+    if (!root.isConnected || editor) return;
+    if (sideBusy()) { sideRedrawDue = true; return; }
+    renderSide();
+  }
+  side.addEventListener("focusout", () => setTimeout(() => {
+    if (sideRedrawDue && !sideBusy()) { sideRedrawDue = false; redrawSideSoon(); }
+  }, 0));
   function selStep() {
     if (!sel || sel === "trigger") return null;
     const r = find(flow.steps, sel);
@@ -1546,7 +1557,7 @@ async function mountFlowEditor(container, { id, staff }) {
     fetchStaffList()
       .then((list) => { staffList = list; })
       .catch((err) => { console.warn("Staff list failed:", err); staffError = true; })
-      .finally(() => { if (root.isConnected && !editor) renderSide(); });
+      .finally(redrawSideSoon);
   }
 
   const NUM_PATHS = ["stop.gapDays", "trigger.repeatDays", "trigger.dailyMax"];
@@ -2105,7 +2116,16 @@ async function mountFlowEditor(container, { id, staff }) {
     if (runsLoading) return;
     runsLoading = true;
     try {
-      const snap = await getDocs(query(collection(db, "email_flow_runs"), where("flowId", "==", id), limit(200)));
+      let snap;
+      try {
+        snap = await getDocs(query(collection(db, "email_flow_runs"), where("flowId", "==", id),
+          orderBy("startedAt", "desc"), limit(200)));
+      } catch (e2) {
+        // The index isn't made yet: the console shows a link that makes it in one click
+        if (!e2 || e2.code !== "failed-precondition") throw e2;
+        console.warn("Make the email_flow_runs index (flowId, startedAt) so the newest patients show:", e2.message);
+        snap = await getDocs(query(collection(db, "email_flow_runs"), where("flowId", "==", id), limit(200)));
+      }
       runs = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
         .sort((a, b) => String(b.startedAt || "").localeCompare(String(a.startedAt || "")));
       runsErr = "";
@@ -2317,7 +2337,10 @@ async function mountFlowEditor(container, { id, staff }) {
       }))) return;
       await settle();
       try {
-        await saveFlow(id, flow, staff, null, letterhead, { sendMode: toReal ? "real" : "test" });
+        // Back to testing: the test emails come to whoever pressed it
+        await saveFlow(id, flow, staff, null, letterhead, toReal ? { sendMode: "real" } : {
+          sendMode: "test", testUid: String((staff && staff.uid) || ""), testName: String((staff && staff.name) || ""),
+        });
         mode = toReal ? "real" : "test";
         renderBar();
         showToast(toReal ? "Now sending to patients." : "Back to testing. Emails come to you.");
@@ -2404,7 +2427,7 @@ async function mountFlowEditor(container, { id, staff }) {
   listTaskTypes({ isAdmin: false })
     .then((l) => { taskTypes = l; })
     .catch((err) => { console.warn("Task types not loaded:", err); taskTypes = []; })
-    .finally(() => { if (root.isConnected) { renderCanvas(); if (!editor) renderSide(); } });
+    .finally(() => { if (root.isConnected) { renderCanvas(); redrawSideSoon(); } });
   getDocs(query(collection(db, "form_templates"), where("status", "==", "live")))
     .then((snap) => {
       onlineForms = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
@@ -2413,12 +2436,12 @@ async function mountFlowEditor(container, { id, staff }) {
         .sort((a, b) => a.name.localeCompare(b.name, "en-AU"));
     })
     .catch((err) => { console.warn("Online forms not loaded:", err); onlineForms = []; })
-    .finally(() => { if (root.isConnected) { renderCanvas(); if (!editor) renderSide(); } });
+    .finally(() => { if (root.isConnected) { renderCanvas(); redrawSideSoon(); } });
   lhReady.finally(() => { if (root.isConnected) renderPreview(); });
   Promise.all([loadProductNames(), loadServiceNames()]).then(([p, s]) => {
     productNames = p;
     serviceNames = s;
     // The suggestions appear once the names have loaded
-    if (root.isConnected && !editor && side.querySelector("[data-pp-in]")) renderSide();
+    if (side.querySelector("[data-pp-in]")) redrawSideSoon();
   }).catch(() => {});
 }
