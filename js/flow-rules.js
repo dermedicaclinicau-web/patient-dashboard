@@ -69,8 +69,9 @@ export const RULE_FIELDS = [
   // Task flows only (task: true): the task that started the flow
   { key: "task.answer", group: "This task", label: "An answer on the task", type: "answer", task: true },
   { key: "task.replied", group: "This task", label: "They replied to the task email", type: "bool", task: true },
-  { key: "task.tx_booked", group: "This task", label: "Treatments in the email", type: "bool", task: true,
-    ops: [["none", "none of them are booked"], ["notall", "at least one isn't booked"], ["all", "all of them are booked"]] },
+  { key: "task.tx_booked", group: "This task", label: "Treatments in the email have an upcoming appointment", type: "txbooked", task: true,
+    ops: [["none", "none of them"], ["notall", "not all of them"], ["all", "all of them"]],
+    note: "Checked against their bookings in the appointment book at the moment the flow reaches this rule. Reviews and follow-ups don't count as booked." },
 
   { key: "hist.bought", group: "Purchase history", label: "Has ever bought", type: "products" },
   { key: "hist.bought_between", group: "Purchase history", label: "Purchases between two dates", type: "prange",
@@ -161,7 +162,7 @@ function cleanRule(r) {
   else if (f.type === "choice") value = f.options.some((o) => o[0] === value) ? value : d.value;
   else if (f.type === "bool") value = "";
   else value = String(value ?? "");
-  const days = (f.type === "form" || f.type === "pdays") && r.days !== "" && r.days !== null && r.days !== undefined ? Number(r.days) : "";
+  const days = (f.type === "form" || f.type === "pdays" || f.type === "txbooked") && r.days !== "" && r.days !== null && r.days !== undefined ? Number(r.days) : "";
   const out = { id: String(r.id || rid()), field: f.key, op, value, days };
   if (f.type === "range" || f.type === "prange") { out.from = isIso(r.from) ? r.from : ""; out.to = isIso(r.to) ? r.to : ""; }
   if (f.type === "year") out.value2 = r.value2 === "" || r.value2 === null || r.value2 === undefined ? "" : Number(r.value2);
@@ -202,6 +203,10 @@ function ruleProblem(r) {
     if (!r.fieldId) return 'Choose which answer to check in "An answer on the task"';
     if (!["empty", "filled"].includes(r.op) && !String(r.value || "").trim()) return `Fill in what "${r.fieldLabel || "the answer"}" should be`;
   }
+  if (f.type === "txbooked" && r.days !== "" && r.days !== null && r.days !== undefined) {
+    const n = Number(r.days);
+    if (!Number.isInteger(n) || n < 1 || n > 730) return "Choose 1 to 730 days for how far ahead to look, or leave it empty for any time";
+  }
   if (f.type === "pdays") {
     const n = Number(r.days);
     const min = r.op === "exact" ? 0 : 1;   // "exactly 0 days ago" = today
@@ -237,6 +242,13 @@ export function describeRule(r) {
   const f = FIELD[r.field];
   if (!f) return "Unknown rule";
   const op = (opsFor(f).find((o) => o[0] === r.op) || opsFor(f)[0])[1];
+  if (f.type === "txbooked") {
+    const when = r.days ? `in the next ${r.days} day${Number(r.days) === 1 ? "" : "s"}` : "any time from today";
+    const what = r.op === "all" ? "Every treatment in the email is booked"
+      : r.op === "notall" ? "At least one treatment in the email isn't booked"
+      : "None of the treatments in the email are booked";
+    return `${what} (${when})`;
+  }
   if (f.type === "bool") return `${f.label}: ${op}`;
   if (f.type === "prange") {
     const list = Array.isArray(r.value) ? r.value : [];
@@ -458,6 +470,10 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
         <span class="fr-unit">in the last</span>
         <input class="fe-input fr-num" type="number" min="0" step="1" data-rd="${p}" value="${esc(r.days)}" placeholder="any" aria-label="Days" />
         <span class="fr-unit">days</span>`;
+    } else if (f.type === "txbooked") {
+      val = `<span class="fr-unit">booked in the next</span>
+        <input class="fe-input fr-num" type="number" min="1" max="730" step="1" inputmode="numeric" data-rd="${p}" value="${esc(r.days)}" placeholder="any" aria-label="Days ahead" />
+        <span class="fr-unit">days</span>`;
     } else if (f.type === "pdays") {
       val = `<input class="fe-input fr-num" type="number" min="0" max="730" step="1" inputmode="numeric" data-rd="${p}" value="${esc(r.days)}" placeholder="14" aria-label="Days" />
         <span class="fr-unit">day${Number(r.days) === 1 ? "" : "s"}${r.op === "exact" || r.op === "over" ? " ago" : ""}</span>`;
@@ -486,6 +502,7 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       ${pre ? `<div class="fr-row">${pre}</div>` : ""}
       <div class="fr-row">${opSel}${val}
         <button type="button" class="fr-x" data-rx="${p}" aria-label="Remove this rule" title="Remove">×</button></div>
+      ${f.note ? `<p class="fr-note">${esc(f.note)}</p>` : ""}
       ${quick}
       ${f.type === "products" || f.type === "names" || f.type === "prange" || f.type === "pdays" ? `<div class="fr-pp" data-pp-host="${p}"></div>` : ""}
     </div>`;
