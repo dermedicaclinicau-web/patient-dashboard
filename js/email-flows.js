@@ -1348,11 +1348,13 @@ async function mountFlowEditor(container, { id, staff }) {
           within 15 minutes. Add <strong>Update their details</strong> to save what they changed to their record.</p>`;
     }
     if (t.event === "task") {
-      const usable = (taskTypes || []).filter((x) => x.useFor !== "treatmentInfo" && (x.category === "patient" || x.recipients.aboutPatient));
+      const usable = (taskTypes || []).filter((x) => x.useFor === "treatmentInfo" || x.category === "patient" || x.recipients.aboutPatient);
+      const kind = (x) => (x.useFor === "treatmentInfo" ? "Treatment Info email (consultation notes)"
+        : x.category === "staff" ? "To Staff, about a patient" : "To Patient");
       const list = taskTypes === null ? '<p class="tb-none">Loading tasks…</p>'
         : !usable.length ? '<p class="tb-none">No published tasks yet. Publish one in Task Manager → Task types.</p>'
         : `<div class="ef-checks">${usable.map((x) => `<label class="fe-check"><input type="checkbox" data-trigtask="${esc(x.id)}"${
-            t.taskIds.includes(x.id) ? " checked" : ""} /> ${esc(x.name)} <small class="muted">${x.category === "staff" ? "To Staff, about a patient" : "To Patient"}</small></label>`).join("")}</div>`;
+            t.taskIds.includes(x.id) ? " checked" : ""} /> ${esc(x.name)} <small class="muted">${kind(x)}</small></label>`).join("")}</div>`;
       return `
         <div class="tb-field"><span>Which tasks</span>${list}</div>
         <div class="tb-field"><span>Only start for patients who… <small>(optional)</small></span><div data-role="trig-rules"></div></div>
