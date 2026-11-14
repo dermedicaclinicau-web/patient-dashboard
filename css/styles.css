@@ -13834,3 +13834,5 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 .ef-recipe small { display: block; margin-top: 2px; color: #64748b; font-size: 12px; line-height: 1.4; }
 .ef-gallery-note { margin: 4px 0 0; font-size: 12px; }
 .fr-note { margin: 4px 0 0; font-size: 12px; line-height: 1.4; color: #64748b; }
+
+.ef-smscount { margin: 4px 0 8px; font-size: 13px; color: #475569; line-height: 1.45; }
