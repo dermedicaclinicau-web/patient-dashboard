@@ -69,6 +69,8 @@ export const RULE_FIELDS = [
   // Task flows only (task: true): the task that started the flow
   { key: "task.answer", group: "This task", label: "An answer on the task", type: "answer", task: true },
   { key: "task.replied", group: "This task", label: "They replied to the task email", type: "bool", task: true },
+  { key: "task.tx_booked", group: "This task", label: "Treatments in the email", type: "bool", task: true,
+    ops: [["none", "none of them are booked"], ["notall", "at least one isn't booked"], ["all", "all of them are booked"]] },
 
   { key: "hist.bought", group: "Purchase history", label: "Has ever bought", type: "products" },
   { key: "hist.bought_between", group: "Purchase history", label: "Purchases between two dates", type: "prange",
