@@ -57,10 +57,12 @@ const I = {
   check: ic('<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'),
   doc: ic('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>'),
   user: ic('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
+  sms: ic('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="13" y2="13"/>'),
 };
 
 const TYPES = {
   email: { label: "Send email to patient", short: "Send email", icon: "mail", tone: "is-patient" },
+  sms: { label: "Send text to patient", short: "Send text", icon: "sms", tone: "is-patient" },
   task: { label: "Send a task's email", short: "Task email", icon: "doc", tone: "is-patient" },
   wait: { label: "Wait", short: "Wait", icon: "clock", tone: "" },
   reply: { label: "Wait for a reply", short: "Wait for reply", icon: "reply", tone: "is-branch" },
@@ -70,7 +72,14 @@ const TYPES = {
   update: { label: "Update their details", short: "Update details", icon: "user", tone: "is-staff" },
   stop: { label: "End flow", short: "End flow", icon: "stop", tone: "" },
 };
-const ADDABLE = ["email", "task", "wait", "reply", "branch", "staff", "todo", "update", "stop"];
+const ADDABLE = ["email", "sms", "task", "wait", "reply", "branch", "staff", "todo", "update", "stop"];
+// Texts: how long it is and roughly how many texts it costs. Curly quotes and emoji make each text shorter.
+function smsInfo(raw) {
+  const t = /reply\s+stop/i.test(raw) ? raw : `${raw.trim()}\nReply STOP to opt out.`;
+  const plain = !/[^\x00-\x7F£€]/.test(t);
+  const per = plain ? (t.length <= 160 ? 160 : 153) : (t.length <= 70 ? 70 : 67);
+  return { len: t.length, parts: Math.max(1, Math.ceil(t.length / per)), plain };
+}
 const UPDATE_FIELDS = [["name", "Name"], ["mobile", "Mobile"], ["email", "Email"], ["address", "Address"],
   ["dob", "Date of birth"], ["medicare", "Medicare details"]];
 const UPDATE_MODES = [["auto", "Update their record straight away"], ["review", "Give staff a to-do to check and update it"]];
@@ -189,6 +198,7 @@ const newId = () => "s_" + Math.random().toString(36).slice(2, 9) + Date.now().t
 
 function blank(type) {
   const cfg = type === "email" ? { subject: "", body: "", promo: false, mode: "rich", code: "", bare: false, skipDays: 0 }
+    : type === "sms" ? { text: "", promo: false }
     : type === "wait" ? { num: 1, unit: "weeks" }
     : type === "branch" ? { cond: "in_ssp", rules: blankGroup(), yes: [], no: [] }
     : type === "staff" ? { to: "ssp_creator", roles: [], staffIds: [], subject: "", message: "" }
@@ -244,6 +254,7 @@ const triggerLabel = (t) => label(TRIGGERS, (t && t.event) || "purchase") || "A 
 function summary(s) {
   const c = s.cfg;
   if (s.type === "email") return c.subject.trim() || "No subject yet";
+  if (s.type === "sms") return (String(c.text || "").trim() || "No message yet").slice(0, 90);
   if (s.type === "wait") return `${Number(c.num) || 0} ${unitWord(c.num, c.unit)}`;
   if (s.type === "branch") return c.cond === "rules" ? describeGroup(c.rules) : label(CONDS, c.cond);
   if (s.type === "staff") {
@@ -267,6 +278,12 @@ function stepProblems(s, depth) {
     if (!c.subject.trim()) out.push("Add a subject");
     if (c.mode === "html" ? !String(c.code || "").trim() : !plainText(c.body)) out.push("Write the message");
     if (PLACEHOLDER_RE.test(`${c.subject} ${c.mode === "html" ? c.code : c.body}`)) out.push("Replace the text in [square brackets]");
+  } else if (s.type === "sms") {
+    const t = String(c.text || "").trim();
+    if (!t) out.push("Write the text");
+    else if (!/dermedica/i.test(t)) out.push("Say it's from Dermedica");
+    if (t.length > 560) out.push("Keep the text under 560 characters");
+    if (PLACEHOLDER_RE.test(t)) out.push("Replace the text in [square brackets]");
   } else if (s.type === "wait" || s.type === "reply") {
     const max = (UNITS.find((u) => u[0] === c.unit) || UNITS[0])[2];
     const n = Number(c.num);
@@ -1042,6 +1059,7 @@ async function mountFlowEditor(container, { id, staff }) {
         path("Replied", c.yes)}${path("No reply", c.no)}</li>`;
     }
     const text = s.type === "email" ? `Email them “${c.subject.trim() || "no subject yet"}”${c.promo ? " (promotional)" : ""}`
+      : s.type === "sms" ? `Text them “${summary(s).slice(0, 70)}${String(c.text || "").trim().length > 70 ? "…" : ""}”${c.promo ? " (promotional)" : ""}`
       : s.type === "task" ? (c.taskName ? `Send the “${c.taskName}” task email` : "Send a task's email (none chosen yet)")
       : s.type === "wait" ? `Wait ${summary(s)}`
       : s.type === "staff" ? `Email staff: ${summary(s)}`
@@ -1502,6 +1520,26 @@ async function mountFlowEditor(container, { id, staff }) {
         </section>
         <section class="ef-sec"><h4>Preview <small>(with example details)</small></h4><div data-role="prev"></div></section>`;
     }
+    if (s.type === "sms") {
+      const toks = tokensFor(false).map((g) => ({ ...g, tokens: g.tokens.filter((t) => t !== "Skin Script table") }))
+        .filter((g) => g.tokens.length);
+      return `
+        <section class="ef-sec">
+          <label class="tb-field"><span>Text</span>
+            <textarea class="fe-input" data-k="text" data-tokens rows="5" maxlength="560"
+              placeholder="Hi {First name}, it's Dermedica. …">${esc(c.text)}</textarea></label>
+          <p class="ef-smscount" data-role="smscount"></p>
+          ${chipsHtml(toks)}
+          ${dateInsertHtml()}
+          <small class="muted">"Reply STOP to opt out." is added at the end if you don't write it. {Clinic phone} comes from
+            Recall settings → Texts, so check it's filled in there.</small>
+          <label class="fe-check"><input type="checkbox" data-k="promo" data-rerender${c.promo ? " checked" : ""} />
+            This is promotional <small class="muted">(an offer, a reorder reminder or a booking invitation)</small></label>
+          <p class="tb-info">Sent between 9 am and 6 pm through Textmagic. Mobiles that replied STOP are never texted${
+            c.promo ? ", and neither is anyone on the do-not-contact list" : ""}. The text shows in their conversation on the
+            patient page. While the flow is testing, you get an email showing the text instead.</p>
+        </section>`;
+    }
     if (s.type === "wait") {
       return `
         <section class="ef-sec">
@@ -1682,6 +1720,7 @@ async function mountFlowEditor(container, { id, staff }) {
     if ((s.type === "staff" || s.type === "todo" || (s.type === "update" && s.cfg.mode === "review"))
       && (s.cfg.to === "roles" || s.cfg.to === "staff")) loadStaff();
     if (s.type === "task") renderPreview();
+    if (s.type === "sms") renderSmsCount();
   }
 
   function sampleVals() {
@@ -1742,6 +1781,15 @@ async function mountFlowEditor(container, { id, staff }) {
     box.innerHTML = `<div class="tb-mail">${head}
       <div class="tb-mail-body tb-mail-shell" data-role="shell">${shell(fill(s.cfg.body))}</div></div>`;
     hydrateRichImages(box.querySelector('[data-role="shell"]'), { logo: lh.logo || "" });
+  }
+  function renderSmsCount() {
+    const box = side.querySelector('[data-role="smscount"]');
+    const s = selStep();
+    if (!box || !s || s.type !== "sms") return;
+    const i = smsInfo(String(s.cfg.text || ""));
+    box.innerHTML = `${i.len} characters with the opt-out line · about <strong>${i.parts} text${i.parts === 1 ? "" : "s"}</strong> per patient${
+      i.plain ? "" : '<br><span class="tb-bad">It has curly quotes, an emoji or another special character, so each text holds about half as much. Type quotes as \' and ".</span>'}
+      <br><small class="muted">Blanks like {First name} change the length a little for each patient.</small>`;
   }
   // While typing HTML: update the preview when you pause, not on every key
   let prevTimer = 0;
@@ -1837,6 +1885,7 @@ async function mountFlowEditor(container, { id, staff }) {
     renderCanvas();
     if (el.dataset.rerender !== undefined) renderSide();
     else if (s.type === "email" || s.type === "task") previewSoon();
+    else if (s.type === "sms") renderSmsCount();
   });
 
   // "Who matches today?" for a daily check
