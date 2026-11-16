@@ -102,8 +102,9 @@ export const RULE_FIELDS = [
   { key: "appt.next_days", group: "Appointments", label: "Time until their next appointment", type: "number", unit: "days" },
   { key: "appt.last_days", group: "Appointments", label: "Time since their last visit", type: "number", unit: "days" },
   { key: "appt.visits", group: "Appointments", label: "Number of past visits", type: "number" },
-  { key: "appt.future_service", group: "Appointments", label: "A future booking's service", type: "text", hint: "e.g. Laser" },
-  { key: "appt.past_service", group: "Appointments", label: "A past visit's service", type: "text", hint: "e.g. Wrinkle Relaxer" },
+  // legacy: replaced by the service picker rules below; only shown on rules that already use them
+  { key: "appt.future_service", group: "Appointments", label: "A future booking's service", type: "text", hint: "e.g. Laser", legacy: true },
+  { key: "appt.past_service", group: "Appointments", label: "A past visit's service", type: "text", hint: "e.g. Wrinkle Relaxer", legacy: true },
   { key: "appt.svc_lapsed", group: "Appointments", label: "Had one of these services", type: "svcs",
     ops: [["norebook", "and none of them is booked"], ["noappt", "and has no appointment booked at all"], ["any", "booked or not"]],
     note: "Search the services (e.g. Genesis), then tick them or press Select all. Checked against their recent visits and upcoming bookings." },
@@ -358,18 +359,98 @@ export function describeRule(r) {
   if (f.type === "form") return `${f.label} ${op} "${r.value || "…"}"${r.days ? ` in the last ${r.days} days` : ""}`;
   return `${f.label} ${op} "${r.value || "…"}"`;
 }
-function describeItem(x) {
+function describeItem(x, full = false) {
   if (!isGroup(x)) return describeRule(x);
   if (!x.rules.length) return "(an empty group)";
   const j = x.match === "any" ? " or " : " and ";
-  return `(${x.rules.slice(0, 2).map(describeRule).join(j)}${x.rules.length > 2 ? `${j}…` : ""})`;
+  const list = full ? x.rules : x.rules.slice(0, 2);
+  return `(${list.map(describeRule).join(j)}${!full && x.rules.length > 2 ? `${j}…` : ""})`;
 }
+// Short: up to 3 items, then "and 2 more"
 export function describeGroup(g) {
   const rules = (g && g.rules) || [];
   if (!rules.length) return "No rules yet";
-  const first = describeItem(rules[0]);
-  return rules.length > 1 ? `${first} · ${g.match === "any" ? "or" : "and"} ${rules.length - 1} more` : first;
+  const j = g.match === "any" ? " or " : " and ";
+  const shown = rules.slice(0, 3).map((x) => describeItem(x)).join(j);
+  return rules.length > 3 ? `${shown}${j}${rules.length - 3} more` : shown;
 }
+// Everything, with groups in brackets
+export function describeAll(g) {
+  const rules = (g && g.rules) || [];
+  const j = g && g.match === "any" ? " or " : " and ";
+  return rules.map((x) => describeItem(x, true)).join(j);
+}
+
+// Rules that can never all be true together, or that do nothing. Shown under the rules; they don't stop saving.
+export function groupWarnings(g, { email = false } = {}) {
+  const out = new Set();
+  const rules = (g && g.rules) || [];
+  const label = (k) => (FIELD[k] ? FIELD[k].label : k);
+  const check = (items, match) => {
+    const list = items.filter((x) => x && !isGroup(x) && FIELD[x.field]);
+    const seen = new Set();
+    list.forEach((r) => {
+      const k = JSON.stringify([r.field, r.op, r.value, r.value2, r.days, r.from, r.to, r.when, r.src]);
+      if (seen.has(k)) out.add(`“${describeRule(r)}” is in there twice.`);
+      seen.add(k);
+    });
+    const has = (k, op) => list.some((r) => r.field === k && (!op || r.op === op));
+    if (email && match === "any" && has("pt.email", "yes") && items.length > 1)
+      out.add("With “any”, “Has an email address: Yes” matches nearly everyone on its own. Did you mean “all”?");
+    if (match !== "all") return;
+    if (email && has("pt.email", "no"))
+      out.add("“Has an email address: No” means nobody gets this: patients with no email address are always left out of email campaigns.");
+    ["appt.has_future", "pkg.has", "ssp.active", "pt.email", "pt.mobile", "plan.due", "plan.overdue"].forEach((k) => {
+      if (has(k, "yes") && has(k, "no")) out.add(`“${label(k)}” is set to both Yes and No, so nobody can match.`);
+    });
+    if (has("appt.has_future", "no") && (has("appt.next_days") || has("appt.future_svcs", "any")))
+      out.add("“Has a future appointment booked: No” can't go with a rule about their next booking.");
+    if (has("appt.has_future", "yes") && has("appt.svc_lapsed", "noappt"))
+      out.add("“Has a future appointment booked: Yes” can't go with “…and has no appointment booked at all”.");
+    if (has("pkg.has", "no") && (has("pkg.left") || has("pkg.expiry_days") || has("pkg.value") || has("pkg.name", "contains")))
+      out.add("“Has a package with visits left: No” can't go with another package rule (only “doesn't contain” works with it).");
+    if (list.some((r) => r.field === "plan.status" && r.op === "is" && r.value === "none") && (has("plan.due", "yes") || has("plan.overdue", "yes")))
+      out.add("“No treatment plan” can't go with a treatment being due.");
+    if (list.some((r) => r.field === "appt.visits" && ((r.op === "eq" && Number(r.value) === 0) || (r.op === "lt" && Number(r.value) <= 1)))
+      && (has("appt.last_days") || has("appt.past_svcs", "any") || has("appt.svc_lapsed")))
+      out.add("“No past visits” can't go with a rule about their past visits.");
+    // The same number pulled two ways, e.g. more than 90 and less than 30
+    const nums = {};
+    list.forEach((r) => {
+      if (FIELD[r.field].type !== "number" || r.value === "" || !Number.isFinite(Number(r.value))) return;
+      const n = Number(r.value);
+      const x = nums[r.field] || (nums[r.field] = { lo: -Infinity, hi: Infinity, eq: [] });
+      if (r.op === "gt") x.lo = Math.max(x.lo, n);
+      else if (r.op === "lt") x.hi = Math.min(x.hi, n);
+      else x.eq.push(n);
+    });
+    Object.entries(nums).forEach(([k, x]) => {
+      const eqBad = new Set(x.eq).size > 1 || x.eq.some((n) => n <= x.lo || n >= x.hi);
+      if (eqBad || x.lo >= x.hi) out.add(`The “${label(k)}” rules can't all be true at once, so nobody can match.`);
+    });
+  };
+  check(rules, g && g.match);
+  rules.filter(isGroup).forEach((x) => check(x.rules, x.match));
+  return [...out];
+}
+
+// Common audiences: added as normal rules that can be changed afterwards
+export const PRESETS = [
+  { name: "Haven't been back in 6+ months", rules: [{ field: "appt.last_days", op: "gt", value: 180 }, { field: "appt.has_future", op: "no" }] },
+  { name: "Came once and didn't come back", rules: [{ field: "appt.visits", op: "eq", value: 1 }, { field: "appt.last_days", op: "gt", value: 60 }, { field: "appt.has_future", op: "no" }] },
+  { name: "Birthday this month", rules: [{ field: "pt.birthday", op: "month" }] },
+  { name: "Package expiring in the next 30 days", rules: [{ field: "pkg.expiry_days", op: "lt", value: 31 }] },
+  { name: "Has a package, no visit in 90+ days", rules: [{ field: "pkg.has", op: "yes" }, { field: "appt.last_days", op: "gt", value: 90 }, { field: "appt.has_future", op: "no" }] },
+  { name: "Sent Treatment Info, nothing booked", rules: [{ field: "sent.txinfo", op: "yes", days: 90 }, { field: "sent.tx_booked", op: "none" }] },
+  { name: "Skin Script expiring in the next 30 days", rules: [{ field: "ssp.active", op: "yes" }, { field: "ssp.expiry_days", op: "lt", value: 31 }] },
+  { name: "Treatment overdue, not booked", rules: [{ field: "plan.overdue", op: "yes" }, { field: "appt.has_future", op: "no" }] },
+  { name: "Top spenders (Gold or Platinum)", rules: [{ type: "group", match: "any", rules: [
+    { field: "pt.spend_tier", op: "is", value: "platinum" }, { field: "pt.spend_tier", op: "is", value: "gold" }] }] },
+];
+const presetKeys = (rs) => rs.flatMap((x) => (x.type === "group" ? presetKeys(x.rules) : [x.field]));
+const fromPreset = (x) => (x.type === "group"
+  ? { id: rid(), type: "group", match: x.match === "any" ? "any" : "all", rules: x.rules.map(fromPreset) }
+  : cleanRule({ ...newRule(x.field), ...x, id: rid() }));
 
 // Product names for the pickers: the Skin Script catalogue and Inventory products
 let namesCache = null;
@@ -501,7 +582,8 @@ export function mountServicePicker(host, arr, { onChange = () => {} } = {}) {
     const c = e.target.closest("[data-sp-c]");
     if (!c) return;
     const s = c.dataset.spC;
-    if (c.checked) add(s); else arr.splice(arr.findIndex((x) => x.toLowerCase() === s.toLowerCase()), 1);
+    if (c.checked) add(s);
+    else { const i = arr.findIndex((x) => x.toLowerCase() === s.toLowerCase()); if (i >= 0) arr.splice(i, 1); }
     changed();
   });
   host.addEventListener("click", (e) => {
@@ -563,9 +645,18 @@ export function mountProductPicker(host, arr, { onChange = () => {}, names = [],
 // The rule builder. group ({ match, rules }) is changed in place; onChange is called after every change.
 // A rule list can hold groups (one level): { type: "group", match, rules }.
 // only: the field keys to offer. lists: the choices for "names" rules, e.g. { "rc.category": [...] }
-export function mountRuleBuilder(host, group, { onChange = () => {}, names = [], empty = "", only = null, lists = {} } = {}) {
+// presets: offer "Start from a common audience". email: warn about rules that mean nobody gets an email.
+export function mountRuleBuilder(host, group, { onChange = () => {}, names = [], empty = "", only = null, lists = {}, presets = false, email = false } = {}) {
   const fields = Array.isArray(only) ? RULE_FIELDS.filter((f) => only.includes(f.key)) : RULE_FIELDS.filter((f) => !f.recall && !f.task);
-  const groups = [...new Set(fields.map((f) => f.group))];
+  const GROUP_ORDER = ["This recall", "This purchase", "This visit", "This task", "Patient", "Appointments", "Packages",
+    "Purchase history", "Skin Script", "Treatment plan", "Emails sent", "Saved forms"];
+  const gi = (g) => { const i = GROUP_ORDER.indexOf(g); return i < 0 ? 99 : i; };
+  const groups = [...new Set(fields.map((f) => f.group))].sort((a, b) => gi(a) - gi(b));
+  const keySet = new Set(fields.map((f) => f.key));
+  const presetList = presets ? PRESETS.filter((p) => presetKeys(p.rules).every((k) => keySet.has(k))) : [];
+  // Every change also refreshes the summary and warnings
+  const notify = onChange;
+  onChange = () => { drawInfo(); notify(); };
   const firstKey = fields.some((f) => f.key === "appt.has_future") ? "appt.has_future" : fields[0].key;
   const MAX = 20, TOTAL = 40;
 
@@ -584,7 +675,7 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
   function ruleHtml(r, p, join) {
     const f = FIELD[r.field];
     const fieldSel = `<select class="fb-select fr-field" data-rf="${p}" aria-label="What to check">${groups.map((g) =>
-      `<optgroup label="${esc(g)}">${fields.filter((x) => x.group === g).map((x) =>
+      `<optgroup label="${esc(g)}">${fields.filter((x) => x.group === g && (!x.legacy || x.key === r.field)).map((x) =>
         `<option value="${x.key}"${x.key === r.field ? " selected" : ""}>${esc(x.label)}</option>`).join("")}</optgroup>`).join("")}</select>`;
     const opSel = `<select class="fb-select fr-op" data-ro="${p}" aria-label="How to compare">${opsFor(f).map(([v, l]) =>
       `<option value="${v}"${v === r.op ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
@@ -679,7 +770,7 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       </div>`;
     }
     return `<div class="fr-rule">
-      ${join ? `<span class="fr-join">${join}</span>` : ""}
+      ${join ? `<button type="button" class="fr-join" data-jt="${p}" title="Switch between and / or">${join}</button>` : ""}
       <div class="fr-row">${fieldSel}</div>
       ${pre ? `<div class="fr-row">${pre}</div>` : ""}
       <div class="fr-row">${opSel}${val}
@@ -693,7 +784,7 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
   function groupHtml(g, i, join, canAdd) {
     const inner = g.match === "any" ? "or" : "and";
     return `<div class="fr-rule fr-group-wrap">
-      ${join ? `<span class="fr-join">${join}</span>` : ""}
+      ${join ? `<button type="button" class="fr-join" data-jt="${i}" title="Switch between and / or">${join}</button>` : ""}
       <div class="fr-group">
         <div class="fr-group-head">
           <label class="fr-match">Match ${matchSel(`data-gm="${i}" aria-label="Match all or any in this group"`, g.match)} of these</label>
@@ -711,15 +802,21 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
     const canAdd = ruleCount(group) < TOTAL;
     const room = group.rules.length < MAX && canAdd;
     host.innerHTML = `<div class="fr">
-      ${group.rules.length > 1 ? `<label class="fr-match">Match ${matchSel('data-rm aria-label="Match all or any"', group.match)} of these</label>` : ""}
+      ${group.rules.length > 1 ? `<label class="fr-match">Match ${matchSel('data-rm aria-label="Match all or any"', group.match)} of these
+        <small class="fr-hint">${group.match === "any" ? "at least one must be true" : "every one must be true"}</small></label>` : ""}
       ${group.rules.length ? `<div class="fr-rules">${group.rules.map((x, i) => (isGroup(x)
         ? groupHtml(x, i, i ? join : "", canAdd)
         : ruleHtml(x, String(i), i ? join : ""))).join("")}</div>` : (empty ? `<p class="fr-empty">${esc(empty)}</p>` : "")}
+      <div data-fr-info></div>
       ${room ? `<div class="fr-adds">
         <button type="button" class="fr-add" data-radd>+ Add a rule</button>
         <button type="button" class="fr-add" data-gnew>+ Add a group</button>
+        ${presetList.length ? `<select class="fb-select fr-preset" data-preset aria-label="Common audiences">
+          <option value="">${group.rules.length ? "+ Add a common audience…" : "Start from a common audience…"}</option>
+          ${presetList.map((p, i) => `<option value="${i}">${esc(p.name)}</option>`).join("")}</select>` : ""}
       </div>` : ""}
     </div>`;
+    drawInfo();
     host.querySelectorAll("[data-pp-host]").forEach((el) => {
       const r = ruleAt(el.dataset.ppHost);
       if (!r) return;
@@ -741,9 +838,32 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
     });
   }
 
+  // The full logic in words, and anything that can't work
+  function drawInfo() {
+    const box = host.querySelector("[data-fr-info]");
+    if (!box) return;
+    const warns = groupWarnings(group, { email });
+    box.innerHTML = (ruleCount(group) > 1 ? `<p class="fr-summary"><strong>Who matches:</strong> ${esc(describeAll(group))}</p>` : "") +
+      (warns.length ? `<div class="fr-warn" role="status">${warns.map((w) => `<p>⚠ ${esc(w)}</p>`).join("")}</div>` : "");
+  }
+  // "All" rules: added alongside. "Any" rules: added as one group, so the audience stays together.
+  function addPreset(p) {
+    if (!p) return;
+    const items = p.rules.map(fromPreset);
+    const n = items.reduce((t, x) => t + (isGroup(x) ? x.rules.length : 1), 0);
+    if (ruleCount(group) + n > TOTAL || group.rules.length + items.length > MAX) { render(); return; }
+    if (!group.rules.length) { group.match = "all"; group.rules.push(...items); }
+    else if (group.match === "all") group.rules.push(...items);
+    else if (items.some(isGroup)) items.forEach((x) => (isGroup(x) ? group.rules.push(...x.rules) : group.rules.push(x)));
+    else group.rules.push(items.length === 1 ? items[0] : { id: rid(), type: "group", match: "all", rules: items });
+    render();
+    onChange();
+  }
+
   host.addEventListener("input", (e) => {
     const el = e.target;
     const d = el.dataset;
+    if (d.preset !== undefined) { if (el.value !== "") addPreset(presetList[Number(el.value)]); return; }
     if (d.rm !== undefined) { group.match = el.value === "any" ? "any" : "all"; render(); onChange(); return; }
     if (d.gm !== undefined) {
       const g = group.rules[Number(d.gm)];
@@ -827,6 +947,13 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
   });
 
   host.addEventListener("click", (e) => {
+    const jt = e.target.closest("[data-jt]");
+    if (jt) {
+      const [a, b] = String(jt.dataset.jt).split(".").map(Number);
+      const g = b === undefined || Number.isNaN(b) ? group : group.rules[a];
+      if (g) { g.match = g.match === "any" ? "all" : "any"; render(); onChange(); }
+      return;
+    }
     if (e.target.closest("[data-radd]")) {
       group.rules.push(newRule(firstKey));
       render(); onChange(); return;
@@ -853,5 +980,8 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
   // The treatment names arrive a moment later; the picker is redrawn with them
   if (!txNamesCache && fields.some((f) => f.type === "txsent")) {
     loadTxNames().then(() => { if (host.isConnected) render(); });
+  }
+  if (!tagNamesCache && fields.some((f) => f.key === "pt.tag")) {
+    loadTagNames().then(() => { if (host.isConnected) render(); });
   }
 }

@@ -22,7 +22,7 @@ export const CAMPAIGN_FIELDS = ["hist.bought", "hist.bought_between", "hist.days
   "appt.visits", "appt.future_service", "appt.past_service", "appt.visit_between", "appt.last_between", "ssp.active", "ssp.age_days", "ssp.expiry_days",
   "plan.status", "plan.due", "plan.overdue", "form.saved", "pt.age", "pt.birth_year", "pt.birthday", "pt.email", "pt.mobile",
   "pkg.has", "pkg.name", "pkg.left", "pkg.expiry_days", "pkg.value", "sent.txinfo", "sent.tx_booked", "sent.task",
-  "appt.svc_lapsed", "appt.past_svcs", "appt.future_svcs"];
+  "appt.svc_lapsed", "appt.past_svcs", "appt.future_svcs", "pt.spend_tier", "pt.tag", "hist.bought_days"];
 const STATUS = {
   draft: ["Draft", "is-draft"], scheduled: ["Scheduled", "is-sched"], building: ["Getting ready", "is-live"],
   sending: ["Sending", "is-live"], paused: ["Paused", "is-paused"], sent: ["Sent", "is-sent"], cancelled: ["Cancelled", "is-cancel"],
@@ -615,7 +615,8 @@ function mountDraft(page, c, staff) {
   loadProductNames().catch(() => []).then((names) => {
     if (!root.isConnected) return;
     mountRuleBuilder(rulesHost, c.audience.rules, {
-      names, only: CAMPAIGN_FIELDS, empty: c.audience.mode === "list" ? "No extra rules: the whole list." : "Add a rule to choose who it goes to.",
+      names, only: CAMPAIGN_FIELDS, presets: true, email: true,
+      empty: c.audience.mode === "list" ? "No extra rules: the whole list." : "Add a rule, or start from a common audience.",
       onChange: () => { lastCount = null; drawCount(); touch(); },
     });
   });
