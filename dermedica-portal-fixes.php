@@ -13,7 +13,7 @@ const DPCFIX_SKIP_KEY = '/(^_|url|link|image|icon|^id$|css|class|colou?r|font|si
 
 add_action('rest_api_init', function () {
   foreach (['find' => 'dpcfix_find', 'replace' => 'dpcfix_replace', 'undo' => 'dpcfix_undo', 'faq' => 'dpcfix_faq',
-    'insert' => 'dpcfix_insert', 'link' => 'dpcfix_link', 'alt' => 'dpcfix_alt'] as $r => $cb) {
+    'insert' => 'dpcfix_insert', 'link' => 'dpcfix_link', 'alt' => 'dpcfix_alt', 'seo' => 'dpcfix_seo'] as $r => $cb) {
     register_rest_route(DPCFIX_NS, '/fix/' . $r, ['methods' => 'POST', 'callback' => $cb, 'permission_callback' => 'dpcfix_auth']);
   }
 });
@@ -275,7 +275,12 @@ function dpcfix_undo(WP_REST_Request $req) {
   foreach ($log as $i => $e) {
     if (($e['fid'] ?? '') !== $fid) continue;
     if (!empty($e['undone'])) return dpcfix_no('done', 'Already undone.');
-    if ($e['where'] === 'alt') {
+    if ($e['where'] === 'seo') {
+      list($via, $now) = dpcfix_seo_get($id, $e['field']);
+      if (!$via) return dpcfix_no('no_seo', 'No SEO plugin found.');
+      if ((string) $now !== (string) $e['after']) return dpcfix_no('changed', 'Edited since.');
+      dpcfix_seo_put($id, $e['field'], (string) $e['before']);
+    } elseif ($e['where'] === 'alt') {
       if (($e['kind'] ?? '') === 'el') {
         $data = json_decode((string) get_post_meta($id, '_elementor_data', true), true);
         if (!is_array($data)) return dpcfix_no('changed', 'Elementor data unreadable.');
@@ -629,4 +634,54 @@ function dpcfix_alt(WP_REST_Request $req) {
   foreach ($out as &$o) { $o['page'] = $hits[$o['stem']] ?? 0; unset($o['stem']); }
   unset($o);
   return ['ok' => true, 'items' => $out, 'link' => get_permalink($id)];
+}
+
+/* ---------- SEO title and meta description (All in One SEO, or Yoast) ---------- */
+
+function dpcfix_seo_model($id) {
+  if (!class_exists('\AIOSEO\Plugin\Common\Models\Post')) return null;
+  $p = \AIOSEO\Plugin\Common\Models\Post::getPost($id);
+  if (!$p) return null;
+  if (method_exists($p, 'exists') && !$p->exists()) $p->post_id = $id;
+  return $p;
+}
+
+function dpcfix_seo_get($id, $field) {
+  $p = dpcfix_seo_model($id);
+  if ($p) return ['aioseo', (string) ($field === 'title' ? $p->title : $p->description)];
+  if (defined('WPSEO_VERSION')) return ['yoast', (string) get_post_meta($id, $field === 'title' ? '_yoast_wpseo_title' : '_yoast_wpseo_metadesc', true)];
+  return [null, ''];
+}
+
+function dpcfix_seo_put($id, $field, $val) {
+  $p = dpcfix_seo_model($id);
+  if ($p) {
+    if ($field === 'title') $p->title = $val; else $p->description = $val;
+    $p->post_id = $id;
+    $p->save();
+    return 'aioseo';
+  }
+  if (defined('WPSEO_VERSION')) {
+    update_post_meta($id, $field === 'title' ? '_yoast_wpseo_title' : '_yoast_wpseo_metadesc', wp_slash($val));
+    return 'yoast';
+  }
+  return null;
+}
+
+function dpcfix_seo(WP_REST_Request $req) {
+  $b = $req->get_json_params() ?: [];
+  $id = (int) ($b['id'] ?? 0);
+  $fid = preg_replace('/[^a-z0-9_-]/i', '', (string) ($b['fid'] ?? ''));
+  $field = (string) ($b['field'] ?? '');
+  $val = trim(sanitize_text_field((string) ($b['value'] ?? '')));
+  if (!$id || !get_post($id) || !$fid || !in_array($field, ['title', 'description'], true) || $val === '' || mb_strlen($val) > 300) {
+    return dpcfix_no('bad', 'Nothing to change.');
+  }
+  list($via, $before) = dpcfix_seo_get($id, $field);
+  if (!$via) return dpcfix_no('no_seo', 'No SEO plugin found (All in One SEO or Yoast).');
+  if ((string) $before === $val) return dpcfix_no('same', 'It already says that.');
+  dpcfix_seo_put($id, $field, $val);
+  dpcfix_log($id, ['fid' => $fid, 'at' => time(), 'where' => 'seo', 'field' => $field, 'before' => (string) $before, 'after' => $val]);
+  dpcfix_purge($id);
+  return ['ok' => true, 'via' => $via, 'before' => (string) $before, 'link' => get_permalink($id)];
 }

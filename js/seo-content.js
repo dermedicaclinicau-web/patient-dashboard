@@ -1636,3 +1636,6 @@ function injectCss() {
   s.textContent = CSS;
   document.head.appendChild(s);
 }
+
+// Shared with the Advisor's one-click changes (seo-advisor-act.js)
+export { fixApi, fixErr, askConfirm, injectCss };

@@ -7,8 +7,9 @@ import { db, auth } from "./firebase-config.js";
 import {
   doc, collection, query, where, orderBy, limit, onSnapshot, writeBatch, updateDoc, getDocs, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { npath, titleOf, pageIndex, pageOf } from "./seo-work.js?v=17";
+import { npath, titleOf, pageIndex, pageOf } from "./seo-work.js?v=25";
 import { stashPostDraft } from "./seo-post.js?v=1";
+import { actionsHtml, actionsClick } from "./seo-advisor-act.js?v=1";
 
 const MODES = [["auto", "Anything"], ["goal", "A goal"], ["page", "A page"], ["question", "A question"]];
 const EXAMPLES = [
@@ -375,6 +376,8 @@ export function renderAdvisor(body, c) {
                 <summary>Draft ready: ${esc(d.label)}</summary>${draftHtmlView(d, m.id, canWp)}</details>`).join("")}
             </div></div>`).join("")}</div></div>`).join("")}</div></div>` : ""}
 
+      ${actionsHtml(m.id, a, m.acts, (p) => typeof c.can === "function" && c.can(p))}
+
       ${a.drafts.filter((d) => !used.has(d.i)).length ? `<div class="seo-adv-sec"><h4>Drafts</h4>
         ${a.drafts.filter((d) => !used.has(d.i)).map((d) => draftHtmlView(d, m.id, canWp)).join("")}</div>` : ""}
 
@@ -500,6 +503,7 @@ export function renderAdvisor(body, c) {
 
   /* --- events --- */
   wrap.addEventListener("click", async (e) => {
+    if (await actionsClick(e, { redraw: drawConv, toast })) return;   // Apply, Edit first, Not now, Undo on the change cards
     const t = e.target.closest("button");
     if (!t || t.dataset.open !== undefined) return;   // seo.js opens page details
     const d = t.dataset;
