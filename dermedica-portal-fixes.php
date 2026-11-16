@@ -13,7 +13,7 @@ const DPCFIX_SKIP_KEY = '/(^_|url|link|image|icon|^id$|css|class|colou?r|font|si
 
 add_action('rest_api_init', function () {
   foreach (['find' => 'dpcfix_find', 'replace' => 'dpcfix_replace', 'undo' => 'dpcfix_undo', 'faq' => 'dpcfix_faq',
-    'insert' => 'dpcfix_insert'] as $r => $cb) {
+    'insert' => 'dpcfix_insert', 'link' => 'dpcfix_link', 'alt' => 'dpcfix_alt'] as $r => $cb) {
     register_rest_route(DPCFIX_NS, '/fix/' . $r, ['methods' => 'POST', 'callback' => $cb, 'permission_callback' => 'dpcfix_auth']);
   }
 });
@@ -275,7 +275,21 @@ function dpcfix_undo(WP_REST_Request $req) {
   foreach ($log as $i => $e) {
     if (($e['fid'] ?? '') !== $fid) continue;
     if (!empty($e['undone'])) return dpcfix_no('done', 'Already undone.');
-    if ($e['where'] === 'insert') {
+    if ($e['where'] === 'alt') {
+      if (($e['kind'] ?? '') === 'el') {
+        $data = json_decode((string) get_post_meta($id, '_elementor_data', true), true);
+        if (!is_array($data)) return dpcfix_no('changed', 'Elementor data unreadable.');
+        foreach ($e['changes'] as $c) if (dpcfix_get($data, $c['path']) !== $c['after']) return dpcfix_no('changed', 'Edited since.');
+        foreach ($e['changes'] as $c) { $ref = &dpcfix_ref($data, $c['path']); $ref = $c['before']; unset($ref); }
+        dpcfix_save_elementor($id, $data);
+      } elseif (($e['kind'] ?? '') === 'content') {
+        $p = get_post($id);
+        if (!$p || md5($p->post_content) !== $e['after_hash']) return dpcfix_no('changed', 'Edited since.');
+        $r = dpcfix_save_content($id, $e['before']);
+        if (is_wp_error($r)) return dpcfix_no('save', $r->get_error_message());
+      }
+      foreach ((array) ($e['metas'] ?? []) as $m) update_post_meta((int) $m['aid'], '_wp_attachment_image_alt', wp_slash((string) $m['before']));
+    } elseif ($e['where'] === 'insert') {
       if ($e['kind'] === 'el') {
         if (md5((string) get_post_meta($id, '_elementor_data', true)) !== $e['after_hash']) return dpcfix_no('changed', 'Edited since.');
         update_post_meta($id, '_elementor_data', wp_slash($e['before']));
@@ -479,4 +493,140 @@ function dpcfix_insert(WP_REST_Request $req) {
   dpcfix_log($id, $entry);
   dpcfix_purge($id);
   return ['ok' => true, 'link' => get_permalink($id)];
+}
+
+/* ---------- Internal links: turn words already on a page into a link ---------- */
+
+// Is this position inside an open <tag>…</tag>? (tag can be a pattern, e.g. h[1-6])
+function dpcfix_inside($src, $pos, $tag) {
+  $before = substr($src, 0, $pos);
+  $o = preg_match_all('/<' . $tag . '\b/i', $before, $m, PREG_OFFSET_CAPTURE) ? end($m[0])[1] + 1 : 0;
+  $c = preg_match_all('/<\/' . $tag . '\s*>/i', $before, $m2, PREG_OFFSET_CAPTURE) ? end($m2[0])[1] + 1 : 0;
+  return $o > $c;
+}
+
+function dpcfix_link(WP_REST_Request $req) {
+  $b = $req->get_json_params() ?: [];
+  $id = (int) ($b['id'] ?? 0);
+  $fid = preg_replace('/[^a-z0-9_-]/i', '', (string) ($b['fid'] ?? ''));
+  $find = trim((string) ($b['find'] ?? ''));
+  $href = esc_url_raw((string) ($b['href'] ?? ''));
+  if (!$id || !get_post($id) || !$fid || $find === '' || mb_strlen($find) > 120 || !$href) return dpcfix_no('bad', 'Nothing to link.');
+  list($targets, $isEl, $data) = dpcfix_targets($id);
+  $pick = null;
+  foreach ($targets as $ti => $t) {
+    $key = $t['path'] ? (string) $t['path'][count($t['path']) - 1] : '';
+    if ($isEl && !preg_match('/(^|_)(editor|text|description|content)$/', $key)) continue;   // text blocks only: not headings or buttons
+    foreach (dpcfix_hits($t['value'], dpcfix_needle($find)) as $h) {
+      if ($h['tags'] || dpcfix_inside($t['value'], $h['a'], 'a') || dpcfix_inside($t['value'], $h['a'], 'h[1-6]')) continue;
+      $pick = [$ti, $h];
+      break 2;
+    }
+  }
+  if (!$pick) return dpcfix_no('not_found', 'No place to link those words: they may already be a link, in a heading, or in a template.');
+  list($ti, $h) = $pick;
+  $v = $targets[$ti]['value'];
+  $new = substr($v, 0, $h['a']) . '<a href="' . esc_url($href) . '">' . substr($v, $h['a'], $h['b'] - $h['a']) . '</a>' . substr($v, $h['b']);
+  $entry = ['fid' => $fid, 'at' => time(), 'where' => $isEl ? 'elementor' : 'content', 'find' => $find, 'replace' => '(link)'];
+  if ($isEl) {
+    $ref = &dpcfix_ref($data, $targets[$ti]['path']); $ref = $new; unset($ref);
+    dpcfix_save_elementor($id, $data);
+    $entry['changes'] = [['path' => $targets[$ti]['path'], 'before' => $v, 'after' => $new]];
+  } else {
+    $r = dpcfix_save_content($id, $new);
+    if (is_wp_error($r)) return dpcfix_no('save', $r->get_error_message());
+    $entry['before'] = $v;
+    $entry['after_hash'] = md5(get_post($id)->post_content);
+  }
+  dpcfix_log($id, $entry);
+  dpcfix_purge($id);
+  return ['ok' => true, 'link' => get_permalink($id), 'context' => $h['ctx']];
+}
+
+/* ---------- Alt text: in the Media Library, and on the page's own image tags ---------- */
+
+// "…/uploads/2024/05/cheek-laser-1024x683.webp?x=1" → "cheek-laser"
+function dpcfix_stem($u) {
+  $b = strtolower(basename(preg_replace('/[?#].*$/', '', (string) $u)));
+  $b = preg_replace('/\.[a-z0-9]+$/', '', $b);
+  return preg_replace('/(-\d+x\d+|-scaled)$/', '', $b);
+}
+
+// The image in the Media Library (sizes, "-scaled" and WebP copies tried too), or 0
+function dpcfix_att_id($src) {
+  $u = preg_replace('/[?#].*$/', '', (string) $src);
+  $tries = [$u, preg_replace('/-\d+x\d+(\.[a-z0-9]+)$/i', '$1', $u), preg_replace('/-scaled(\.[a-z0-9]+)$/i', '$1', $u)];
+  foreach ($tries as $t) {
+    $aid = attachment_url_to_postid($t);
+    if ($aid) return $aid;
+    if (preg_match('/\.webp$/i', $t)) {
+      foreach (['jpg', 'jpeg', 'png'] as $ext) {
+        $aid = attachment_url_to_postid(preg_replace('/\.webp$/i', '.' . $ext, $t));
+        if ($aid) return $aid;
+      }
+    }
+  }
+  return 0;
+}
+
+// <img> tags with no alt attribute whose file matches: alt added. $hits counts them by file.
+function dpcfix_alt_html($html, $stems, &$hits) {
+  return preg_replace_callback('/<img\b[^>]*>/i', function ($m) use ($stems, &$hits) {
+    $tag = $m[0];
+    if (preg_match('/\salt\s*=/i', $tag)) return $tag;
+    if (!preg_match('/\s(?:data-src|data-lazy-src|src)\s*=\s*["\']([^"\']+)["\']/i', $tag, $s)) return $tag;
+    $st = dpcfix_stem($s[1]);
+    if (!array_key_exists($st, $stems)) return $tag;
+    $hits[$st] = ($hits[$st] ?? 0) + 1;
+    return preg_replace('/^<img\b/i', '<img alt="' . esc_attr($stems[$st]) . '"', $tag);
+  }, $html);
+}
+
+function dpcfix_alt(WP_REST_Request $req) {
+  $b = $req->get_json_params() ?: [];
+  $id = (int) ($b['id'] ?? 0);
+  $fid = preg_replace('/[^a-z0-9_-]/i', '', (string) ($b['fid'] ?? ''));
+  $items = array_slice((array) ($b['items'] ?? []), 0, 20);
+  if (!$id || !get_post($id) || !$fid || !$items) return dpcfix_no('bad', 'Nothing to save.');
+  $stems = []; $metas = []; $out = []; $done = [];
+  foreach ($items as $x) {
+    $src = (string) ($x['src'] ?? '');
+    if ($src === '') continue;
+    $alt = mb_substr(trim(wp_strip_all_tags((string) ($x['alt'] ?? ''))), 0, 200);
+    $aid = dpcfix_att_id($src);
+    if ($aid && !isset($done[$aid])) {
+      $done[$aid] = 1;
+      $metas[] = ['aid' => $aid, 'before' => (string) get_post_meta($aid, '_wp_attachment_image_alt', true)];
+      update_post_meta($aid, '_wp_attachment_image_alt', wp_slash($alt));
+    }
+    $stems[dpcfix_stem($src)] = $alt;
+    $out[] = ['src' => $src, 'library' => $aid > 0, 'stem' => dpcfix_stem($src)];
+  }
+  list($targets, $isEl, $data) = dpcfix_targets($id);
+  $changes = []; $hits = [];
+  foreach ($targets as $t) {
+    if (stripos($t['value'], '<img') === false) continue;
+    $nv = dpcfix_alt_html($t['value'], $stems, $hits);
+    if ($nv !== $t['value']) $changes[] = ['path' => $t['path'], 'before' => $t['value'], 'after' => $nv];
+  }
+  $entry = ['fid' => $fid, 'at' => time(), 'where' => 'alt', 'metas' => $metas, 'kind' => 'none'];
+  if ($changes) {
+    if ($isEl) {
+      foreach ($changes as $c) { $ref = &dpcfix_ref($data, $c['path']); $ref = $c['after']; unset($ref); }
+      dpcfix_save_elementor($id, $data);
+      $entry['kind'] = 'el';
+      $entry['changes'] = $changes;
+    } else {
+      $r = dpcfix_save_content($id, $changes[0]['after']);
+      if (is_wp_error($r)) return dpcfix_no('save', $r->get_error_message());
+      $entry['kind'] = 'content';
+      $entry['before'] = $changes[0]['before'];
+      $entry['after_hash'] = md5(get_post($id)->post_content);
+    }
+  }
+  dpcfix_log($id, $entry);
+  dpcfix_purge($id);
+  foreach ($out as &$o) { $o['page'] = $hits[$o['stem']] ?? 0; unset($o['stem']); }
+  unset($o);
+  return ['ok' => true, 'items' => $out, 'link' => get_permalink($id)];
 }

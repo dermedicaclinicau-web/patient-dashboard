@@ -14,6 +14,11 @@ async function fixApi(op, data) {
   if (r && r.problem) { const e = new Error(r.problem); e.editUrl = r.editUrl || ""; throw e; }
   return r;
 }
+// Links to a page (LK) and alt text on a page (AL)
+const LK = new Map();
+const AL = new Map();
+const lkId = (path) => "l_" + hash("lk|" + npath(path)) + hash(npath(path) + "#lk");
+const alId = (path) => "a_" + hash("al|" + npath(path)) + hash(npath(path) + "#al");
 // New sections (by page): Write FAQs (WF) and the reviewed line (RV)
 const WF = new Map();
 const RV = new Map();
@@ -659,21 +664,109 @@ function faqSchemaBody(c, d, canFix, compact) {
 function freshHtml(c, list) {
   const w = c.work, H = w.health, canFix = c.can("seo.fix");
   const inList = new Set(list.map(({ d }) => npath(d.path)));
-  const done = Object.values(H?.content?.deep || {})
-    .filter((d) => d && d.path && !inList.has(npath(d.path)) && H.status?.[rvId(d.path)]?.status === "fixed");
-  if (!list.length && !done.length) return `<div class="seo-empty">Every priority and cluster page looks current and well supported.</div>`;
+  const doneOf = (idf) => Object.values(H?.content?.deep || {})
+    .filter((d) => d && d.path && !inList.has(npath(d.path)) && H.status?.[idf(d.path)]?.status === "fixed");
+  const doneRv = doneOf(rvId), doneLk = doneOf(lkId);
+  if (!list.length && !doneRv.length && !doneLk.length) return `<div class="seo-empty">Every priority and cluster page looks current and well supported.</div>`;
   return `${list.length ? `<div class="seo-card">${list.map(({ d, why }) => {
     const pid = pageId(c, d.path);
+    const needLinks = (d.inbound || 0) < 3 || H.status?.[lkId(d.path)]?.status === "fixed";
     return `<div class="seo-ct-row" data-fxcard>
       <div class="seo-row" style="margin:0"><strong>${esc(titleIn(w, d.path))}</strong><span class="seo-sp"></span>
         ${pid ? `<button class="seo-w-link" type="button" data-open="${esc(pid)}">Open page details</button>` : ""}</div>
       <div>${why.map((x) => `<span class="seo-pr-pill is-grey" style="margin:2px 4px 0 0">${esc(x)}</span>`).join("")}</div>
-      ${reviewBody(c, d, canFix)}</div>`;
+      ${reviewBody(c, d, canFix)}${needLinks ? linkBody(c, d, canFix) : ""}</div>`;
   }).join("")}</div>` : ""}
-  ${done.length ? `<div class="seo-card"><h3 style="margin:0 0 6px">“Reviewed by” lines added from here</h3>
-    ${done.map((d) => insertDone(c, d.path, H.status[rvId(d.path)], "review", canFix, RV.get(npath(d.path)) || {}, true)).join("")}</div>` : ""}
+  ${doneRv.length ? `<div class="seo-card"><h3 style="margin:0 0 6px">“Reviewed by” lines added from here</h3>
+    ${doneRv.map((d) => insertDone(c, d.path, H.status[rvId(d.path)], "review", canFix, RV.get(npath(d.path)) || {}, true)).join("")}</div>` : ""}
+  ${doneLk.length ? `<div class="seo-card"><h3 style="margin:0 0 6px">Links added from here</h3>
+    ${doneLk.map((d) => linkBody(c, d, canFix, true)).join("")}</div>` : ""}
   <p class="seo-note">Links counted from the pages compared so far, so the numbers grow over the first week.</p>`;
 }
+
+// Freshness: a page few others link to. Claude finds sentences on related pages to link from.
+function linkBody(c, d, canFix, compact) {
+  const st = c.work.health.status?.[lkId(d.path)];
+  const F = LK.get(npath(d.path)) || {};
+  const errBox = F.err ? `<div class="seo-fx-err"><span>⚠</span><div>${esc(F.err)}</div></div>` : "";
+  if (st?.status === "fixed") {
+    let res = [];
+    try { res = JSON.parse(st.results || "[]"); } catch { res = []; }
+    const ok = res.filter((r) => r.ok).length;
+    return `<div class="seo-fx is-done">
+      <div class="seo-fx-head"><span class="seo-fx-tick">✓</span><strong>Linked from ${plural(ok, "page")}${compact ? `: ${esc(titleIn(c.work, d.path))}` : ""}</strong>
+        <span class="seo-sp"></span><span class="seo-note">${esc(st.byName || "")}${st.at ? " · " + esc(whenC(st.at)) : ""}</span></div>
+      <ul class="seo-fx-res">${res.map((r) => `<li class="${r.ok ? "is-ok" : "is-bad"}"><span>${r.ok ? "✓" : "⚠"}</span><b>${esc(r.title || r.from)}</b>
+        <span class="seo-note">“${esc(r.anchor)}”${r.ok ? "" : " · " + esc(r.why || "")}</span>
+        ${r.ok && r.link ? `<a class="seo-w-link" href="${esc(r.link)}" target="_blank" rel="noopener">View ↗</a>` : ""}</li>`).join("")}</ul>
+      ${st.note ? `<div class="seo-note">${esc(st.note)}</div>` : ""}
+      <div class="seo-fx-bar">${canFix ? `<button class="seo-fx-b is-ghost" type="button" data-ch-lkundo="${esc(d.path)}"${F.busy ? " disabled" : ""}>${
+        F.busy === "undo" ? spin + "Removing…" : "↶ Undo every link"}</button>` : ""}
+        <span class="seo-sp"></span><span class="seo-note">The count of pages linking here updates tonight.</span></div>${errBox}</div>`;
+  }
+  if (!canFix) return "";
+  if (!F.links) {
+    return `<div class="seo-fx-bar"><button class="seo-fx-b is-ghost" type="button" data-ch-lkgo="${esc(d.path)}"${F.busy ? " disabled" : ""}>${
+      F.busy === "go" ? spin + "Reading related pages… (about 30 seconds)" : "🔗 Find places to link here"}</button></div>${errBox}`;
+  }
+  const off = F.off || new Set();
+  const n = F.links.length - off.size;
+  return `<div class="seo-fx-lab" style="margin-top:10px">Links to add: the underlined words become a link to this page</div>
+    ${F.links.length ? `<div class="seo-fx-faqs">${F.links.map((l, i) => {
+      const p = ctxParts(l.ctx, l.anchor);
+      const s = p ? `${esc(p[0])}<u class="seo-fx-a">${esc(p[1])}</u>${esc(p[2])}` : esc(l.ctx);
+      return `<button type="button" class="seo-fx-faq${off.has(i) ? "" : " is-on"}" data-ch-lktick="${esc(d.path)}|${i}" aria-pressed="${!off.has(i)}">
+        <span class="seo-fx-check">${off.has(i) ? "" : "✓"}</span>
+        <span class="seo-fx-otxt"><b>On “${esc(l.fromTitle || l.from)}”</b><span class="seo-fx-lctx">${s}</span>${l.why ? `<small>${esc(l.why)}</small>` : ""}</span></button>`;
+    }).join("")}</div>` : `<p class="seo-note">No natural places found on the related pages. Adding the page to a topic or cluster in Settings gives Claude more to work with.</p>`}
+    ${(F.skipped || []).length ? `<p class="seo-note" style="margin:6px 0 0">Already link here: ${F.skipped.map((s) => esc(s.title || s.from)).join(", ")}</p>` : ""}
+    <div class="seo-fx-bar">
+      ${F.links.length ? `<button class="seo-fx-b is-accept" type="button" data-ch-lkapply="${esc(d.path)}"${!n || F.busy ? " disabled" : ""}>${
+        F.busy === "apply" ? spin + "Adding the links…" : `✓ Add ${plural(n, "link")}`}</button>` : ""}
+      <button class="seo-fx-b is-ghost" type="button" data-ch-lkcancel="${esc(d.path)}"${F.busy ? " disabled" : ""}>Cancel</button></div>${errBox}`;
+}
+
+// Site health → Issues → "images have no alt text": Claude describes them, you check, it's saved to WordPress
+export function altBody(c, path) {
+  injectCss();
+  const st = c.work.health.status?.[alId(path)];
+  const F = AL.get(npath(path)) || {};
+  const errBox = F.err ? `<div class="seo-fx-err"><span>⚠</span><div>${esc(F.err)}</div></div>` : "";
+  if (st?.status === "fixed") {
+    let res = [];
+    try { res = JSON.parse(st.results || "[]"); } catch { res = []; }
+    return `<div class="seo-fx is-done">
+      <div class="seo-fx-head"><span class="seo-fx-tick">✓</span><strong>Alt text saved for ${plural(Number(st.count) || 0, "image")}</strong>
+        <span class="seo-sp"></span><span class="seo-note">${esc(st.byName || "")}${st.at ? " · " + esc(whenC(st.at)) : ""}</span></div>
+      <ul class="seo-fx-res">${res.map((r) => {
+        const ok = r.library || r.page;
+        const where = [r.library ? "saved to the image in the Media Library" : "", r.page ? "added on this page" : ""].filter(Boolean).join(" · ")
+          || "not found in WordPress: it may come from the theme or a plugin";
+        return `<li class="${ok ? "is-ok" : "is-bad"}"><span>${ok ? "✓" : "⚠"}</span><b>${esc(r.alt || "(decorative)")}</b><span class="seo-note">${esc(where)}</span></li>`;
+      }).join("")}</ul>
+      ${st.left != null ? `<div class="seo-note">${st.left ? `${plural(st.left, "image")} on the page still ${st.left === 1 ? "has" : "have"} no alt text.` : "Every image on the page now has alt text."}</div>` : ""}
+      <div class="seo-fx-bar">${c.can("seo.fix") ? `<button class="seo-fx-b is-ghost" type="button" data-ch-alundo="${esc(path)}"${F.busy ? " disabled" : ""}>${
+        F.busy === "undo" ? spin + "Putting it back…" : "↶ Undo"}</button>` : ""}
+        <span class="seo-sp"></span><span class="seo-note">This issue clears at the next Site health check (about 8am).</span></div>${errBox}</div>`;
+  }
+  if (!F.images) {
+    return `<div class="seo-fx-bar"><button class="seo-fx-b is-accept" type="button" data-ch-algo="${esc(path)}"${F.busy ? " disabled" : ""}>${
+      F.busy === "go" ? spin + "Claude is looking at the images…" : "✨ Write alt text"}</button></div>${errBox}`;
+  }
+  return `<div data-fxcard><div class="seo-fx-lab" style="margin-top:10px">Check each description${F.skipped ? ` <span class="seo-note">(${plural(F.skipped, "image")} couldn't be read)</span>` : ""}</div>
+    <div class="seo-fx-alts">${F.images.map((m, i) => `<div class="seo-fx-alt">
+      <img src="${esc(m.src)}" alt="" loading="lazy" referrerpolicy="no-referrer">
+      <div class="seo-fx-wfb">
+        <input class="seo-input" data-al-alt="${i}" value="${esc(m.alt)}" maxlength="200" placeholder="What the image shows" aria-label="Alt text for image ${i + 1}">
+        <label class="seo-check"><input type="checkbox" data-al-dec="${i}"${m.decorative ? " checked" : ""}> Decorative: no description needed</label>
+        ${(m.flags || []).map((f) => `<small class="seo-fx-flag">⚠ ${esc(f)}</small>`).join("")}
+        <small class="seo-note seo-w-mono">${esc(m.src.split("/").pop().split("?")[0])}</small></div></div>`).join("")}</div>
+    <div class="seo-fx-bar">
+      <button class="seo-fx-b is-accept" type="button" data-ch-alapply="${esc(path)}"${F.busy ? " disabled" : ""}>${
+        F.busy === "apply" ? spin + "Saving…" : `✓ Save alt text (${plural(F.images.length, "image")})`}</button>
+      <button class="seo-fx-b is-ghost" type="button" data-ch-alcancel="${esc(path)}"${F.busy ? " disabled" : ""}>Cancel</button></div>${errBox}</div>`;
+}
+
 /* ---------- clicks (called by seo-health.js) ---------- */
 
 export async function contentClick(e, c, ui, redraw) {
@@ -681,7 +774,9 @@ export async function contentClick(e, c, ui, redraw) {
     "[data-ch-accept],[data-ch-rej],[data-ch-rejok],[data-ch-rejno],[data-ch-regen],[data-ch-pick],[data-ch-fundo],[data-ch-recheck]," +
     "[data-ch-tpick],[data-ch-tprev],[data-ch-tapply],[data-ch-tcancel],[data-ch-tundo]," +
     "[data-ch-fqprev],[data-ch-fqtick],[data-ch-fqapply],[data-ch-fqcancel],[data-ch-fqundo]," +
-    "[data-ch-wfgo],[data-ch-wfadd],[data-ch-wfrm],[data-ch-wfapply],[data-ch-wfcancel],[data-ch-rvgo],[data-ch-rvapply],[data-ch-rvcancel],[data-ch-insundo]");
+    "[data-ch-wfgo],[data-ch-wfadd],[data-ch-wfrm],[data-ch-wfapply],[data-ch-wfcancel],[data-ch-rvgo],[data-ch-rvapply],[data-ch-rvcancel],[data-ch-insundo]," +
+    "[data-ch-lkgo],[data-ch-lktick],[data-ch-lkapply],[data-ch-lkcancel],[data-ch-lkundo]," +
+    "[data-ch-algo],[data-ch-alapply],[data-ch-alcancel],[data-ch-alundo]");
   if (!t) return false;
   const d = t.dataset, w = c.work, H = w.health;
   if (d.chCat) { ui.ccat = d.chCat; ui.cign = false; redraw(); return true; }
@@ -689,6 +784,8 @@ export async function contentClick(e, c, ui, redraw) {
   if (d.chRecheck) { await recheckPages(c, redraw, [d.chRecheck]); return true; }
   if (d.chTpick || d.chTprev || d.chTapply || d.chTcancel || d.chTundo) { await termClick(d, c, redraw); return true; }
   if (d.chFqprev || d.chFqtick || d.chFqapply || d.chFqcancel || d.chFqundo) { await faqClick(d, c, redraw); return true; }
+  if (d.chLkgo || d.chLktick || d.chLkapply || d.chLkcancel || d.chLkundo) { await lkClick(d, c, redraw); return true; }
+  if (d.chAlgo || d.chAlapply || d.chAlcancel || d.chAlundo) { await alClick(t, d, c, redraw); return true; }
   if (d.chWfgo || d.chWfadd || d.chWfrm || d.chWfapply || d.chWfcancel || d.chRvgo || d.chRvapply || d.chRvcancel || d.chInsundo) {
     await insClick(t, d, c, redraw);
     return true;
@@ -743,6 +840,116 @@ export async function contentClick(e, c, ui, redraw) {
   } catch (err) { t.disabled = false; toast(/permission/i.test(err.message || "") ? "You don't have permission to do that." : err.message, true); }
   return true;
 }
+
+/* ---------- Links (Apps Script: linkFind / linkApply / termUndo) and alt text (altFind / altApply / fixUndo) ---------- */
+
+async function lkClick(d, c, redraw) {
+  const H = c.work.health;
+  H.status = H.status || {};
+  const raw = String(d.chLkgo || d.chLktick || d.chLkapply || d.chLkcancel || d.chLkundo);
+  const path = d.chLktick ? raw.slice(0, raw.lastIndexOf("|")) : raw;
+  const k = npath(path), id = lkId(path);
+  const F = LK.get(k) || {};
+  LK.set(k, F);
+  F.off = F.off || new Set();
+
+  if (d.chLktick) {
+    const i = Number(raw.slice(raw.lastIndexOf("|") + 1));
+    if (F.off.has(i)) F.off.delete(i); else F.off.add(i);
+    redraw();
+    return;
+  }
+  if (d.chLkcancel) { LK.delete(k); redraw(); return; }
+  if (d.chLkgo) {
+    F.busy = "go"; F.err = ""; redraw();
+    try { const r = await fixApi("linkFind", { path }); F.links = r.links || []; F.skipped = r.skipped || []; F.off = new Set(); }
+    catch (err) { F.err = fixErr(err); }
+    finally { F.busy = ""; redraw(); }
+    return;
+  }
+  if (d.chLkapply) {
+    const links = (F.links || []).filter((_, i) => !F.off.has(i));
+    if (!links.length) return;
+    const yes = await askConfirm({ title: `Add ${plural(links.length, "link")} to “${titleIn(c.work, path)}”?`, ok: "✓ Yes, add them",
+      body: `<ul class="seo-fx-mlist">${links.map((l) => `<li>On <b>${esc(l.fromTitle || l.from)}</b>: “${esc(l.anchor)}”</li>`).join("")}</ul>
+        <ul class="seo-fx-mlist"><li>The words stay the same. They just become a link. Live straight away.</li>
+          <li>It's added to the Change log, and one <b>Undo</b> removes every link.</li></ul>` });
+    if (!yes) return;
+    F.busy = "apply"; F.err = ""; redraw();
+    try {
+      const r = await fixApi("linkApply", { issueId: id, path, links: links.map((l) => ({ from: l.from, anchor: l.anchor })) });
+      H.status[id] = r.rec;
+      LK.delete(k);
+      toast("Links added ✓");
+    } catch (err) { F.err = fixErr(err); }
+    finally { F.busy = ""; redraw(); }
+    return;
+  }
+  if (d.chLkundo) {
+    const yes = await askConfirm({ title: "Remove every link added here?", ok: "↶ Yes, remove them", tone: "reject",
+      body: `<ul class="seo-fx-mlist"><li>The words stay. Only the links are removed.</li>
+        <li>A page edited in WordPress since can't be changed back from here: it's listed if so.</li></ul>` });
+    if (!yes) return;
+    F.busy = "undo"; F.err = ""; redraw();
+    try {
+      const r = await fixApi("termUndo", { issueId: id });
+      H.status[id] = r.rec;
+      toast(r.left ? `Removed, except on ${plural(r.left, "page")} edited since` : "Links removed");
+    } catch (err) { F.err = fixErr(err); }
+    finally { F.busy = ""; redraw(); }
+  }
+}
+
+async function alClick(t, d, c, redraw) {
+  const H = c.work.health;
+  H.status = H.status || {};
+  const path = String(d.chAlgo || d.chAlapply || d.chAlcancel || d.chAlundo);
+  const k = npath(path), id = alId(path);
+  const F = AL.get(k) || {};
+  AL.set(k, F);
+  const card = t.closest("[data-fxcard]");
+  if (card && F.images) {   // what's typed, before the card is drawn again
+    card.querySelectorAll("[data-al-alt]").forEach((el) => { const m = F.images[Number(el.dataset.alAlt)]; if (m) m.alt = el.value.trim(); });
+    card.querySelectorAll("[data-al-dec]").forEach((el) => { const m = F.images[Number(el.dataset.alDec)]; if (m) m.decorative = el.checked; });
+  }
+  if (d.chAlcancel) { AL.delete(k); redraw(); return; }
+  if (d.chAlgo) {
+    F.busy = "go"; F.err = ""; redraw();
+    try { const r = await fixApi("altFind", { path }); F.images = r.images || []; F.skipped = r.skipped || 0; }
+    catch (err) { F.err = fixErr(err); }
+    finally { F.busy = ""; redraw(); }
+    return;
+  }
+  if (d.chAlapply) {
+    const items = (F.images || []).map((m) => ({ src: m.src, alt: m.decorative ? "" : m.alt }));
+    const missing = (F.images || []).filter((m) => !m.decorative && String(m.alt || "").length < 3).length;
+    if (missing) { F.err = `${plural(missing, "image")} still ${missing === 1 ? "needs" : "need"} a description, or tick Decorative.`; redraw(); return; }
+    const yes = await askConfirm({ title: `Save alt text for ${plural(items.length, "image")}?`, ok: "✓ Yes, save it",
+      body: `<ul class="seo-fx-mlist">${items.map((x) => `<li>${x.alt ? esc(x.alt) : "<i>Decorative</i>"}</li>`).join("")}</ul>
+        <ul class="seo-fx-mlist"><li>Saved to each image in the Media Library, so every page using it gets it too.</li>
+          <li>It's added to the Change log, and you can <b>Undo</b> it.</li></ul>` });
+    if (!yes) return;
+    F.busy = "apply"; F.err = ""; redraw();
+    try {
+      const r = await fixApi("altApply", { issueId: id, path, items });
+      H.status[id] = r.rec;
+      AL.delete(k);
+      toast("Alt text saved ✓");
+    } catch (err) { F.err = fixErr(err); }
+    finally { F.busy = ""; redraw(); }
+    return;
+  }
+  if (d.chAlundo) {
+    const yes = await askConfirm({ title: "Put the old alt text back?", ok: "↶ Yes, put it back", tone: "reject",
+      body: `<ul class="seo-fx-mlist"><li>The images go back to how they were, in the Media Library and on this page.</li></ul>` });
+    if (!yes) return;
+    F.busy = "undo"; F.err = ""; redraw();
+    try { const r = await fixApi("fixUndo", { issueId: id }); H.status[id] = r.rec; toast("Put back"); }
+    catch (err) { F.err = fixErr(err); }
+    finally { F.busy = ""; redraw(); }
+  }
+}
+
 /* ---------- New sections (Apps Script: faqWrite / pageOutline / insertApply, and fixUndo) ---------- */
 
 // What's typed and chosen in the card, kept before the card is drawn again
@@ -1117,6 +1324,12 @@ const CSS = `
 .seo-ct-forms{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px}
 .seo-ct-forms .seo-pr-pill{cursor:help}
 .seo-ct-forms em{font-style:normal;opacity:.7;margin-left:2px}
+.seo-fx-lctx{display:block;margin:3px 0;font-size:13px;line-height:1.55;color:inherit}
+.seo-fx-a{text-decoration:underline;text-decoration-color:#16a34a;text-decoration-thickness:2px;text-underline-offset:3px;background:#f0fdf4;border-radius:3px;padding:0 2px}
+.seo-fx-alts{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:8px;margin:4px 0 0}
+.seo-fx-alt{display:grid;grid-template-columns:96px minmax(0,1fr);gap:10px;align-items:start;padding:10px;border:1px solid var(--border,#e5e7eb);border-radius:10px;background:var(--card,#fff)}
+.seo-fx-alt img{width:96px;height:96px;object-fit:cover;border-radius:8px;background:#f1f5f9}
+.seo-fx-alt .seo-check{font-size:12.5px}
 .seo-fx-wf{display:grid;gap:8px;margin:4px 0 0}
 .seo-fx-wfi{display:grid;grid-template-columns:26px minmax(0,1fr) 30px;gap:8px;align-items:start;padding:10px;border:1px solid var(--border,#e5e7eb);border-radius:10px;background:var(--card,#fff)}
 .seo-fx-wfn{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:#eff6ff;color:#1d4ed8;font-size:12px;font-weight:700}
