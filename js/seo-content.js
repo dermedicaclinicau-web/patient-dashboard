@@ -6,7 +6,9 @@
 import { db, auth } from "./firebase-config.js";
 import { doc, setDoc, serverTimestamp, arrayUnion } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
-const TYPE = { spelling: ["Spelling", "red"], grammar: ["Grammar", "amber"], au: ["Australian English", "blue"], compliance: ["Advertising rules", "red"] };
+const TYPE = { spelling: ["Spelling", "red"], grammar: ["Grammar", "amber"], au: ["Australian English", "blue"],
+  compliance: ["Advertising rules", "red"], consistency: ["Consistency", "violet"] };
+const isProof = (t) => t === "spelling" || t === "grammar" || t === "au";
 const QUESTION = /\b(how|what|why|when|does|do|can|is|are|should|which|vs|safe|hurt|last|long|cost|price|much)\b/;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 const npath = (s) => String(s || "").split("#")[0].split("?")[0].replace(/\/+$/, "").toLowerCase() || "/";
@@ -21,6 +23,10 @@ export const contentIssueId = (path, i) => {
   return "c_" + hash(npath(path) + "|" + i.type + "|" + t) + hash(i.type + "#" + t);
 };
 const dupId = (a, b) => { const [x, y] = [npath(a), npath(b)].sort(); return "d_" + hash(x + "|" + y) + hash(y + "#" + x); };
+const groupId = (key) => "k_" + hash("consist|" + key) + hash(key + "#consist");
+const toD = (t) => { const d = t?.toDate ? t.toDate() : t ? new Date(t) : null; return d && !isNaN(d) ? d : null; };
+const whenC = (t) => { const d = toD(t); return d ? d.toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : ""; };
+const hoursAgo = (t) => { const d = toD(t); return d ? (Date.now() - d.getTime()) / 36e5 : null; };
 
 function toast(msg, bad) {
   const t = document.createElement("div");
@@ -81,34 +87,51 @@ export function contentHtml(c, ui) {
   const C = H?.content;
   if (!C) {
     return `<div class="seo-empty">Content checks haven't run yet. In Apps Script, run <code>runSeoContent()</code> once
-      (it takes a few minutes), then <code>installSeoContentTrigger()</code>.</div>`;
+      (it takes a minute or two), then <code>installSeoContentTrigger()</code>.</div>`;
   }
   const cat = ui.ccat || "spell";
   const showIgn = !!ui.cign;
   const canWork = c.can("seo.work"), canManage = c.can("seo.manage");
+  const st = C.state || {};
   const deep = Object.values(C.deep || {}).filter((d) => d && d.path);
   const issues = deep.flatMap((d) => contentIssues(w, d.path));
   const dupsAll = (C.dups || []).map((x) => {
     const id = dupId(x.a, x.b);
-    const st = H.status?.[id] || null;
-    return { ...x, id, st, ignored: st?.status === "ignored" };
+    const s = H.status?.[id] || null;
+    return { ...x, id, st: s, ignored: s?.status === "ignored" };
+  });
+  const consistAll = (C.consist || []).map((g) => {
+    const id = groupId(g.key);
+    const s = H.status?.[id] || null;
+    return { ...g, id, st: s, ignored: s?.status === "ignored" };
   });
   const noFaq = deep.filter((d) => !d.faq || !d.faqSchema);
   const fresh = deep.map((d) => ({ d, why: freshWhy(d) })).filter((x) => x.why.length);
-  const openSpell = issues.filter((i) => !i.ignored && i.type !== "compliance");
-  const openAds = issues.filter((i) => !i.ignored && i.type === "compliance");
+
+  // Pages proofread so far. Before any are, the counts are unknown, not 0.
+  const proofed = deep.filter((d) => d.ai).length;
+  const open = (test) => issues.filter((i) => !i.ignored && test(i.type));
+  const openSpell = open(isProof), openAds = open((t) => t === "compliance"), openCons = open((t) => t === "consistency");
+  const groupsOpen = consistAll.filter((g) => !g.ignored).length;
+  const pagesIn = (list) => new Set(list.map((i) => npath(i.path))).size;
   const tiles = [
-    ["spell", "Spelling and grammar", openSpell.length, `on ${plural(new Set(openSpell.map((i) => npath(i.path))).size, "page")}`],
+    ["spell", "Spelling and grammar", proofed ? openSpell.length : null,
+      proofed ? `on ${plural(pagesIn(openSpell), "page")} · ${proofed} of ${deep.length} proofread` : `not proofread yet · ${deep.length} waiting`],
     ["dup", "Duplicate content", dupsAll.filter((x) => !x.ignored).length, "pairs of pages"],
+    ["consist", "Consistency", proofed || consistAll.length ? groupsOpen + openCons.length : null,
+      proofed || consistAll.length ? `${groupsOpen} across pages · ${openCons.length} within pages` : "not checked yet"],
     ["faq", "FAQs", noFaq.length, "pages to improve"],
-    ["ads", "Advertising rules", openAds.length, "TGA and AHPRA"],
+    ["ads", "Advertising rules", proofed ? openAds.length : null, proofed ? "TGA and AHPRA" : "not proofread yet"],
     ["fresh", "Freshness and trust", fresh.length, "pages"],
   ];
 
   let body = "";
   if (cat === "spell" || cat === "ads") {
-    const list = issues.filter((i) => (cat === "ads" ? i.type === "compliance" : i.type !== "compliance") && i.ignored === showIgn);
-    body = issuesHtml(c, list, canWork, canManage, cat);
+    const list = issues.filter((i) => (cat === "ads" ? i.type === "compliance" : isProof(i.type)) && i.ignored === showIgn);
+    body = issuesHtml(c, list, canWork, canManage, cat, proofed);
+  } else if (cat === "consist") {
+    body = consistHtml(c, consistAll.filter((g) => g.ignored === showIgn),
+      issues.filter((i) => i.type === "consistency" && i.ignored === showIgn), canWork, canManage, proofed);
   } else if (cat === "dup") {
     body = dupsHtml(c, dupsAll.filter((x) => x.ignored === showIgn), canWork);
   } else if (cat === "faq") {
@@ -117,24 +140,69 @@ export function contentHtml(c, ui) {
     body = freshHtml(c, fresh);
   }
 
-  const st = C.state || {};
-  const when = (t) => { const d = t?.toDate ? t.toDate() : t ? new Date(t) : null; return d && !isNaN(d) ? d.toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : ""; };
+  // Warnings when the data is old: the nightly read (about 1am) or the proofreading (every 20 minutes)
+  const readAge = hoursAgo(st.at), proofAge = hoursAgo(st.proofAt);
+  const warns = [];
+  if (st.ok === false) warns.push(`The last content check failed, so this may be out of date: ${esc(st.error || "")}`);
+  else if (readAge != null && readAge > 36) {
+    warns.push(`Pages were last read ${esc(whenC(st.at))}. This runs every night at about 1am, so it may be failing:
+      in Apps Script, check Executions → runSeoContent.`);
+  }
+  if (st.aiLeft && (proofAge == null ? readAge != null && readAge > 3 : proofAge > 3)) {
+    warns.push(`${plural(st.aiLeft, "page")} ${st.aiLeft === 1 ? "is" : "are"} waiting to be proofread, but proofreading hasn't run
+      ${st.proofAt ? "since " + esc(whenC(st.proofAt)) : "yet"}. In Apps Script, check that runSeoProofread is in runPortalJobs.`);
+  }
+
   return `
-    ${st.ok === false ? `<div class="seo-warn">The last content check failed, so this may be out of date: ${esc(st.error || "")}</div>` : ""}
+    ${warns.map((x) => `<div class="seo-warn">${x}</div>`).join("")}
     <div class="seo-ct-tiles">${tiles.map(([k, l, n, s]) => `<button type="button" class="seo-ct-tile${cat === k ? " is-on" : ""}" data-ch-cat="${k}">
-      <span class="seo-note">${l}</span><strong>${h.fmtInt(n)}</strong><span class="seo-note">${s}</span></button>`).join("")}</div>
-    ${["spell", "ads", "dup"].includes(cat) ? `<div class="seo-row"><span class="seo-sp"></span>
+      <span class="seo-note">${l}</span><strong>${n == null ? "—" : h.fmtInt(n)}</strong><span class="seo-note">${s}</span></button>`).join("")}</div>
+    ${["spell", "ads", "dup", "consist"].includes(cat) ? `<div class="seo-row"><span class="seo-sp"></span>
       <button type="button" class="seo-w-chip ${showIgn ? "is-on" : ""}" data-ch-showign>${showIgn ? "Show open" : "Show ignored"}</button></div>` : ""}
     ${body}
-    <p class="seo-note" style="margin-top:10px">Checked ${esc(when(st.at))} · ${st.deepRead || 0} of ${st.deepTotal || 0} priority and cluster pages read ·
-      ${st.siteIndexed || 0} of ${st.siteTotal || 0} pages compared for duplicates (about 60 more each night) ·
-      ${st.aiLeft ? `${st.aiLeft} page${st.aiLeft === 1 ? "" : "s"} waiting to be proofread` : "all proofread"}.
+    <p class="seo-note" style="margin-top:10px">Pages read ${esc(whenC(st.at))} (${st.deepRead || 0} of ${st.deepTotal || 0} priority and cluster pages) ·
+      proofread ${st.proofAt ? esc(whenC(st.proofAt)) : "not yet"}${st.proofModel ? ` (${esc(st.proofModel)})` : ""} ·
+      ${st.aiLeft ? `${plural(st.aiLeft, "page")} waiting (done every 20 minutes)` : proofed ? "all proofread" : "proofreading not started"} ·
+      ${st.siteIndexed || 0} of ${st.siteTotal || 0} pages compared for duplicates (about 60 more each night).
       Menus, footers and text repeated on many pages aren't checked.</p>`;
 }
 
-function issuesHtml(c, list, canWork, canManage, cat) {
+// Terms written different ways across pages, then pages that contradict themselves
+function consistHtml(c, groups, pageIssues, canWork, canManage, proofed) {
+  if (!groups.length && !pageIssues.length) {
+    return `<div class="seo-empty">${proofed ? "Nothing written different ways, and no page contradicts itself." : "Not checked yet."}</div>`;
+  }
+  const links = (paths) => paths.slice(0, 4).map((p) => {
+    const pid = pageId(c, p);
+    return pid ? `<button class="seo-w-link" type="button" data-open="${esc(pid)}">${esc(titleIn(c.work, p))}</button>` : esc(titleIn(c.work, p));
+  }).join(", ") + (paths.length > 4 ? ` and ${paths.length - 4} more` : "");
+  let out = "";
+  if (groups.length) {
+    out += `<div class="seo-card"><h3 style="margin:0 0 4px">Written different ways across your pages</h3>
+      <p class="seo-note">Pick one way and use it everywhere. The most used is first (green). Hover a form to see its pages.</p>
+      ${groups.map((g) => `<div class="seo-ct-row">
+        <div class="seo-ct-forms">${g.forms.map((f, n) => `<span class="seo-pr-pill is-${n ? "amber" : "green"}" title="${esc(f.pages.join(", "))}">${esc(f.f)} <em>×${f.n}</em></span>`).join("")}</div>
+        <div class="seo-note">Suggested: use <b class="seo-ct-fix">${esc(g.forms[0].f)}</b> everywhere.
+          ${g.forms.slice(1).map((f) => `“${esc(f.f)}” is on ${links(f.pages)}`).join(" · ")}</div>
+        ${g.ignored ? `<div class="seo-note">Ignored by ${esc(g.st?.byName || "someone")}${g.st?.note ? `: ${esc(g.st.note)}` : ""}</div>` : ""}
+        ${canWork ? `<div class="seo-w-acts">${g.ignored ? `<button class="seo-btn" type="button" data-ch-undo="${esc(g.id)}">Back to open</button>`
+          : `<button class="seo-btn" type="button" data-ch-ign="${esc(g.id)}">Ignore</button>`}</div>` : ""}
+      </div>`).join("")}</div>`;
+  }
+  if (pageIssues.length) {
+    out += `<h3 style="margin:16px 0 8px;font-size:14px">Pages that contradict themselves</h3>` + issuesHtml(c, pageIssues, canWork, canManage, "consist", proofed);
+  }
+  return out;
+}
+
+
+function issuesHtml(c, list, canWork, canManage, cat, proofed = 1) {
   if (!list.length) {
-    return `<div class="seo-empty">${cat === "ads" ? "No advertising rule problems found." : "No spelling or grammar mistakes found."}</div>`;
+    if (!proofed) {
+      return `<div class="seo-empty">These pages haven't been proofread yet. Proofreading runs every 20 minutes until every priority and cluster page is done.</div>`;
+    }
+    return `<div class="seo-empty">${cat === "ads" ? "No advertising rule problems found." : cat === "consist" ? "No page contradicts itself."
+      : "No spelling or grammar mistakes found."}</div>`;
   }
   const by = new Map();
   list.forEach((i) => { const k = npath(i.path); if (!by.has(k)) by.set(k, []); by.get(k).push(i); });
@@ -250,8 +318,12 @@ export async function contentClick(e, c, ui, redraw) {
   if (item) { key = item.type + ":" + item.text; label = `${(TYPE[item.type] || ["Check"])[0]}: ${item.text}`; path = item.path; }
   else {
     const dd = (H?.content?.dups || []).find((x) => dupId(x.a, x.b) === id);
-    if (!dd) return true;
-    key = "dup:" + npath(dd.a) + "|" + npath(dd.b); label = `Duplicate content: ${dd.a} and ${dd.b}`; path = dd.a;
+    const g = dd ? null : (H?.content?.consist || []).find((x) => groupId(x.key) === id);
+    if (dd) { key = "dup:" + npath(dd.a) + "|" + npath(dd.b); label = `Duplicate content: ${dd.a} and ${dd.b}`; path = dd.a; }
+    else if (g) {
+      key = "consist:" + g.key; label = `Written different ways: ${g.forms.map((f) => f.f).join(" / ")}`;
+      path = g.forms[0]?.pages?.[0] || "/";
+    } else return true;
   }
   let note = "";
   if (d.chIgn) {
@@ -291,6 +363,12 @@ const CSS = `
 .seo-ct-pp{padding:8px 10px;border:1px solid var(--border,#e5e7eb);border-radius:8px;font-size:13px;min-width:0}
 .seo-ct-qs{margin:2px 0 6px;padding-left:18px;font-size:13px}
 .seo-pr-pill.is-blue{background:#eff6ff;color:#1d4ed8}
+.seo-pr-pill.is-violet{background:#f5f3ff;color:#6d28d9}
+.seo-pr-pill.is-green{background:#ecfdf5;color:#047857}
+.seo-ct-forms{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px}
+.seo-ct-forms .seo-pr-pill{cursor:help}
+.seo-ct-forms em{font-style:normal;opacity:.7;margin-left:2px}
+
 @media (max-width:640px){.seo-ct-pair{grid-template-columns:1fr}}
 `;
 
