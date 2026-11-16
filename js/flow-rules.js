@@ -74,6 +74,22 @@ export const RULE_FIELDS = [
     note: "Checked against their bookings in the appointment book at the moment the flow reaches this rule. Reviews and follow-ups don't count as booked." },
 
   { key: "hist.bought", group: "Purchase history", label: "Has ever bought", type: "products" },
+
+  { key: "pkg.has", group: "Packages", label: "Has a package with visits left", type: "bool" },
+  { key: "pkg.name", group: "Packages", label: "A package with visits left", type: "text", hint: "e.g. DermaGlow" },
+  { key: "pkg.left", group: "Packages", label: "Visits left on their packages", type: "number" },
+  { key: "pkg.expiry_days", group: "Packages", label: "Time until a package expires", type: "number", unit: "days",
+    note: "Their soonest-expiring package with visits left. Packages with no expiry date don't count." },
+  { key: "pkg.value", group: "Packages", label: "Value of visits left ($)", type: "number" },
+
+  { key: "sent.txinfo", group: "Emails sent", label: "Was sent Treatment Info", type: "txsent",
+    ops: [["yes", "was sent it"], ["no", "wasn't sent it"]],
+    note: "Treatment Info emails sent after a consultation recording, and To Patient tasks with a Treatments field. Leave the treatments empty for any." },
+  { key: "sent.tx_booked", group: "Emails sent", label: "Treatments in their last Treatment Info have an upcoming appointment", type: "txbooked",
+    ops: [["none", "none of them"], ["notall", "not all of them"], ["all", "all of them"]],
+    note: "Never matches if they've never been sent Treatment Info. Reviews and follow-ups don't count as booked." },
+  { key: "sent.task", group: "Emails sent", label: "Was sent a Task Manager email", type: "tasksent",
+    ops: [["yes", "was sent one"], ["no", "wasn't sent one"]] },
   { key: "hist.bought_between", group: "Purchase history", label: "Purchases between two dates", type: "prange",
     ops: [["last", "last bought between"], ["any", "bought between"], ["none", "didn't buy between"]] },
   { key: "hist.bought_days", group: "Purchase history", label: "Bought … days ago", type: "pdays",
@@ -135,8 +151,9 @@ const OPS = {
 };
 const opsFor = (f) => f.ops || OPS[f.type] || OPS.bool;
 function defaults(f) {
-  const list = f.type === "products" || f.type === "names" || f.type === "prange" || f.type === "pdays";
+  const list = f.type === "products" || f.type === "names" || f.type === "prange" || f.type === "pdays" || f.type === "txsent";
   return { op: opsFor(f)[0][0], value: list ? [] : f.type === "choice" ? f.options[0][0] : "", days: "",
+    ...(f.type === "txsent" ? { src: "any" } : {}),
     ...(f.type === "range" || f.type === "prange" ? { from: "", to: "" } : {}),
     ...(f.type === "year" ? { value2: "" } : {}),
     ...(f.type === "answer" ? { fieldId: "", fieldLabel: "" } : {}) };
@@ -157,13 +174,14 @@ function cleanRule(r) {
   const d = defaults(f);
   const op = opsFor(f).some((o) => o[0] === r.op) ? r.op : d.op;
   let value = r.value;
-  if (f.type === "products" || f.type === "names" || f.type === "prange" || f.type === "pdays") value = (Array.isArray(value) ? value : []).map(String).filter(Boolean).slice(0, 40);
+  if (f.type === "products" || f.type === "names" || f.type === "prange" || f.type === "pdays" || f.type === "txsent") value = (Array.isArray(value) ? value : []).map(String).filter(Boolean).slice(0, 40);
   else if (f.type === "number" || f.type === "birthday" || f.type === "year") value = value === "" || value === null || value === undefined ? "" : Number(value);
   else if (f.type === "choice") value = f.options.some((o) => o[0] === value) ? value : d.value;
   else if (f.type === "bool") value = "";
   else value = String(value ?? "");
-  const days = (f.type === "form" || f.type === "pdays" || f.type === "txbooked") && r.days !== "" && r.days !== null && r.days !== undefined ? Number(r.days) : "";
+  const days = ["form", "pdays", "txbooked", "txsent", "tasksent"].includes(f.type) && r.days !== "" && r.days !== null && r.days !== undefined ? Number(r.days) : "";
   const out = { id: String(r.id || rid()), field: f.key, op, value, days };
+  if (f.type === "txsent") out.src = ["rec", "task"].includes(r.src) ? r.src : "any";
   if (f.type === "range" || f.type === "prange") { out.from = isIso(r.from) ? r.from : ""; out.to = isIso(r.to) ? r.to : ""; }
   if (f.type === "year") out.value2 = r.value2 === "" || r.value2 === null || r.value2 === undefined ? "" : Number(r.value2);
   if (f.type === "answer") {
@@ -202,6 +220,10 @@ function ruleProblem(r) {
   if (f.type === "answer") {
     if (!r.fieldId) return 'Choose which answer to check in "An answer on the task"';
     if (!["empty", "filled"].includes(r.op) && !String(r.value || "").trim()) return `Fill in what "${r.fieldLabel || "the answer"}" should be`;
+  }
+  if ((f.type === "txsent" || f.type === "tasksent") && r.days !== "" && r.days !== null && r.days !== undefined) {
+    const n = Number(r.days);
+    if (!Number.isInteger(n) || n < 1 || n > 730) return `Choose 1 to 730 days for "${f.label}", or leave it empty for any time`;
   }
   if (f.type === "txbooked" && r.days !== "" && r.days !== null && r.days !== undefined) {
     const n = Number(r.days);
@@ -244,10 +266,22 @@ export function describeRule(r) {
   const op = (opsFor(f).find((o) => o[0] === r.op) || opsFor(f)[0])[1];
   if (f.type === "txbooked") {
     const when = r.days ? `in the next ${r.days} day${Number(r.days) === 1 ? "" : "s"}` : "any time from today";
-    const what = r.op === "all" ? "Every treatment in the email is booked"
-      : r.op === "notall" ? "At least one treatment in the email isn't booked"
-      : "None of the treatments in the email are booked";
+    const src = r.field === "sent.tx_booked" ? "their last Treatment Info" : "the email";
+    const what = r.op === "all" ? `Every treatment in ${src} is booked`
+      : r.op === "notall" ? `At least one treatment in ${src} isn't booked`
+      : `None of the treatments in ${src} are booked`;
     return `${what} (${when})`;
+  }
+  if (f.type === "txsent") {
+    const list = Array.isArray(r.value) ? r.value : [];
+    const about = list.length ? ` about ${list.length > 2 ? `${list.slice(0, 2).join(", ")} +${list.length - 2}` : list.join(", ")}` : "";
+    const src = r.src === "rec" ? " after a recording" : r.src === "task" ? " from Task Manager" : "";
+    const when = r.days ? ` in the last ${r.days} day${Number(r.days) === 1 ? "" : "s"}` : "";
+    return `${r.op === "no" ? "Wasn't sent" : "Was sent"} Treatment Info${about}${src}${when}`;
+  }
+  if (f.type === "tasksent") {
+    const when = r.days ? ` in the last ${r.days} day${Number(r.days) === 1 ? "" : "s"}` : "";
+    return `${r.op === "no" ? "Wasn't sent" : "Was sent"} ${r.value ? `the task “${r.value}”` : "a Task Manager email"}${when}`;
   }
   if (f.type === "bool") return `${f.label}: ${op}`;
   if (f.type === "prange") {
@@ -362,6 +396,24 @@ export async function loadTagNames() {
   }
   return tagNamesCache;
 }
+// Treatment names (TREATMENT-CONFIGURATIONS), for the "Was sent Treatment Info" rule
+let txNamesCache = null;
+export async function loadTxNames() {
+  if (txNamesCache) return txNamesCache;
+  try {
+    const snap = await getDocs(collection(db, "TREATMENT-CONFIGURATIONS"));
+    const out = new Map();
+    snap.forEach((d) => {
+      const n = String((d.data() || {})["Treatment Name"] || "").replace(/\s+/g, " ").trim();
+      if (n) out.set(n.toLowerCase(), n);
+    });
+    txNamesCache = [...out.values()].sort((a, b) => a.localeCompare(b));
+  } catch (err) {
+    console.warn("Treatment names not loaded:", err);
+    txNamesCache = [];
+  }
+  return txNamesCache;
+}
 // A list of names (chips) with a box to add more. arr is changed in place.
 export function mountProductPicker(host, arr, { onChange = () => {}, names = [], placeholder = "Type a product name", none = "No products chosen yet" } = {}) {
   const listId = "pp_" + Math.random().toString(36).slice(2, 8);
@@ -470,6 +522,19 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
         <span class="fr-unit">in the last</span>
         <input class="fe-input fr-num" type="number" min="0" step="1" data-rd="${p}" value="${esc(r.days)}" placeholder="any" aria-label="Days" />
         <span class="fr-unit">days</span>`;
+    } else if (f.type === "txsent") {
+      val = `<select class="fb-select fr-val" data-rs="${p}" aria-label="Sent from">
+          <option value="any"${r.src !== "rec" && r.src !== "task" ? " selected" : ""}>either way</option>
+          <option value="rec"${r.src === "rec" ? " selected" : ""}>after a recording</option>
+          <option value="task"${r.src === "task" ? " selected" : ""}>from Task Manager</option></select>
+        <span class="fr-unit">in the last</span>
+        <input class="fe-input fr-num" type="number" min="1" max="730" step="1" inputmode="numeric" data-rd="${p}" value="${esc(r.days)}" placeholder="any" aria-label="Days" />
+        <span class="fr-unit">days</span>`;
+    } else if (f.type === "tasksent") {
+      val = `<input class="fe-input fr-val" data-rv="${p}" maxlength="80" placeholder="Task name, or empty for any" value="${esc(r.value)}" aria-label="Task name" />
+        <span class="fr-unit">in the last</span>
+        <input class="fe-input fr-num" type="number" min="1" max="730" step="1" inputmode="numeric" data-rd="${p}" value="${esc(r.days)}" placeholder="any" aria-label="Days" />
+        <span class="fr-unit">days</span>`;
     } else if (f.type === "txbooked") {
       val = `<span class="fr-unit">booked in the next</span>
         <input class="fe-input fr-num" type="number" min="1" max="730" step="1" inputmode="numeric" data-rd="${p}" value="${esc(r.days)}" placeholder="any" aria-label="Days ahead" />
@@ -504,7 +569,7 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
         <button type="button" class="fr-x" data-rx="${p}" aria-label="Remove this rule" title="Remove">×</button></div>
       ${f.note ? `<p class="fr-note">${esc(f.note)}</p>` : ""}
       ${quick}
-      ${f.type === "products" || f.type === "names" || f.type === "prange" || f.type === "pdays" ? `<div class="fr-pp" data-pp-host="${p}"></div>` : ""}
+      ${f.type === "products" || f.type === "names" || f.type === "prange" || f.type === "pdays" || f.type === "txsent" ? `<div class="fr-pp" data-pp-host="${p}"></div>` : ""}
     </div>`;
   }
 
@@ -546,6 +611,9 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       if (f && f.type === "names") {
         mountProductPicker(el, r.value, { onChange, names: lists[r.field] || (r.field === "pt.tag" ? tagNamesCache || [] : []),
           placeholder: "Choose or type one", none: "None chosen yet" });
+      } else if (f && f.type === "txsent") {
+        mountProductPicker(el, r.value, { onChange, names: txNamesCache || [],
+          placeholder: "Type a treatment, or leave empty for any", none: "Any treatment" });
       } else if (f && (f.type === "prange" || f.type === "pdays")) {
         mountProductPicker(el, r.value, { onChange, names, placeholder: "Type a product, or leave empty for any", none: "Any product" });
       } else {
@@ -585,6 +653,13 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       if (!r || !span) return;
       [r.from, r.to] = span;
       render();
+      onChange();
+      return;
+    }
+    if (d.rs !== undefined) {
+      const r = ruleAt(d.rs);
+      if (!r) return;
+      r.src = ["rec", "task"].includes(el.value) ? el.value : "any";
       onChange();
       return;
     }
@@ -646,4 +721,8 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
     }
   });
   render();
+  // The treatment names arrive a moment later; the picker is redrawn with them
+  if (!txNamesCache && fields.some((f) => f.type === "txsent")) {
+    loadTxNames().then(() => { if (host.isConnected) render(); });
+  }
 }

@@ -18,9 +18,10 @@ const COL = "mkt_campaigns";
 const LIST_HREF = "#/tasks/marketing/campaigns";
 const BACK = `<a class="back-link" href="${LIST_HREF}">← Campaigns</a>`;
 // Rules that make sense without a purchase or visit (the same list as MKT_RULE_FIELDS_ in Code.gs)
-export const CAMPAIGN_FIELDS = ["hist.bought", "hist.days_since", "appt.has_future", "appt.next_days", "appt.last_days",
+export const CAMPAIGN_FIELDS = ["hist.bought", "hist.bought_between", "hist.days_since", "appt.has_future", "appt.next_days", "appt.last_days",
   "appt.visits", "appt.future_service", "appt.past_service", "appt.visit_between", "appt.last_between", "ssp.active", "ssp.age_days", "ssp.expiry_days",
-  "plan.status", "plan.due", "plan.overdue", "form.saved", "pt.age", "pt.email", "pt.mobile"];
+  "plan.status", "plan.due", "plan.overdue", "form.saved", "pt.age", "pt.birth_year", "pt.birthday", "pt.email", "pt.mobile",
+  "pkg.has", "pkg.name", "pkg.left", "pkg.expiry_days", "pkg.value", "sent.txinfo", "sent.tx_booked", "sent.task"];
 const STATUS = {
   draft: ["Draft", "is-draft"], scheduled: ["Scheduled", "is-sched"], building: ["Getting ready", "is-live"],
   sending: ["Sending", "is-live"], paused: ["Paused", "is-paused"], sent: ["Sent", "is-sent"], cancelled: ["Cancelled", "is-cancel"],
