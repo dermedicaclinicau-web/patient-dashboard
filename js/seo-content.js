@@ -14,6 +14,8 @@ async function fixApi(op, data) {
   if (r && r.problem) { const e = new Error(r.problem); e.editUrl = r.editUrl || ""; throw e; }
   return r;
 }
+// Re-checking pages now (Refresh on Site health, or Re-check this page)
+const RC = { busy: false, n: 0, msg: "", bad: false };
 const fixErr = (e) => (e?.code === "FORBIDDEN" || /FORBIDDEN/.test(e?.message || "")
   ? "You don't have access to fix wording on the website. Ask an Admin to turn on “Site health: fix wording on the website”."
   : e?.message || "Something went wrong. Try again.");
@@ -173,6 +175,8 @@ export function contentHtml(c, ui) {
 
   return `
     ${warns.map((x) => `<div class="seo-warn">${x}</div>`).join("")}
+    ${RC.busy ? `<div class="seo-fx-banner"><span class="seo-fx-spin"></span>Re-checking ${plural(RC.n, "page")} on the live website… about 30 seconds.</div>`
+      : RC.msg ? `<div class="seo-fx-banner ${RC.bad ? "is-bad" : "is-ok"}">${RC.bad ? "⚠" : "✓"} ${esc(RC.msg)}</div>` : ""}
     <div class="seo-ct-tiles">${tiles.map(([k, l, n, s]) => `<button type="button" class="seo-ct-tile${cat === k ? " is-on" : ""}" data-ch-cat="${k}">
       <span class="seo-note">${l}</span><strong>${n == null ? "—" : h.fmtInt(n)}</strong><span class="seo-note">${s}</span></button>`).join("")}</div>
     ${["spell", "ads", "dup", "consist"].includes(cat) ? `<div class="seo-row"><span class="seo-sp"></span>
@@ -230,6 +234,8 @@ function issuesHtml(c, list, canWork, canManage, cat, proofed = 1) {
     return `<div class="seo-card seo-ct-page">
       <div class="seo-row" style="margin:0 0 2px"><strong>${esc(titleIn(c.work, arr[0].path))}</strong>
         <span class="seo-note">${left ? `${plural(left, "thing")} to fix` : "all fixed ✓"}</span><span class="seo-sp"></span>
+        ${c.can("seo.fix") || canWork ? `<button class="seo-fx-b is-ghost" type="button" data-ch-recheck="${esc(arr[0].path)}"${RC.busy ? " disabled" : ""}
+          title="Read and proofread this page again now">↻ Re-check this page</button>` : ""}
         ${pid ? `<button class="seo-btn" type="button" data-open="${esc(pid)}">Open page details</button>` : ""}</div>
       <div class="seo-note seo-w-mono">${esc(arr[0].path)}</div>
       ${arr.map((i) => fixRow(c, i, canWork, canManage)).join("")}
@@ -287,7 +293,7 @@ function fixRow(c, i, canWork, canManage) {
         ${s.link ? `<a class="seo-fx-b is-accept" href="${esc(s.link)}" target="_blank" rel="noopener">View live page ↗</a>` : ""}
         ${canFix ? `<button class="seo-fx-b is-ghost" type="button" data-ch-fundo="${esc(i.id)}"${f.busy ? " disabled" : ""}>${
           f.busy === "undo" ? spin + "Putting it back…" : "↶ Undo"}</button>` : ""}
-        <span class="seo-sp"></span><span class="seo-note">Drops off this list after tonight's check.</span>
+        <span class="seo-sp"></span><span class="seo-note">Drops off when the page is re-checked (Refresh, or tonight).</span>
       </div>${errBox}</div>`;
   }
 
@@ -450,11 +456,12 @@ function freshHtml(c, list) {
 
 export async function contentClick(e, c, ui, redraw) {
   const t = e.target.closest("[data-ch-cat],[data-ch-ign],[data-ch-undo],[data-ch-word],[data-ch-showign]," +
-    "[data-ch-accept],[data-ch-rej],[data-ch-rejok],[data-ch-rejno],[data-ch-regen],[data-ch-pick],[data-ch-fundo]");
+    "[data-ch-accept],[data-ch-rej],[data-ch-rejok],[data-ch-rejno],[data-ch-regen],[data-ch-pick],[data-ch-fundo],[data-ch-recheck]");
   if (!t) return false;
   const d = t.dataset, w = c.work, H = w.health;
   if (d.chCat) { ui.ccat = d.chCat; ui.cign = false; redraw(); return true; }
   if (d.chShowign !== undefined) { ui.cign = !ui.cign; redraw(); return true; }
+  if (d.chRecheck) { await recheckPages(c, redraw, [d.chRecheck]); return true; }
   const fxId = d.chAccept || d.chRej || d.chRejok || d.chRejno || d.chRegen || d.chFundo || (d.chPick ? d.chPick.split("|")[0] : "");
   if (fxId) { await fixClick(t, d, fxId, c, redraw); return true; }
 
@@ -505,6 +512,29 @@ export async function contentClick(e, c, ui, redraw) {
   } catch (err) { t.disabled = false; toast(/permission/i.test(err.message || "") ? "You don't have permission to do that." : err.message, true); }
   return true;
 }
+/* ---------- Re-check pages now (Apps Script: wordpress → recheck) ---------- */
+// paths: the pages to re-check. Left out: the pages with changes made from here that tonight's check hasn't seen yet.
+export async function recheckPages(c, redraw, paths) {
+  const w = c.work, C = w.health?.content;
+  if (!C || RC.busy || !(c.can("seo.fix") || c.can("seo.work"))) return;
+  if (!paths) {
+    paths = [...new Set(Object.values(C.deep || {}).filter((d) => d && d.path)
+      .flatMap((d) => contentIssues(w, d.path)).filter((i) => i.fixed).map((i) => i.path))];
+  }
+  if (!paths.length) return;
+  const now = paths.slice(0, 4);
+  Object.assign(RC, { busy: true, n: now.length, msg: "", bad: false });
+  redraw();
+  try {
+    const r = await fixApi("recheck", { paths: now });
+    for (const [k, v] of Object.entries(r.entries || {})) C.deep[k] = v;
+    const left = paths.length - now.length;
+    RC.msg = `Re-checked ${plural(r.done || 0, "page")} just now.${r.failed ? ` ${plural(r.failed, "page")} couldn't be proofread: try again in a minute.` : ""}${
+      left ? ` ${plural(left, "more page")} ${left === 1 ? "is" : "are"} re-checked when you press Refresh again.` : ""}`;
+  } catch (err) { RC.msg = fixErr(err); RC.bad = true; }
+  finally { RC.busy = false; redraw(); }
+}
+
 /* ---------- Accept, Reject, Regenerate, Undo (Apps Script: wordpress → fixApply / fixReject / fixRegen / fixUndo) ---------- */
 
 async function fixClick(t, d, id, c, redraw) {
@@ -628,6 +658,11 @@ const CSS = `
 .seo-ct-forms{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px}
 .seo-ct-forms .seo-pr-pill{cursor:help}
 .seo-ct-forms em{font-style:normal;opacity:.7;margin-left:2px}
+.seo-fx-banner{display:flex;align-items:center;gap:8px;margin:0 0 12px;padding:10px 14px;border-radius:10px;font-size:13.5px;
+  background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af}
+.seo-fx-banner.is-ok{background:#f0fdf4;border-color:#bbf7d0;color:#166534}
+.seo-fx-banner.is-bad{background:#fef2f2;border-color:#fecaca;color:#991b1b}
+.seo-ct-page .seo-fx-b{min-height:32px;padding:0 12px;font-size:12.5px}
 /* An issue */
 .seo-fx{padding:14px 0;border-top:1px solid var(--border,#e5e7eb)}
 .seo-ct-page .seo-fx:first-of-type{margin-top:8px}

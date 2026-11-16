@@ -2,7 +2,7 @@
 // Reads seo_state/health, seo_health (current build) and seo_issues (what staff have ignored).
 
 import { db, auth } from "./firebase-config.js";
-import { contentHtml, contentClick } from "./seo-content.js?v=3";
+import { contentHtml, contentClick, recheckPages } from "./seo-content.js?v=5";
 import {
   doc, getDoc, setDoc, collection, query, where, getDocs, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -541,6 +541,8 @@ export function viewHealth(wrap, c, ui) {
     } catch (err) { t.disabled = false; toast(errText(err.message || err), true); }
   };
   draw();
+  // Refresh on this tab: re-check the pages changed from here, so fixed issues drop off now
+  if (c.work.recheckNow) { c.work.recheckNow = false; recheckPages(c, draw); }
 }
 
 /* ---------- styles ---------- */

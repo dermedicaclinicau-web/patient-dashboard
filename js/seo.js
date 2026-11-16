@@ -1395,7 +1395,14 @@ export async function mountSeo(el, opts = {}) {
     else if (ds.open) openPanel(ds.open);
     else if (ds.close !== undefined) panel.hidden = true;
     else if (ds.more !== undefined) { ui.limit = Infinity; renderTable(); }
-    else if (ds.reload !== undefined) { panel.hidden = true; load(true); }
+    else if (ds.reload !== undefined) {
+      panel.hidden = true;
+      const recheck = tab === "health";
+      load(true).then(() => {
+        // Site health: re-check the pages fixed from here (seo-health.js picks this up)
+        if (recheck && work && tab === "health") { work.recheckNow = true; render(); }
+      });
+    }
     else if (ds.logpage !== undefined) {
       panel.hidden = true;
       if (work) work.prefill = { url: ds.logpage };

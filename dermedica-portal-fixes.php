@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Dermedica Portal Fixes
  * Description: Lets the staff portal fix a word or phrase on a page (spelling, grammar, wording) and undo it. Works alongside Dermedica Portal Connector.
- * Version: 1.0.0
+ * Version: 1.1.0
  */
 if (!defined('ABSPATH')) exit;
 
@@ -47,33 +47,63 @@ function dpcfix_no($code, $msg, $extra = []) { return array_merge(['ok' => false
 
 /* ---------- Finding the words in the page's HTML ---------- */
 
-function dpcfix_norm_char($ch) {
+// Curly quotes, long dashes and odd spaces count as the plain ones (capitals kept)
+function dpcfix_fold_char($ch) {
   static $map = ["\u{2018}" => "'", "\u{2019}" => "'", "\u{02BC}" => "'", '`' => "'", "\u{201C}" => '"', "\u{201D}" => '"',
     "\u{2013}" => '-', "\u{2014}" => '-', "\u{00A0}" => ' '];
   if (isset($map[$ch])) $ch = $map[$ch];
   if (preg_match('/^\s$/u', $ch)) return ' ';
-  return mb_strtolower($ch, 'UTF-8');
+  return $ch;
 }
+function dpcfix_norm_char($ch) { return mb_strtolower(dpcfix_fold_char($ch), 'UTF-8'); }
 
-// The text of an HTML string as people read it, and where each character came from (byte offsets)
+// The text of an HTML string as people read it, and where each character came from (byte offsets).
+// Returns [lower-case text, starts[], ends[], each character with its capitals kept]
 function dpcfix_index($src) {
-  $chars = []; $st = []; $en = [];
+  $chars = []; $orig = []; $st = []; $en = [];
   $block = '/^<\/?(p|br|li|ul|ol|h[1-6]|div|section|tr|td|th|blockquote|figure|figcaption)\b/i';
   preg_match_all('/<!--.*?-->|<[^>]*>|&#?[a-z0-9]+;|./su', (string) $src, $m, PREG_OFFSET_CAPTURE);
   foreach ($m[0] as $tk) {
     $tok = $tk[0]; $off = $tk[1]; $end = $off + strlen($tok);
     if ($tok[0] === '<' && strlen($tok) > 1) {
-      if (preg_match($block, $tok) && $chars && end($chars) !== ' ') { $chars[] = ' '; $st[] = $off; $en[] = $end; }
+      if (preg_match($block, $tok) && $chars && end($chars) !== ' ') { $chars[] = ' '; $orig[] = ' '; $st[] = $off; $en[] = $end; }
       continue;
     }
     $txt = ($tok[0] === '&' && strlen($tok) > 1) ? html_entity_decode($tok, ENT_QUOTES | ENT_HTML5, 'UTF-8') : $tok;
     foreach (preg_split('//u', $txt, -1, PREG_SPLIT_NO_EMPTY) as $ch) {
-      $c = dpcfix_norm_char($ch);
+      $f = dpcfix_fold_char($ch);
+      $c = mb_strtolower($f, 'UTF-8');
       if ($c === ' ' && (!$chars || end($chars) === ' ')) continue;
-      $chars[] = $c; $st[] = $off; $en[] = $end;
+      $chars[] = $c; $orig[] = $f; $st[] = $off; $en[] = $end;
     }
   }
-  return [implode('', $chars), $st, $en];
+  return [implode('', $chars), $st, $en, $orig];
+}
+
+// The smallest change: only the characters that differ between the page and the new wording, so formatting
+// around them (bold, links) is kept. keepCase (spelling): capitals on the page stay as they are.
+// Returns [start, end, new HTML], or null when the part that changes has formatting inside it.
+function dpcfix_edit($src, $st, $en, $orig, $at, $n, $rep, $keepCase) {
+  $pc = array_slice($orig, $at, $n);                                  // the words on the page
+  $rc = preg_split('//u', $rep, -1, PREG_SPLIT_NO_EMPTY);             // the new words
+  $rf = array_map('dpcfix_fold_char', $rc);
+  $same = function ($x, $y) use ($keepCase) {
+    return $keepCase ? mb_strtolower($x, 'UTF-8') === mb_strtolower($y, 'UTF-8') : $x === $y;
+  };
+  $m = count($rc);
+  $p = 0;
+  while ($p < $n && $p < $m && $same($pc[$p], $rf[$p])) $p++;
+  $s = 0;
+  while ($s < $n - $p && $s < $m - $p && $same($pc[$n - 1 - $s], $rf[$m - 1 - $s])) $s++;
+  $mid = htmlspecialchars(implode('', array_slice($rc, $p, $m - $p - $s)), ENT_NOQUOTES, 'UTF-8');
+  if ($n - $p - $s === 0) {                                           // only adding words
+    $pos = $p > 0 ? $en[$at + $p - 1] : $st[$at];
+    return [$pos, $pos, $mid];
+  }
+  $a = $st[$at + $p];
+  $b = $en[$at + $n - $s - 1];
+  if (strpos(substr($src, $a, $b - $a), '<') !== false) return null;  // formatting inside the part that changes
+  return [$a, $b, $mid];
 }
 
 function dpcfix_needle($text) { return trim(dpcfix_index(htmlspecialchars((string) $text, ENT_NOQUOTES, 'UTF-8'))[0]); }
@@ -91,7 +121,7 @@ function dpcfix_hits($src, $needle) {
     if ($edgeL && $at > 0 && preg_match($word, mb_substr($plain, $at - 1, 1, 'UTF-8'))) continue;
     if ($edgeR && preg_match($word, mb_substr($plain, $at + $n, 1, 'UTF-8'))) continue;
     $a = $st[$at]; $b = $en[$at + $n - 1];
-    $out[] = ['a' => $a, 'b' => $b, 'tags' => strpos(substr($src, $a, $b - $a), '<') !== false,
+    $out[] = ['a' => $a, 'b' => $b, 'at' => $at, 'n' => $n, 'tags' => strpos(substr($src, $a, $b - $a), '<') !== false,
       'ctx' => mb_substr($plain, max(0, $at - 60), $n + 120, 'UTF-8')];
     $from = $at + $n;
   }
@@ -178,12 +208,14 @@ function dpcfix_find(WP_REST_Request $req) {
 }
 
 // Changes the words. Exactly one place, unless "all" (spelling: every place the misspelt word appears).
+// Only the characters that differ are replaced, so formatting around them stays.
 function dpcfix_replace(WP_REST_Request $req) {
   $b = $req->get_json_params() ?: [];
   $id = (int) ($b['id'] ?? 0);
-  $find = trim((string) ($b['find'] ?? '')); $rep = trim((string) ($b['replace'] ?? ''));
+  $find = trim((string) ($b['find'] ?? '')); $rep = trim(preg_replace('/\s+/u', ' ', (string) ($b['replace'] ?? '')));
   $fid = preg_replace('/[^a-z0-9_-]/i', '', (string) ($b['fid'] ?? ''));
   $all = !empty($b['all']);
+  $keep = !empty($b['keepCase']);
   $post = $id ? get_post($id) : null;
   if (!$post) return dpcfix_no('not_found', "That page isn't in WordPress.");
   if ($find === '' || $rep === '' || mb_strlen($find) > 200 || mb_strlen($rep) > 400 || !$fid) return dpcfix_no('bad', 'Nothing to change.');
@@ -193,18 +225,24 @@ function dpcfix_replace(WP_REST_Request $req) {
   if (!$hits) return dpcfix_no('not_found', 'Not found in the page.');
   if (count($hits) > 1 && !$all) return dpcfix_no('many', 'Found more than once.', ['count' => count($hits)]);
   if (count($hits) > 20) return dpcfix_no('many', 'Found too many times.', ['count' => count($hits)]);
-  foreach ($hits as $h) if ($h['tags']) return dpcfix_no('formatted', 'Formatting inside the words.');
 
-  $esc = htmlspecialchars($rep, ENT_NOQUOTES, 'UTF-8');
   $byT = [];
   foreach ($hits as $h) $byT[$h['t']][] = $h;
   $changes = [];
   foreach ($byT as $ti => $hs) {
-    usort($hs, function ($x, $y) { return $y['a'] - $x['a']; });   // from the end, so earlier positions stay right
     $v = $targets[$ti]['value'];
-    foreach ($hs as $h) $v = substr_replace($v, $esc, $h['a'], $h['b'] - $h['a']);
-    $changes[] = ['path' => $targets[$ti]['path'], 'before' => $targets[$ti]['value'], 'after' => $v];
+    list(, $st, $en, $orig) = dpcfix_index($v);
+    $edits = [];
+    foreach ($hs as $h) {
+      $e = dpcfix_edit($v, $st, $en, $orig, $h['at'], $h['n'], $rep, $keep);
+      if (!$e) return dpcfix_no('formatted', 'Formatting inside the part that changes.', ['context' => $h['ctx']]);
+      $edits[] = $e;
+    }
+    usort($edits, function ($x, $y) { return $y[0] - $x[0]; });   // from the end, so earlier positions stay right
+    foreach ($edits as $e) $v = substr_replace($v, $e[2], $e[0], $e[1] - $e[0]);
+    if ($v !== $targets[$ti]['value']) $changes[] = ['path' => $targets[$ti]['path'], 'before' => $targets[$ti]['value'], 'after' => $v];
   }
+  if (!$changes) return dpcfix_no('same', 'The new wording is the same as what the page says.');
 
   $entry = ['fid' => $fid, 'at' => time(), 'where' => $isEl ? 'elementor' : 'content', 'find' => $find, 'replace' => $rep];
   if ($isEl) {
@@ -221,6 +259,7 @@ function dpcfix_replace(WP_REST_Request $req) {
   dpcfix_purge($id);
   return ['ok' => true, 'where' => $entry['where'], 'count' => count($hits), 'link' => get_permalink($id), 'context' => $hits[0]['ctx']];
 }
+
 
 // Puts a change back, if the page hasn't been edited since
 function dpcfix_undo(WP_REST_Request $req) {
