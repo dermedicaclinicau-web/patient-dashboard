@@ -137,6 +137,20 @@ export const RULE_FIELDS = [
   { key: "pt.marketing", group: "Patient", label: "Agreed to marketing emails", type: "bool" },
   { key: "pt.spend_tier", group: "Patient", label: "Spend tier (last 12 months)", type: "choice", options: SPEND_TIERS },
   { key: "pt.tag", group: "Patient", label: "Patient tag", type: "names" },
+  { key: "pt.spend12", group: "Patient", label: "Spent in the last 12 months ($)", type: "number" },
+  { key: "pt.spend_all", group: "Patient", label: "Spent in total ($)", type: "number" },
+  { key: "pt.visits12", group: "Patient", label: "Visits in the last 12 months", type: "number" },
+  { key: "pt.address", group: "Patient", label: "Address", type: "text", hint: "Suburb or postcode, e.g. 6010" },
+  { key: "pt.sample", group: "Patient", label: "Random sample", type: "number", unit: "%",
+    ops: [["in", "is in a random"], ["out", "is not in a random"]],
+    note: "Test an offer on part of the list. Duplicate the campaign and choose “is not in” to send the other part something else." },
+  { key: "appt.consult_only", group: "Appointments", label: "Had a consultation, no treatment since", type: "bool" },
+  { key: "mkt.sent", group: "Emails sent", label: "Was sent a marketing email", type: "mktsent",
+    ops: [["yes", "was sent one"], ["no", "wasn't sent one"]] },
+  { key: "mkt.opened", group: "Emails sent", label: "Opened a marketing email", type: "mktsent",
+    ops: [["yes", "opened one"], ["no", "didn't open one"]] },
+  { key: "mkt.clicked", group: "Emails sent", label: "Clicked a link in a marketing email", type: "mktsent",
+    ops: [["yes", "clicked one"], ["no", "didn't click one"]] },
 ];
 const FIELD = Object.fromEntries(RULE_FIELDS.map((f) => [f.key, f]));
 // What the Recall flow offers: this recall, plus everything about the patient (not "this purchase" or "this visit")
@@ -150,7 +164,7 @@ export const TASK_RULE_KEYS = RULE_FIELDS
 
 const OPS = {
   bool: [["yes", "Yes"], ["no", "No"]],
-  number: [["gt", "more than"], ["lt", "less than"], ["eq", "exactly"]],
+  number: [["gt", "more than"], ["gte", "at least"], ["lt", "less than"], ["lte", "at most"], ["eq", "exactly"], ["between", "between"]],
   text: [["contains", "contains"], ["not_contains", "doesn't contain"]],
   products: [["any", "any of"], ["none", "none of"]],
   names: [["any", "is one of"], ["none", "is not one of"]],
@@ -165,7 +179,7 @@ function defaults(f) {
     ...(f.type === "svcs" ? { when: "any" } : {}),
     ...(f.type === "txsent" ? { src: "any" } : {}),
     ...(f.type === "range" || f.type === "prange" ? { from: "", to: "" } : {}),
-    ...(f.type === "year" ? { value2: "" } : {}),
+    ...(f.type === "year" || f.type === "number" ? { value2: "" } : {}),
     ...(f.type === "answer" ? { fieldId: "", fieldLabel: "" } : {}) };
 }
 export const blankGroup = () => ({ match: "all", rules: [] });
@@ -189,7 +203,7 @@ function cleanRule(r) {
   else if (f.type === "choice") value = f.options.some((o) => o[0] === value) ? value : d.value;
   else if (f.type === "bool") value = "";
   else value = String(value ?? "");
-  const days = ["form", "pdays", "txbooked", "txsent", "tasksent", "svcs"].includes(f.type) && r.days !== "" && r.days !== null && r.days !== undefined ? Number(r.days) : "";
+  const days = ["form", "pdays", "txbooked", "txsent", "tasksent", "mktsent", "svcs"].includes(f.type) && r.days !== "" && r.days !== null && r.days !== undefined ? Number(r.days) : "";
   const out = { id: String(r.id || rid()), field: f.key, op, value, days };
   if (f.type === "txsent") out.src = ["rec", "task"].includes(r.src) ? r.src : "any";
   if (f.type === "svcs") {
@@ -197,7 +211,7 @@ function cleanRule(r) {
     if (out.when === "any") out.days = "";
   }
   if (f.type === "range" || f.type === "prange") { out.from = isIso(r.from) ? r.from : ""; out.to = isIso(r.to) ? r.to : ""; }
-  if (f.type === "year") out.value2 = r.value2 === "" || r.value2 === null || r.value2 === undefined ? "" : Number(r.value2);
+  if (f.type === "year" || f.type === "number") out.value2 = r.value2 === "" || r.value2 === null || r.value2 === undefined ? "" : Number(r.value2);
   if (f.type === "answer") {
     out.fieldId = String(r.fieldId || "").slice(0, 40);
     out.fieldLabel = String(r.fieldLabel || "").slice(0, 120);
@@ -224,6 +238,8 @@ function ruleProblem(r) {
   const f = FIELD[r.field];
   if (!f) return "A rule uses something that no longer exists";
   if (f.type === "number" && !(r.value !== "" && Number.isFinite(Number(r.value)) && Number(r.value) >= 0)) return `Add a number to "${f.label}"`;
+  if (f.type === "number" && r.op === "between" && !(r.value2 !== "" && r.value2 !== undefined && Number.isFinite(Number(r.value2)) && Number(r.value2) >= 0)) return `Add the second number to "${f.label}"`;
+  if (r.field === "pt.sample" && !(Number.isInteger(Number(r.value)) && Number(r.value) >= 1 && Number(r.value) <= 99)) return 'Choose 1 to 99 % for "Random sample"';
   if (f.type === "birthday" && (r.op === "next" || r.op === "last")
     && !(r.value !== "" && Number.isInteger(Number(r.value)) && Number(r.value) >= 1 && Number(r.value) <= 60)) return 'Choose 1 to 60 days for "Birthday"';
   if (f.type === "year") {
@@ -242,7 +258,7 @@ function ruleProblem(r) {
       if (r.days === "" || !Number.isInteger(n) || n < 1 || n > 1095) return `Choose 1 to 1095 days for "${f.label}"`;
     }
   }
-  if ((f.type === "txsent" || f.type === "tasksent") && r.days !== "" && r.days !== null && r.days !== undefined) {
+  if ((f.type === "txsent" || f.type === "tasksent" || f.type === "mktsent") && r.days !== "" && r.days !== null && r.days !== undefined) {
     const n = Number(r.days);
     if (!Number.isInteger(n) || n < 1 || n > 730) return `Choose 1 to 730 days for "${f.label}", or leave it empty for any time`;
   }
@@ -312,6 +328,18 @@ export function describeRule(r) {
   if (f.type === "tasksent") {
     const when = r.days ? ` in the last ${r.days} day${Number(r.days) === 1 ? "" : "s"}` : "";
     return `${r.op === "no" ? "Wasn't sent" : "Was sent"} ${r.value ? `the task “${r.value}”` : "a Task Manager email"}${when}`;
+  }
+  if (f.type === "mktsent") {
+    const when = r.days ? ` in the last ${r.days} day${Number(r.days) === 1 ? "" : "s"}` : "";
+    const what = r.value ? `a marketing email named “${r.value}”` : "a marketing email";
+    const verb = r.field === "mkt.opened" ? (r.op === "no" ? "Didn't open" : "Opened")
+      : r.field === "mkt.clicked" ? (r.op === "no" ? "Didn't click a link in" : "Clicked a link in")
+      : (r.op === "no" ? "Wasn't sent" : "Was sent");
+    return `${verb} ${what}${when}`;
+  }
+  if (r.field === "pt.sample") return `${r.op === "out" ? "Not in" : "In"} a random ${r.value === "" ? "…" : r.value}% sample`;
+  if (f.type === "number" && r.op === "between") {
+    return `${f.label} between ${r.value === "" ? "…" : r.value} and ${r.value2 === "" || r.value2 === undefined ? "…" : r.value2}${f.unit ? " " + f.unit : ""}`;
   }
   if (f.type === "bool") return `${f.label}: ${op}`;
   if (f.type === "prange") {
@@ -422,7 +450,9 @@ export function groupWarnings(g, { email = false } = {}) {
       const x = nums[r.field] || (nums[r.field] = { lo: -Infinity, hi: Infinity, eq: [] });
       if (r.op === "gt") x.lo = Math.max(x.lo, n);
       else if (r.op === "lt") x.hi = Math.min(x.hi, n);
-      else x.eq.push(n);
+  "appt.svc_lapsed", "appt.past_svcs", "appt.future_svcs", "pt.spend_tier", "pt.tag", "hist.bought_days",
+  "pt.spend12", "pt.spend_all", "pt.visits12", "pt.address", "pt.sample", "appt.consult_only",
+  "mkt.sent", "mkt.opened", "mkt.clicked"];
     });
     Object.entries(nums).forEach(([k, x]) => {
       const eqBad = new Set(x.eq).size > 1 || x.eq.some((n) => n <= x.lo || n >= x.hi);
@@ -684,6 +714,8 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
     let pre = "";
     if (f.type === "number") {
       val = `<input class="fe-input fr-num" type="number" min="0" step="1" inputmode="numeric" data-rv="${p}" value="${esc(r.value)}" aria-label="Number" />
+        ${r.op === "between" ? `<span class="fr-unit">and</span>
+        <input class="fe-input fr-num" type="number" min="0" step="1" inputmode="numeric" data-rv2="${p}" value="${esc(r.value2 ?? "")}" aria-label="Second number" />` : ""}
         ${f.unit ? `<span class="fr-unit">${esc(f.unit)}</span>` : ""}`;
     } else if (f.type === "birthday") {
       if (r.op === "next" || r.op === "last") {
@@ -738,8 +770,8 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
         <span class="fr-unit">in the last</span>
         <input class="fe-input fr-num" type="number" min="1" max="730" step="1" inputmode="numeric" data-rd="${p}" value="${esc(r.days)}" placeholder="any" aria-label="Days" />
         <span class="fr-unit">days</span>`;
-    } else if (f.type === "tasksent") {
-      val = `<input class="fe-input fr-val" data-rv="${p}" maxlength="80" placeholder="Task name, or empty for any" value="${esc(r.value)}" aria-label="Task name" />
+    } else if (f.type === "tasksent" || f.type === "mktsent") {
+      val = `<input class="fe-input fr-val" data-rv="${p}" maxlength="80" placeholder="${f.type === "mktsent" ? "Campaign name, or empty for any" : "Task name, or empty for any"}" value="${esc(r.value)}" aria-label="Name" />
         <span class="fr-unit">in the last</span>
         <input class="fe-input fr-num" type="number" min="1" max="730" step="1" inputmode="numeric" data-rd="${p}" value="${esc(r.days)}" placeholder="any" aria-label="Days" />
         <span class="fr-unit">days</span>`;
@@ -940,6 +972,7 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       if (ft === "year") render();   // shows or hides the second year box
       if (ft === "answer") render(); // "has an answer" / "is empty" have no value box
       if (ft === "pdays") render();  // "days ago" or "days"
+      if (ft === "number") render(); // "between" shows a second box
     }
     else if (d.rd !== undefined) r.days = el.value === "" ? "" : Number(el.value);
     else r.value = ft === "number" || ft === "birthday" || ft === "year" ? (el.value === "" ? "" : Number(el.value)) : el.value;
