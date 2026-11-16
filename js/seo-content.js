@@ -352,6 +352,31 @@ function beforeAfter(i, fix) {
 }
 
 const spin = '<span class="seo-fx-spin" aria-hidden="true"></span>';
+// A capital at the start of the original is kept
+const caseLike = (old, fix) => {
+  const a = String(old || "").charAt(0), b = String(fix || "");
+  return a && a !== a.toLowerCase() && b && b.charAt(0) === b.charAt(0).toLowerCase() ? b.charAt(0).toUpperCase() + b.slice(1) : b;
+};
+// One place on the page: …before ~~old~~ new after…
+const placeLine = (p, fix) => `${esc(p.pre)}<del class="seo-fx-del">${esc(p.old)}</del><ins class="seo-fx-ins">${esc(caseLike(p.old, fix))}</ins>${esc(p.post)}`;
+
+// The words are on the page more than once: choose which one changes
+function placesHtml(i, f, fix) {
+  return `<div class="seo-fx-places">
+    <div class="seo-fx-lab">“${esc(i.text)}” is on this page ${f.places.length} times. Which should change?</div>
+    ${f.places.map((p, n) => `<div class="seo-fx-place">
+      <span class="seo-fx-pn">${n + 1}</span>
+      <div class="seo-fx-txt">${placeLine(p, fix)}</div>
+      ${p.ok ? `<button class="seo-fx-b is-accept" type="button" data-ch-place="${esc(i.id)}|${n}"${f.busy ? " disabled" : ""}>${
+          f.busy === "at" + n ? spin + "Changing…" : "Change this one"}</button>`
+        : `<span class="seo-note">${esc(p.why)}</span>`}
+    </div>`).join("")}
+    <div class="seo-fx-bar">
+      ${f.places.length > 1 ? `<button class="seo-fx-b is-ghost" type="button" data-ch-placeall="${esc(i.id)}"${f.busy ? " disabled" : ""}>${
+        f.busy === "all" ? spin + "Changing…" : `Change all ${f.places.length}`}</button>` : ""}
+      <button class="seo-fx-b is-ghost" type="button" data-ch-placeno="${esc(i.id)}"${f.busy ? " disabled" : ""}>Cancel</button>
+    </div></div>`;
+}
 
 // One problem: what's wrong, the fix, and Accept / Reject / Regenerate (or the result)
 function fixRow(c, i, canWork, canManage) {
@@ -435,7 +460,7 @@ function fixRow(c, i, canWork, canManage) {
   return `<div class="seo-fx">
     <div class="seo-fx-head"><span class="seo-pr-pill is-${tone}">${lab}</span>${summary}</div>
     ${i.why ? `<div class="seo-fx-why"><b>Why:</b> ${esc(i.why)}</div>` : ""}
-    ${beforeAfter(i, fix)}${rej}${opts}${bar}${rejForm}${errBox}
+    ${beforeAfter(i, fix)}${rej}${opts}${f.places ? placesHtml(i, f, fix) : bar}${rejForm}${errBox}
   </div>`;
 }
 
@@ -854,6 +879,7 @@ export function altBody(c, path) {
 export async function contentClick(e, c, ui, redraw) {
   const t = e.target.closest("[data-ch-cat],[data-ch-ign],[data-ch-undo],[data-ch-word],[data-ch-showign]," +
     "[data-ch-accept],[data-ch-rej],[data-ch-rejok],[data-ch-rejno],[data-ch-regen],[data-ch-pick],[data-ch-fundo],[data-ch-recheck]," +
+    "[data-ch-place],[data-ch-placeall],[data-ch-placeno]," +
     "[data-ch-tpick],[data-ch-tprev],[data-ch-tapply],[data-ch-tcancel],[data-ch-tundo]," +
     "[data-ch-fqprev],[data-ch-fqtick],[data-ch-fqapply],[data-ch-fqcancel],[data-ch-fqundo]," +
     "[data-ch-wfgo],[data-ch-wfadd],[data-ch-wfrm],[data-ch-wfapply],[data-ch-wfcancel],[data-ch-rvgo],[data-ch-rvapply],[data-ch-rvcancel],[data-ch-insundo]," +
@@ -874,7 +900,8 @@ export async function contentClick(e, c, ui, redraw) {
     await insClick(t, d, c, redraw);
     return true;
   }
-  const fxId = d.chAccept || d.chRej || d.chRejok || d.chRejno || d.chRegen || d.chFundo || (d.chPick ? d.chPick.split("|")[0] : "");
+  const fxId = d.chAccept || d.chRej || d.chRejok || d.chRejno || d.chRegen || d.chFundo || (d.chPick ? d.chPick.split("|")[0] : "")
+    || (d.chPlace ? d.chPlace.split("|")[0] : "") || d.chPlaceall || d.chPlaceno;
   if (fxId) { await fixClick(t, d, fxId, c, redraw); return true; }
 
   if (d.chWord) {
@@ -1402,8 +1429,43 @@ async function fixClick(t, d, id, c, redraw) {
     });
     if (!yes) return;
     f.busy = "accept"; f.err = ""; redraw();
+    let many = false;
     try {
       const r = await fixApi("fixApply", { ...base, fix: fixNow });
+      H.status[id] = r.rec;
+      FX.delete(id);
+      toast("Updated on the website ✓");
+    } catch (err) {
+      many = /is on this page \d+ times/i.test(err?.message || "");   // the same words in more than one place
+      if (!many) fail(err);
+    } finally { f.busy = ""; redraw(); }
+    if (many) {
+      f.busy = "places"; redraw();
+      try { const r = await fixApi("fixPlaces", base); f.places = r.places || []; f.err = ""; }
+      catch (err) { fail(err); }
+      finally { f.busy = ""; redraw(); }
+    }
+    return;
+  }
+
+  if (d.chPlaceno) { f.places = null; f.err = ""; redraw(); return; }
+  if (d.chPlace || d.chPlaceall) {
+    const all = !!d.chPlaceall;
+    const n = all ? -1 : Number(d.chPlace.split("|")[1]);
+    const p = all ? null : (f.places || [])[n];
+    if (!all && !p) return;
+    const yes = await askConfirm({
+      title: all ? `Change all ${f.places.length} places?` : "Change this place on the live website?",
+      ok: "✓ Yes, change it",
+      body: `<div class="seo-fx-mpage"><b>${esc(titleIn(w, item.path))}</b><span class="seo-note seo-w-mono">${esc(item.path)}</span></div>
+        ${(all ? f.places : [p]).map((x) => `<div class="seo-fx-col is-new" style="margin-top:8px">${placeLine(x, fixNow)}</div>`).join("")}
+        <ul class="seo-fx-mlist"><li>It goes live straight away${all ? "" : ". The other places stay as they are"}.</li>
+          <li>It's added to the Change log, and you can <b>Undo</b> it afterwards.</li></ul>`,
+    });
+    if (!yes) return;
+    f.busy = all ? "all" : "at" + n; f.err = ""; redraw();
+    try {
+      const r = await fixApi("fixApplyAt", { ...base, fix: fixNow, find: p ? p.find : "", all });
       H.status[id] = r.rec;
       FX.delete(id);
       toast("Updated on the website ✓");
@@ -1543,6 +1605,12 @@ const CSS = `
   border:2px solid #94a3b8;border-radius:5px;color:#fff;font-size:12px;font-weight:700}
 .seo-fx-faq.is-on .seo-fx-check{background:#16a34a;border-color:#16a34a}
 
+.seo-fx-places{margin:12px 0 0;padding:12px 14px;border:1px solid #c7d2fe;border-radius:12px;background:#f8faff}
+.seo-fx-place{display:grid;grid-template-columns:26px minmax(0,1fr) auto;gap:10px;align-items:center;margin:8px 0 0;padding:10px 12px;
+  border:1px solid var(--border,#e5e7eb);border-radius:10px;background:var(--card,#fff)}
+.seo-fx-place .seo-fx-txt{font-size:13.5px;line-height:1.6}
+.seo-fx-pn{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:#eef2ff;color:#4338ca;font-size:12px;font-weight:700}
+@media (max-width:640px){.seo-fx-place{grid-template-columns:26px minmax(0,1fr)}.seo-fx-place .seo-fx-b{grid-column:1 / -1}}
 .seo-fx-banner{display:flex;align-items:center;gap:8px;margin:0 0 12px;padding:10px 14px;border-radius:10px;font-size:13.5px;
   background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af}
 .seo-fx-banner.is-ok{background:#f0fdf4;border-color:#bbf7d0;color:#166534}
