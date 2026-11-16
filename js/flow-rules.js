@@ -3,6 +3,7 @@
 
 import { db } from "./firebase-config.js";
 import { collection, getDocs, doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { callApi } from "./appointments.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -103,6 +104,13 @@ export const RULE_FIELDS = [
   { key: "appt.visits", group: "Appointments", label: "Number of past visits", type: "number" },
   { key: "appt.future_service", group: "Appointments", label: "A future booking's service", type: "text", hint: "e.g. Laser" },
   { key: "appt.past_service", group: "Appointments", label: "A past visit's service", type: "text", hint: "e.g. Wrinkle Relaxer" },
+  { key: "appt.svc_lapsed", group: "Appointments", label: "Had one of these services", type: "svcs",
+    ops: [["norebook", "and none of them is booked"], ["noappt", "and has no appointment booked at all"], ["any", "booked or not"]],
+    note: "Search the services (e.g. Genesis), then tick them or press Select all. Checked against their recent visits and upcoming bookings." },
+  { key: "appt.past_svcs", group: "Appointments", label: "Past visits included", type: "svcs",
+    ops: [["any", "any of these"], ["none", "none of these"]] },
+  { key: "appt.future_svcs", group: "Appointments", label: "Upcoming bookings include", type: "svcs",
+    ops: [["any", "any of these"], ["none", "none of these"]] },
   { key: "appt.visit_between", group: "Appointments", label: "Visits between two dates", type: "range",
     ops: [["yes", "had a visit"], ["no", "had no visit"]] },
   { key: "appt.last_between", group: "Appointments", label: "Last visit date", type: "range",
@@ -151,8 +159,9 @@ const OPS = {
 };
 const opsFor = (f) => f.ops || OPS[f.type] || OPS.bool;
 function defaults(f) {
-  const list = f.type === "products" || f.type === "names" || f.type === "prange" || f.type === "pdays" || f.type === "txsent";
+  const list = f.type === "products" || f.type === "names" || f.type === "prange" || f.type === "pdays" || f.type === "txsent" || f.type === "svcs";
   return { op: opsFor(f)[0][0], value: list ? [] : f.type === "choice" ? f.options[0][0] : "", days: "",
+    ...(f.type === "svcs" ? { when: "any" } : {}),
     ...(f.type === "txsent" ? { src: "any" } : {}),
     ...(f.type === "range" || f.type === "prange" ? { from: "", to: "" } : {}),
     ...(f.type === "year" ? { value2: "" } : {}),
@@ -174,14 +183,18 @@ function cleanRule(r) {
   const d = defaults(f);
   const op = opsFor(f).some((o) => o[0] === r.op) ? r.op : d.op;
   let value = r.value;
-  if (f.type === "products" || f.type === "names" || f.type === "prange" || f.type === "pdays" || f.type === "txsent") value = (Array.isArray(value) ? value : []).map(String).filter(Boolean).slice(0, 40);
+  if (f.type === "products" || f.type === "names" || f.type === "prange" || f.type === "pdays" || f.type === "txsent" || f.type === "svcs") value = (Array.isArray(value) ? value : []).map(String).filter(Boolean).slice(0, 40);
   else if (f.type === "number" || f.type === "birthday" || f.type === "year") value = value === "" || value === null || value === undefined ? "" : Number(value);
   else if (f.type === "choice") value = f.options.some((o) => o[0] === value) ? value : d.value;
   else if (f.type === "bool") value = "";
   else value = String(value ?? "");
-  const days = ["form", "pdays", "txbooked", "txsent", "tasksent"].includes(f.type) && r.days !== "" && r.days !== null && r.days !== undefined ? Number(r.days) : "";
+  const days = ["form", "pdays", "txbooked", "txsent", "tasksent", "svcs"].includes(f.type) && r.days !== "" && r.days !== null && r.days !== undefined ? Number(r.days) : "";
   const out = { id: String(r.id || rid()), field: f.key, op, value, days };
   if (f.type === "txsent") out.src = ["rec", "task"].includes(r.src) ? r.src : "any";
+  if (f.type === "svcs") {
+    out.when = ["over", "within"].includes(r.when) ? r.when : "any";
+    if (out.when === "any") out.days = "";
+  }
   if (f.type === "range" || f.type === "prange") { out.from = isIso(r.from) ? r.from : ""; out.to = isIso(r.to) ? r.to : ""; }
   if (f.type === "year") out.value2 = r.value2 === "" || r.value2 === null || r.value2 === undefined ? "" : Number(r.value2);
   if (f.type === "answer") {
@@ -220,6 +233,13 @@ function ruleProblem(r) {
   if (f.type === "answer") {
     if (!r.fieldId) return 'Choose which answer to check in "An answer on the task"';
     if (!["empty", "filled"].includes(r.op) && !String(r.value || "").trim()) return `Fill in what "${r.fieldLabel || "the answer"}" should be`;
+  }
+  if (f.type === "svcs") {
+    if (!(Array.isArray(r.value) && r.value.length)) return `Choose at least one service for "${f.label}"`;
+    if (r.when === "over" || r.when === "within") {
+      const n = Number(r.days);
+      if (r.days === "" || !Number.isInteger(n) || n < 1 || n > 1095) return `Choose 1 to 1095 days for "${f.label}"`;
+    }
   }
   if ((f.type === "txsent" || f.type === "tasksent") && r.days !== "" && r.days !== null && r.days !== undefined) {
     const n = Number(r.days);
@@ -271,6 +291,15 @@ export function describeRule(r) {
       : r.op === "notall" ? `At least one treatment in ${src} isn't booked`
       : `None of the treatments in ${src} are booked`;
     return `${what} (${when})`;
+  }
+  if (f.type === "svcs") {
+    const list = Array.isArray(r.value) ? r.value : [];
+    const what = list.length ? (list.length > 2 ? `${list.slice(0, 2).join(", ")} +${list.length - 2}` : list.join(", ")) : "…";
+    const when = r.when === "over" && r.days ? `, last one more than ${r.days} days ago`
+      : r.when === "within" && r.days ? `, last one in the last ${r.days} days` : "";
+    if (r.field === "appt.future_svcs") return `Upcoming bookings include ${r.op === "none" ? "none" : "any"} of ${what}`;
+    if (r.field === "appt.past_svcs") return `Past visits included ${r.op === "none" ? "none" : "any"} of ${what}${when}`;
+    return `Had ${what}${when}${r.op === "norebook" ? ", none of them booked" : r.op === "noappt" ? ", no appointment booked" : ""}`;
   }
   if (f.type === "txsent") {
     const list = Array.isArray(r.value) ? r.value : [];
@@ -414,6 +443,83 @@ export async function loadTxNames() {
   }
   return txNamesCache;
 }
+// Every service in the appointment book, most used first: [{ service, n }]
+let bookSvcCache = null;
+export async function loadBookServices() {
+  if (bookSvcCache) return bookSvcCache;
+  for (const action of ["marketing", "emailFlow"]) {
+    try {
+      const res = await callApi({ action, op: "services" });
+      if (res && Array.isArray(res.services)) { bookSvcCache = res.services; return bookSvcCache; }
+    } catch (err) { /* no access, or an older Apps Script: try the next */ }
+  }
+  bookSvcCache = (await loadServiceNames()).map((s) => ({ service: s, n: 0 }));
+  return bookSvcCache;
+}
+
+// Chosen services as chips, a search box, and a tick list with "Select all". arr is changed in place.
+// A typed word (e.g. "genesis") matches every service containing it.
+export function mountServicePicker(host, arr, { onChange = () => {} } = {}) {
+  const MAXN = 40;
+  const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  let q = "";
+  let all = bookSvcCache;
+  host.innerHTML = `<div class="fr-chips" data-sp-chips></div>
+    <input class="fe-input fr-sp-q" data-sp-q maxlength="80" placeholder="Search services, e.g. Genesis" aria-label="Search services" />
+    <div data-sp-body></div>`;
+  const chipsEl = host.querySelector("[data-sp-chips]");
+  const body = host.querySelector("[data-sp-body]");
+  const has = (s) => arr.some((x) => x.toLowerCase() === String(s).toLowerCase());
+  const add = (s) => { if (!has(s) && arr.length < MAXN) { arr.push(s); return true; } return false; };
+  const drawChips = () => {
+    chipsEl.innerHTML = arr.length ? arr.map((n, i) => `<span class="fr-chip">${esc(n)}
+      <button type="button" data-sp-x="${i}" aria-label="Remove ${esc(n)}" title="Remove">×</button></span>`).join("")
+      : '<span class="fr-none">No services chosen yet</span>';
+  };
+  const drawBody = () => {
+    if (!all) { body.innerHTML = '<p class="fr-note">Loading services…</p>'; return; }
+    const nq = norm(q);
+    const shown = all.filter((s) => !nq || norm(s.service).includes(nq));
+    const notYet = shown.filter((s) => !has(s.service));
+    const word = q.trim();
+    body.innerHTML = `
+      <div class="fr-sp-acts">
+        ${nq && notYet.length ? `<button type="button" class="lh-btn" data-sp-all>Select all ${notYet.length} shown</button>` : ""}
+        ${nq && !has(word) ? `<button type="button" class="lh-btn is-quiet" data-sp-word>Any service containing “${esc(word)}”</button>` : ""}
+      </div>
+      <div class="fr-sp-list">${shown.slice(0, 60).map((s) => `<label class="fr-sp-row">
+          <input type="checkbox" data-sp-c="${esc(s.service)}"${has(s.service) ? " checked" : ""} />
+          <span>${esc(s.service)}</span>${s.n ? `<small>${Number(s.n).toLocaleString("en-AU")}</small>` : ""}</label>`).join("")
+        || '<p class="fr-note">No services match. Use "Any service containing" to keep the word.</p>'}</div>
+      ${shown.length > 60 ? `<p class="fr-note">${shown.length - 60} more. Type more to narrow it down, or use Select all.</p>` : ""}
+      ${arr.length >= MAXN ? `<p class="fr-note">Up to ${MAXN} can be chosen. Use "Any service containing" to cover many at once.</p>` : ""}`;
+  };
+  const changed = () => { drawChips(); drawBody(); onChange(); };
+  host.addEventListener("input", (e) => { if (e.target.matches("[data-sp-q]")) { q = e.target.value; drawBody(); } });
+  host.addEventListener("keydown", (e) => { if (e.target.matches("[data-sp-q]") && e.key === "Enter") e.preventDefault(); });
+  host.addEventListener("change", (e) => {
+    const c = e.target.closest("[data-sp-c]");
+    if (!c) return;
+    const s = c.dataset.spC;
+    if (c.checked) add(s); else arr.splice(arr.findIndex((x) => x.toLowerCase() === s.toLowerCase()), 1);
+    changed();
+  });
+  host.addEventListener("click", (e) => {
+    const x = e.target.closest("[data-sp-x]");
+    if (x) { arr.splice(Number(x.dataset.spX), 1); changed(); return; }
+    if (e.target.closest("[data-sp-all]")) {
+      const nq = norm(q);
+      all.filter((s) => norm(s.service).includes(nq)).forEach((s) => add(s.service));
+      changed();
+      return;
+    }
+    if (e.target.closest("[data-sp-word]")) { add(q.trim().slice(0, 80)); changed(); }
+  });
+  drawChips();
+  drawBody();
+  if (!all) loadBookServices().then((l) => { all = l; if (host.isConnected) drawBody(); });
+}
+
 // A list of names (chips) with a box to add more. arr is changed in place.
 export function mountProductPicker(host, arr, { onChange = () => {}, names = [], placeholder = "Type a product name", none = "No products chosen yet" } = {}) {
   const listId = "pp_" + Math.random().toString(36).slice(2, 8);
@@ -522,6 +628,17 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
         <span class="fr-unit">in the last</span>
         <input class="fe-input fr-num" type="number" min="0" step="1" data-rd="${p}" value="${esc(r.days)}" placeholder="any" aria-label="Days" />
         <span class="fr-unit">days</span>`;
+    } else if (f.type === "svcs") {
+      if (r.field !== "appt.future_svcs") {
+        const w = r.when || "any";
+        val = `<span class="fr-unit">last one</span>
+          <select class="fb-select fr-val" data-rw="${p}" aria-label="When">
+            <option value="any"${w === "any" ? " selected" : ""}>any time</option>
+            <option value="over"${w === "over" ? " selected" : ""}>more than</option>
+            <option value="within"${w === "within" ? " selected" : ""}>in the last</option></select>
+          ${w !== "any" ? `<input class="fe-input fr-num" type="number" min="1" max="1095" step="1" inputmode="numeric" data-rd="${p}" value="${esc(r.days)}" placeholder="90" aria-label="Days" />
+          <span class="fr-unit">${w === "over" ? "days ago" : "days"}</span>` : ""}`;
+      }
     } else if (f.type === "txsent") {
       val = `<select class="fb-select fr-val" data-rs="${p}" aria-label="Sent from">
           <option value="any"${r.src !== "rec" && r.src !== "task" ? " selected" : ""}>either way</option>
@@ -569,7 +686,7 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
         <button type="button" class="fr-x" data-rx="${p}" aria-label="Remove this rule" title="Remove">×</button></div>
       ${f.note ? `<p class="fr-note">${esc(f.note)}</p>` : ""}
       ${quick}
-      ${f.type === "products" || f.type === "names" || f.type === "prange" || f.type === "pdays" || f.type === "txsent" ? `<div class="fr-pp" data-pp-host="${p}"></div>` : ""}
+      ${f.type === "products" || f.type === "names" || f.type === "prange" || f.type === "pdays" || f.type === "txsent" || f.type === "svcs" ? `<div class="fr-pp" data-pp-host="${p}"></div>` : ""}
     </div>`;
   }
 
@@ -611,6 +728,8 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       if (f && f.type === "names") {
         mountProductPicker(el, r.value, { onChange, names: lists[r.field] || (r.field === "pt.tag" ? tagNamesCache || [] : []),
           placeholder: "Choose or type one", none: "None chosen yet" });
+      } else if (f && f.type === "svcs") {
+        mountServicePicker(el, r.value, { onChange });
       } else if (f && f.type === "txsent") {
         mountProductPicker(el, r.value, { onChange, names: txNamesCache || [],
           placeholder: "Type a treatment, or leave empty for any", none: "Any treatment" });
@@ -652,6 +771,16 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       const span = quickRange(d.rq !== undefined ? el.value : `ym:${el.value}`);
       if (!r || !span) return;
       [r.from, r.to] = span;
+      render();
+      onChange();
+      return;
+    }
+    if (d.rw !== undefined) {
+      const r = ruleAt(d.rw);
+      if (!r) return;
+      r.when = ["over", "within"].includes(el.value) ? el.value : "any";
+      if (r.when === "any") r.days = "";
+      else if (r.days === "") r.days = 90;
       render();
       onChange();
       return;
