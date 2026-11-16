@@ -22,7 +22,9 @@ export const CAMPAIGN_FIELDS = ["hist.bought", "hist.bought_between", "hist.days
   "appt.visits", "appt.future_service", "appt.past_service", "appt.visit_between", "appt.last_between", "ssp.active", "ssp.age_days", "ssp.expiry_days",
   "plan.status", "plan.due", "plan.overdue", "form.saved", "pt.age", "pt.birth_year", "pt.birthday", "pt.email", "pt.mobile",
   "pkg.has", "pkg.name", "pkg.left", "pkg.expiry_days", "pkg.value", "sent.txinfo", "sent.tx_booked", "sent.task",
-  "appt.svc_lapsed", "appt.past_svcs", "appt.future_svcs", "pt.spend_tier", "pt.tag", "hist.bought_days"];
+  "appt.svc_lapsed", "appt.past_svcs", "appt.future_svcs", "pt.spend_tier", "pt.tag", "hist.bought_days",
+  "pt.spend12", "pt.spend_all", "pt.visits12", "pt.address", "pt.sample", "appt.consult_only",
+  "mkt.sent", "mkt.opened", "mkt.clicked"];
 const STATUS = {
   draft: ["Draft", "is-draft"], scheduled: ["Scheduled", "is-sched"], building: ["Getting ready", "is-live"],
   sending: ["Sending", "is-live"], paused: ["Paused", "is-paused"], sent: ["Sent", "is-sent"], cancelled: ["Cancelled", "is-cancel"],

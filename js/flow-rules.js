@@ -450,9 +450,7 @@ export function groupWarnings(g, { email = false } = {}) {
       const x = nums[r.field] || (nums[r.field] = { lo: -Infinity, hi: Infinity, eq: [] });
       if (r.op === "gt") x.lo = Math.max(x.lo, n);
       else if (r.op === "lt") x.hi = Math.min(x.hi, n);
-  "appt.svc_lapsed", "appt.past_svcs", "appt.future_svcs", "pt.spend_tier", "pt.tag", "hist.bought_days",
-  "pt.spend12", "pt.spend_all", "pt.visits12", "pt.address", "pt.sample", "appt.consult_only",
-  "mkt.sent", "mkt.opened", "mkt.clicked"];
+      else if (r.op === "eq") x.eq.push(n);
     });
     Object.entries(nums).forEach(([k, x]) => {
       const eqBad = new Set(x.eq).size > 1 || x.eq.some((n) => n <= x.lo || n >= x.hi);
