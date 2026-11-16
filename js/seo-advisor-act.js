@@ -1,9 +1,10 @@
 // seo-advisor-act.js — SEO Advisor: changes you can make right from an answer (title, meta description, wording, links)
-import { fixApi, fixErr, askConfirm, injectCss } from "./seo-content.js?v=10";
+import { fixApi, fixErr, askConfirm, injectCss } from "./seo-content.js?v=12";
 
 const S = new Map();     // "msgId|actionId" → { edit, text, busy, err, show }
 const REG = new Map();   // msgId → the answer's actions
 const ACTS = new Map();  // msgId → the newest status we've seen
+const QUEUE = new Map(); // msgId → the change still saving on that answer (changes on one answer run one at a time)
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const spin = `<span class="seo-aa-spin" aria-hidden="true"></span>`;
 const ICON = { title: "🏷️", description: "📝", wording: "✏️", link: "🔗" };
@@ -60,7 +61,8 @@ function card(msgId, a, st, can) {
   const key = `${msgId}|${a.id}`, ref = esc(key);
   const F = S.get(key) || {};
   const canDo = typeof can === "function" ? can(a.kind === "title" || a.kind === "description" ? "seo.pages" : "seo.fix") : false;
-  const errBox = F.err ? `<div class="seo-fx-err"><span>⚠</span><div>${esc(F.err)}</div></div>` : "";
+  const errBox = (F.busy === "wait" ? `<div class="seo-note" style="margin-top:6px">⏳ Queued: it starts as soon as the change before it has saved.</div>` : "")
+    + (F.err ? `<div class="seo-fx-err"><span>⚠</span><div>${esc(F.err)}</div></div>` : "");
   const head = `<div class="seo-aa-top"><span class="seo-aa-kind">${ICON[a.kind] || "•"} ${esc(a.label)}</span>
     <b class="seo-aa-page">${esc(a.pageTitle || a.page)}</b><span class="seo-note seo-w-mono">${esc(a.page)}</span></div>`;
 
@@ -142,15 +144,20 @@ export async function actionsClick(e, ctx = {}) {
   const say = (m) => (ctx.toast ? ctx.toast(m) : null);
   const box = t.closest("[data-aa-card]")?.querySelector("[data-aa-text]");
   if (box) F.text = box.value.replace(/\s+/g, " ").trim();
+  // One change at a time per answer: each one reads the saved list after the one before it has written it
   const run = async (busy, op, body, msg) => {
-    F.busy = busy; F.err = ""; redraw();
-    try {
+    const prev = QUEUE.get(msgId);
+    F.busy = prev ? "wait" : busy; F.err = ""; redraw();
+    const job = (prev || Promise.resolve()).catch(() => {}).then(async () => {
+      F.busy = busy; redraw();
       const r = await fixApi(op, Object.assign({ msgId, actionId: aid }, body));
       if (r.acts) ACTS.set(msgId, r.acts);
-      if (msg) say(msg);
-      return true;
-    } catch (err) { F.err = fixErr(err); return false; }
-    finally { F.busy = ""; redraw(); }
+      return r;
+    });
+    QUEUE.set(msgId, job);
+    try { await job; if (msg) say(msg); return true; }
+    catch (err) { F.err = fixErr(err); return false; }
+    finally { if (QUEUE.get(msgId) === job) QUEUE.delete(msgId); F.busy = ""; redraw(); }
   };
 
   if (d.aaEdit) { F.edit = !F.edit; F.err = ""; redraw(); return true; }
