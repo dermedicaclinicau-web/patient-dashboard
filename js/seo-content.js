@@ -14,6 +14,13 @@ async function fixApi(op, data) {
   if (r && r.problem) { const e = new Error(r.problem); e.editUrl = r.editUrl || ""; throw e; }
   return r;
 }
+// Duplicate pairs being rewritten (by pair id)
+const DP = new Map();
+// The page's numbers from Search Console (the address with the most impressions)
+const pageObj = (c, path) => (c.data?.pages || []).filter((x) => npath(x.path) === npath(path))
+  .sort((a, b) => (b.m28?.impressions || 0) - (a.m28?.impressions || 0))[0] || null;
+// Rewrite on the page with fewer clicks, so the one Google prefers stays as it is
+const dupDefault = (c, x) => ((pageObj(c, x.a)?.m28?.clicks || 0) < (pageObj(c, x.b)?.m28?.clicks || 0) ? x.a : x.b);
 // Links to a page (LK) and alt text on a page (AL)
 const LK = new Map();
 const AL = new Map();
@@ -157,7 +164,7 @@ export function contentHtml(c, ui) {
   const tiles = [
     ["spell", "Spelling and grammar", proofed ? openSpell.length : null,
       proofed ? `on ${plural(pagesIn(openSpell), "page")} · ${proofed} of ${deep.length} proofread` : `not proofread yet · ${deep.length} waiting`],
-    ["dup", "Duplicate content", dupsAll.filter((x) => !x.ignored).length, "pairs of pages"],
+    ["dup", "Duplicate content", dupsAll.filter((x) => !x.ignored && x.st?.status !== "fixed").length, "pairs of pages"],
     ["consist", "Consistency", proofed || consistAll.length ? groupsOpen + openCons.length : null,
       proofed || consistAll.length ? `${groupsOpen} across pages · ${openCons.length} within pages` : "not checked yet"],
     ["faq", "FAQs", noFaq.length, "pages to improve"],
@@ -476,24 +483,99 @@ function askConfirm({ title, body, ok = "Confirm", tone = "accept" }) {
 
 function dupsHtml(c, list, canWork) {
   if (!list.length) return `<div class="seo-empty">No pages that say nearly the same thing, among the pages compared so far.</div>`;
+  const canFix = c.can("seo.fix");
   const line = (p) => {
     const pid = pageId(c, p);
     return `<div class="seo-ct-pp"><strong>${esc(titleIn(c.work, p))}</strong><div class="seo-note seo-w-mono">${esc(p)}</div>
       ${pid ? `<button class="seo-w-link" type="button" data-open="${esc(pid)}">Open page details</button>` : ""}</div>`;
   };
-  return list.map((x) => `<div class="seo-card">
-    <div class="seo-row" style="margin:0 0 6px"><span class="seo-pr-pill is-${x.sim >= 70 ? "red" : "amber"}">${x.sim}% the same</span>
-      <strong>${plural(x.shared, "paragraph")} repeat</strong></div>
-    <div class="seo-ct-pair">${line(x.a)}${line(x.b)}</div>
-    ${x.sample ? `<div class="seo-ct-q">“${esc(x.sample)}…”</div>` : ""}
-    <p class="seo-note" style="margin:6px 0 0">Google usually shows only one of two near-identical pages. Make one the main page and merge the other
-      into it (SEO → Pages → Clusters), or rewrite one so it answers a different question.</p>
-    ${x.ignored ? `<p class="seo-note">Ignored by ${esc(x.st?.byName || "someone")}${x.st?.note ? `: ${esc(x.st.note)}` : ""}</p>` : ""}
-    <div class="seo-w-acts"><button class="seo-btn on" type="button" data-cmp2="${esc(x.a)}|${esc(x.b)}">Compare them head to head</button></div>
-    ${canWork ? `<div class="seo-w-acts">${x.ignored ? `<button class="seo-btn" type="button" data-ch-undo="${esc(x.id)}">Back to open</button>`
-      : `<button class="seo-btn" type="button" data-ch-ign="${esc(x.id)}">Ignore</button>`}</div>` : ""}
-  </div>`).join("");
+  return list.map((x) => {
+    if (x.st?.status === "fixed" && x.st?.kind === "dup") return dupDone(c, x, canFix);
+    return `<div class="seo-card" data-fxcard>
+      <div class="seo-row" style="margin:0 0 6px"><span class="seo-pr-pill is-${x.sim >= 70 ? "red" : "amber"}">${x.sim}% the same</span>
+        <strong>${plural(x.shared, "paragraph")} repeat</strong></div>
+      <div class="seo-ct-pair">${line(x.a)}${line(x.b)}</div>
+      ${x.sample ? `<div class="seo-ct-q">“${esc(x.sample)}…”</div>` : ""}
+      <p class="seo-note" style="margin:6px 0 0">Google usually shows only one of two near-identical pages. Rewrite the shared paragraphs on one of them
+        so each page answers its own question, or make one the main page and merge the other into it (SEO → Pages → Clusters).</p>
+      ${x.ignored ? `<p class="seo-note">Ignored by ${esc(x.st?.byName || "someone")}${x.st?.note ? `: ${esc(x.st.note)}` : ""}</p>` : ""}
+      ${canFix && !x.ignored ? dupRewrite(c, x) : ""}
+      <div class="seo-fx-bar">
+        <button class="seo-fx-b is-ghost" type="button" data-cmp2="${esc(x.a)}|${esc(x.b)}">Compare them head to head</button>
+        ${canWork ? (x.ignored ? `<button class="seo-fx-b is-ghost" type="button" data-ch-undo="${esc(x.id)}">Back to open</button>`
+          : `<button class="seo-fx-b is-ghost" type="button" data-ch-ign="${esc(x.id)}">Ignore</button>`) : ""}
+      </div>
+    </div>`;
+  }).join("");
 }
+
+// Choose the page, Claude rewrites the shared paragraphs, you check each one
+function dupRewrite(c, x) {
+  const F = DP.get(x.id) || {};
+  const change = F.pick || dupDefault(c, x);
+  const errBox = F.err ? `<div class="seo-fx-err"><span>⚠</span><div>${esc(F.err)}</div></div>` : "";
+  const opt = (p, k) => {
+    const pg = pageObj(c, p), on = npath(p) === npath(change);
+    return `<button type="button" class="seo-fx-form${on ? " is-on" : ""}" data-ch-dppick="${esc(x.id)}|${k}" aria-pressed="${on}"${F.busy ? " disabled" : ""}>
+      <span class="seo-fx-radio"></span><span><b>${esc(titleIn(c.work, p))}</b>
+      <small>${pg ? `${c.h.fmtInt(pg.m28.clicks)} clicks from Google in 28 days` : "no clicks from Google"}</small></span></button>`;
+  };
+  let out = `<div class="seo-fx-dup">
+    <div class="seo-fx-lab">Rewrite the shared paragraphs on</div>
+    <div class="seo-fx-forms">${opt(x.a, "a")}${opt(x.b, "b")}</div>
+    <p class="seo-note" style="margin:4px 0 0">Usually the page with fewer clicks, so the page Google prefers stays exactly as it is.</p>`;
+  if (!F.items) {
+    return out + `<div class="seo-fx-bar"><button class="seo-fx-b is-accept" type="button" data-ch-dpgo="${esc(x.id)}"${F.busy ? " disabled" : ""}>${
+      F.busy === "go" ? spin + "Claude is rewriting… (about 30 seconds)" : `✍️ Rewrite them on “${esc(titleIn(c.work, change))}”`}</button></div>${errBox}</div>`;
+  }
+  const off = F.off || new Set();
+  const n = F.items.length - off.size;
+  out += `<div class="seo-fx-lab" style="margin-top:12px">${plural(F.items.length, "shared paragraph")}: check each new version</div>
+    ${F.items.map((it, i) => `<div class="seo-fx-dpi${off.has(i) ? " is-off" : ""}">
+      <div class="seo-fx-head">
+        <button type="button" class="seo-fx-tog${off.has(i) ? "" : " is-on"}" data-ch-dptick="${esc(x.id)}|${i}" aria-pressed="${!off.has(i)}">
+          <span class="seo-fx-check">${off.has(i) ? "" : "✓"}</span>${off.has(i) ? "Leave as it is" : "Use the new version"}</button>
+        ${it.why ? `<span class="seo-note">${esc(it.why)}</span>` : ""}</div>
+      <div class="seo-fx-ba">
+        <div class="seo-fx-col is-now"><div class="seo-fx-lab">Now on both pages</div><div class="seo-fx-txt">${esc(it.old)}</div></div>
+        <div class="seo-fx-arrow" aria-hidden="true">→</div>
+        <div class="seo-fx-col is-new"><div class="seo-fx-lab">New version on this page</div>
+          <textarea class="seo-input seo-fx-dpt" data-dp-text="${i}" rows="6" aria-label="New version of paragraph ${i + 1}">${esc(it.text)}</textarea></div></div>
+      ${(it.flags || []).map((f) => `<small class="seo-fx-flag">⚠ ${esc(f)}. Reword it before using.</small>`).join("")}
+    </div>`).join("")}
+    <div class="seo-fx-bar">
+      <button class="seo-fx-b is-accept" type="button" data-ch-dpapply="${esc(x.id)}"${!n || F.busy ? " disabled" : ""}>${
+        F.busy === "apply" ? spin + "Changing the page…" : `✓ Use the new wording (${plural(n, "paragraph")})`}</button>
+      <button class="seo-fx-b is-ghost" type="button" data-ch-dpgo="${esc(x.id)}"${F.busy ? " disabled" : ""}>${F.busy === "go" ? spin + "Writing…" : "↻ Write again"}</button>
+      <button class="seo-fx-b is-ghost" type="button" data-ch-dpcancel="${esc(x.id)}"${F.busy ? " disabled" : ""}>Cancel</button>
+    </div>${errBox}</div>`;
+  return out;
+}
+
+// Rewritten from here: each paragraph, View, and one Undo
+function dupDone(c, x, canFix) {
+  const st = x.st, F = DP.get(x.id) || {};
+  let res = [];
+  try { res = JSON.parse(st.results || "[]"); } catch { res = []; }
+  const ok = res.filter((r) => r.ok).length;
+  const change = st.change || st.path;
+  const other = st.other || (npath(change) === npath(x.a) ? x.b : x.a);
+  const errBox = F.err ? `<div class="seo-fx-err"><span>⚠</span><div>${esc(F.err)}</div></div>` : "";
+  return `<div class="seo-card"><div class="seo-fx is-done" style="margin:0">
+    <div class="seo-fx-head"><span class="seo-fx-tick">✓</span><strong>Rewrote ${plural(ok, "paragraph")} on “${esc(titleIn(c.work, change))}”</strong>
+      <span class="seo-sp"></span><span class="seo-note">${esc(st.byName || "")}${st.at ? " · " + esc(whenC(st.at)) : ""}</span></div>
+    <div class="seo-note">So it no longer repeats “${esc(titleIn(c.work, other))}”</div>
+    <ul class="seo-fx-res">${res.map((r) => `<li class="${r.ok ? "is-ok" : "is-bad"}"><span>${r.ok ? "✓" : "⚠"}</span>
+      <span class="seo-note">“${esc(r.old)}…”${r.ok ? "" : " · " + esc(r.why || "")}</span>
+      ${!r.ok && r.text ? `<details class="seo-fx-paste"><summary>New wording to paste in WordPress</summary><p>${esc(r.text)}</p></details>` : ""}</li>`).join("")}</ul>
+    <div class="seo-fx-bar">
+      ${st.link ? `<a class="seo-fx-b is-accept" href="${esc(st.link)}" target="_blank" rel="noopener">View live page ↗</a>` : ""}
+      ${canFix ? `<button class="seo-fx-b is-ghost" type="button" data-ch-dpundo="${esc(x.id)}"${F.busy ? " disabled" : ""}>${
+        F.busy === "undo" ? spin + "Putting it back…" : "↶ Undo"}</button>` : ""}
+      <span class="seo-sp"></span><span class="seo-note">The pair drops off once tonight's check reads the page again.</span>
+    </div>${errBox}</div></div>`;
+}
+
 
 function faqHtml(c, list) {
   const w = c.work, H = w.health;
@@ -776,7 +858,8 @@ export async function contentClick(e, c, ui, redraw) {
     "[data-ch-fqprev],[data-ch-fqtick],[data-ch-fqapply],[data-ch-fqcancel],[data-ch-fqundo]," +
     "[data-ch-wfgo],[data-ch-wfadd],[data-ch-wfrm],[data-ch-wfapply],[data-ch-wfcancel],[data-ch-rvgo],[data-ch-rvapply],[data-ch-rvcancel],[data-ch-insundo]," +
     "[data-ch-lkgo],[data-ch-lktick],[data-ch-lkapply],[data-ch-lkcancel],[data-ch-lkundo]," +
-    "[data-ch-algo],[data-ch-alapply],[data-ch-alcancel],[data-ch-alundo]");
+    "[data-ch-algo],[data-ch-alapply],[data-ch-alcancel],[data-ch-alundo]," +
+    "[data-ch-dppick],[data-ch-dpgo],[data-ch-dptick],[data-ch-dpapply],[data-ch-dpcancel],[data-ch-dpundo]");
   if (!t) return false;
   const d = t.dataset, w = c.work, H = w.health;
   if (d.chCat) { ui.ccat = d.chCat; ui.cign = false; redraw(); return true; }
@@ -785,6 +868,7 @@ export async function contentClick(e, c, ui, redraw) {
   if (d.chTpick || d.chTprev || d.chTapply || d.chTcancel || d.chTundo) { await termClick(d, c, redraw); return true; }
   if (d.chFqprev || d.chFqtick || d.chFqapply || d.chFqcancel || d.chFqundo) { await faqClick(d, c, redraw); return true; }
   if (d.chLkgo || d.chLktick || d.chLkapply || d.chLkcancel || d.chLkundo) { await lkClick(d, c, redraw); return true; }
+  if (d.chDppick || d.chDpgo || d.chDptick || d.chDpapply || d.chDpcancel || d.chDpundo) { await dpClick(t, d, c, redraw); return true; }
   if (d.chAlgo || d.chAlapply || d.chAlcancel || d.chAlundo) { await alClick(t, d, c, redraw); return true; }
   if (d.chWfgo || d.chWfadd || d.chWfrm || d.chWfapply || d.chWfcancel || d.chRvgo || d.chRvapply || d.chRvcancel || d.chInsundo) {
     await insClick(t, d, c, redraw);
@@ -839,6 +923,84 @@ export async function contentClick(e, c, ui, redraw) {
     redraw();
   } catch (err) { t.disabled = false; toast(/permission/i.test(err.message || "") ? "You don't have permission to do that." : err.message, true); }
   return true;
+}
+
+/* ---------- Duplicate content (Apps Script: dupFind / dupApply / termUndo) ---------- */
+
+async function dpClick(t, d, c, redraw) {
+  const w = c.work, H = w.health;
+  H.status = H.status || {};
+  const raw = String(d.chDppick || d.chDpgo || d.chDptick || d.chDpapply || d.chDpcancel || d.chDpundo);
+  const id = raw.split("|")[0];
+  const x = (H?.content?.dups || []).find((y) => dupId(y.a, y.b) === id);
+  if (!x) return;
+  const F = DP.get(id) || {};
+  DP.set(id, F);
+  F.off = F.off || new Set();
+  const card = t.closest("[data-fxcard]");
+  if (card && F.items) {   // what's been edited, before the card is drawn again
+    card.querySelectorAll("[data-dp-text]").forEach((el) => { const it = F.items[Number(el.dataset.dpText)]; if (it) it.text = el.value.trim(); });
+  }
+  const change = F.pick || dupDefault(c, x);
+  const other = npath(change) === npath(x.a) ? x.b : x.a;
+
+  if (d.chDppick) {
+    const p = raw.split("|")[1] === "a" ? x.a : x.b;
+    if (npath(p) !== npath(change)) { F.pick = p; F.items = null; F.off = new Set(); F.err = ""; }
+    redraw();
+    return;
+  }
+  if (d.chDptick) {
+    const i = Number(raw.split("|")[1]);
+    if (F.off.has(i)) F.off.delete(i); else F.off.add(i);
+    redraw();
+    return;
+  }
+  if (d.chDpcancel) { DP.delete(id); redraw(); return; }
+  if (d.chDpgo) {
+    F.busy = "go"; F.err = ""; redraw();
+    try {
+      const r = await fixApi("dupFind", { change, other });
+      F.items = r.items || [];
+      F.off = new Set(F.items.map((it, i) => ((it.flags || []).length ? i : -1)).filter((i) => i >= 0));   // flagged ones start as "leave"
+    } catch (err) { F.err = fixErr(err); }
+    finally { F.busy = ""; redraw(); }
+    return;
+  }
+  if (d.chDpapply) {
+    const items = (F.items || []).filter((_, i) => !F.off.has(i)).map((it) => ({ old: it.old, text: String(it.text || "").trim() }));
+    if (items.some((it) => it.text.length < 20)) { F.err = "Each new version needs a full paragraph, or set it to Leave as it is."; redraw(); return; }
+    if (!items.length) return;
+    const yes = await askConfirm({ title: `Change ${plural(items.length, "paragraph")} on “${titleIn(w, change)}”?`, ok: "✓ Yes, change them",
+      body: `<div class="seo-fx-mpage"><b>${esc(titleIn(w, change))}</b><span class="seo-note seo-w-mono">${esc(change)}</span></div>
+        <ul class="seo-fx-mlist"><li>Only this page changes. “${esc(titleIn(w, other))}” stays exactly as it is.</li>
+          <li>Live straight away, added to the Change log, and one <b>Undo</b> puts every paragraph back.</li></ul>` });
+    if (!yes) return;
+    F.busy = "apply"; F.err = ""; redraw();
+    try {
+      const r = await fixApi("dupApply", { issueId: id, change, other, items });
+      H.status[id] = r.rec;
+      DP.delete(id);
+      toast("Paragraphs rewritten ✓");
+      redraw();
+      recheckPages(c, redraw, [change]);   // proofread the new wording straight away
+    } catch (err) { F.err = fixErr(err); }
+    finally { F.busy = ""; redraw(); }
+    return;
+  }
+  if (d.chDpundo) {
+    const yes = await askConfirm({ title: "Put the old paragraphs back?", ok: "↶ Yes, put them back", tone: "reject",
+      body: `<ul class="seo-fx-mlist"><li>The page goes back to the wording it shared with the other page.</li>
+        <li>If the page has been edited in WordPress since, it can't be put back from here.</li></ul>` });
+    if (!yes) return;
+    F.busy = "undo"; F.err = ""; redraw();
+    try {
+      const r = await fixApi("termUndo", { issueId: id });
+      H.status[id] = r.rec;
+      toast(r.left ? "Partly put back: one or more paragraphs were edited since" : "Put back");
+    } catch (err) { F.err = fixErr(err); }
+    finally { F.busy = ""; redraw(); }
+  }
 }
 
 /* ---------- Links (Apps Script: linkFind / linkApply / termUndo) and alt text (altFind / altApply / fixUndo) ---------- */
@@ -1324,6 +1486,17 @@ const CSS = `
 .seo-ct-forms{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px}
 .seo-ct-forms .seo-pr-pill{cursor:help}
 .seo-ct-forms em{font-style:normal;opacity:.7;margin-left:2px}
+.seo-fx-dup{margin:12px 0 0;padding:12px 14px;border:1px solid #c7d2fe;border-radius:12px;background:#f8faff}
+.seo-fx-dpi{margin:10px 0 0;padding:10px 12px;border:1px solid var(--border,#e5e7eb);border-radius:12px;background:var(--card,#fff)}
+.seo-fx-dpi.is-off .seo-fx-col.is-new{opacity:.45}
+.seo-fx-tog{display:inline-flex;align-items:center;gap:8px;padding:4px 12px 4px 6px;border:1px solid var(--border,#e5e7eb);border-radius:999px;
+  background:var(--card,#fff);font:inherit;font-size:13px;font-weight:600;cursor:pointer;color:inherit}
+.seo-fx-tog.is-on{border-color:#16a34a;background:#f0fdf4;color:#166534}
+.seo-fx-tog.is-on .seo-fx-check{background:#16a34a;border-color:#16a34a}
+.seo-fx-dpt{display:block;width:100%;min-width:0;box-sizing:border-box;resize:vertical;line-height:1.55;background:var(--card,#fff)}
+.seo-fx-paste{flex-basis:100%;margin:4px 0 0 22px}
+.seo-fx-paste summary{cursor:pointer;font-size:12.5px;color:var(--accent,#2563eb)}
+.seo-fx-paste p{margin:6px 0 0;padding:8px 10px;border-radius:8px;background:var(--card,#fff);border:1px solid #bbf7d0;font-size:13px;line-height:1.55;user-select:all}
 .seo-fx-lctx{display:block;margin:3px 0;font-size:13px;line-height:1.55;color:inherit}
 .seo-fx-a{text-decoration:underline;text-decoration-color:#16a34a;text-decoration-thickness:2px;text-underline-offset:3px;background:#f0fdf4;border-radius:3px;padding:0 2px}
 .seo-fx-alts{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:8px;margin:4px 0 0}

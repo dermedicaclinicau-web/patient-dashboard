@@ -222,7 +222,7 @@ function dpcfix_replace(WP_REST_Request $req) {
   $skipCaps = !empty($b['skipCaps']);   // words written in capitals (headings) are left as they are
   $post = $id ? get_post($id) : null;
   if (!$post) return dpcfix_no('not_found', "That page isn't in WordPress.");
-  if ($find === '' || $rep === '' || mb_strlen($find) > 200 || mb_strlen($rep) > 400 || !$fid) return dpcfix_no('bad', 'Nothing to change.');
+  if ($find === '' || $rep === '' || mb_strlen($find) > 1500 || mb_strlen($rep) > 2000 || !$fid) return dpcfix_no('bad', 'Nothing to change.');
 
   list($targets, $isEl, $data) = dpcfix_targets($id);
   $hits = dpcfix_all_hits($targets, dpcfix_needle($find));
