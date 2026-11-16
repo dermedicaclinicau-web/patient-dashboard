@@ -4,6 +4,7 @@
 import { db, auth } from "./firebase-config.js";
 import {
   doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, collection, query, where, getDocs, serverTimestamp, writeBatch,
+  arrayUnion, arrayRemove,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { loadHealth, viewHealth, healthPanelHtml } from "./seo-health.js?v=4";
 import { loadAudience, viewAudience } from "./seo-audience.js";
@@ -1398,6 +1399,20 @@ function viewSettings(wrap, c, ui) {
     }).catch((err) => { setStatus("Not saved"); toast(errMsg(err), true); });
     return queue;
   }
+  // Site health adds spelling words too (Reject → Never flag it again), so only the words changed here are sent
+  function saveSpell(add, remove) {
+    setStatus("Saving…");
+    queue = queue.then(async () => {
+      const ref = doc(db, "seo_settings", "main");
+      const meta = { updatedBy: uid(), updatedAt: serverTimestamp() };
+      if (add.length) await setDoc(ref, { spellWords: arrayUnion(...add), ...meta }, { merge: true });
+      if (remove.length) await setDoc(ref, { spellWords: arrayRemove(...remove), ...meta }, { merge: true });
+      const cur = Array.isArray(w.settings?.spellWords) ? w.settings.spellWords : [];
+      w.settings = { ...(w.settings || {}), spellWords: [...new Set(cur.concat(add))].filter((x) => !remove.includes(x)) };
+      setStatus("Saved ✓");
+    }).catch((err) => { setStatus("Not saved"); toast(errMsg(err), true); });
+    return queue;
+  }
   const cleanTopics = () => topics.map((x) => {
     const concern = [...new Set(x.concern.map(norm).filter(Boolean))].slice(0, 60);
     const treatment = [...new Set(x.treatment.map(norm).filter(Boolean))].filter((y) => !concern.includes(y)).slice(0, 60);
@@ -1947,7 +1962,7 @@ function viewSettings(wrap, c, ui) {
     if (si && (e.key === "Enter" || e.key === ",")) {
       e.preventDefault();
       const add = si.value.split(",").map((x) => norm(x).slice(0, 40)).filter((x) => x && !spellWords.includes(x));
-      if (add.length) { spellWords = spellWords.concat(add).slice(0, 300); persist({ spellWords }); draw(); refocus("[data-w-swin]"); }
+      if (add.length) { spellWords = spellWords.concat(add); saveSpell(add, []); draw(); refocus("[data-w-swin]"); }
       else si.value = "";
       return;
     }
@@ -2103,7 +2118,7 @@ function viewSettings(wrap, c, ui) {
     }
 
     /* brand and wording */
-    if (d.wSwx !== undefined) { spellWords.splice(+d.wSwx, 1); persist({ spellWords: spellWords.slice() }); draw(); return; }
+    if (d.wSwx !== undefined) { const gone = spellWords.splice(+d.wSwx, 1); saveSpell([], gone); draw(); return; }
     if (d.wBx !== undefined) { brand.splice(+d.wBx, 1); persist({ brand: brand.slice() }); draw(); return; }
     if (d.wWedit !== undefined) {
       const ta = wrap.querySelector("[data-w-words]");
