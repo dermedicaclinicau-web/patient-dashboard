@@ -239,6 +239,28 @@ function issuesHtml(c, list, canWork, canManage, cat, proofed = 1) {
     it tells you to change them in WordPress instead.</p>`;
 }
 
+// The sentence around the problem, split into [before, the words, after]
+function ctxParts(ctx, text) {
+  const s = String(ctx || ""), t = String(text || "");
+  const at = t ? s.toLowerCase().indexOf(t.toLowerCase()) : -1;
+  return at < 0 ? null : [s.slice(0, at), s.slice(at, at + t.length), s.slice(at + t.length)];
+}
+
+// "Now on the page" → "After the change", side by side
+function beforeAfter(i, fix) {
+  const p = ctxParts(i.ctx, i.text);
+  const now = p ? `${esc(p[0])}<del class="seo-fx-del">${esc(p[1])}</del>${esc(p[2])}` : `<del class="seo-fx-del">${esc(i.text)}</del>`;
+  const after = !fix ? `<span class="seo-fx-wait">No wording yet. Press <b>Regenerate</b> to get some.</span>`
+    : p ? `${esc(p[0])}<ins class="seo-fx-ins">${esc(fix)}</ins>${esc(p[2])}` : `<ins class="seo-fx-ins">${esc(fix)}</ins>`;
+  return `<div class="seo-fx-ba">
+    <div class="seo-fx-col is-now"><div class="seo-fx-lab">Now on the page</div><div class="seo-fx-txt">${now}</div></div>
+    <div class="seo-fx-arrow" aria-hidden="true">→</div>
+    <div class="seo-fx-col is-new"><div class="seo-fx-lab">After the change</div><div class="seo-fx-txt">${after}</div></div>
+  </div>`;
+}
+
+const spin = '<span class="seo-fx-spin" aria-hidden="true"></span>';
+
 // One problem: what's wrong, the fix, and Accept / Reject / Regenerate (or the result)
 function fixRow(c, i, canWork, canManage) {
   const [lab, tone] = TYPE[i.type] || ["Check", "grey"];
@@ -246,70 +268,126 @@ function fixRow(c, i, canWork, canManage) {
   const isWord = i.type === "spelling" || i.type === "au";
   const f = FX.get(i.id) || {};
   const fix = f.pick != null ? f.pick : i.fix || "";
-  const head = `<span class="seo-pr-pill is-${tone}">${lab}</span><div class="seo-ct-q">${mark(i.ctx, i.text)}</div>`;
-  const errBox = f.err ? `<div class="seo-ct-err">${esc(f.err)}${f.editUrl
-    ? ` <a class="seo-w-link" href="${esc(f.editUrl)}" target="_blank" rel="noopener">Edit in WordPress ↗</a>` : ""}</div>` : "";
+  const errBox = f.err ? `<div class="seo-fx-err"><span>⚠</span><div>${esc(f.err)}${f.editUrl
+    ? ` <a class="seo-w-link" href="${esc(f.editUrl)}" target="_blank" rel="noopener">Edit in WordPress ↗</a>` : ""}</div></div>` : "";
 
   // Done: changed on the website
   if (i.fixed) {
     const s = i.st || {};
-    const seen = s.checked === false ? "" : s.verified ? " · seen on the live page"
-      : " · not showing on the live page yet (the page cache can take a minute)";
-    return `<div class="seo-ct-row is-fixed">${head}
-      <div class="seo-ct-done">✓ Updated on the website: “${esc(s.from || i.text)}” → <b class="seo-ct-fix">${esc(s.to || "")}</b>${
-        Number(s.count) > 1 ? ` <span class="seo-note">(${s.count} places)</span>` : ""}
-        <div class="seo-note">${esc(s.byName || "")}${s.at ? " · " + esc(whenC(s.at)) : ""}${seen}</div>
-        <div class="seo-w-acts">
-          ${s.link ? `<a class="seo-btn on" href="${esc(s.link)}" target="_blank" rel="noopener">View live page ↗</a>` : ""}
-          ${canFix ? `<button class="seo-btn" type="button" data-ch-fundo="${esc(i.id)}"${f.busy ? " disabled" : ""}>${
-            f.busy === "undo" ? "Undoing…" : "Undo"}</button>` : ""}
-        </div>${errBox}
-        <p class="seo-note" style="margin:4px 0 0">It drops off this list after tonight's check.</p></div></div>`;
+    const seen = s.checked === false ? "" : s.verified ? "Seen on the live page"
+      : "Not showing on the live page yet: the page cache can take a minute";
+    return `<div class="seo-fx is-done">
+      <div class="seo-fx-head"><span class="seo-fx-tick">✓</span><strong>Updated on the website</strong>
+        <span class="seo-pr-pill is-${tone}">${lab}</span><span class="seo-sp"></span>
+        <span class="seo-note">${esc(s.byName || "")}${s.at ? " · " + esc(whenC(s.at)) : ""}</span></div>
+      <div class="seo-fx-sum"><del class="seo-fx-del">${esc(s.from || i.text)}</del> → <ins class="seo-fx-ins">${esc(s.to || "")}</ins>${
+        Number(s.count) > 1 ? ` <span class="seo-note">· ${s.count} places on the page</span>` : ""}</div>
+      ${seen ? `<div class="seo-note" style="margin-top:4px">${esc(seen)}</div>` : ""}
+      <div class="seo-fx-bar">
+        ${s.link ? `<a class="seo-fx-b is-accept" href="${esc(s.link)}" target="_blank" rel="noopener">View live page ↗</a>` : ""}
+        ${canFix ? `<button class="seo-fx-b is-ghost" type="button" data-ch-fundo="${esc(i.id)}"${f.busy ? " disabled" : ""}>${
+          f.busy === "undo" ? spin + "Putting it back…" : "↶ Undo"}</button>` : ""}
+        <span class="seo-sp"></span><span class="seo-note">Drops off this list after tonight's check.</span>
+      </div>${errBox}</div>`;
   }
 
-  // Ignored: as before
+  // Ignored
   if (i.ignored) {
-    return `<div class="seo-ct-row">${head}
-      <div class="seo-note">Ignored by ${esc(i.st?.byName || "someone")}${i.st?.note ? `: ${esc(i.st.note)}` : ""}</div>
-      ${canWork || canFix ? `<div class="seo-w-acts"><button class="seo-btn" type="button" data-ch-undo="${esc(i.id)}">Back to open</button></div>` : ""}</div>`;
+    return `<div class="seo-fx is-ignored">
+      <div class="seo-fx-head"><span class="seo-pr-pill is-${tone}">${lab}</span>
+        <span class="seo-fx-sum"><span>${esc(i.text)}</span></span><span class="seo-sp"></span>
+        ${canWork || canFix ? `<button class="seo-fx-b is-ghost" type="button" data-ch-undo="${esc(i.id)}">Back to open</button>` : ""}</div>
+      <div class="seo-note">Ignored by ${esc(i.st?.byName || "someone")}${i.st?.note ? `: ${esc(i.st.note)}` : ""}</div></div>`;
   }
 
-  const sug = fix
-    ? `${i.type === "compliance" ? "Suggested" : "Change to"}: <b class="seo-ct-fix">${esc(fix)}</b>${i.why ? ` · ${esc(i.why)}` : ""}`
-    : `${i.why ? esc(i.why) + " · " : ""}No wording suggested yet: press Regenerate.`;
-  const rej = i.rejects.length ? `<div class="seo-note">Rejected before: ${i.rejects.slice(-2).map((r) =>
-    `“${esc(r.text)}” (${esc(r.reason)}${r.byName ? `, ${esc(r.byName)}` : ""})`).join(" · ")}</div>` : "";
-  const opts = (f.opts || []).length ? `<div class="seo-ct-opts"><div class="seo-note">Pick the wording to use:</div>
-    ${f.opts.map((o, n) => `<button type="button" class="seo-ct-opt${fix === o.text ? " is-on" : ""}${(o.flags || []).length ? " is-flag" : ""}"
-        data-ch-pick="${esc(i.id)}|${n}"><span>${esc(o.text)}</span>${o.why ? `<small>${esc(o.why)}</small>` : ""}${
-        (o.flags || []).map((x) => `<small class="seo-ct-flagt">⚠ ${esc(x)}</small>`).join("")}</button>`).join("")}
-    ${i.fix ? `<button type="button" class="seo-ct-opt${fix === i.fix ? " is-on" : ""}" data-ch-pick="${esc(i.id)}|orig">
-      <span>${esc(i.fix)}</span><small>The first suggestion</small></button>` : ""}</div>` : "";
-  const rejForm = f.reject ? `<div class="seo-ct-rej">
-    <label class="seo-note" style="display:block">Why are you rejecting it? (Claude is told, so it learns)
-      <textarea class="seo-input" rows="2" maxlength="300" data-ch-why placeholder="e.g. we always write skin care as two words"></textarea></label>
-    ${[["keep", "Keep it on the list, just not this suggestion"], ["here", "Ignore it on this page"],
-      ["everywhere", isWord ? `Never flag “${esc(i.text)}” again (adds it to your words)` : "Never flag this again, on any page"]]
-      .map(([v, l]) => `<label class="seo-check"><input type="radio" name="sc_${esc(i.id)}" value="${v}"${v === "here" ? " checked" : ""}> ${l}</label>`).join("")}
-    <div class="seo-w-acts"><button class="seo-btn on" type="button" data-ch-rejok="${esc(i.id)}"${f.busy ? " disabled" : ""}>${
-      f.busy === "reject" ? "Saving…" : "Reject"}</button>
-      <button class="seo-btn" type="button" data-ch-rejno="${esc(i.id)}">Cancel</button></div></div>` : "";
+  // Open
+  const summary = `<span class="seo-fx-sum"><del class="seo-fx-del">${esc(i.text)}</del>${
+    fix ? ` → <ins class="seo-fx-ins">${esc(fix)}</ins>` : ""}</span>`;
+  const rej = i.rejects.length ? `<div class="seo-fx-prev">Rejected before: ${i.rejects.slice(-2).map((r) =>
+    `“${esc(r.text)}” <span class="seo-note">(${esc(r.reason)}${r.byName ? `, ${esc(r.byName)}` : ""})</span>`).join(" · ")}</div>` : "";
+  const opts = (f.opts || []).length ? `<div class="seo-fx-opts"><div class="seo-fx-lab">Choose the wording to use</div>
+    ${f.opts.map((o, n) => `<button type="button" class="seo-fx-opt${fix === o.text ? " is-on" : ""}${(o.flags || []).length ? " is-flag" : ""}"
+        data-ch-pick="${esc(i.id)}|${n}" aria-pressed="${fix === o.text}"><span class="seo-fx-radio"></span>
+        <span class="seo-fx-otxt"><b>${esc(o.text)}</b>${o.why ? `<small>${esc(o.why)}</small>` : ""}${
+        (o.flags || []).map((x) => `<small class="seo-fx-flag">⚠ ${esc(x)}</small>`).join("")}</span></button>`).join("")}
+    ${i.fix ? `<button type="button" class="seo-fx-opt${fix === i.fix ? " is-on" : ""}" data-ch-pick="${esc(i.id)}|orig" aria-pressed="${fix === i.fix}">
+      <span class="seo-fx-radio"></span><span class="seo-fx-otxt"><b>${esc(i.fix)}</b><small>The first suggestion</small></span></button>` : ""}</div>` : "";
+  const rejForm = f.reject ? `<div class="seo-fx-rej">
+    <div class="seo-fx-lab">Why are you rejecting it? <span class="seo-note">Claude is told, so it doesn't suggest it again</span></div>
+    <textarea class="seo-input" rows="2" maxlength="300" data-ch-why placeholder="e.g. we always write skin care as two words"></textarea>
+    <div class="seo-fx-lab" style="margin-top:8px">Then</div>
+    <div class="seo-fx-choices">${[
+      ["keep", "Keep it on the list", "Just not this suggestion. Press Regenerate for other wording."],
+      ["here", "Ignore it on this page", "It moves to Show ignored."],
+      ["everywhere", "Never flag it again", isWord ? `“${esc(i.text)}” is added to your words.` : "On any page."],
+    ].map(([v, l, s]) => `<label class="seo-fx-choice"><input type="radio" name="sc_${esc(i.id)}" value="${v}"${v === "here" ? " checked" : ""}>
+        <span><b>${l}</b><small>${s}</small></span></label>`).join("")}</div>
+    <div class="seo-fx-bar">
+      <button class="seo-fx-b is-reject" type="button" data-ch-rejok="${esc(i.id)}"${f.busy ? " disabled" : ""}>${
+        f.busy === "reject" ? spin + "Saving…" : "Reject it"}</button>
+      <button class="seo-fx-b is-ghost" type="button" data-ch-rejno="${esc(i.id)}">Cancel</button></div></div>` : "";
 
-  const acts = canFix ? `
-      <button class="seo-btn on" type="button" data-ch-accept="${esc(i.id)}"${!fix || f.busy ? " disabled" : ""}
-        title="${fix ? "Change it on the live website now" : "Press Regenerate for wording to use"}">${f.busy === "accept" ? "Updating the website…" : "✓ Accept change"}</button>
-      <button class="seo-btn" type="button" data-ch-rej="${esc(i.id)}"${f.busy ? " disabled" : ""}>✕ Reject</button>
-      <button class="seo-btn" type="button" data-ch-regen="${esc(i.id)}"${f.busy ? " disabled" : ""}>${
-        f.busy === "regen" ? "Writing options…" : "↻ Regenerate"}</button>`
-    : canWork ? `<button class="seo-btn" type="button" data-ch-ign="${esc(i.id)}">Ignore</button>` : "";
+  const bar = canFix ? `<div class="seo-fx-bar">
+      <button class="seo-fx-b is-accept" type="button" data-ch-accept="${esc(i.id)}"${!fix || f.busy ? " disabled" : ""}
+        title="${fix ? "Change it on the live website now" : "Press Regenerate for wording to use"}">${
+        f.busy === "accept" ? spin + "Updating the website…" : "✓ Accept change"}</button>
+      <button class="seo-fx-b is-reject${f.reject ? " is-on" : ""}" type="button" data-ch-rej="${esc(i.id)}"${f.busy ? " disabled" : ""}>✕ Reject</button>
+      <button class="seo-fx-b is-ghost" type="button" data-ch-regen="${esc(i.id)}"${f.busy ? " disabled" : ""}>${
+        f.busy === "regen" ? spin + "Writing options…" : (f.opts || []).length ? "↻ More options" : "↻ Regenerate"}</button>
+      <span class="seo-sp"></span>
+      ${isWord ? `<span class="seo-note">Changes every copy on this page</span>` : ""}
+    </div>`
+    : `<div class="seo-fx-bar">${canWork ? `<button class="seo-fx-b is-ghost" type="button" data-ch-ign="${esc(i.id)}">Ignore</button>` : ""}
+        ${isWord && canManage ? `<button class="seo-fx-b is-ghost" type="button" data-ch-word="${esc(i.text)}">Add to my words</button>` : ""}</div>`;
 
-  return `<div class="seo-ct-row">${head}
-    <div class="seo-note">${sug}</div>${rej}${opts}
-    <div class="seo-w-acts">${acts}
-      ${isWord && canManage && !canFix ? `<button class="seo-btn" type="button" data-ch-word="${esc(i.text)}">Add to my words</button>` : ""}
-    </div>${rejForm}${errBox}</div>`;
+  return `<div class="seo-fx">
+    <div class="seo-fx-head"><span class="seo-pr-pill is-${tone}">${lab}</span>${summary}</div>
+    ${i.why ? `<div class="seo-fx-why"><b>Why:</b> ${esc(i.why)}</div>` : ""}
+    ${beforeAfter(i, fix)}${rej}${opts}${bar}${rejForm}${errBox}
+  </div>`;
 }
 
+/* ---------- The overlay (instead of the browser's pop-up) ---------- */
+// askConfirm({ title, body (HTML), ok, tone: "accept" | "reject" }) → true / false
+function askConfirm({ title, body, ok = "Confirm", tone = "accept" }) {
+  injectCss();
+  return new Promise((resolve) => {
+    const before = document.activeElement;
+    const ov = document.createElement("div");
+    ov.className = "seo-fx-ov";
+    ov.innerHTML = `<div class="seo-fx-modal" role="dialog" aria-modal="true" aria-labelledby="seo-fx-mt">
+      <h3 id="seo-fx-mt">${esc(title)}</h3>
+      <div class="seo-fx-mbody">${body}</div>
+      <div class="seo-fx-bar seo-fx-mbar">
+        <span class="seo-sp"></span>
+        <button type="button" class="seo-fx-b is-ghost" data-x>Cancel</button>
+        <button type="button" class="seo-fx-b is-${tone}" data-ok>${esc(ok)}</button>
+      </div></div>`;
+    const key = (e) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); done(false); }
+      else if (e.key === "Tab") {   // keep the keyboard inside the overlay
+        const bs = [...ov.querySelectorAll("button,a[href]")];
+        const i = bs.indexOf(document.activeElement);
+        e.preventDefault();
+        bs[(i + (e.shiftKey ? -1 : 1) + bs.length) % bs.length].focus();
+      }
+    };
+    const done = (v) => {
+      document.removeEventListener("keydown", key, true);
+      ov.classList.add("is-out");
+      setTimeout(() => ov.remove(), 120);
+      before?.focus?.();
+      resolve(v);
+    };
+    ov.addEventListener("click", (e) => {
+      if (e.target === ov || e.target.closest("[data-x]")) done(false);
+      else if (e.target.closest("[data-ok]")) done(true);
+    });
+    document.addEventListener("keydown", key, true);
+    document.body.appendChild(ov);
+    ov.querySelector("[data-ok]").focus();
+  });
+}
 
 function dupsHtml(c, list, canWork) {
   if (!list.length) return `<div class="seo-empty">No pages that say nearly the same thing, among the pages compared so far.</div>`;
@@ -453,7 +531,18 @@ async function fixClick(t, d, id, c, redraw) {
   if (d.chAccept) {
     if (!fixNow) return;
     const many = item.type === "spelling" || item.type === "au";
-    if (!confirm(`Change “${item.text}” to “${fixNow}” on the live website now?${many ? "\n\nEvery place this spelling appears on the page is changed." : ""}`)) return;
+    const yes = await askConfirm({
+      title: "Change it on the live website?",
+      ok: "✓ Yes, change it",
+      body: `<div class="seo-fx-mpage"><b>${esc(titleIn(w, item.path))}</b><span class="seo-note seo-w-mono">${esc(item.path)}</span></div>
+        ${beforeAfter(item, fixNow)}
+        <ul class="seo-fx-mlist">
+          <li>It goes live straight away.</li>
+          ${many ? `<li>Every place “${esc(item.text)}” appears on this page is changed.</li>` : ""}
+          <li>It's added to the Change log, and you can <b>Undo</b> it afterwards.</li>
+        </ul>`,
+    });
+    if (!yes) return;
     f.busy = "accept"; f.err = ""; redraw();
     try {
       const r = await fixApi("fixApply", { ...base, fix: fixNow });
@@ -497,7 +586,17 @@ async function fixClick(t, d, id, c, redraw) {
   }
 
   if (d.chFundo) {
-    if (!confirm("Put the old wording back on the live website?")) return;
+    const s = item.st || {};
+    const yes = await askConfirm({
+      title: "Put the old wording back?",
+      ok: "↶ Yes, put it back",
+      tone: "reject",
+      body: `<div class="seo-fx-mpage"><b>${esc(titleIn(w, item.path))}</b><span class="seo-note seo-w-mono">${esc(item.path)}</span></div>
+        <div class="seo-fx-sum" style="margin:10px 0"><del class="seo-fx-del">${esc(s.to || "")}</del> → <ins class="seo-fx-ins">${esc(s.from || item.text)}</ins></div>
+        <ul class="seo-fx-mlist"><li>It goes live straight away, and the Change log notes it.</li>
+          <li>If someone has edited the page in WordPress since, it can't be put back from here.</li></ul>`,
+    });
+    if (!yes) return;
     f.busy = "undo"; f.err = ""; redraw();
     try {
       const r = await fixApi("fixUndo", { issueId: id });
@@ -529,20 +628,82 @@ const CSS = `
 .seo-ct-forms{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px}
 .seo-ct-forms .seo-pr-pill{cursor:help}
 .seo-ct-forms em{font-style:normal;opacity:.7;margin-left:2px}
-.seo-ct-row.is-fixed .seo-ct-q{opacity:.6}
-.seo-ct-done{margin:6px 0 0;padding:10px 12px;border-radius:8px;background:#f0fdf4;border:1px solid #bbf7d0;color:#166534;font-size:13px}
-.seo-ct-done .seo-w-acts a.seo-btn{text-decoration:none}
-.seo-ct-err{margin:6px 0 0;padding:8px 10px;border-radius:8px;background:#fef2f2;border:1px solid #fecaca;color:#991b1b;font-size:13px}
-.seo-ct-opts{display:grid;gap:6px;margin:8px 0 0}
-.seo-ct-opt{display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:8px 10px;border:1px solid var(--border,#e5e7eb);border-radius:8px;
-  background:var(--card,#fff);font:inherit;font-size:13px;text-align:left;cursor:pointer;color:inherit}
-.seo-ct-opt:hover{border-color:#93c5fd}
-.seo-ct-opt.is-on{border-color:#16a34a;background:#f0fdf4;box-shadow:0 0 0 1px #16a34a}
-.seo-ct-opt.is-flag{border-color:#fcd34d}
-.seo-ct-opt small{font-size:11.5px;color:var(--text-muted,#6b7280)}
-.seo-ct-opt small.seo-ct-flagt{color:#b45309}
-.seo-ct-rej{margin:8px 0 0;padding:10px 12px;border:1px solid var(--border,#e5e7eb);border-radius:8px;background:#f8fafc}
-.seo-ct-rej textarea{display:block;width:100%;min-width:0;margin:4px 0 6px;box-sizing:border-box;resize:vertical}
+/* An issue */
+.seo-fx{padding:14px 0;border-top:1px solid var(--border,#e5e7eb)}
+.seo-ct-page .seo-fx:first-of-type{margin-top:8px}
+.seo-fx-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.seo-fx-sum{font-size:15px;line-height:1.4}
+.seo-fx-why{margin:6px 0 0;font-size:12.5px;color:var(--text-muted,#6b7280)}
+.seo-fx-why b{color:inherit;font-weight:600}
+.seo-fx-del{background:#fee2e2;color:#991b1b;text-decoration:line-through;text-decoration-thickness:2px;border-radius:4px;padding:0 3px}
+.seo-fx-ins{background:#dcfce7;color:#166534;text-decoration:none;font-weight:600;border-radius:4px;padding:0 3px}
+/* Before → after */
+.seo-fx-ba{display:grid;grid-template-columns:minmax(0,1fr) 28px minmax(0,1fr);gap:8px;align-items:stretch;margin:10px 0 0}
+.seo-fx-col{padding:10px 12px;border-radius:10px;font-size:13.5px;line-height:1.6}
+.seo-fx-col.is-now{background:#fff7f7;border:1px solid #fde2e2}
+.seo-fx-col.is-new{background:#f6fef9;border:1px solid #d1fadf}
+.seo-fx-lab{margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--text-muted,#6b7280)}
+.seo-fx-arrow{display:flex;align-items:center;justify-content:center;font-size:18px;color:#94a3b8}
+.seo-fx-wait{color:var(--text-muted,#6b7280);font-style:italic}
+.seo-fx-prev{margin:8px 0 0;padding:6px 10px;border-radius:8px;background:#f8fafc;font-size:12.5px}
+/* Buttons */
+.seo-fx-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0 0}
+.seo-fx-b{display:inline-flex;align-items:center;gap:6px;min-height:36px;padding:0 16px;border-radius:999px;border:1px solid transparent;
+  font:inherit;font-size:13.5px;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap;transition:background .15s,border-color .15s,box-shadow .15s}
+.seo-fx-b:focus-visible{outline:none;box-shadow:0 0 0 3px rgba(37,99,235,.3)}
+.seo-fx-b:disabled{opacity:.55;cursor:not-allowed}
+.seo-fx-b.is-accept{background:#16a34a;color:#fff}
+.seo-fx-b.is-accept:hover:not(:disabled){background:#15803d}
+.seo-fx-b.is-reject{background:var(--card,#fff);color:#b91c1c;border-color:#fecaca}
+.seo-fx-b.is-reject:hover:not(:disabled),.seo-fx-b.is-reject.is-on{background:#fef2f2;border-color:#f87171}
+.seo-fx-b.is-ghost{background:var(--card,#fff);color:inherit;border-color:var(--border,#e5e7eb);font-weight:500}
+.seo-fx-b.is-ghost:hover:not(:disabled){border-color:#93c5fd;background:#f8fbff}
+.seo-fx-spin{width:14px;height:14px;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;animation:seo-fx-spin .7s linear infinite}
+@keyframes seo-fx-spin{to{transform:rotate(360deg)}}
+/* Options from Regenerate */
+.seo-fx-opts{display:grid;gap:6px;margin:12px 0 0}
+.seo-fx-opt{display:flex;align-items:flex-start;gap:10px;width:100%;padding:10px 12px;border:1px solid var(--border,#e5e7eb);border-radius:10px;
+  background:var(--card,#fff);font:inherit;font-size:13.5px;text-align:left;cursor:pointer;color:inherit}
+.seo-fx-opt:hover{border-color:#86efac}
+.seo-fx-opt.is-on{border-color:#16a34a;background:#f0fdf4;box-shadow:0 0 0 1px #16a34a}
+.seo-fx-opt.is-flag{border-color:#fcd34d}
+.seo-fx-radio{flex:none;width:16px;height:16px;margin-top:2px;border:2px solid #94a3b8;border-radius:50%}
+.seo-fx-opt.is-on .seo-fx-radio{border-color:#16a34a;background:radial-gradient(#16a34a 45%,transparent 50%)}
+.seo-fx-otxt{display:flex;flex-direction:column;gap:2px;min-width:0}
+.seo-fx-otxt small{font-size:12px;color:var(--text-muted,#6b7280)}
+.seo-fx-otxt small.seo-fx-flag{color:#b45309}
+/* Reject */
+.seo-fx-rej{margin:12px 0 0;padding:12px 14px;border:1px solid #fecaca;border-radius:12px;background:#fffafa}
+.seo-fx-rej textarea{display:block;width:100%;min-width:0;box-sizing:border-box;resize:vertical}
+.seo-fx-choices{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:6px}
+.seo-fx-choice{display:flex;align-items:flex-start;gap:8px;padding:8px 10px;border:1px solid var(--border,#e5e7eb);border-radius:10px;background:var(--card,#fff);cursor:pointer}
+.seo-fx-choice:has(input:checked){border-color:#f87171;background:#fef2f2}
+.seo-fx-choice input{margin-top:3px}
+.seo-fx-choice span{display:flex;flex-direction:column;font-size:13px}
+.seo-fx-choice small{font-size:12px;color:var(--text-muted,#6b7280)}
+.seo-fx-err{display:flex;gap:8px;margin:10px 0 0;padding:10px 12px;border-radius:10px;background:#fef2f2;border:1px solid #fecaca;color:#991b1b;font-size:13px;line-height:1.45}
+/* Done and ignored */
+.seo-fx.is-done{margin:10px 0 0;padding:12px 14px;border:1px solid #bbf7d0;border-radius:12px;background:#f0fdf4}
+.seo-fx-tick{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:#16a34a;color:#fff;font-size:13px;font-weight:700}
+.seo-fx.is-done .seo-fx-sum{margin-top:6px}
+.seo-fx.is-ignored{opacity:.75}
+/* The overlay */
+.seo-fx-ov{position:fixed;inset:0;z-index:3000;display:flex;align-items:center;justify-content:center;padding:16px;
+  background:rgba(15,23,42,.45);backdrop-filter:blur(2px);animation:seo-fx-in .14s ease-out}
+.seo-fx-ov.is-out{opacity:0;transition:opacity .12s}
+.seo-fx-modal{width:min(620px,100%);max-height:calc(100vh - 32px);overflow:auto;padding:20px 22px;border-radius:16px;background:var(--card,#fff);
+  box-shadow:0 24px 60px rgba(15,23,42,.25);animation:seo-fx-up .16s ease-out}
+.seo-fx-modal h3{margin:0 0 12px;font-size:18px}
+.seo-fx-mpage{display:flex;flex-direction:column;gap:2px;font-size:14px}
+.seo-fx-mlist{margin:12px 0 0;padding-left:18px;font-size:13px;line-height:1.6;color:var(--text-muted,#475569)}
+.seo-fx-mbar{margin-top:18px}
+@keyframes seo-fx-in{from{opacity:0}}
+@keyframes seo-fx-up{from{transform:translateY(8px);opacity:0}}
+@media (max-width:640px){
+  .seo-fx-ba{grid-template-columns:1fr}
+  .seo-fx-arrow{transform:rotate(90deg);height:18px}
+  .seo-fx-b{flex:1 1 auto;justify-content:center}
+}
 .seo-ct-rej .seo-check{margin:2px 0}
 
 @media (max-width:640px){.seo-ct-pair{grid-template-columns:1fr}}
