@@ -14,6 +14,10 @@ async function fixApi(op, data) {
   if (r && r.problem) { const e = new Error(r.problem); e.editUrl = r.editUrl || ""; throw e; }
   return r;
 }
+// Consistency across pages (by group id) and FAQ schema (by page): what's chosen, previews, busy, errors
+const TM = new Map();
+const FQ = new Map();
+const faqId = (path) => "q_" + hash("faq|" + npath(path)) + hash(npath(path) + "#faq");
 // Re-checking pages now (Refresh on Site health, or Re-check this page)
 const RC = { busy: false, n: 0, msg: "", bad: false };
 const fixErr = (e) => (e?.code === "FORBIDDEN" || /FORBIDDEN/.test(e?.message || "")
@@ -132,7 +136,7 @@ export function contentHtml(c, ui) {
   const proofed = deep.filter((d) => d.ai).length;
   const open = (test) => issues.filter((i) => !i.ignored && !i.fixed && test(i.type));
   const openSpell = open(isProof), openAds = open((t) => t === "compliance"), openCons = open((t) => t === "consistency");
-  const groupsOpen = consistAll.filter((g) => !g.ignored).length;
+  const groupsOpen = consistAll.filter((g) => !g.ignored && g.st?.status !== "fixed").length;
   const pagesIn = (list) => new Set(list.map((i) => npath(i.path))).size;
   const tiles = [
     ["spell", "Spelling and grammar", proofed ? openSpell.length : null,
@@ -189,27 +193,24 @@ export function contentHtml(c, ui) {
       Menus, footers and text repeated on many pages aren't checked.</p>`;
 }
 
+// Links to pages by their titles (up to 4)
+function pageLinks(c, paths) {
+  return paths.slice(0, 4).map((p) => {
+    const pid = pageId(c, p);
+    return pid ? `<button class="seo-w-link" type="button" data-open="${esc(pid)}">${esc(titleIn(c.work, p))}</button>` : esc(titleIn(c.work, p));
+  }).join(", ") + (paths.length > 4 ? ` and ${paths.length - 4} more` : "");
+}
+
 // Terms written different ways across pages, then pages that contradict themselves
 function consistHtml(c, groups, pageIssues, canWork, canManage, proofed) {
   if (!groups.length && !pageIssues.length) {
     return `<div class="seo-empty">${proofed ? "Nothing written different ways, and no page contradicts itself." : "Not checked yet."}</div>`;
   }
-  const links = (paths) => paths.slice(0, 4).map((p) => {
-    const pid = pageId(c, p);
-    return pid ? `<button class="seo-w-link" type="button" data-open="${esc(pid)}">${esc(titleIn(c.work, p))}</button>` : esc(titleIn(c.work, p));
-  }).join(", ") + (paths.length > 4 ? ` and ${paths.length - 4} more` : "");
   let out = "";
   if (groups.length) {
     out += `<div class="seo-card"><h3 style="margin:0 0 4px">Written different ways across your pages</h3>
-      <p class="seo-note">Pick one way and use it everywhere. The most used is first (green). Hover a form to see its pages.</p>
-      ${groups.map((g) => `<div class="seo-ct-row">
-        <div class="seo-ct-forms">${g.forms.map((f, n) => `<span class="seo-pr-pill is-${n ? "amber" : "green"}" title="${esc(f.pages.join(", "))}">${esc(f.f)} <em>×${f.n}</em></span>`).join("")}</div>
-        <div class="seo-note">Suggested: use <b class="seo-ct-fix">${esc(g.forms[0].f)}</b> everywhere.
-          ${g.forms.slice(1).map((f) => `“${esc(f.f)}” is on ${links(f.pages)}`).join(" · ")}</div>
-        ${g.ignored ? `<div class="seo-note">Ignored by ${esc(g.st?.byName || "someone")}${g.st?.note ? `: ${esc(g.st.note)}` : ""}</div>` : ""}
-        ${canWork ? `<div class="seo-w-acts">${g.ignored ? `<button class="seo-btn" type="button" data-ch-undo="${esc(g.id)}">Back to open</button>`
-          : `<button class="seo-btn" type="button" data-ch-ign="${esc(g.id)}">Ignore</button>`}</div>` : ""}
-      </div>`).join("")}</div>`;
+      <p class="seo-note">Choose the way to write it, preview the changes, then use it everywhere. Words written in capitals (headings) are left as they are.</p>
+      ${groups.map((g) => termRow(c, g, canWork)).join("")}</div>`;
   }
   if (pageIssues.length) {
     out += `<h3 style="margin:16px 0 8px;font-size:14px">Pages that contradict themselves</h3>` + issuesHtml(c, pageIssues, canWork, canManage, "consist", proofed);
@@ -217,6 +218,68 @@ function consistHtml(c, groups, pageIssues, canWork, canManage, proofed) {
   return out;
 }
 
+// One term: choose the way to write it, preview, use it everywhere (or the result, with Undo)
+function termRow(c, g, canWork) {
+  const canFix = c.can("seo.fix");
+  const T = TM.get(g.id) || {};
+  const pick = T.pick || g.forms[0].f;
+  const errBox = T.err ? `<div class="seo-fx-err"><span>⚠</span><div>${esc(T.err)}</div></div>` : "";
+
+  if (g.st?.status === "fixed") {
+    let res = [];
+    try { res = JSON.parse(g.st.results || "[]"); } catch { res = []; }
+    const changed = new Set(res.filter((r) => r.ok && r.count).map((r) => npath(r.path))).size;
+    return `<div class="seo-fx is-done">
+      <div class="seo-fx-head"><span class="seo-fx-tick">✓</span><strong>Now written “${esc(g.st.to || "")}” on ${plural(changed, "page")}</strong>
+        <span class="seo-sp"></span><span class="seo-note">${esc(g.st.byName || "")}${g.st.at ? " · " + esc(whenC(g.st.at)) : ""}</span></div>
+      <ul class="seo-fx-res">${res.map((r) => `<li class="${r.ok ? (r.count ? "is-ok" : "") : "is-bad"}">
+        <span>${r.ok ? (r.count ? "✓" : "–") : "⚠"}</span><b>${esc(r.title || r.path)}</b>
+        <span class="seo-note">“${esc(r.from)}”${r.ok ? (r.count ? ` · ${plural(r.count, "place")}` : " · nothing to change") : ` · ${esc(r.why || "")}`}</span>
+        ${r.ok && r.count && r.link ? `<a class="seo-w-link" href="${esc(r.link)}" target="_blank" rel="noopener">View ↗</a>` : ""}</li>`).join("")}</ul>
+      ${g.st.note ? `<div class="seo-note">${esc(g.st.note)}</div>` : ""}
+      <div class="seo-fx-bar">${canFix ? `<button class="seo-fx-b is-ghost" type="button" data-ch-tundo="${esc(g.id)}"${T.busy ? " disabled" : ""}>${
+        T.busy === "undo" ? spin + "Putting it back…" : "↶ Undo on every page"}</button>` : ""}
+        <span class="seo-sp"></span><span class="seo-note">Drops off after tonight's check.</span></div>${errBox}</div>`;
+  }
+
+  if (g.ignored) {
+    return `<div class="seo-fx is-ignored"><div class="seo-fx-head">${g.forms.map((f) => `<span class="seo-pr-pill is-grey">${esc(f.f)}</span>`).join("")}
+      <span class="seo-sp"></span>${canWork || canFix ? `<button class="seo-fx-b is-ghost" type="button" data-ch-undo="${esc(g.id)}">Back to open</button>` : ""}</div>
+      <div class="seo-note">Ignored by ${esc(g.st?.byName || "someone")}${g.st?.note ? `: ${esc(g.st.note)}` : ""}</div></div>`;
+  }
+
+  const others = g.forms.filter((f) => f.f !== pick);
+  const forms = `<div class="seo-fx-forms">${g.forms.map((f, n) => {
+    const on = f.f === pick;
+    return canFix
+      ? `<button type="button" class="seo-fx-form${on ? " is-on" : ""}" data-ch-tpick="${esc(g.id)}|${n}" aria-pressed="${on}" title="${esc(f.pages.join(", "))}">
+          <span class="seo-fx-radio"></span><span><b>${esc(f.f)}</b><small>${plural(f.n, "time")} · ${plural(f.pages.length, "page")}${n === 0 ? " · most used" : ""}</small></span></button>`
+      : `<span class="seo-pr-pill is-${n ? "amber" : "green"}" title="${esc(f.pages.join(", "))}">${esc(f.f)} <em>×${f.n}</em></span>`;
+  }).join("")}</div>`;
+  const line = (ctx, from) => {
+    const p = ctxParts(ctx, from);
+    return p ? `…${esc(p[0])}<del class="seo-fx-del">${esc(p[1])}</del><ins class="seo-fx-ins">${esc(pick)}</ins>${esc(p[2])}…` : esc(ctx);
+  };
+  const prev = T.prev ? `<div class="seo-fx-prevlist"><div class="seo-fx-lab">What changes</div>${T.prev.map((p) => `
+      <div class="seo-fx-pp${p.count ? "" : " is-skip"}"><div><b>${esc(p.title || p.path)}</b>
+        <span class="seo-note">${p.count ? plural(p.count, "place") : esc(p.why || "nothing to change")}</span></div>
+        ${(p.contexts || []).map((x) => `<div class="seo-fx-txt">${line(x, p.from)}</div>`).join("")}</div>`).join("")}</div>` : "";
+  const total = (T.prev || []).reduce((a, p) => a + (p.count || 0), 0);
+  const bar = (canFix ? (T.prev
+      ? `<button class="seo-fx-b is-accept" type="button" data-ch-tapply="${esc(g.id)}"${!total || T.busy ? " disabled" : ""}>${
+          T.busy === "apply" ? spin + "Changing the pages…" : `✓ Use “${esc(pick)}” everywhere`}</button>
+         <button class="seo-fx-b is-ghost" type="button" data-ch-tcancel="${esc(g.id)}"${T.busy ? " disabled" : ""}>Cancel</button>`
+      : `<button class="seo-fx-b is-accept" type="button" data-ch-tprev="${esc(g.id)}"${T.busy ? " disabled" : ""}>${
+          T.busy === "prev" ? spin + "Reading the pages…" : "Preview the changes"}</button>`) : "")
+    + (canWork ? `<button class="seo-fx-b is-ghost" type="button" data-ch-ign="${esc(g.id)}">Ignore</button>` : "");
+
+  return `<div class="seo-fx">
+    <div class="seo-fx-head"><span class="seo-pr-pill is-violet">Written ${g.forms.length} ways</span>
+      <span class="seo-fx-sum">${others.map((f) => `<del class="seo-fx-del">${esc(f.f)}</del>`).join(" ")} → <ins class="seo-fx-ins">${esc(pick)}</ins></span></div>
+    ${canFix ? `<div class="seo-fx-lab" style="margin-top:10px">Choose the way to write it</div>` : ""}${forms}
+    <div class="seo-note" style="margin-top:6px">${others.map((f) => `“${esc(f.f)}” is on ${pageLinks(c, f.pages)}`).join(" · ")}</div>
+    ${prev}<div class="seo-fx-bar">${bar}</div>${errBox}</div>`;
+}
 
 function issuesHtml(c, list, canWork, canManage, cat, proofed = 1) {
   if (!list.length) {
@@ -417,29 +480,74 @@ function dupsHtml(c, list, canWork) {
 }
 
 function faqHtml(c, list) {
-  if (!list.length) return `<div class="seo-empty">Every priority and cluster page has an FAQ section with FAQ schema.</div>`;
-  const w = c.work;
-  return list.map((d) => {
+  const w = c.work, H = w.health;
+  const canFix = c.can("seo.fix");
+  const inList = new Set(list.map((d) => npath(d.path)));
+  const done = Object.values(H?.content?.deep || {})
+    .filter((d) => d && d.path && !inList.has(npath(d.path)) && H.status?.[faqId(d.path)]?.status === "fixed");
+  if (!list.length && !done.length) return `<div class="seo-empty">Every priority and cluster page has an FAQ section with FAQ schema.</div>`;
+
+  const cards = list.map((d) => {
+    const pid = pageId(c, d.path);
+    const head = `<div class="seo-row" style="margin:0 0 2px"><span class="seo-pr-pill is-amber">${d.faq ? "No FAQ schema" : "No FAQ section"}</span>
+      <strong>${esc(titleIn(w, d.path))}</strong><span class="seo-sp"></span>
+      ${pid ? `<button class="seo-btn" type="button" data-open="${esc(pid)}">Open page details</button>` : ""}</div>`;
+    if (d.faq) return `<div class="seo-card">${head}${faqSchemaBody(c, d, canFix)}</div>`;
     const me = npath(d.path);
     const qs = (w.queries || []).filter((q) => q.topic !== "__brand" && QUESTION.test(q.q))
       .map((q) => ({ q: q.q, x: q.pages.find((p) => npath(p.path) === me) })).filter((r) => r.x)
       .sort((a, b) => b.x.i - a.x.i).slice(0, 4);
-    const pid = pageId(c, d.path);
-    return `<div class="seo-card">
-      <div class="seo-row" style="margin:0 0 2px"><span class="seo-pr-pill is-amber">${d.faq ? "No FAQ schema" : "No FAQ section"}</span>
-        <strong>${esc(titleIn(w, d.path))}</strong><span class="seo-sp"></span>
-        ${pid ? `<button class="seo-btn" type="button" data-open="${esc(pid)}">Open page details</button>` : ""}</div>
-      ${d.faq ? `<p class="seo-note" style="margin:4px 0 0">The page has questions, but no FAQ schema. Rebuild them with your SEO plugin's FAQ block
-          (Yoast or Rank Math), so Google can read them and show them in search.</p>`
-        : qs.length ? `<p class="seo-note" style="margin:4px 0 2px">People search these, so they make good FAQ questions:</p>
+    return `<div class="seo-card">${head}
+      ${qs.length ? `<p class="seo-note" style="margin:4px 0 2px">People search these, so they make good FAQ questions:</p>
           <ul class="seo-ct-qs">${qs.map((r) => `<li>${esc(r.q)} <span class="seo-note">(${c.h.fmtInt(r.x.i)} impressions)</span></li>`).join("")}</ul>
-          <p class="seo-note" style="margin:0">Answer each in 2–3 sentences, using your SEO plugin's FAQ block so the page also gets FAQ schema.</p>`
-        : `<p class="seo-note" style="margin:4px 0 0">Add 3–5 questions patients ask at consultations (cost, sessions, downtime, results), using your SEO
-          plugin's FAQ block so the page also gets FAQ schema.</p>`}
+          <p class="seo-note" style="margin:0">Answer each in 2–3 sentences, then come back here and press <b>Re-check this page</b> on the Spelling tab and Add FAQ schema.</p>`
+        : `<p class="seo-note" style="margin:4px 0 0">Add 3–5 questions patients ask at consultations (cost, sessions, downtime, results), each ending with “?” and its answer straight after it.</p>`}
     </div>`;
-  }).join("") + `<p class="seo-note">On priority pages these are also steps in Tasks.</p>`;
+  }).join("");
+
+  return cards + (done.length ? `<div class="seo-card"><h3 style="margin:0 0 6px">FAQ schema added from here</h3>
+      ${done.map((d) => faqSchemaBody(c, d, canFix, true)).join("")}</div>` : "")
+    + `<p class="seo-note">FAQ schema tells Google the questions and answers that are already on the page. Nothing visitors see changes.</p>`;
 }
 
+// A page with questions but no FAQ schema: find them, tick, add (or the result, with Undo)
+function faqSchemaBody(c, d, canFix, compact) {
+  const k = npath(d.path), st = c.work.health.status?.[faqId(d.path)];
+  const F = FQ.get(k) || {};
+  const errBox = F.err ? `<div class="seo-fx-err"><span>⚠</span><div>${esc(F.err)}</div></div>` : "";
+  if (st?.status === "fixed") {
+    return `<div class="seo-fx is-done">
+      <div class="seo-fx-head"><span class="seo-fx-tick">✓</span><strong>FAQ schema added${compact ? `: ${esc(titleIn(c.work, d.path))}` : ""}</strong>
+        <span class="seo-note">${plural(Number(st.count) || 0, "question")}</span><span class="seo-sp"></span>
+        <span class="seo-note">${esc(st.byName || "")}${st.at ? " · " + esc(whenC(st.at)) : ""}</span></div>
+      ${st.checked === false ? "" : `<div class="seo-note">${st.verified ? "Seen on the live page" : "Not showing on the live page yet: the page cache can take a minute"}</div>`}
+      <div class="seo-fx-bar">
+        ${st.link ? `<a class="seo-fx-b is-accept" href="https://search.google.com/test/rich-results?url=${encodeURIComponent(st.link)}" target="_blank" rel="noopener">Test it in Google ↗</a>` : ""}
+        ${canFix ? `<button class="seo-fx-b is-ghost" type="button" data-ch-fqundo="${esc(d.path)}"${F.busy ? " disabled" : ""}>${
+          F.busy === "undo" ? spin + "Removing…" : "↶ Undo"}</button>` : ""}
+      </div>${errBox}</div>`;
+  }
+  if (!canFix) {
+    return `<p class="seo-note" style="margin:4px 0 0">The page has questions, but no FAQ schema. Someone with “fix wording on the website” access can add it from here.</p>`;
+  }
+  if (!F.pairs) {
+    return `<p class="seo-note" style="margin:4px 0 0">The page has questions, but Google can't tell they're an FAQ. Add FAQ schema from the questions already on the page.</p>
+      <div class="seo-fx-bar"><button class="seo-fx-b is-accept" type="button" data-ch-fqprev="${esc(d.path)}"${F.busy ? " disabled" : ""}>${
+        F.busy === "prev" ? spin + "Reading the page…" : "Find the questions"}</button></div>${errBox}`;
+  }
+  const off = F.off || new Set();
+  const n = F.pairs.length - off.size;
+  return `<div class="seo-fx-lab" style="margin-top:8px">Questions found on the page: tick the ones to include</div>
+    <div class="seo-fx-faqs">${F.pairs.map((p, i) => `<button type="button" class="seo-fx-faq${off.has(i) ? "" : " is-on"}" data-ch-fqtick="${esc(d.path)}|${i}" aria-pressed="${!off.has(i)}">
+      <span class="seo-fx-check">${off.has(i) ? "" : "✓"}</span>
+      <span class="seo-fx-otxt"><b>${esc(p.q)}</b><small>${esc(p.a.length > 220 ? p.a.slice(0, 219) + "…" : p.a)}</small>
+        ${(p.flags || []).map((x) => `<small class="seo-fx-flag">⚠ ${esc(x)}. Left out unless you tick it.</small>`).join("")}</span></button>`).join("")}</div>
+    <div class="seo-fx-bar">
+      <button class="seo-fx-b is-accept" type="button" data-ch-fqapply="${esc(d.path)}"${!n || F.busy ? " disabled" : ""}>${
+        F.busy === "apply" ? spin + "Adding it…" : `✓ Add FAQ schema (${plural(n, "question")})`}</button>
+      <button class="seo-fx-b is-ghost" type="button" data-ch-fqcancel="${esc(d.path)}"${F.busy ? " disabled" : ""}>Cancel</button>
+    </div>${errBox}`;
+}
 function freshHtml(c, list) {
   if (!list.length) return `<div class="seo-empty">Every priority and cluster page looks current and well supported.</div>`;
   return `<div class="seo-card">${list.map(({ d, why }) => {
@@ -456,12 +564,16 @@ function freshHtml(c, list) {
 
 export async function contentClick(e, c, ui, redraw) {
   const t = e.target.closest("[data-ch-cat],[data-ch-ign],[data-ch-undo],[data-ch-word],[data-ch-showign]," +
-    "[data-ch-accept],[data-ch-rej],[data-ch-rejok],[data-ch-rejno],[data-ch-regen],[data-ch-pick],[data-ch-fundo],[data-ch-recheck]");
+    "[data-ch-accept],[data-ch-rej],[data-ch-rejok],[data-ch-rejno],[data-ch-regen],[data-ch-pick],[data-ch-fundo],[data-ch-recheck]," +
+    "[data-ch-tpick],[data-ch-tprev],[data-ch-tapply],[data-ch-tcancel],[data-ch-tundo]," +
+    "[data-ch-fqprev],[data-ch-fqtick],[data-ch-fqapply],[data-ch-fqcancel],[data-ch-fqundo]");
   if (!t) return false;
   const d = t.dataset, w = c.work, H = w.health;
   if (d.chCat) { ui.ccat = d.chCat; ui.cign = false; redraw(); return true; }
   if (d.chShowign !== undefined) { ui.cign = !ui.cign; redraw(); return true; }
   if (d.chRecheck) { await recheckPages(c, redraw, [d.chRecheck]); return true; }
+  if (d.chTpick || d.chTprev || d.chTapply || d.chTcancel || d.chTundo) { await termClick(d, c, redraw); return true; }
+  if (d.chFqprev || d.chFqtick || d.chFqapply || d.chFqcancel || d.chFqundo) { await faqClick(d, c, redraw); return true; }
   const fxId = d.chAccept || d.chRej || d.chRejok || d.chRejno || d.chRegen || d.chFundo || (d.chPick ? d.chPick.split("|")[0] : "");
   if (fxId) { await fixClick(t, d, fxId, c, redraw); return true; }
 
@@ -512,6 +624,137 @@ export async function contentClick(e, c, ui, redraw) {
   } catch (err) { t.disabled = false; toast(/permission/i.test(err.message || "") ? "You don't have permission to do that." : err.message, true); }
   return true;
 }
+
+/* ---------- Consistency across pages (Apps Script: termPreview / termApply / termUndo) ---------- */
+
+async function termClick(d, c, redraw) {
+  const w = c.work, H = w.health;
+  H.status = H.status || {};
+  const gid = String(d.chTpick || d.chTprev || d.chTapply || d.chTcancel || d.chTundo).split("|")[0];
+  const g = (H?.content?.consist || []).find((x) => groupId(x.key) === gid);
+  if (!g) return;
+  const T = TM.get(gid) || {};
+  TM.set(gid, T);
+  const pick = T.pick || g.forms[0].f;
+
+  if (d.chTpick) {
+    const f = g.forms[Number(d.chTpick.split("|")[1])];
+    if (f) { T.pick = f.f; T.prev = null; T.err = ""; }
+    redraw();
+    return;
+  }
+  if (d.chTcancel) { T.prev = null; T.err = ""; redraw(); return; }
+  if (d.chTprev) {
+    T.busy = "prev"; T.err = ""; redraw();
+    try { const r = await fixApi("termPreview", { key: g.key, to: pick }); T.prev = r.pages || []; }
+    catch (err) { T.err = fixErr(err); }
+    finally { T.busy = ""; redraw(); }
+    return;
+  }
+  if (d.chTapply) {
+    const pages = (T.prev || []).filter((p) => p.count);
+    const places = pages.reduce((a, p) => a + p.count, 0);
+    const yes = await askConfirm({
+      title: `Use “${pick}” on ${plural(new Set(pages.map((p) => npath(p.path))).size, "page")}?`,
+      ok: "✓ Yes, change them",
+      body: `<div class="seo-fx-sum">${g.forms.filter((f) => f.f !== pick).map((f) => `<del class="seo-fx-del">${esc(f.f)}</del>`).join(" ")}
+          → <ins class="seo-fx-ins">${esc(pick)}</ins></div>
+        <ul class="seo-fx-mlist"><li>${plural(places, "place")} change on the live website straight away.</li>
+          <li>Words written in capitals (headings) are left as they are.</li>
+          <li>It's added to the Change log, and one <b>Undo</b> puts every page back.</li></ul>`,
+    });
+    if (!yes) return;
+    T.busy = "apply"; T.err = ""; redraw();
+    try {
+      const r = await fixApi("termApply", { issueId: gid, key: g.key, to: pick });
+      H.status[gid] = r.rec;
+      TM.delete(gid);
+      toast(`Now written “${pick}” across your pages ✓`);
+    } catch (err) { T.err = fixErr(err); }
+    finally { T.busy = ""; redraw(); }
+    return;
+  }
+  if (d.chTundo) {
+    const yes = await askConfirm({ title: "Put the old wording back on every page?", ok: "↶ Yes, put it back", tone: "reject",
+      body: `<ul class="seo-fx-mlist"><li>Every page changed from here goes back to how it was.</li>
+        <li>A page edited in WordPress since can't be put back from here: it's listed if so.</li></ul>` });
+    if (!yes) return;
+    T.busy = "undo"; T.err = ""; redraw();
+    try {
+      const r = await fixApi("termUndo", { issueId: gid });
+      H.status[gid] = r.rec;
+      toast(r.left ? `Put back, except ${plural(r.left, "page")} edited since` : "Put back on every page");
+    } catch (err) { T.err = fixErr(err); }
+    finally { T.busy = ""; redraw(); }
+  }
+}
+
+/* ---------- FAQ schema (Apps Script: faqPreview / faqApply, and fixUndo) ---------- */
+
+async function faqClick(d, c, redraw) {
+  const w = c.work, H = w.health;
+  H.status = H.status || {};
+  const raw = String(d.chFqprev || d.chFqapply || d.chFqcancel || d.chFqundo || d.chFqtick);
+  const path = d.chFqtick ? raw.slice(0, raw.lastIndexOf("|")) : raw;
+  const k = npath(path);
+  const F = FQ.get(k) || {};
+  FQ.set(k, F);
+  F.off = F.off || new Set();
+
+  if (d.chFqtick) {
+    const i = Number(raw.slice(raw.lastIndexOf("|") + 1));
+    if (F.off.has(i)) F.off.delete(i); else F.off.add(i);
+    redraw();
+    return;
+  }
+  if (d.chFqcancel) { F.pairs = null; F.err = ""; redraw(); return; }
+  if (d.chFqprev) {
+    F.busy = "prev"; F.err = ""; redraw();
+    try {
+      const r = await fixApi("faqPreview", { path });
+      F.pairs = r.pairs || [];
+      F.off = new Set(F.pairs.map((p, i) => ((p.flags || []).length ? i : -1)).filter((i) => i >= 0));   // flagged ones start unticked
+    } catch (err) { F.err = fixErr(err); }
+    finally { F.busy = ""; redraw(); }
+    return;
+  }
+  if (d.chFqapply) {
+    const qs = (F.pairs || []).filter((_, i) => !F.off.has(i)).map((p) => p.q);
+    if (!qs.length) { F.err = "Tick at least one question."; redraw(); return; }
+    const yes = await askConfirm({ title: "Add FAQ schema to this page?", ok: "✓ Yes, add it",
+      body: `<div class="seo-fx-mpage"><b>${esc(titleIn(w, path))}</b><span class="seo-note seo-w-mono">${esc(path)}</span></div>
+        <ul class="seo-fx-mlist">${qs.slice(0, 8).map((q) => `<li>${esc(q)}</li>`).join("")}${qs.length > 8 ? `<li>and ${qs.length - 8} more</li>` : ""}</ul>
+        <ul class="seo-fx-mlist"><li>Google reads these questions and answers from the page. Nothing visitors see changes.</li>
+          <li>It's added to the Change log, and you can <b>Undo</b> it.</li></ul>` });
+    if (!yes) return;
+    F.busy = "apply"; F.err = ""; redraw();
+    try {
+      const r = await fixApi("faqApply", { issueId: faqId(path), path, questions: qs });
+      H.status[faqId(path)] = r.rec;
+      FQ.delete(k);
+      toast("FAQ schema added ✓");
+      redraw();
+      recheckPages(c, redraw, [path]);   // the FAQ tile updates once the page is read again
+    } catch (err) { F.err = fixErr(err); }
+    finally { F.busy = ""; redraw(); }
+    return;
+  }
+  if (d.chFqundo) {
+    const yes = await askConfirm({ title: "Remove the FAQ schema from this page?", ok: "↶ Yes, remove it", tone: "reject",
+      body: `<ul class="seo-fx-mlist"><li>The questions stay on the page. Only the schema for Google is removed.</li></ul>` });
+    if (!yes) return;
+    F.busy = "undo"; F.err = ""; redraw();
+    try {
+      const r = await fixApi("fixUndo", { issueId: faqId(path) });
+      H.status[faqId(path)] = r.rec;
+      toast("FAQ schema removed");
+      redraw();
+      recheckPages(c, redraw, [path]);
+    } catch (err) { F.err = fixErr(err); }
+    finally { F.busy = ""; redraw(); }
+  }
+}
+
 /* ---------- Re-check pages now (Apps Script: wordpress → recheck) ---------- */
 // paths: the pages to re-check. Left out: the pages with changes made from here that tonight's check hasn't seen yet.
 export async function recheckPages(c, redraw, paths) {
@@ -658,6 +901,30 @@ const CSS = `
 .seo-ct-forms{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px}
 .seo-ct-forms .seo-pr-pill{cursor:help}
 .seo-ct-forms em{font-style:normal;opacity:.7;margin-left:2px}
+.seo-fx-forms{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 0}
+.seo-fx-form{display:flex;align-items:flex-start;gap:8px;padding:8px 12px;border:1px solid var(--border,#e5e7eb);border-radius:10px;
+  background:var(--card,#fff);font:inherit;font-size:13.5px;text-align:left;cursor:pointer;color:inherit}
+.seo-fx-form:hover{border-color:#86efac}
+.seo-fx-form.is-on{border-color:#16a34a;background:#f0fdf4;box-shadow:0 0 0 1px #16a34a}
+.seo-fx-form.is-on .seo-fx-radio{border-color:#16a34a;background:radial-gradient(#16a34a 45%,transparent 50%)}
+.seo-fx-form small{display:block;font-size:11.5px;color:var(--text-muted,#6b7280)}
+.seo-fx-prevlist{margin:12px 0 0;padding:10px 12px;border:1px solid var(--border,#e5e7eb);border-radius:12px;background:#fafbfc}
+.seo-fx-pp{padding:8px 0;border-top:1px solid var(--border,#e5e7eb);font-size:13px}
+.seo-fx-pp:first-of-type{border-top:0}
+.seo-fx-pp.is-skip{opacity:.6}
+.seo-fx-pp .seo-fx-txt{margin:4px 0 0;padding:6px 10px;border-radius:8px;background:var(--card,#fff);line-height:1.55}
+.seo-fx-res{list-style:none;margin:8px 0 0;padding:0;font-size:13px}
+.seo-fx-res li{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;padding:5px 0;border-top:1px solid #dcfce7}
+.seo-fx-res li:first-child{border-top:0}
+.seo-fx-res li.is-bad{color:#991b1b}
+.seo-fx-faqs{display:grid;gap:6px;margin:4px 0 0}
+.seo-fx-faq{display:flex;align-items:flex-start;gap:10px;width:100%;padding:10px 12px;border:1px solid var(--border,#e5e7eb);border-radius:10px;
+  background:var(--card,#fff);font:inherit;font-size:13.5px;text-align:left;cursor:pointer;color:inherit}
+.seo-fx-faq.is-on{border-color:#16a34a;background:#f6fef9}
+.seo-fx-check{flex:none;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;margin-top:1px;
+  border:2px solid #94a3b8;border-radius:5px;color:#fff;font-size:12px;font-weight:700}
+.seo-fx-faq.is-on .seo-fx-check{background:#16a34a;border-color:#16a34a}
+
 .seo-fx-banner{display:flex;align-items:center;gap:8px;margin:0 0 12px;padding:10px 14px;border-radius:10px;font-size:13.5px;
   background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af}
 .seo-fx-banner.is-ok{background:#f0fdf4;border-color:#bbf7d0;color:#166534}

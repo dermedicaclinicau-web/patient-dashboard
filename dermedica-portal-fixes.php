@@ -12,7 +12,7 @@ const DPCFIX_LOG = '_dpc_fix_log';
 const DPCFIX_SKIP_KEY = '/(^_|url|link|image|icon|^id$|css|class|colou?r|font|size|width|height|align|position|animation|motion|background|border|padding|margin|gap|style|tag$|type$|layout|view|selected|^source$|anchor|lightbox|video|embed|shortcode|^template)/i';
 
 add_action('rest_api_init', function () {
-  foreach (['find' => 'dpcfix_find', 'replace' => 'dpcfix_replace', 'undo' => 'dpcfix_undo'] as $r => $cb) {
+  foreach (['find' => 'dpcfix_find', 'replace' => 'dpcfix_replace', 'undo' => 'dpcfix_undo', 'faq' => 'dpcfix_faq'] as $r => $cb) {
     register_rest_route(DPCFIX_NS, '/fix/' . $r, ['methods' => 'POST', 'callback' => $cb, 'permission_callback' => 'dpcfix_auth']);
   }
 });
@@ -108,10 +108,11 @@ function dpcfix_edit($src, $st, $en, $orig, $at, $n, $rep, $keepCase) {
 
 function dpcfix_needle($text) { return trim(dpcfix_index(htmlspecialchars((string) $text, ENT_NOQUOTES, 'UTF-8'))[0]); }
 
-// Each place the words appear (whole words only): byte range, whether formatting is inside it, and the text around it
+// Each place the words appear (whole words only): byte range, whether formatting is inside it,
+// the words as written on the page, and the sentence around them (capitals kept)
 function dpcfix_hits($src, $needle) {
   if ($needle === '' || !is_string($src) || $src === '') return [];
-  list($plain, $st, $en) = dpcfix_index($src);
+  list($plain, $st, $en, $orig) = dpcfix_index($src);
   $out = []; $from = 0; $n = mb_strlen($needle, 'UTF-8');
   $word = '/[\p{L}\p{N}]/u';
   $edgeL = preg_match($word, mb_substr($needle, 0, 1, 'UTF-8'));
@@ -121,13 +122,14 @@ function dpcfix_hits($src, $needle) {
     if ($edgeL && $at > 0 && preg_match($word, mb_substr($plain, $at - 1, 1, 'UTF-8'))) continue;
     if ($edgeR && preg_match($word, mb_substr($plain, $at + $n, 1, 'UTF-8'))) continue;
     $a = $st[$at]; $b = $en[$at + $n - 1];
+    $c0 = max(0, $at - 60);
     $out[] = ['a' => $a, 'b' => $b, 'at' => $at, 'n' => $n, 'tags' => strpos(substr($src, $a, $b - $a), '<') !== false,
-      'ctx' => mb_substr($plain, max(0, $at - 60), $n + 120, 'UTF-8')];
+      'match' => implode('', array_slice($orig, $at, $n)),
+      'ctx' => implode('', array_slice($orig, $c0, $at - $c0 + $n + 60))];
     $from = $at + $n;
   }
   return $out;
 }
-
 // Where the page's words are kept: Elementor's data for Elementor pages, otherwise the post content
 function dpcfix_targets($id) {
   $t = [];
@@ -203,8 +205,8 @@ function dpcfix_find(WP_REST_Request $req) {
   list($targets, $isEl) = dpcfix_targets($id);
   $hits = dpcfix_all_hits($targets, dpcfix_needle($find));
   return ['ok' => true, 'elementor' => $isEl, 'count' => count($hits), 'hits' => array_map(function ($h) {
-    return ['formatted' => $h['tags'], 'context' => $h['ctx']];
-  }, array_slice($hits, 0, 5))];
+    return ['formatted' => $h['tags'], 'context' => $h['ctx'], 'match' => $h['match']];
+  }, array_slice($hits, 0, 20))];
 }
 
 // Changes the words. Exactly one place, unless "all" (spelling: every place the misspelt word appears).
@@ -216,6 +218,7 @@ function dpcfix_replace(WP_REST_Request $req) {
   $fid = preg_replace('/[^a-z0-9_-]/i', '', (string) ($b['fid'] ?? ''));
   $all = !empty($b['all']);
   $keep = !empty($b['keepCase']);
+  $skipCaps = !empty($b['skipCaps']);   // words written in capitals (headings) are left as they are
   $post = $id ? get_post($id) : null;
   if (!$post) return dpcfix_no('not_found', "That page isn't in WordPress.");
   if ($find === '' || $rep === '' || mb_strlen($find) > 200 || mb_strlen($rep) > 400 || !$fid) return dpcfix_no('bad', 'Nothing to change.');
@@ -234,6 +237,7 @@ function dpcfix_replace(WP_REST_Request $req) {
     list(, $st, $en, $orig) = dpcfix_index($v);
     $edits = [];
     foreach ($hs as $h) {
+      if ($skipCaps && preg_match('/\p{L}/u', $h['match']) && $h['match'] === mb_strtoupper($h['match'], 'UTF-8')) continue;
       $e = dpcfix_edit($v, $st, $en, $orig, $h['at'], $h['n'], $rep, $keep);
       if (!$e) return dpcfix_no('formatted', 'Formatting inside the part that changes.', ['context' => $h['ctx']]);
       $edits[] = $e;
@@ -270,7 +274,11 @@ function dpcfix_undo(WP_REST_Request $req) {
   foreach ($log as $i => $e) {
     if (($e['fid'] ?? '') !== $fid) continue;
     if (!empty($e['undone'])) return dpcfix_no('done', 'Already undone.');
-    if ($e['where'] === 'elementor') {
+    if ($e['where'] === 'faq') {
+      $cur = get_post_meta($id, '_dpc_faq', true);
+      if (md5(wp_json_encode(is_array($cur) ? $cur : [])) !== $e['after_hash']) return dpcfix_no('changed', 'Edited since.');
+      if (!empty($e['before'])) update_post_meta($id, '_dpc_faq', wp_slash($e['before'])); else delete_post_meta($id, '_dpc_faq');
+    } elseif ($e['where'] === 'elementor') {
       $data = json_decode((string) get_post_meta($id, '_elementor_data', true), true);
       if (!is_array($data)) return dpcfix_no('changed', 'Elementor data unreadable.');
       foreach ($e['changes'] as $c) if (dpcfix_get($data, $c['path']) !== $c['after']) return dpcfix_no('changed', 'Edited since.');
@@ -289,3 +297,40 @@ function dpcfix_undo(WP_REST_Request $req) {
   }
   return dpcfix_no('not_found', "That change isn't in the page's history (the last 8 are kept).");
 }
+
+/* ---------- FAQ schema: the questions and answers already on a page, for Google ---------- */
+
+// Saves the page's questions and answers (the portal reads them from the live page)
+function dpcfix_faq(WP_REST_Request $req) {
+  $b = $req->get_json_params() ?: [];
+  $id = (int) ($b['id'] ?? 0);
+  $fid = preg_replace('/[^a-z0-9_-]/i', '', (string) ($b['fid'] ?? ''));
+  if (!$id || !get_post($id) || !$fid) return dpcfix_no('bad', 'Nothing to save.');
+  $clean = [];
+  foreach ((array) ($b['faqs'] ?? []) as $x) {
+    $q = trim(wp_strip_all_tags((string) ($x['q'] ?? '')));
+    $a = trim(wp_strip_all_tags((string) ($x['a'] ?? '')));
+    if ($q !== '' && $a !== '') $clean[] = ['q' => mb_substr($q, 0, 300), 'a' => mb_substr($a, 0, 1500)];
+    if (count($clean) >= 20) break;
+  }
+  $before = get_post_meta($id, '_dpc_faq', true);
+  if ($clean) update_post_meta($id, '_dpc_faq', wp_slash($clean)); else delete_post_meta($id, '_dpc_faq');
+  dpcfix_log($id, ['fid' => $fid, 'at' => time(), 'where' => 'faq', 'before' => is_array($before) ? $before : [],
+    'after_hash' => md5(wp_json_encode($clean))]);
+  dpcfix_purge($id);
+  return ['ok' => true, 'count' => count($clean), 'link' => get_permalink($id)];
+}
+
+// Shows them to Google as FAQPage schema
+add_action('wp_head', function () {
+  if (!is_singular()) return;
+  $faq = get_post_meta(get_queried_object_id(), '_dpc_faq', true);
+  if (!is_array($faq) || !$faq) return;
+  $items = [];
+  foreach ($faq as $x) {
+    $items[] = ['@type' => 'Question', 'name' => $x['q'], 'acceptedAnswer' => ['@type' => 'Answer', 'text' => $x['a']]];
+  }
+  echo "\n" . '<script type="application/ld+json" id="dpc-faq">'
+    . wp_json_encode(['@context' => 'https://schema.org', '@type' => 'FAQPage', 'mainEntity' => $items], JSON_UNESCAPED_UNICODE)
+    . "</script>\n";
+}, 30);
