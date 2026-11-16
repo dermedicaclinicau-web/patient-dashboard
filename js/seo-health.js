@@ -343,7 +343,6 @@ export function viewHealth(wrap, c, ui) {
       <div><strong>${esc(i.msg)}</strong>${i.detail ? `<div class="seo-note seo-h-detail">${esc(i.detail)}</div>` : ""}</div>
       ${HELP[i.code] ? `<details class="seo-h-help"><summary>How to fix</summary><p>${esc(HELP[i.code])}</p></details>` : ""}
       ${!ignored ? hxBody(i) : ""}
-      ${i.code === "alt" && i.path !== "Whole site" && !ignored && c.can("seo.fix") ? altBody(c, i.path) : ""}
       ${ignored ? `<p class="seo-note">Ignored by ${esc(i.st?.byName || "someone")}${i.st?.at ? " · " + esc(when(i.st.at)) : ""}${i.st?.note ? ": " + esc(i.st.note) : ""}</p>` : ""}
       ${(() => {
         const fix = (!ignored && FIX[i.code] && i.path !== "Whole site" && c.can("seo.pages") ? fixBtn(i.path, FIX[i.code]) : "")
@@ -793,7 +792,6 @@ const CSS = `
 .seo-h-adv{margin-left:4px;white-space:nowrap}
 .seo-h-try .seo-h-adv{display:inline-block;margin:6px 0 0}
 .seo-h-issue .seo-fx.is-done{margin-top:10px}
-`;
 `;
 
 function injectCss() {
