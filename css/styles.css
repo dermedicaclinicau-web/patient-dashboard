@@ -13836,3 +13836,11 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 .fr-note { margin: 4px 0 0; font-size: 12px; line-height: 1.4; color: #64748b; }
 
 .ef-smscount { margin: 4px 0 8px; font-size: 13px; color: #475569; line-height: 1.45; }
+
+.fr-sp-q { margin: 6px 0; width: 100%; }
+.fr-sp-acts { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 6px; }
+.fr-sp-list { max-height: 220px; overflow: auto; border: 1px solid var(--line, #e2e8f0); border-radius: 10px; padding: 4px; }
+.fr-sp-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+.fr-sp-row:hover { background: var(--hover, #f1f5f9); }
+.fr-sp-row span { flex: 1; }
+.fr-sp-row small { color: var(--muted, #64748b); }
