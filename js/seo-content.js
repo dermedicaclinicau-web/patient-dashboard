@@ -5,6 +5,18 @@
 
 import { db, auth } from "./firebase-config.js";
 import { doc, setDoc, serverTimestamp, arrayUnion } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { callApi } from "./appointments.js";
+
+// Accept / Reject / Regenerate state per issue while the page is open: { opts, pick, busy, err, editUrl, reject }
+const FX = new Map();
+async function fixApi(op, data) {
+  const r = await callApi({ action: "wordpress", op, ...data });
+  if (r && r.problem) { const e = new Error(r.problem); e.editUrl = r.editUrl || ""; throw e; }
+  return r;
+}
+const fixErr = (e) => (e?.code === "FORBIDDEN" || /FORBIDDEN/.test(e?.message || "")
+  ? "You don't have access to fix wording on the website. Ask an Admin to turn on “Site health: fix wording on the website”."
+  : e?.message || "Something went wrong. Try again.");
 
 const TYPE = { spelling: ["Spelling", "red"], grammar: ["Grammar", "amber"], au: ["Australian English", "blue"],
   compliance: ["Advertising rules", "red"], consistency: ["Consistency", "violet"] };
@@ -51,12 +63,18 @@ export function contentIssues(w, path) {
   const d = w?.health?.content?.deep?.[npath(path)];
   if (!d || !d.ai || !Array.isArray(d.ai.issues)) return [];
   const ok = new Set((Array.isArray(w.settings?.spellWords) ? w.settings.spellWords : []).map((x) => String(x).toLowerCase()));
+  // "Never flag this again" from Reject (seo_settings/main.proofIgnore: "type|text")
+  const skip = new Set((Array.isArray(w.settings?.proofIgnore) ? w.settings.proofIgnore : []).map((x) => String(x).toLowerCase()));
   return d.ai.issues
     .filter((i) => !((i.type === "spelling" || i.type === "au") && ok.has(String(i.text).toLowerCase())))
+    .filter((i) => !skip.has(i.type + "|" + String(i.text).toLowerCase()))
     .map((i) => {
       const id = contentIssueId(d.path || path, i);
       const st = w.health.status?.[id] || null;
-      return { ...i, id, path: d.path || path, st, ignored: st?.status === "ignored" };
+      let rejects = [];
+      try { rejects = st?.rejects ? JSON.parse(st.rejects) : []; } catch { rejects = []; }
+      return { ...i, id, path: d.path || path, st, rejects,
+        ignored: st?.status === "ignored", fixed: st?.status === "fixed" };
     });
 }
 
@@ -110,7 +128,7 @@ export function contentHtml(c, ui) {
 
   // Pages proofread so far. Before any are, the counts are unknown, not 0.
   const proofed = deep.filter((d) => d.ai).length;
-  const open = (test) => issues.filter((i) => !i.ignored && test(i.type));
+  const open = (test) => issues.filter((i) => !i.ignored && !i.fixed && test(i.type));
   const openSpell = open(isProof), openAds = open((t) => t === "compliance"), openCons = open((t) => t === "consistency");
   const groupsOpen = consistAll.filter((g) => !g.ignored).length;
   const pagesIn = (list) => new Set(list.map((i) => npath(i.path))).size;
@@ -208,29 +226,90 @@ function issuesHtml(c, list, canWork, canManage, cat, proofed = 1) {
   list.forEach((i) => { const k = npath(i.path); if (!by.has(k)) by.set(k, []); by.get(k).push(i); });
   return [...by.values()].map((arr) => {
     const pid = pageId(c, arr[0].path);
+    const left = arr.filter((i) => !i.fixed).length;
     return `<div class="seo-card seo-ct-page">
       <div class="seo-row" style="margin:0 0 2px"><strong>${esc(titleIn(c.work, arr[0].path))}</strong>
-        <span class="seo-note">${plural(arr.length, "thing")} to fix</span><span class="seo-sp"></span>
+        <span class="seo-note">${left ? `${plural(left, "thing")} to fix` : "all fixed ✓"}</span><span class="seo-sp"></span>
         ${pid ? `<button class="seo-btn" type="button" data-open="${esc(pid)}">Open page details</button>` : ""}</div>
       <div class="seo-note seo-w-mono">${esc(arr[0].path)}</div>
-      ${arr.map((i) => {
-        const [lab, tone] = TYPE[i.type] || ["Check", "grey"];
-        return `<div class="seo-ct-row">
-          <span class="seo-pr-pill is-${tone}">${lab}</span>
-          <div class="seo-ct-q">${mark(i.ctx, i.text)}</div>
-          <div class="seo-note">${i.type === "compliance"
-            ? `${esc(i.why)}${i.fix ? ` Suggested: <b class="seo-ct-fix">${esc(i.fix)}</b>` : ""}`
-            : `Change to <b class="seo-ct-fix">${esc(i.fix)}</b>${i.why ? ` · ${esc(i.why)}` : ""}`}</div>
-          ${i.ignored ? `<div class="seo-note">Ignored by ${esc(i.st?.byName || "someone")}${i.st?.note ? `: ${esc(i.st.note)}` : ""}</div>` : ""}
-          <div class="seo-w-acts">
-            ${(i.type === "spelling" || i.type === "au") && canManage && !i.ignored ? `<button class="seo-btn" type="button" data-ch-word="${esc(i.text)}">Add to my words</button>` : ""}
-            ${canWork ? (i.ignored ? `<button class="seo-btn" type="button" data-ch-undo="${esc(i.id)}">Back to open</button>`
-              : `<button class="seo-btn" type="button" data-ch-ign="${esc(i.id)}">Ignore</button>`) : ""}
-          </div></div>`;
-      }).join("")}
+      ${arr.map((i) => fixRow(c, i, canWork, canManage)).join("")}
     </div>`;
-  }).join("") + `<p class="seo-note">On priority pages these are also steps in Tasks. A fix disappears after the next nightly check.</p>`;
+  }).join("") + `<p class="seo-note">Accept changes the wording on the live website straight away and adds it to the Change log.
+    Elementor and normal pages both work. If the words are in a header, footer or template, or have bold or a link inside them,
+    it tells you to change them in WordPress instead.</p>`;
 }
+
+// One problem: what's wrong, the fix, and Accept / Reject / Regenerate (or the result)
+function fixRow(c, i, canWork, canManage) {
+  const [lab, tone] = TYPE[i.type] || ["Check", "grey"];
+  const canFix = c.can("seo.fix");
+  const isWord = i.type === "spelling" || i.type === "au";
+  const f = FX.get(i.id) || {};
+  const fix = f.pick != null ? f.pick : i.fix || "";
+  const head = `<span class="seo-pr-pill is-${tone}">${lab}</span><div class="seo-ct-q">${mark(i.ctx, i.text)}</div>`;
+  const errBox = f.err ? `<div class="seo-ct-err">${esc(f.err)}${f.editUrl
+    ? ` <a class="seo-w-link" href="${esc(f.editUrl)}" target="_blank" rel="noopener">Edit in WordPress ↗</a>` : ""}</div>` : "";
+
+  // Done: changed on the website
+  if (i.fixed) {
+    const s = i.st || {};
+    const seen = s.checked === false ? "" : s.verified ? " · seen on the live page"
+      : " · not showing on the live page yet (the page cache can take a minute)";
+    return `<div class="seo-ct-row is-fixed">${head}
+      <div class="seo-ct-done">✓ Updated on the website: “${esc(s.from || i.text)}” → <b class="seo-ct-fix">${esc(s.to || "")}</b>${
+        Number(s.count) > 1 ? ` <span class="seo-note">(${s.count} places)</span>` : ""}
+        <div class="seo-note">${esc(s.byName || "")}${s.at ? " · " + esc(whenC(s.at)) : ""}${seen}</div>
+        <div class="seo-w-acts">
+          ${s.link ? `<a class="seo-btn on" href="${esc(s.link)}" target="_blank" rel="noopener">View live page ↗</a>` : ""}
+          ${canFix ? `<button class="seo-btn" type="button" data-ch-fundo="${esc(i.id)}"${f.busy ? " disabled" : ""}>${
+            f.busy === "undo" ? "Undoing…" : "Undo"}</button>` : ""}
+        </div>${errBox}
+        <p class="seo-note" style="margin:4px 0 0">It drops off this list after tonight's check.</p></div></div>`;
+  }
+
+  // Ignored: as before
+  if (i.ignored) {
+    return `<div class="seo-ct-row">${head}
+      <div class="seo-note">Ignored by ${esc(i.st?.byName || "someone")}${i.st?.note ? `: ${esc(i.st.note)}` : ""}</div>
+      ${canWork || canFix ? `<div class="seo-w-acts"><button class="seo-btn" type="button" data-ch-undo="${esc(i.id)}">Back to open</button></div>` : ""}</div>`;
+  }
+
+  const sug = fix
+    ? `${i.type === "compliance" ? "Suggested" : "Change to"}: <b class="seo-ct-fix">${esc(fix)}</b>${i.why ? ` · ${esc(i.why)}` : ""}`
+    : `${i.why ? esc(i.why) + " · " : ""}No wording suggested yet: press Regenerate.`;
+  const rej = i.rejects.length ? `<div class="seo-note">Rejected before: ${i.rejects.slice(-2).map((r) =>
+    `“${esc(r.text)}” (${esc(r.reason)}${r.byName ? `, ${esc(r.byName)}` : ""})`).join(" · ")}</div>` : "";
+  const opts = (f.opts || []).length ? `<div class="seo-ct-opts"><div class="seo-note">Pick the wording to use:</div>
+    ${f.opts.map((o, n) => `<button type="button" class="seo-ct-opt${fix === o.text ? " is-on" : ""}${(o.flags || []).length ? " is-flag" : ""}"
+        data-ch-pick="${esc(i.id)}|${n}"><span>${esc(o.text)}</span>${o.why ? `<small>${esc(o.why)}</small>` : ""}${
+        (o.flags || []).map((x) => `<small class="seo-ct-flagt">⚠ ${esc(x)}</small>`).join("")}</button>`).join("")}
+    ${i.fix ? `<button type="button" class="seo-ct-opt${fix === i.fix ? " is-on" : ""}" data-ch-pick="${esc(i.id)}|orig">
+      <span>${esc(i.fix)}</span><small>The first suggestion</small></button>` : ""}</div>` : "";
+  const rejForm = f.reject ? `<div class="seo-ct-rej">
+    <label class="seo-note" style="display:block">Why are you rejecting it? (Claude is told, so it learns)
+      <textarea class="seo-input" rows="2" maxlength="300" data-ch-why placeholder="e.g. we always write skin care as two words"></textarea></label>
+    ${[["keep", "Keep it on the list, just not this suggestion"], ["here", "Ignore it on this page"],
+      ["everywhere", isWord ? `Never flag “${esc(i.text)}” again (adds it to your words)` : "Never flag this again, on any page"]]
+      .map(([v, l]) => `<label class="seo-check"><input type="radio" name="sc_${esc(i.id)}" value="${v}"${v === "here" ? " checked" : ""}> ${l}</label>`).join("")}
+    <div class="seo-w-acts"><button class="seo-btn on" type="button" data-ch-rejok="${esc(i.id)}"${f.busy ? " disabled" : ""}>${
+      f.busy === "reject" ? "Saving…" : "Reject"}</button>
+      <button class="seo-btn" type="button" data-ch-rejno="${esc(i.id)}">Cancel</button></div></div>` : "";
+
+  const acts = canFix ? `
+      <button class="seo-btn on" type="button" data-ch-accept="${esc(i.id)}"${!fix || f.busy ? " disabled" : ""}
+        title="${fix ? "Change it on the live website now" : "Press Regenerate for wording to use"}">${f.busy === "accept" ? "Updating the website…" : "✓ Accept change"}</button>
+      <button class="seo-btn" type="button" data-ch-rej="${esc(i.id)}"${f.busy ? " disabled" : ""}>✕ Reject</button>
+      <button class="seo-btn" type="button" data-ch-regen="${esc(i.id)}"${f.busy ? " disabled" : ""}>${
+        f.busy === "regen" ? "Writing options…" : "↻ Regenerate"}</button>`
+    : canWork ? `<button class="seo-btn" type="button" data-ch-ign="${esc(i.id)}">Ignore</button>` : "";
+
+  return `<div class="seo-ct-row">${head}
+    <div class="seo-note">${sug}</div>${rej}${opts}
+    <div class="seo-w-acts">${acts}
+      ${isWord && canManage && !canFix ? `<button class="seo-btn" type="button" data-ch-word="${esc(i.text)}">Add to my words</button>` : ""}
+    </div>${rejForm}${errBox}</div>`;
+}
+
 
 function dupsHtml(c, list, canWork) {
   if (!list.length) return `<div class="seo-empty">No pages that say nearly the same thing, among the pages compared so far.</div>`;
@@ -292,11 +371,14 @@ function freshHtml(c, list) {
 /* ---------- clicks (called by seo-health.js) ---------- */
 
 export async function contentClick(e, c, ui, redraw) {
-  const t = e.target.closest("[data-ch-cat],[data-ch-ign],[data-ch-undo],[data-ch-word],[data-ch-showign]");
+  const t = e.target.closest("[data-ch-cat],[data-ch-ign],[data-ch-undo],[data-ch-word],[data-ch-showign]," +
+    "[data-ch-accept],[data-ch-rej],[data-ch-rejok],[data-ch-rejno],[data-ch-regen],[data-ch-pick],[data-ch-fundo]");
   if (!t) return false;
   const d = t.dataset, w = c.work, H = w.health;
   if (d.chCat) { ui.ccat = d.chCat; ui.cign = false; redraw(); return true; }
   if (d.chShowign !== undefined) { ui.cign = !ui.cign; redraw(); return true; }
+  const fxId = d.chAccept || d.chRej || d.chRejok || d.chRejno || d.chRegen || d.chFundo || (d.chPick ? d.chPick.split("|")[0] : "");
+  if (fxId) { await fixClick(t, d, fxId, c, redraw); return true; }
 
   if (d.chWord) {
     const word = d.chWord.toLowerCase().slice(0, 40);
@@ -345,7 +427,86 @@ export async function contentClick(e, c, ui, redraw) {
   } catch (err) { t.disabled = false; toast(/permission/i.test(err.message || "") ? "You don't have permission to do that." : err.message, true); }
   return true;
 }
+/* ---------- Accept, Reject, Regenerate, Undo (Apps Script: wordpress → fixApply / fixReject / fixRegen / fixUndo) ---------- */
 
+async function fixClick(t, d, id, c, redraw) {
+  const w = c.work, H = w.health;
+  H.status = H.status || {};
+  const item = Object.values(H?.content?.deep || {}).flatMap((x) => contentIssues(w, x.path)).find((i) => i.id === id);
+  if (!item) return;
+  const f = FX.get(id) || {};
+  FX.set(id, f);
+  const base = { issueId: id, path: item.path, text: item.text, type: item.type };
+  const fail = (err) => { f.err = fixErr(err); f.editUrl = err?.editUrl || ""; };
+  const fixNow = f.pick != null ? f.pick : item.fix || "";
+
+  if (d.chPick) {
+    const n = d.chPick.split("|")[1];
+    f.pick = n === "orig" ? item.fix : (f.opts || [])[Number(n)]?.text ?? f.pick;
+    f.err = "";
+    redraw();
+    return;
+  }
+  if (d.chRej) { f.reject = !f.reject; f.err = ""; redraw(); return; }
+  if (d.chRejno) { f.reject = false; redraw(); return; }
+
+  if (d.chAccept) {
+    if (!fixNow) return;
+    const many = item.type === "spelling" || item.type === "au";
+    if (!confirm(`Change “${item.text}” to “${fixNow}” on the live website now?${many ? "\n\nEvery place this spelling appears on the page is changed." : ""}`)) return;
+    f.busy = "accept"; f.err = ""; redraw();
+    try {
+      const r = await fixApi("fixApply", { ...base, fix: fixNow });
+      H.status[id] = r.rec;
+      FX.delete(id);
+      toast("Updated on the website ✓");
+    } catch (err) { fail(err); }
+    finally { f.busy = ""; redraw(); }
+    return;
+  }
+
+  if (d.chRegen) {
+    f.busy = "regen"; f.err = ""; redraw();
+    try {
+      const r = await fixApi("fixRegen", base);
+      f.opts = Array.isArray(r.options) ? r.options : [];
+      const firstOk = f.opts.find((o) => !(o.flags || []).length);
+      if (firstOk) f.pick = firstOk.text;
+      if (!f.opts.length) f.err = "No new wording came back. Try again.";
+    } catch (err) { fail(err); }
+    finally { f.busy = ""; redraw(); }
+    return;
+  }
+
+  if (d.chRejok) {
+    const box = t.closest(".seo-ct-rej");
+    const reason = String(box?.querySelector("[data-ch-why]")?.value || "").trim();
+    const scope = box?.querySelector('input[type="radio"]:checked')?.value || "here";
+    if (reason.length < 3) { f.err = "Add a short reason, so Claude knows not to suggest it again."; redraw(); return; }
+    f.busy = "reject"; f.err = ""; redraw();
+    try {
+      const r = await fixApi("fixReject", { ...base, reason, scope, fix: fixNow });
+      H.status[id] = r.rec;
+      if (r.settings) w.settings = { ...(w.settings || {}), ...r.settings };
+      FX.delete(id);
+      toast(scope === "keep" ? "Rejected. It stays on the list: press Regenerate for other wording."
+        : scope === "everywhere" ? "It won't be flagged again" : "Ignored on this page");
+    } catch (err) { fail(err); }
+    finally { f.busy = ""; redraw(); }
+    return;
+  }
+
+  if (d.chFundo) {
+    if (!confirm("Put the old wording back on the live website?")) return;
+    f.busy = "undo"; f.err = ""; redraw();
+    try {
+      const r = await fixApi("fixUndo", { issueId: id });
+      H.status[id] = r.rec;
+      toast("Put back");
+    } catch (err) { fail(err); }
+    finally { f.busy = ""; redraw(); }
+  }
+}
 /* ---------- styles ---------- */
 
 const CSS = `
@@ -368,6 +529,21 @@ const CSS = `
 .seo-ct-forms{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px}
 .seo-ct-forms .seo-pr-pill{cursor:help}
 .seo-ct-forms em{font-style:normal;opacity:.7;margin-left:2px}
+.seo-ct-row.is-fixed .seo-ct-q{opacity:.6}
+.seo-ct-done{margin:6px 0 0;padding:10px 12px;border-radius:8px;background:#f0fdf4;border:1px solid #bbf7d0;color:#166534;font-size:13px}
+.seo-ct-done .seo-w-acts a.seo-btn{text-decoration:none}
+.seo-ct-err{margin:6px 0 0;padding:8px 10px;border-radius:8px;background:#fef2f2;border:1px solid #fecaca;color:#991b1b;font-size:13px}
+.seo-ct-opts{display:grid;gap:6px;margin:8px 0 0}
+.seo-ct-opt{display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:8px 10px;border:1px solid var(--border,#e5e7eb);border-radius:8px;
+  background:var(--card,#fff);font:inherit;font-size:13px;text-align:left;cursor:pointer;color:inherit}
+.seo-ct-opt:hover{border-color:#93c5fd}
+.seo-ct-opt.is-on{border-color:#16a34a;background:#f0fdf4;box-shadow:0 0 0 1px #16a34a}
+.seo-ct-opt.is-flag{border-color:#fcd34d}
+.seo-ct-opt small{font-size:11.5px;color:var(--text-muted,#6b7280)}
+.seo-ct-opt small.seo-ct-flagt{color:#b45309}
+.seo-ct-rej{margin:8px 0 0;padding:10px 12px;border:1px solid var(--border,#e5e7eb);border-radius:8px;background:#f8fafc}
+.seo-ct-rej textarea{display:block;width:100%;min-width:0;margin:4px 0 6px;box-sizing:border-box;resize:vertical}
+.seo-ct-rej .seo-check{margin:2px 0}
 
 @media (max-width:640px){.seo-ct-pair{grid-template-columns:1fr}}
 `;

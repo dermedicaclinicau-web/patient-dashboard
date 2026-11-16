@@ -2,7 +2,7 @@
 // Reads seo_state/health, seo_health (current build) and seo_issues (what staff have ignored).
 
 import { db, auth } from "./firebase-config.js";
-import { contentHtml, contentClick } from "./seo-content.js?v=1";
+import { contentHtml, contentClick } from "./seo-content.js?v=3";
 import {
   doc, getDoc, setDoc, collection, query, where, getDocs, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -205,9 +205,10 @@ export async function loadHealth() {
       .catch((e) => console.warn("SEO issue statuses not read:", e)),
     getDoc(doc(db, "seo_state", "content")).then(async (x) => {   // Site health → Content (Seo9.gs)
       if (!x.exists()) return;
-      const [dp, du] = await Promise.all([getDoc(doc(db, "seo_content", "deep")), getDoc(doc(db, "seo_content", "dups"))]);
+      const [dp, du, cs] = await Promise.all([getDoc(doc(db, "seo_content", "deep")), getDoc(doc(db, "seo_content", "dups")),
+        getDoc(doc(db, "seo_content", "consist"))]);
       const j = (d, def) => { try { return d.exists() && d.data().json ? JSON.parse(d.data().json) : def; } catch { return def; } };
-      out.content = { state: x.data(), deep: j(dp, {}), dups: j(du, []) };
+      out.content = { state: x.data(), deep: j(dp, {}), dups: j(du, []), consist: j(cs, []) };
     }).catch((e) => console.warn("SEO content checks not read:", e)),
     getDoc(doc(db, "seo_index", "main")).then((x) => {
       if (!x.exists()) return;

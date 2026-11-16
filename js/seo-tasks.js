@@ -13,7 +13,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { npath, pageStory, priorityOf, prioritySettings, titleOf, complianceWords, renderOppsInto, taskConfig, pageOf, makeSortable,
   clusterOfMain, linkState, redirectState }   from "./seo-work.js?v=17";
-import { contentIssues } from "./seo-content.js?v=2";
+import { contentIssues } from "./seo-content.js?v=3";
 
 const GROUPS = {
   basics:  { order: 0, factor: 1,   title: () => "Fix what's holding it back" },
@@ -153,7 +153,7 @@ function planTasks(c, path) {
   }
 
   /* Spelling, grammar and advertising wording (Site health → Content), and FAQs */
-  for (const i of contentIssues(w, path).filter((x) => !x.ignored).slice(0, 10)) {
+  for (const i of contentIssues(w, path).filter((x) => !x.ignored && !x.fixed).slice(0, 10)) {
     const lab = { spelling: "Spelling", grammar: "Grammar", au: "Australian English", consistency: "Make it consistent" }[i.type];
     add("quality", "q:" + i.id, i.type === "compliance" ? `Reword “${i.text}” (advertising rules)` : `${lab}: change “${i.text}” to “${i.fix}”`, "Quick",
       { k: "absent", ...pg, word: String(i.ph || i.text).toLowerCase() },

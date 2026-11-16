@@ -5,7 +5,7 @@ import { db, auth } from "./firebase-config.js";
 import {
   doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, collection, query, where, getDocs, serverTimestamp, writeBatch,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { loadHealth, viewHealth, healthPanelHtml } from "./seo-health.js?v=3";
+import { loadHealth, viewHealth, healthPanelHtml } from "./seo-health.js?v=4";
 import { loadAudience, viewAudience } from "./seo-audience.js";
 
 const BRAND = "__brand", OTHER = "__other", ALL = "__all", PRI = "__priority";
