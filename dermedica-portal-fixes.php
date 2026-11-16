@@ -12,7 +12,8 @@ const DPCFIX_LOG = '_dpc_fix_log';
 const DPCFIX_SKIP_KEY = '/(^_|url|link|image|icon|^id$|css|class|colou?r|font|size|width|height|align|position|animation|motion|background|border|padding|margin|gap|style|tag$|type$|layout|view|selected|^source$|anchor|lightbox|video|embed|shortcode|^template)/i';
 
 add_action('rest_api_init', function () {
-  foreach (['find' => 'dpcfix_find', 'replace' => 'dpcfix_replace', 'undo' => 'dpcfix_undo', 'faq' => 'dpcfix_faq'] as $r => $cb) {
+  foreach (['find' => 'dpcfix_find', 'replace' => 'dpcfix_replace', 'undo' => 'dpcfix_undo', 'faq' => 'dpcfix_faq',
+    'insert' => 'dpcfix_insert'] as $r => $cb) {
     register_rest_route(DPCFIX_NS, '/fix/' . $r, ['methods' => 'POST', 'callback' => $cb, 'permission_callback' => 'dpcfix_auth']);
   }
 });
@@ -274,7 +275,21 @@ function dpcfix_undo(WP_REST_Request $req) {
   foreach ($log as $i => $e) {
     if (($e['fid'] ?? '') !== $fid) continue;
     if (!empty($e['undone'])) return dpcfix_no('done', 'Already undone.');
-    if ($e['where'] === 'faq') {
+    if ($e['where'] === 'insert') {
+      if ($e['kind'] === 'el') {
+        if (md5((string) get_post_meta($id, '_elementor_data', true)) !== $e['after_hash']) return dpcfix_no('changed', 'Edited since.');
+        update_post_meta($id, '_elementor_data', wp_slash($e['before']));
+        delete_post_meta($id, '_elementor_element_cache');
+      } else {
+        $p = get_post($id);
+        if (!$p || md5($p->post_content) !== $e['after_hash']) return dpcfix_no('changed', 'Edited since.');
+        $r = dpcfix_save_content($id, $e['before']);
+        if (is_wp_error($r)) return dpcfix_no('save', $r->get_error_message());
+      }
+      if (array_key_exists('faq_before', $e)) {
+        if (!empty($e['faq_before'])) update_post_meta($id, '_dpc_faq', wp_slash($e['faq_before'])); else delete_post_meta($id, '_dpc_faq');
+      }
+    } elseif ($e['where'] === 'faq') {
       $cur = get_post_meta($id, '_dpc_faq', true);
       if (md5(wp_json_encode(is_array($cur) ? $cur : [])) !== $e['after_hash']) return dpcfix_no('changed', 'Edited since.');
       if (!empty($e['before'])) update_post_meta($id, '_dpc_faq', wp_slash($e['before'])); else delete_post_meta($id, '_dpc_faq');
@@ -334,3 +349,134 @@ add_action('wp_head', function () {
     . wp_json_encode(['@context' => 'https://schema.org', '@type' => 'FAQPage', 'mainEntity' => $items], JSON_UNESCAPED_UNICODE)
     . "</script>\n";
 }, 30);
+
+/* ---------- Adding a section: an FAQ, or the "medically reviewed by" line ---------- */
+
+// The new section as HTML, or as WordPress blocks. parts: [{ t: h2 | h3 | p | note, x: text }]
+function dpcfix_parts_html($parts, $blocks) {
+  $out = '';
+  foreach ($parts as $p) {
+    $t = (string) ($p['t'] ?? '');
+    $x = esc_html(mb_substr(trim((string) ($p['x'] ?? '')), 0, 1500));
+    if ($x === '') continue;
+    if ($t === 'h2' || $t === 'h3') {
+      $lv = $t === 'h2' ? 2 : 3;
+      $h = '<h' . $lv . ($blocks ? ' class="wp-block-heading"' : '') . '>' . $x . '</h' . $lv . '>';
+      $out .= $blocks ? '<!-- wp:heading' . ($lv === 3 ? ' {"level":3}' : '') . " -->\n" . $h . "\n<!-- /wp:heading -->\n\n" : $h . "\n";
+    } else {
+      $note = $t === 'note';
+      $pp = '<p' . ($note ? ' class="dpc-reviewed"' : '') . '>' . ($note ? '<em>' . $x . '</em>' : $x) . '</p>';
+      $out .= $blocks ? ($note ? '<!-- wp:paragraph {"className":"dpc-reviewed"} -->' : '<!-- wp:paragraph -->') . "\n" . $pp . "\n<!-- /wp:paragraph -->\n\n" : $pp . "\n";
+    }
+  }
+  return $out;
+}
+
+// Normal pages: before a heading, after the main heading (top), or at the end. null when the heading isn't there.
+function dpcfix_insert_content($content, $where, $html) {
+  if ($where === 'end') return rtrim($content) . "\n\n" . $html;
+  preg_match_all('/(?:<!--\s*wp:heading\b[^>]*-->\s*)?<h([1-6])\b[^>]*>(.*?)<\/h\1\s*>/is', $content, $m, PREG_OFFSET_CAPTURE | PREG_SET_ORDER);
+  if ($where === 'top') {
+    foreach ($m as $x) {
+      if ($x[1][0] !== '1') continue;
+      $pos = $x[0][1] + strlen($x[0][0]);
+      if (preg_match('/^\s*<!--\s*\/wp:heading\s*-->/', substr($content, $pos), $mm)) $pos += strlen($mm[0]);
+      return substr($content, 0, $pos) . "\n\n" . $html . substr($content, $pos);
+    }
+    return $html . "\n" . $content;   // the main heading comes from the theme: start of the page's content
+  }
+  if (strpos($where, 'before:') === 0) {
+    $want = dpcfix_needle(substr($where, 7));
+    foreach ($m as $x) {
+      if (trim(dpcfix_index($x[2][0])[0]) === $want) return substr($content, 0, $x[0][1]) . $html . "\n" . substr($content, $x[0][1]);
+    }
+  }
+  return null;
+}
+
+// Elementor: a new text block before a heading, after the main heading (top), or after the last block (end)
+function dpcfix_insert_el(&$data, $where, $html) {
+  $want = strpos($where, 'before:') === 0 ? dpcfix_needle(substr($where, 7)) : '';
+  $found = null; $first = null; $last = null;
+  $walk = function ($els, $path) use (&$walk, &$found, &$first, &$last, $where, $want) {
+    foreach ($els as $i => $el) {
+      if ($found) return;
+      if (!is_array($el)) continue;
+      if (($el['elType'] ?? '') === 'widget') {
+        if (!$first) $first = [$path, $i];
+        $last = [$path, $i];
+        $s = is_array($el['settings'] ?? null) ? $el['settings'] : [];
+        $type = (string) ($el['widgetType'] ?? '');
+        $ed = isset($s['editor']) && is_string($s['editor']) ? $s['editor'] : '';
+        if ($where === 'top') {
+          if (($type === 'heading' && ($s['header_size'] ?? '') === 'h1') || $type === 'theme-post-title' || preg_match('/<h1\b/i', $ed)) {
+            $found = ['after', $path, $i]; return;
+          }
+        } elseif ($want !== '') {
+          if ($type === 'heading' && trim(dpcfix_index((string) ($s['title'] ?? ''))[0]) === $want) { $found = ['before', $path, $i]; return; }
+          if ($ed !== '' && preg_match_all('/<h([1-6])\b[^>]*>(.*?)<\/h\1\s*>/is', $ed, $mm, PREG_OFFSET_CAPTURE | PREG_SET_ORDER)) {
+            foreach ($mm as $x) {
+              if (trim(dpcfix_index($x[2][0])[0]) === $want) { $found = ['inside', $path, $i, $x[0][1]]; return; }
+            }
+          }
+        }
+      }
+      if (!empty($el['elements']) && is_array($el['elements'])) $walk($el['elements'], array_merge($path, [$i, 'elements']));
+    }
+  };
+  $walk($data, []);
+  if (!$found && $where === 'end' && $last) $found = ['after', $last[0], $last[1]];
+  if (!$found && $where === 'top' && $first) $found = ['before', $first[0], $first[1]];
+  if (!$found || !$found[1]) return false;
+  if ($found[0] === 'inside') {   // the heading is inside a text block: put it straight before the heading
+    $ed = &dpcfix_ref($data, array_merge($found[1], [$found[2], 'settings', 'editor']));
+    $ed = substr($ed, 0, $found[3]) . $html . substr($ed, $found[3]);
+    unset($ed);
+    return true;
+  }
+  $widget = ['id' => substr(md5(uniqid('', true)), 0, 7), 'elType' => 'widget', 'widgetType' => 'text-editor',
+    'settings' => ['editor' => $html], 'elements' => [], 'isInner' => false];
+  $arr = &dpcfix_ref($data, $found[1]);
+  array_splice($arr, $found[0] === 'after' ? $found[2] + 1 : $found[2], 0, [$widget]);
+  unset($arr);
+  return true;
+}
+
+function dpcfix_insert(WP_REST_Request $req) {
+  $b = $req->get_json_params() ?: [];
+  $id = (int) ($b['id'] ?? 0);
+  $fid = preg_replace('/[^a-z0-9_-]/i', '', (string) ($b['fid'] ?? ''));
+  $where = mb_substr((string) ($b['where'] ?? 'end'), 0, 200);
+  $parts = array_slice((array) ($b['parts'] ?? []), 0, 40);
+  if (!$id || !get_post($id) || !$fid || !$parts) return dpcfix_no('bad', 'Nothing to add.');
+  $entry = ['fid' => $fid, 'at' => time(), 'where' => 'insert'];
+  if (get_post_meta($id, '_elementor_edit_mode', true) === 'builder') {
+    $raw = (string) get_post_meta($id, '_elementor_data', true);
+    $data = json_decode($raw, true);
+    if (!is_array($data)) return dpcfix_no('bad', "The page's Elementor content couldn't be read.");
+    if (!dpcfix_insert_el($data, $where, dpcfix_parts_html($parts, false))) return dpcfix_no('not_found', 'That place was not found.');
+    dpcfix_save_elementor($id, $data);
+    $entry += ['kind' => 'el', 'before' => $raw, 'after_hash' => md5((string) get_post_meta($id, '_elementor_data', true))];
+  } else {
+    $content = (string) get_post($id)->post_content;
+    $new = dpcfix_insert_content($content, $where, dpcfix_parts_html($parts, strpos($content, '<!-- wp:') !== false));
+    if ($new === null) return dpcfix_no('not_found', 'That place was not found.');
+    $r = dpcfix_save_content($id, $new);
+    if (is_wp_error($r)) return dpcfix_no('save', $r->get_error_message());
+    $entry += ['kind' => 'content', 'before' => $content, 'after_hash' => md5(get_post($id)->post_content)];
+  }
+  if (!empty($b['faqs']) && is_array($b['faqs'])) {   // the FAQ schema, with the section
+    $clean = [];
+    foreach ($b['faqs'] as $x) {
+      $q = trim(wp_strip_all_tags((string) ($x['q'] ?? '')));
+      $a = trim(wp_strip_all_tags((string) ($x['a'] ?? '')));
+      if ($q !== '' && $a !== '') $clean[] = ['q' => mb_substr($q, 0, 300), 'a' => mb_substr($a, 0, 1500)];
+    }
+    $old = get_post_meta($id, '_dpc_faq', true);
+    $entry['faq_before'] = is_array($old) ? $old : [];
+    if ($clean) update_post_meta($id, '_dpc_faq', wp_slash(array_slice($clean, 0, 20)));
+  }
+  dpcfix_log($id, $entry);
+  dpcfix_purge($id);
+  return ['ok' => true, 'link' => get_permalink($id)];
+}
