@@ -13,7 +13,8 @@ const DPCFIX_SKIP_KEY = '/(^_|url|link|image|icon|^id$|css|class|colou?r|font|si
 
 add_action('rest_api_init', function () {
   foreach (['find' => 'dpcfix_find', 'replace' => 'dpcfix_replace', 'undo' => 'dpcfix_undo', 'faq' => 'dpcfix_faq',
-    'insert' => 'dpcfix_insert', 'link' => 'dpcfix_link', 'alt' => 'dpcfix_alt', 'seo' => 'dpcfix_seo'] as $r => $cb) {
+    'insert' => 'dpcfix_insert', 'link' => 'dpcfix_link', 'alt' => 'dpcfix_alt', 'seo' => 'dpcfix_seo',
+    'href' => 'dpcfix_href', 'h1' => 'dpcfix_h1'] as $r => $cb) {
     register_rest_route(DPCFIX_NS, '/fix/' . $r, ['methods' => 'POST', 'callback' => $cb, 'permission_callback' => 'dpcfix_auth']);
   }
 });
@@ -684,4 +685,165 @@ function dpcfix_seo(WP_REST_Request $req) {
   dpcfix_log($id, ['fid' => $fid, 'at' => time(), 'where' => 'seo', 'field' => $field, 'before' => (string) $before, 'after' => $val]);
   dpcfix_purge($id);
   return ['ok' => true, 'via' => $via, 'before' => (string) $before, 'link' => get_permalink($id)];
+}
+
+/* ---------- Links: point them somewhere else, or remove them and keep the words ---------- */
+
+// A link on this website → its path ("/laser-hair-removal"), or null for other websites, mailto: and the like
+function dpcfix_nurl($u) {
+  $u = trim(html_entity_decode((string) $u, ENT_QUOTES));
+  if (preg_match('#^(?:https?:)?//([^/?\#]+)#i', $u, $m)) {
+    $home = preg_replace('/^www\./i', '', strtolower((string) parse_url(home_url(), PHP_URL_HOST)));
+    if (preg_replace('/^www\./i', '', strtolower($m[1])) !== $home) return null;
+    $u = substr($u, strlen($m[0]));
+  } elseif ($u === '' || $u[0] !== '/') {
+    return null;
+  }
+  $u = rtrim(strtolower(preg_replace('/[?#].*$/', '', $u)), '/');
+  return $u === '' ? '/' : $u;
+}
+
+// <a href="from">words</a> → <a href="to">words</a>, or just "words" when to is ''
+function dpcfix_href_html($html, $map, &$n) {
+  return preg_replace_callback('/<a\b([^>]*)>([\s\S]*?)<\/a\s*>/i', function ($m) use ($map, &$n) {
+    if (!preg_match('/\shref\s*=\s*(["\'])(.*?)\1/i', $m[1], $h)) return $m[0];
+    $k = dpcfix_nurl($h[2]);
+    if ($k === null || !array_key_exists($k, $map)) return $m[0];
+    $n[$k] = ($n[$k] ?? 0) + 1;
+    if ($map[$k] === '') return $m[2];
+    return '<a' . str_replace($h[0], ' href=' . $h[1] . esc_url($map[$k]) . $h[1], $m[1]) . '>' . $m[2] . '</a>';
+  }, $html);
+}
+
+// Elementor: link settings ("url") and text that contains links
+function dpcfix_href_el(&$node, $path, $map, &$n, &$changes, &$skip) {
+  if (!is_array($node)) return;
+  foreach ($node as $k => &$v) {
+    $p = array_merge($path, [$k]);
+    if (is_array($v)) { dpcfix_href_el($v, $p, $map, $n, $changes, $skip); continue; }
+    if (!is_string($v) || $v === '') continue;
+    if ($k === 'url') {
+      $key = dpcfix_nurl($v);
+      if ($key === null || !array_key_exists($key, $map)) continue;
+      if ($map[$key] === '') { $skip[$key] = ($skip[$key] ?? 0) + 1; continue; }   // a button can't lose its link
+      $changes[] = ['path' => $p, 'before' => $v, 'after' => $map[$key]];
+      $v = $map[$key];
+      $n[$key] = ($n[$key] ?? 0) + 1;
+    } elseif (stripos($v, '<a') !== false) {
+      $nv = dpcfix_href_html($v, $map, $n);
+      if ($nv !== $v) { $changes[] = ['path' => $p, 'before' => $v, 'after' => $nv]; $v = $nv; }
+    }
+  }
+  unset($v);
+}
+
+function dpcfix_href(WP_REST_Request $req) {
+  $b = $req->get_json_params() ?: [];
+  $id = (int) ($b['id'] ?? 0);
+  $fid = preg_replace('/[^a-z0-9_-]/i', '', (string) ($b['fid'] ?? ''));
+  if (!$id || !get_post($id) || !$fid) return dpcfix_no('bad', 'Nothing to change.');
+  $map = [];
+  foreach (array_slice((array) ($b['items'] ?? []), 0, 40) as $x) {
+    $k = dpcfix_nurl($x['from'] ?? '');
+    if ($k === null) continue;
+    $to = trim((string) ($x['to'] ?? ''));
+    $map[$k] = $to === '' ? '' : esc_url_raw($to);
+  }
+  if (!$map) return dpcfix_no('bad', 'No links to change.');
+  $n = []; $skip = []; $changes = [];
+  $entry = ['fid' => $fid, 'at' => time(), 'find' => '(links)', 'replace' => '(links)'];
+  $raw = get_post_meta($id, '_elementor_data', true);
+  $data = $raw ? json_decode((string) $raw, true) : null;
+  if (is_array($data) && $data) {
+    dpcfix_href_el($data, [], $map, $n, $changes, $skip);
+    if ($changes) { dpcfix_save_elementor($id, $data); $entry['where'] = 'elementor'; $entry['changes'] = $changes; }
+  } else {
+    $p = get_post($id);
+    $new = dpcfix_href_html($p->post_content, $map, $n);
+    if ($new !== $p->post_content) {
+      $r = dpcfix_save_content($id, $new);
+      if (is_wp_error($r)) return dpcfix_no('save', $r->get_error_message());
+      $entry['where'] = 'content';
+      $entry['before'] = $p->post_content;
+      $entry['after_hash'] = md5(get_post($id)->post_content);
+    }
+  }
+  if (empty($entry['where'])) {
+    return dpcfix_no('not_found', $skip ? 'These are buttons: change their link in Elementor.' : "These links aren't in the page's own content. They may be in the menu, footer or a template.");
+  }
+  dpcfix_log($id, $entry);
+  dpcfix_purge($id);
+  return ['ok' => true, 'counts' => $n, 'skipped' => $skip, 'link' => get_permalink($id)];
+}
+
+/* ---------- Main headings: extra H1s become H2s ---------- */
+
+function dpcfix_h1_html($html, &$seen, $keep, $apply, &$texts) {
+  return preg_replace_callback('/(<!--\s*wp:heading\s*(\{[^}]*\})?\s*-->\s*)?<h1\b([^>]*)>([\s\S]*?)<\/h1\s*>/i',
+    function ($m) use (&$seen, $keep, $apply, &$texts) {
+      $seen++;
+      $texts[] = trim(wp_strip_all_tags($m[4]));
+      if (!$apply || $seen <= $keep) return $m[0];
+      $c = $m[1] !== '' ? preg_replace('/"level"\s*:\s*1\b/', '"level":2', $m[1]) : '';   // the block editor's note, so it stays valid
+      return $c . '<h2' . $m[3] . '>' . $m[4] . '</h2>';
+    }, $html);
+}
+
+// Elementor: Heading widgets set to H1, and text that contains <h1>. The theme's page title widget is left alone.
+function dpcfix_h1_el(&$node, $path, &$seen, $keep, $apply, &$changes, &$texts) {
+  if (!is_array($node)) return;
+  if (($node['widgetType'] ?? '') === 'heading' && strtolower((string) ($node['settings']['header_size'] ?? '')) === 'h1') {
+    $seen++;
+    $texts[] = trim(wp_strip_all_tags((string) ($node['settings']['title'] ?? '')));
+    if ($apply && $seen > $keep) {
+      $changes[] = ['path' => array_merge($path, ['settings', 'header_size']), 'before' => $node['settings']['header_size'], 'after' => 'h2'];
+      $node['settings']['header_size'] = 'h2';
+    }
+  }
+  foreach ($node as $k => &$v) {
+    $p = array_merge($path, [$k]);
+    if (is_array($v)) { dpcfix_h1_el($v, $p, $seen, $keep, $apply, $changes, $texts); continue; }
+    if (is_string($v) && stripos($v, '<h1') !== false) {
+      $nv = dpcfix_h1_html($v, $seen, $keep, $apply, $texts);
+      if ($apply && $nv !== $v) { $changes[] = ['path' => $p, 'before' => $v, 'after' => $nv]; $v = $nv; }
+    }
+  }
+  unset($v);
+}
+
+// dry: count the H1s in the page's own content. Otherwise keep the first "keep" (0 or 1) and change the rest.
+function dpcfix_h1(WP_REST_Request $req) {
+  $b = $req->get_json_params() ?: [];
+  $id = (int) ($b['id'] ?? 0);
+  $dry = !empty($b['dry']);
+  $fid = preg_replace('/[^a-z0-9_-]/i', '', (string) ($b['fid'] ?? ''));
+  $keep = max(0, min(1, (int) ($b['keep'] ?? 1)));
+  if (!$id || !get_post($id) || (!$dry && !$fid)) return dpcfix_no('bad', 'Nothing to change.');
+  $seen = 0; $changes = []; $texts = [];
+  $raw = get_post_meta($id, '_elementor_data', true);
+  $data = $raw ? json_decode((string) $raw, true) : null;
+  $isEl = is_array($data) && $data;
+  $p = get_post($id);
+  $new = '';
+  if ($isEl) dpcfix_h1_el($data, [], $seen, $keep, !$dry, $changes, $texts);
+  else $new = dpcfix_h1_html($p->post_content, $seen, $keep, !$dry, $texts);
+  if ($dry) return ['ok' => true, 'count' => $seen, 'texts' => array_slice($texts, 0, 12)];
+  if ($seen <= $keep) return dpcfix_no('same', 'Nothing to change.');
+  $entry = ['fid' => $fid, 'at' => time(), 'find' => '(h1)', 'replace' => '(h2)'];
+  if ($isEl) {
+    if (!$changes) return dpcfix_no('same', 'Nothing to change.');
+    dpcfix_save_elementor($id, $data);
+    $entry['where'] = 'elementor';
+    $entry['changes'] = $changes;
+  } else {
+    if ($new === $p->post_content) return dpcfix_no('same', 'Nothing to change.');
+    $r = dpcfix_save_content($id, $new);
+    if (is_wp_error($r)) return dpcfix_no('save', $r->get_error_message());
+    $entry['where'] = 'content';
+    $entry['before'] = $p->post_content;
+    $entry['after_hash'] = md5(get_post($id)->post_content);
+  }
+  dpcfix_log($id, $entry);
+  dpcfix_purge($id);
+  return ['ok' => true, 'changed' => $seen - $keep, 'link' => get_permalink($id)];
 }

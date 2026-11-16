@@ -2,7 +2,7 @@
 // Reads seo_state/health, seo_health (current build) and seo_issues (what staff have ignored).
 
 import { db, auth } from "./firebase-config.js";
-import { contentHtml, contentClick, recheckPages } from "./seo-content.js?v=5";
+import { contentHtml, contentClick, recheckPages, altBody, fixApi, fixErr, askConfirm, injectCss as fxCss } from "./seo-content.js?v=12";
 import {
   doc, getDoc, setDoc, collection, query, where, getDocs, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -68,7 +68,24 @@ const chipB = (r, n) => (r == null || n < 10 ? '<span class="seo-note">—</span
 const FIX = { no_title: "title", title_long: "title", title_short: "title", dup_title: "title",
   no_desc: "desc", desc_long: "desc", desc_short: "desc", dup_desc: "desc" };
 const fixBtn = (path, what, target = "") =>
-  `<button class="seo-btn seo-fixit" type="button" data-wsfix="${esc(`${path}|${what}|${target}`)}" title="Open the page with a suggestion written">✨ Fix it</button>`;
+  `<button class="seo-btn" type="button" data-wsfix="${esc(`${path}|${what}|${target}`)}" title="Open the page's SEO settings">Open in the Website tab</button>`;
+
+// One-click fixes on the Issues tab: state per issue while the page is open { opts, pick, text, now, items, h1, busy, err }
+const HX = new Map();
+const META = { no_title: "title", title_long: "title", title_short: "title", dup_title: "title",
+  no_desc: "desc", desc_long: "desc", desc_short: "desc", dup_desc: "desc" };
+const LIM = { title: [30, 60], desc: [120, 155] };
+const spinH = '<span class="seo-fx-spin" aria-hidden="true"></span>';
+// 🧭 Fix with the Advisor: which problems, and the question it starts with
+const ADVK = { cwv_lcp: "speed", cwv_inp: "speed", cwv_cls: "speed", score: "speed", noindex: "index", canonical: "index", no_canonical: "index",
+  g_not_indexed: "index", g_blocked: "index", g_fetch: "index", g_canonical: "index", g_stale: "index", g_robots: "index" };
+const ADVQ = {
+  speed: (p) => `The page ${p} is slow on phones. What's slowing it down, and what exactly should we change to make it faster?`,
+  bounce: (p) => `Too many visitors from Google leave ${p} straight away. Why, and what should we change at the top of the page, in the title and in the description so it matches what they searched for?`,
+  index: (p) => `Google isn't showing ${p} properly in search. What's the cause, and what should we change to fix it?`,
+};
+const advBtn = (path, kind, show) => (show
+  ? `<button class="seo-btn seo-h-adv" type="button" data-h-adv="${esc(path)}|${kind}" title="Opens the Advisor with this page and problem filled in">🧭 Fix with the Advisor</button>` : "");
 
 // Priority pages (seo_settings/main.keyPages). Read here so this file doesn't import seo-work.js.
 const normP = (s) => String(s || "").split("#")[0].split("?")[0].replace(/\/+$/, "").toLowerCase() || "/";
@@ -276,6 +293,7 @@ export function viewHealth(wrap, c, ui) {
     return;
   }
   if (!ui.hview) Object.assign(ui, { hview: "content", hsev: "all", hgroup: "all", hstatus: "open" });
+  fxCss();   // the Accept / overlay styles, also when Issues is opened first
   const canWork = c.can("seo.work");
   const isPri = priOf(c);
   let byId = new Map();
@@ -319,14 +337,17 @@ export function viewHealth(wrap, c, ui) {
     const where = starMark(isPri(i.path)) + (pg ? `<button class="seo-w-link" data-open="${pg.id}">${esc(i.path)}</button>`
       : `<a class="seo-w-link" href="${esc(i.url)}" target="_blank" rel="noopener">${esc(i.path)}</a>`);
     const ignored = i.status === "ignored";
-    return `<div class="seo-h-issue is-${SEV[i.sev].tone}">
+    return `<div class="seo-h-issue is-${SEV[i.sev].tone}" data-hx-row>
       <div class="seo-h-ihead"><span class="seo-w-pill is-${SEV[i.sev].tone}">${SEV[i.sev].label}</span>
         <span class="seo-note">${esc(GROUPS[i.group] || i.group)}</span> · ${where}</div>
       <div><strong>${esc(i.msg)}</strong>${i.detail ? `<div class="seo-note seo-h-detail">${esc(i.detail)}</div>` : ""}</div>
       ${HELP[i.code] ? `<details class="seo-h-help"><summary>How to fix</summary><p>${esc(HELP[i.code])}</p></details>` : ""}
+      ${!ignored ? hxBody(i) : ""}
+      ${i.code === "alt" && i.path !== "Whole site" && !ignored && c.can("seo.fix") ? altBody(c, i.path) : ""}
       ${ignored ? `<p class="seo-note">Ignored by ${esc(i.st?.byName || "someone")}${i.st?.at ? " · " + esc(when(i.st.at)) : ""}${i.st?.note ? ": " + esc(i.st.note) : ""}</p>` : ""}
       ${(() => {
-        const fix = !ignored && FIX[i.code] && i.path !== "Whole site" && c.can("seo.pages") ? fixBtn(i.path, FIX[i.code]) : "";
+        const fix = (!ignored && FIX[i.code] && i.path !== "Whole site" && c.can("seo.pages") ? fixBtn(i.path, FIX[i.code]) : "")
+          + (!ignored && ADVK[i.code] && i.path !== "Whole site" ? advBtn(i.path, ADVK[i.code], true) : "");
         const acts = canWork ? (ignored
           ? `<button class="seo-btn" data-h-undo="${i.id}">Back to open</button>`
           : `<button class="seo-btn" data-h-log="${i.id}">Log a fix</button><button class="seo-btn" data-h-ignore="${i.id}">Ignore</button>`) : "";
@@ -334,7 +355,213 @@ export function viewHealth(wrap, c, ui) {
       })()}
     </div>`;
   }
+  /* --- One-click fixes on the Issues tab --- */
+  const shortI = (u) => String(u || "").replace(/^https?:\/\/[^/]+/i, "") || "/";
+  function hxBody(i) {
+    if (i.path === "Whole site") return "";
+    const F = HX.get(i.id) || {};
+    const errBox = F.err ? `<div class="seo-fx-err"><span>⚠</span><div>${esc(F.err)}</div></div>` : "";
+    if (i.st?.status === "fixed" && i.st?.kind === "hx") return hxDone(i, i.st, F, errBox);
+    const field = META[i.code];
+    if (field) return c.can("seo.pages") ? metaBody(i, field, F, errBox) : "";
+    if (!c.can("seo.fix")) return "";
+    if (i.code === "redirect_links" || i.code === "broken_link") return linksBody(i, F, errBox);
+    if (i.code === "many_h1") return h1Body(i, F, errBox);
+    if (i.code === "alt") return altBody(c, i.path);
+    return "";
+  }
 
+  function metaBody(i, field, F, errBox) {
+    const name = field === "title" ? "title" : "meta description";
+    if (!F.opts) {
+      return `<div class="seo-fx-bar"><button class="seo-fx-b is-accept" type="button" data-hx-meta="${i.id}"${F.busy ? " disabled" : ""}>${
+        F.busy === "go" ? spinH + "Writing options… (about 15 seconds)" : `✨ Write a new ${name}`}</button></div>${errBox}`;
+    }
+    const L = LIM[field], pick = F.pick ?? 0;
+    return `<div class="seo-fx-opts">
+      ${F.now ? `<div class="seo-fx-col is-now"><div class="seo-fx-lab">Now · ${F.now.length} characters</div><div class="seo-fx-txt">${esc(F.now)}</div></div>` : ""}
+      <div class="seo-fx-lab" style="margin-top:6px">Choose the ${name}</div>
+      ${F.opts.map((o, n) => `<button type="button" class="seo-fx-opt${pick === n ? " is-on" : ""}${(o.flags || []).length ? " is-flag" : ""}" data-hx-pick="${i.id}|${n}" aria-pressed="${pick === n}">
+        <span class="seo-fx-radio"></span><span class="seo-fx-otxt"><b>${esc(o.text)}</b>
+        <small>${o.text.length} characters${o.text.length >= L[0] && o.text.length <= L[1] ? " ✓" : ` · best ${L[0]}–${L[1]}`}${o.why ? " · " + esc(o.why) : ""}</small>
+        ${(o.flags || []).map((f) => `<small class="seo-fx-flag">⚠ ${esc(f)}</small>`).join("")}</span></button>`).join("")}
+      <label class="seo-fx-lab" style="display:block;margin-top:8px">Or edit it
+        <input class="seo-input seo-hx-in" data-hx-text="${i.id}" value="${esc(F.text ?? "")}" maxlength="${field === "title" ? 70 : 170}"></label></div>
+    <div class="seo-fx-bar">
+      <button class="seo-fx-b is-accept" type="button" data-hx-metaok="${i.id}"${F.busy ? " disabled" : ""}>${F.busy === "apply" ? spinH + "Saving…" : "✓ Use it on the page"}</button>
+      <button class="seo-fx-b is-ghost" type="button" data-hx-meta="${i.id}"${F.busy ? " disabled" : ""}>${F.busy === "go" ? spinH + "Writing…" : "↻ More options"}</button>
+      <button class="seo-fx-b is-ghost" type="button" data-hx-cancel="${i.id}"${F.busy ? " disabled" : ""}>Cancel</button></div>${errBox}`;
+  }
+
+  function linksBody(i, F, errBox) {
+    const broken = i.code === "broken_link";
+    if (!F.items) {
+      return `<div class="seo-fx-bar"><button class="seo-fx-b is-accept" type="button" data-hx-links="${i.id}"${F.busy ? " disabled" : ""}>${
+        F.busy === "go" ? spinH + "Checking the links on the page…" : broken ? "🔧 Fix this link" : "🔧 Update the links"}</button></div>${errBox}`;
+    }
+    if (!F.items.length) {
+      return `<p class="seo-note" style="margin:8px 0 0">Nothing to change now: ${broken ? "the link works again" : "the links go straight to their pages"}, or ${
+        broken ? "it's" : "they're"} in the menu or footer. This issue clears at the next check.</p>
+        <div class="seo-fx-bar"><button class="seo-fx-b is-ghost" type="button" data-hx-cancel="${i.id}">Close</button></div>${errBox}`;
+    }
+    return `<div class="seo-fx-places">
+      <div class="seo-fx-lab">${broken ? "Where should the link go instead?" : `${plural(F.items.length, "link")} to update. The words stay the same.`}</div>
+      ${F.items.map((x, n) => `<div class="seo-fx-place"><span class="seo-fx-pn">${n + 1}</span>
+        <div class="seo-fx-txt"><del class="seo-fx-del">${esc(shortI(x.abs))}</del>${broken ? ` <span class="seo-note">(error ${x.code})</span>`
+          : ` → <ins class="seo-fx-ins">${esc(shortI(x.to))}</ins>`}</div>
+        ${broken ? `<select class="seo-input seo-hx-sel" data-hx-to="${n}" aria-label="Where the link goes">
+          ${(x.options || []).map((o) => `<option value="${esc(o.path)}"${x.choice === o.path ? " selected" : ""}>${esc(o.title || o.path)} (${esc(o.path)})</option>`).join("")}
+          <option value=""${x.choice === "" ? " selected" : ""}>Remove the link (keep the words)</option></select>` : ""}</div>`).join("")}
+      <div class="seo-fx-bar">
+        <button class="seo-fx-b is-accept" type="button" data-hx-linksok="${i.id}"${F.busy ? " disabled" : ""}>${F.busy === "apply" ? spinH + "Updating…" : "✓ Update on the page"}</button>
+        <button class="seo-fx-b is-ghost" type="button" data-hx-cancel="${i.id}"${F.busy ? " disabled" : ""}>Cancel</button></div></div>${errBox}`;
+  }
+
+  function h1Body(i, F, errBox) {
+    if (!F.h1) {
+      return `<div class="seo-fx-bar"><button class="seo-fx-b is-accept" type="button" data-hx-h1="${i.id}"${F.busy ? " disabled" : ""}>${
+        F.busy === "go" ? spinH + "Reading the page…" : "🔧 Fix the headings"}</button></div>${errBox}`;
+    }
+    const h = F.h1;
+    if (!h.convert.length) {
+      return `<p class="seo-note" style="margin:8px 0 0">The extra main headings aren't in the page's own content (they come from the theme or a template), so they can't be changed from here.</p>
+        <div class="seo-fx-bar"><button class="seo-fx-b is-ghost" type="button" data-hx-cancel="${i.id}">Close</button></div>${errBox}`;
+    }
+    return `<div class="seo-fx-places">
+      <div class="seo-fx-lab">${h.keep ? `“${esc(h.texts[0] || "")}” stays the main heading.` : "The theme already shows the page's main heading."}
+        These become section headings (H2). They may look a little smaller.</div>
+      <ul class="seo-fx-mlist">${h.convert.map((t) => `<li>“${esc(t)}”</li>`).join("")}</ul>
+      <div class="seo-fx-bar">
+        <button class="seo-fx-b is-accept" type="button" data-hx-h1ok="${i.id}"${F.busy ? " disabled" : ""}>${F.busy === "apply" ? spinH + "Changing…" : `✓ Change ${plural(h.convert.length, "heading")}`}</button>
+        <button class="seo-fx-b is-ghost" type="button" data-hx-cancel="${i.id}"${F.busy ? " disabled" : ""}>Cancel</button></div></div>${errBox}`;
+  }
+
+  function hxDone(i, st, F, errBox) {
+    let lines = [];
+    try { lines = JSON.parse(st.results || "[]"); } catch { lines = []; }
+    const what = st.fix === "meta" ? `New ${st.field === "desc" ? "meta description" : "title"} saved`
+      : st.fix === "links" ? `${plural(Number(st.count) || 0, "link")} updated` : `${plural(Number(st.count) || 0, "heading")} changed to H2`;
+    return `<div class="seo-fx is-done">
+      <div class="seo-fx-head"><span class="seo-fx-tick">✓</span><strong>${what}</strong><span class="seo-sp"></span>
+        <span class="seo-note">${esc(st.byName || "")}${st.at ? " · " + esc(when(st.at)) : ""}</span></div>
+      ${st.fix === "meta" ? `<div class="seo-fx-sum">${st.from ? `<del class="seo-fx-del">${esc(st.from)}</del> → ` : ""}<ins class="seo-fx-ins">${esc(st.to || "")}</ins></div>
+        ${st.verified === false ? `<div class="seo-note">Not on the live page yet: the page cache can take a few minutes.</div>` : ""}` : ""}
+      ${lines.length ? `<ul class="seo-fx-res">${lines.map((l) => `<li class="is-ok"><span>✓</span><span class="seo-note">${esc(l)}</span></li>`).join("")}</ul>` : ""}
+      ${st.note ? `<div class="seo-note">${esc(st.note)}</div>` : ""}
+      <div class="seo-fx-bar">
+        ${st.link ? `<a class="seo-fx-b is-accept" href="${esc(st.link)}" target="_blank" rel="noopener">View live page ↗</a>` : ""}
+        ${c.can(st.fix === "meta" ? "seo.pages" : "seo.fix") ? `<button class="seo-fx-b is-ghost" type="button" data-hx-undo="${i.id}"${F.busy ? " disabled" : ""}>${
+          F.busy === "undo" ? spinH + "Putting it back…" : "↶ Undo"}</button>` : ""}
+        <span class="seo-sp"></span><span class="seo-note">This issue clears at the next Site health check (about 8am).</span></div>${errBox}</div>`;
+  }
+
+  async function hxClick(e) {
+    const t = e.target.closest("[data-h-adv],[data-hx-meta],[data-hx-pick],[data-hx-metaok],[data-hx-links],[data-hx-linksok],[data-hx-h1],[data-hx-h1ok],[data-hx-cancel],[data-hx-undo]");
+    if (!t) return false;
+    e.stopPropagation();   // some sit inside a row that opens the page panel
+    const d = t.dataset;
+    if (d.hAdv) {
+      const cut = d.hAdv.lastIndexOf("|"), path = d.hAdv.slice(0, cut), kind = d.hAdv.slice(cut + 1);
+      c.work.advPrefill = { mode: "page", page: path, text: (ADVQ[kind] || ADVQ.index)(path) };
+      c.setTab("advisor");
+      return true;
+    }
+    const id = d.hxMeta || d.hxMetaok || d.hxLinks || d.hxLinksok || d.hxH1 || d.hxH1ok || d.hxCancel || d.hxUndo || String(d.hxPick || "").split("|")[0];
+    const i = byId.get(id);
+    if (!i) return true;
+    const F = HX.get(id) || {};
+    HX.set(id, F);
+    const row = t.closest("[data-hx-row]");   // what's typed and chosen, kept before the row is drawn again
+    const inp = row?.querySelector("[data-hx-text]");
+    if (inp) F.text = inp.value.replace(/\s+/g, " ").trim();
+    row?.querySelectorAll("[data-hx-to]").forEach((s) => { const it = F.items?.[Number(s.dataset.hxTo)]; if (it) it.choice = s.value; });
+    const field = META[i.code];
+    const base = { issueId: id, path: i.path, key: i.key, label: (i.msg + (i.detail ? " · " + i.detail : "")).slice(0, 300) };
+    const run = async (busy, op, body = {}) => {
+      F.busy = busy; F.err = ""; draw();
+      try { return await fixApi(op, { ...base, ...body }); }
+      catch (err) { F.err = fixErr(err); return null; }
+      finally { F.busy = ""; draw(); }
+    };
+    const saved = (r, msg) => { c.work.health.status[id] = r.rec; i.st = r.rec; HX.delete(id); toast(msg); draw(); };
+    const page = `<div class="seo-fx-mpage"><b>${esc(i.path)}</b></div>`;
+    const after = `<ul class="seo-fx-mlist"><li>Live straight away.</li><li>It's added to the Change log, and you can <b>Undo</b> it from here.</li></ul>`;
+
+    if (d.hxCancel) { HX.delete(id); draw(); return true; }
+    if (d.hxPick) {
+      const n = Number(d.hxPick.split("|")[1]);
+      F.pick = n; F.text = F.opts?.[n]?.text || "";
+      draw();
+      return true;
+    }
+    if (d.hxMeta) {
+      const r = await run("go", "hxMeta", { field });
+      if (r) {
+        F.opts = r.options || [];
+        F.now = r.now || "";
+        const ok = F.opts.findIndex((o) => !(o.flags || []).length);
+        F.pick = ok < 0 ? 0 : ok;
+        F.text = F.opts[F.pick]?.text || "";
+        if (!F.opts.length) F.err = "No options came back. Try again.";
+        draw();
+      }
+      return true;
+    }
+    if (d.hxMetaok) {
+      const text = F.text || "";
+      if (text.length < (field === "title" ? 20 : 50)) { F.err = `That's too short for a ${field === "title" ? "title" : "meta description"}.`; draw(); return true; }
+      const yes = await askConfirm({ title: `Use this ${field === "title" ? "title" : "meta description"} on the page?`, ok: "✓ Yes, use it",
+        body: `${page}<div class="seo-fx-ba">
+          <div class="seo-fx-col is-now"><div class="seo-fx-lab">Now</div><div class="seo-fx-txt">${F.now ? esc(F.now) : "<i>(none)</i>"}</div></div>
+          <div class="seo-fx-arrow" aria-hidden="true">→</div>
+          <div class="seo-fx-col is-new"><div class="seo-fx-lab">After · ${text.length} characters</div><div class="seo-fx-txt">${esc(text)}</div></div></div>
+          <ul class="seo-fx-mlist"><li>Saved in your SEO plugin and live straight away. Google usually shows it within a few days to two weeks.</li>
+            <li>It's added to the Change log, and you can <b>Undo</b> it from here.</li></ul>` });
+      if (!yes) return true;
+      const r = await run("apply", "hxMetaApply", { field, value: text });
+      if (r) saved(r, "Saved ✓");
+      return true;
+    }
+    if (d.hxLinks) {
+      const broken = i.code === "broken_link";
+      const r = await run("go", "hxLinks", { kind: broken ? "broken" : "redirect", only: broken ? i.detail : "" });
+      if (r) { F.items = (r.items || []).map((x) => ({ ...x, choice: x.options?.[0]?.path ?? "" })); draw(); }
+      return true;
+    }
+    if (d.hxLinksok) {
+      const broken = i.code === "broken_link";
+      const items = (F.items || []).map((x) => ({ from: x.abs, to: broken ? x.choice : x.to }));
+      const yes = await askConfirm({ title: `Update ${plural(items.length, "link")} on this page?`, ok: "✓ Yes, update them",
+        body: `${page}<ul class="seo-fx-mlist">${items.map((x) => `<li>${esc(shortI(x.from))} → ${x.to ? `<b>${esc(shortI(x.to))}</b>` : "<i>link removed, words kept</i>"}</li>`).join("")}</ul>${after}` });
+      if (!yes) return true;
+      const r = await run("apply", "hxLinksApply", { items });
+      if (r) saved(r, "Links updated ✓");
+      return true;
+    }
+    if (d.hxH1) {
+      const r = await run("go", "hxH1");
+      if (r) { F.h1 = r; draw(); }
+      return true;
+    }
+    if (d.hxH1ok) {
+      const yes = await askConfirm({ title: `Change ${plural(F.h1?.convert?.length || 0, "heading")} to section headings?`, ok: "✓ Yes, change them",
+        body: `${page}<ul class="seo-fx-mlist">${(F.h1?.convert || []).map((x) => `<li>“${esc(x)}” → H2</li>`).join("")}</ul>${after}` });
+      if (!yes) return true;
+      const r = await run("apply", "hxH1Apply");
+      if (r) saved(r, "Headings fixed ✓");
+      return true;
+    }
+    if (d.hxUndo) {
+      const yes = await askConfirm({ title: "Undo this change?", ok: "↶ Yes, undo it", tone: "reject",
+        body: `${page}<ul class="seo-fx-mlist"><li>The page goes back to how it was before.</li>
+          <li>If someone has edited the page in WordPress since, it can't be undone from here.</li></ul>` });
+      if (!yes) return true;
+      const r = await run("undo", "hxUndo");
+      if (r) { c.work.health.status[id] = r.rec; i.st = r.rec; i.status = "open"; toast("Put back"); draw(); }
+      return true;
+    }
+    return true;
+  }
   function issuesHtml(all) {
     const inStatus = all.filter((i) => i.status === ui.hstatus);
     const counts = { open: all.filter((i) => i.status === "open").length, ignored: all.filter((i) => i.status === "ignored").length };
@@ -364,7 +591,7 @@ export function viewHealth(wrap, c, ui) {
   function speedHtml() {
     const rows = H.pages.slice().sort((a, b) => (isPri(b.path) - isPri(a.path)) || (a.speed?.score ?? 999) - (b.speed?.score ?? 999));
     return `<div class="seo-table-wrap"><table class="seo-table">
-      <thead><tr><th>Page</th><th>Mobile score</th><th>Loading (LCP)</th><th>Responding (INP)</th><th>Shifting (CLS)</th><th>Measured from</th><th>Trend</th><th>Checked</th></tr></thead>
+      <thead><tr><th>Page</th><th>Mobile score</th><th>Loading (LCP)</th><th>Responding (INP)</th><th>Shifting (CLS)</th><th>Measured from</th><th>Trend</th><th>Checked</th><th></th></tr></thead>
       <tbody>${rows.map((p) => {
         const m = metricsOf(p.speed);
         const pg = c.byPath.get(p.path);
@@ -375,6 +602,7 @@ export function viewHealth(wrap, c, ui) {
             : `<td colspan="5" class="seo-note">${p.speedError ? esc(p.speedError) : "Not checked yet"}</td>`}
           <td>${scores.length > 1 ? c.h.sparkline(scores, 90, 22) : ""}</td>
           <td class="seo-note">${p.speedAt ? esc(when(p.speedAt)) : "—"}</td>
+          <td>${advBtn(p.path, "speed", !!m && ((m.score != null && m.score < 70) || m.pass === false))}</td>
         </tr>`;
       }).join("")}</tbody></table></div>
       <p class="seo-note" style="margin-top:8px">Mobile, from Google PageSpeed Insights. Good: LCP under 2.5 s, INP under 200 ms, CLS under 0.1, score 90+.
@@ -403,7 +631,8 @@ export function viewHealth(wrap, c, ui) {
       const rich = (r.rr || []).map((x) => esc(x.t) + (x.e ? ` <span class="seo-h-poor">${plural(x.e, "error")}</span>` : "")).join(", ");
       return `<tr><td>${name}</td><td>${yes(r.v === "PASS")}</td><td class="seo-note">${esc(r.cs || "")}</td><td>${day(r.lc)}</td>
         <td>${diff ? `<span class="seo-h-ni" title="${esc(r.gc)}">${esc(shortU(r.gc))}</span>` : `<span class="seo-note">Same</span>`}</td>
-        <td>${X.sitemapUrls ? yes(!missing.has(p.path)) : "—"}</td><td class="seo-note">${rich || "—"}</td><td>${inspect(r)}</td></tr>`;
+        <td>${X.sitemapUrls ? yes(!missing.has(p.path)) : "—"}</td><td class="seo-note">${rich || "—"}</td>
+        <td>${inspect(r)} ${advBtn(p.path, "index", r.v !== "PASS" || diff)}</td></tr>`;
     }).join("");
 
     const fmtD = (iso) => (iso ? new Date(iso).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "—");
@@ -484,7 +713,7 @@ export function viewHealth(wrap, c, ui) {
           return `<tr><td>${name}</td><td>${c.h.fmtInt(e.c[0])}</td><td>${chipB(b, e.c[0])}</td>
             <td>${was == null || e.c[0] < 20 ? "—" : c.h.delta(b * 100, was * 100, { invert: true, abs: true, digits: 0 })}</td>
             <td>${durB(e.c[2] / e.c[0])}</td><td>${chipB(bRate(e.m), e.m[0])}</td><td>${chipB(bRate(e.d), e.d[0])}</td>
-            <td>${c.h.fmtInt(e.c[3] || 0)}</td><td class="seo-h-try">${esc(tipsOf(hp, e))}</td></tr>`;
+            <td>${c.h.fmtInt(e.c[3] || 0)}</td><td class="seo-h-try">${esc(tipsOf(hp, e))}${advBtn(hp.path, "bounce", highBounce(e))}</td></tr>`;
         }).join("")}</tbody></table></div>
       <p class="seo-note" style="margin-top:8px">A bounce is a visit from Google that left without engaging: under 10 seconds, no second page, no booking or enquiry.
         Green up to 45%, red over 65%. “vs before” is in points against the 28 days before. Pages with fewer than 20 visits aren't judged.</p>`;
@@ -512,6 +741,7 @@ export function viewHealth(wrap, c, ui) {
   }
 
   wrap.onclick = async (e) => {
+    if (await hxClick(e)) return;   // one-click fixes and Fix with the Advisor (first: some sit inside a row that opens the page panel)
     if (e.target.closest("[data-open]")) return;   // seo.js opens the page panel
     if (await contentClick(e, c, ui, draw)) return;   // the Content view's buttons
     const t = e.target.closest("[data-h-view],[data-h-sev],[data-h-group],[data-h-status],[data-h-log],[data-h-ignore],[data-h-undo]");
@@ -558,6 +788,12 @@ const CSS = `
 .seo-h-plist{list-style:none;margin:0 0 8px;padding:0;font-size:13px}
 .seo-h-plist li{padding:5px 0;border-top:1px solid var(--border,#e5e7eb)}
 .seo-w-ta{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;resize:vertical}
+.seo-hx-in{display:block;width:100%;max-width:640px;margin-top:4px;box-sizing:border-box;font-weight:400;text-transform:none;letter-spacing:0}
+.seo-hx-sel{max-width:320px;min-width:0}
+.seo-h-adv{margin-left:4px;white-space:nowrap}
+.seo-h-try .seo-h-adv{display:inline-block;margin:6px 0 0}
+.seo-h-issue .seo-fx.is-done{margin-top:10px}
+`;
 `;
 
 function injectCss() {
