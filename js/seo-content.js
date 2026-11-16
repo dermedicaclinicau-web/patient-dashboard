@@ -447,7 +447,7 @@ function fixRow(c, i, canWork, canManage) {
   const bar = canFix ? `<div class="seo-fx-bar">
       <button class="seo-fx-b is-accept" type="button" data-ch-accept="${esc(i.id)}"${!fix || f.busy ? " disabled" : ""}
         title="${fix ? "Change it on the live website now" : "Press Regenerate for wording to use"}">${
-        f.busy === "accept" ? spin + "Updating the website…" : "✓ Accept change"}</button>
+        f.busy === "accept" ? spin + "Updating the website…" : f.busy === "places" ? spin + "Finding each place on the page…" : "✓ Accept change"}</button>
       <button class="seo-fx-b is-reject${f.reject ? " is-on" : ""}" type="button" data-ch-rej="${esc(i.id)}"${f.busy ? " disabled" : ""}>✕ Reject</button>
       <button class="seo-fx-b is-ghost" type="button" data-ch-regen="${esc(i.id)}"${f.busy ? " disabled" : ""}>${
         f.busy === "regen" ? spin + "Writing options…" : (f.opts || []).length ? "↻ More options" : "↻ Regenerate"}</button>
@@ -1415,7 +1415,7 @@ async function fixClick(t, d, id, c, redraw) {
 
   if (d.chAccept) {
     if (!fixNow) return;
-    const many = item.type === "spelling" || item.type === "au";
+    const everyCopy = item.type === "spelling" || item.type === "au";
     const yes = await askConfirm({
       title: "Change it on the live website?",
       ok: "✓ Yes, change it",
@@ -1423,7 +1423,7 @@ async function fixClick(t, d, id, c, redraw) {
         ${beforeAfter(item, fixNow)}
         <ul class="seo-fx-mlist">
           <li>It goes live straight away.</li>
-          ${many ? `<li>Every place “${esc(item.text)}” appears on this page is changed.</li>` : ""}
+          ${everyCopy ? `<li>Every place “${esc(item.text)}” appears on this page is changed.</li>` : ""}
           <li>It's added to the Change log, and you can <b>Undo</b> it afterwards.</li>
         </ul>`,
     });
@@ -1488,7 +1488,7 @@ async function fixClick(t, d, id, c, redraw) {
   }
 
   if (d.chRejok) {
-    const box = t.closest(".seo-ct-rej");
+    const box = t.closest(".seo-fx-rej");
     const reason = String(box?.querySelector("[data-ch-why]")?.value || "").trim();
     const scope = box?.querySelector('input[type="radio"]:checked')?.value || "here";
     if (reason.length < 3) { f.err = "Add a short reason, so Claude knows not to suggest it again."; redraw(); return; }
