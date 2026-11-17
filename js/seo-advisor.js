@@ -7,9 +7,9 @@ import { db, auth } from "./firebase-config.js";
 import {
   doc, collection, query, where, orderBy, limit, onSnapshot, writeBatch, updateDoc, getDocs, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { npath, titleOf, pageIndex, pageOf } from "./seo-work.js?v=25";
-import { stashPostDraft } from "./seo-post.js?v=1";
-import { actionsHtml, actionsClick } from "./seo-advisor-act.js?v=1";
+import { npath, titleOf, pageIndex, pageOf } from "./seo-work.js";
+import { stashPostDraft } from "./seo-post.js";
+import { actionsHtml, actionsClick } from "./seo-advisor-act.js";
 
 const MODES = [["auto", "Anything"], ["goal", "A goal"], ["page", "A page"], ["question", "A question"]];
 const EXAMPLES = [
@@ -337,6 +337,21 @@ export function renderAdvisor(body, c) {
     });
     return groups;
   }
+  // When the answer has no one-click changes (or some didn't match the live page): say why, and offer to ask for them
+  function noActsHtml(m, a) {
+    const acts = Array.isArray(a.actions) ? a.actions : [];
+    const drop = Array.isArray(a.dropped) ? a.dropped : [];
+    const web = (a.steps || []).some((s) => s.area === "website" && s.page);
+    if (!drop.length && (acts.length || !web)) return "";
+    const last = [...S.msgs].reverse().find((x) => x.status === "done")?.id === m.id;
+    const busy = S.msgs.some((x) => x.status === "new" || x.status === "working");
+    return `<div class="seo-adv-noacts">
+      <strong>${acts.length ? `${plural(drop.length, "suggested change")} couldn't be matched to the live page` : "No one-click changes in this answer"}</strong>
+      ${a.noActions ? `<p class="seo-note">${esc(a.noActions)}</p>` : ""}
+      ${drop.length ? `<ul>${drop.slice(0, 5).map((d) => `<li>${esc(d.kind)} on ${esc(titleOf(w, c.data, d.page))}: ${esc(d.why)}</li>`).join("")}</ul>` : ""}
+      ${can && last && !busy ? `<button class="seo-btn" type="button" data-adv-mkacts="${esc(m.id)}">Turn this into changes I can apply</button>` : ""}
+    </div>`;
+  }
 
   function answerHtml(m, a) {
     const k = KIND[a.kind] || KIND.question;
@@ -377,6 +392,7 @@ export function renderAdvisor(body, c) {
             </div></div>`).join("")}</div></div>`).join("")}</div></div>` : ""}
 
       ${actionsHtml(m.id, a, m.acts, (p) => typeof c.can === "function" && c.can(p))}
+      ${noActsHtml(m, a)}
 
       ${a.drafts.filter((d) => !used.has(d.i)).length ? `<div class="seo-adv-sec"><h4>Drafts</h4>
         ${a.drafts.filter((d) => !used.has(d.i)).map((d) => draftHtmlView(d, m.id, canWp)).join("")}</div>` : ""}
@@ -529,6 +545,12 @@ export function renderAdvisor(body, c) {
       const text = d.advFu || main.querySelector("[data-adv-fq]")?.value || "";
       t.disabled = true;
       await ask(text, { thread: ui.thread, mode: "auto", page: thread()?.page || "" });
+      return;
+    }
+    if (d.advMkacts) {
+      t.disabled = true;
+      await ask("Turn your last answer into one-click changes I can apply now: new titles, meta descriptions, wording and links on the pages you named. Read each page's live wording first.",
+        { thread: ui.thread, mode: "actions", page: thread()?.page || "" });
       return;
     }
     if (d.advRetry) {
@@ -736,6 +758,9 @@ const CSS = `
 .seo-adv-fbox textarea{flex:1;min-width:0;resize:vertical}
 .seo-pr-pill.is-violet{background:#f5f3ff;color:#6d28d9}
 .seo-pr-pill.is-blue{background:#eff6ff;color:#1d4ed8}
+.seo-adv-noacts{margin-top:12px;padding:10px 12px;border:1px dashed #c7d2fe;border-radius:12px;background:#f8faff;font-size:13px}
+.seo-adv-noacts ul{margin:6px 0 8px;padding-left:18px;color:#475569}
+.seo-adv-noacts .seo-btn{margin-top:4px}
 @media (max-width:900px){.seo-adv-grid{grid-template-columns:1fr}.seo-adv-side{position:static;max-height:none}.seo-adv-tg{grid-template-columns:1fr}}
 `;
 

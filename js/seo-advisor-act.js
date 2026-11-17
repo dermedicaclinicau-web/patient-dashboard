@@ -1,5 +1,5 @@
 // seo-advisor-act.js — SEO Advisor: changes you can make right from an answer (title, meta description, wording, links)
-import { fixApi, fixErr, askConfirm, injectCss } from "./seo-content.js?v=12";
+import { fixApi, fixErr, askConfirm, injectCss } from "./seo-content.js";
 
 const S = new Map();     // "msgId|actionId" → { edit, text, busy, err, show }
 const REG = new Map();   // msgId → the answer's actions
@@ -102,8 +102,9 @@ function card(msgId, a, st, can) {
 // Now → After, with the changed words highlighted
 function view(a, text, before, done) {
   if (a.kind === "link") {
-    const i = String(a.ctx || "").indexOf(a.find);
-    const s = i < 0 ? esc(a.ctx || a.find) : `${esc(a.ctx.slice(0, i))}<u class="seo-fx-a">${esc(a.find)}</u>${esc(a.ctx.slice(i + a.find.length))}`;
+    const ctx = String(a.ctx || ""), find = String(a.find || "");
+    const i = find ? ctx.indexOf(find) : -1;
+    const s = i < 0 ? esc(ctx || find) : `${esc(ctx.slice(0, i))}<u class="seo-fx-a">${esc(find)}</u>${esc(ctx.slice(i + find.length))}`;
     return `<div class="seo-aa-link"><div class="seo-fx-lab">${done ? "Now a link" : "These words become a link"}</div>
       <div class="seo-aa-ctx">${s}</div><div class="seo-aa-to">→ goes to <b>${esc(a.toTitle || a.to)}</b> <span class="seo-note seo-w-mono">${esc(a.to)}</span></div></div>`;
   }
