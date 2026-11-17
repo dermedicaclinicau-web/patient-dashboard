@@ -12,8 +12,9 @@ import {
   doc, getDoc, getDocs, collection, query, where, orderBy, limit, writeBatch, runTransaction, serverTimestamp, arrayUnion,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { npath, pageStory, priorityOf, prioritySettings, titleOf, complianceWords, renderOppsInto, taskConfig, pageOf, makeSortable,
-  clusterOfMain, linkState, redirectState }   from "./seo-work.js?v=17";
-import { contentIssues } from "./seo-content.js?v=3";
+  clusterOfMain, linkState, redirectState }   from "./seo-work.js?v=28";
+import { contentIssues, contentClick, altBody, issueFixHtml, altIssueId, fixApi, fixErr, askConfirm, injectCss as fxCss }
+  from "./seo-content.js?v=13";
 
 const GROUPS = {
   basics:  { order: 0, factor: 1,   title: () => "Fix what's holding it back" },
@@ -417,6 +418,7 @@ async function logOnly(c, S, log) {
 
 export async function renderTasks(body, c) {
   injectCss();
+  fxCss();   // the Accept / Undo styles from Site health
   const wrap = document.createElement("div");
   wrap.className = "seo-t";
   body.replaceChildren(wrap);
@@ -437,15 +439,184 @@ export async function renderTasks(body, c) {
   const day = todayPerth();
   const pageId = (path) => pageOf(c.data, path)?.id || "";
   const canFix = typeof c.can === "function" ? c.can("seo.pages") : S.canDo;
-  // ✨ Fix it on a step: opens the page (the other page, for "take it out of …'s title") with suggestions written
-  const fixOfStep = (t, s) => {
-    const what = FIXK[s.check?.k];
-    if (!what || !canFix || (s.status && s.status !== "todo")) return "";
-    const path = s.check.page || t.path;
-    const target = s.check.k === "titleNot" ? (s.check.has ? "!" + s.check.has : "") : s.check.has || "";
-    return `<div class="seo-t-fix"><button class="seo-btn seo-fixit" type="button" data-wsfix="${esc(`${path}|${what}|${target}`)}"
-      title="Open the page with suggestions written">✨ Fix it</button></div>`;
-  };
+  // One-click changes on a step: titles and descriptions, alt text, spelling, grammar and wording.
+  // The same tools as Site health. A change made here ticks the step, and tonight's website check confirms it.
+  const AP = c.work.tap || (c.work.tap = new Map());   // "taskId|stepId" → { opts, pick, text, now, busy, err }
+  const canAltFix = typeof c.can === "function" && c.can("seo.fix");
+  const hStatus = () => (c.work.health ? c.work.health.status || (c.work.health.status = {}) : {});
+  const stepIssueId = (t, s) => "i_t" + hash(t.id + "|" + s.id) + hash(s.id + "#t");
+  const qIssue = (path, word) => contentIssues(c.work, path)
+    .find((x) => String(x.ph || x.text).toLowerCase() === String(word || "").toLowerCase()) || null;
+  const metaTarget = (s) => (s.check.k === "titleNot" ? (s.check.has ? "!" + s.check.has : "") : s.check.has || "");
+  const spinT = '<span class="seo-fx-spin" aria-hidden="true"></span>';
+
+  function applyHtml(t, s) {
+    if (s.status === "confirmed") return "";
+    const k = s.check?.k, path = s.check?.page || t.path;
+    const field = FIXK[k];
+    if (field) return canFix ? metaApplyHtml(t, s, field, path) : "";
+    if (!c.work.health || !canAltFix) return "";
+    if (k === "alt") return `<div class="seo-t-apply">${altBody(c, path)}</div>`;
+    if (k === "absent" && t.group === "quality") {
+      const i = qIssue(path, s.check.word);
+      return i ? `<div class="seo-t-apply">${issueFixHtml(c, i.id)}</div>` : "";
+    }
+    return "";
+  }
+
+  function metaApplyHtml(t, s, field, path) {
+    const key = t.id + "|" + s.id;
+    const F = AP.get(key) || {};
+    const st = hStatus()[stepIssueId(t, s)];
+    const name = field === "title" ? "title" : "meta description";
+    const err = F.err ? `<div class="seo-fx-err"><span>⚠</span><div>${esc(F.err)}</div></div>` : "";
+    if (st?.status === "fixed" && st.kind === "hx") {
+      return `<div class="seo-t-apply"><div class="seo-fx is-done">
+        <div class="seo-fx-head"><span class="seo-fx-tick">✓</span><strong>New ${name} on the website</strong><span class="seo-sp"></span>
+          <span class="seo-note">${esc(st.byName || "")}${st.at ? " · " + esc(when(st.at)) : ""}</span></div>
+        <div class="seo-fx-sum">${st.from ? `<del class="seo-fx-del">${esc(st.from)}</del> → ` : ""}<ins class="seo-fx-ins">${esc(st.to || "")}</ins></div>
+        ${st.verified === false ? `<div class="seo-note">Not on the live page yet: the page cache can take a few minutes.</div>` : ""}
+        <div class="seo-fx-bar">
+          ${st.link ? `<a class="seo-fx-b is-accept" href="${esc(st.link)}" target="_blank" rel="noopener">View live page ↗</a>` : ""}
+          ${canFix ? `<button class="seo-fx-b is-ghost" type="button" data-ta-undo="${esc(key)}"${F.busy ? " disabled" : ""}>${
+            F.busy === "undo" ? spinT + "Putting it back…" : "↶ Undo"}</button>` : ""}
+        </div>${err}</div></div>`;
+    }
+    if (s.status && s.status !== "todo") return "";
+    if (!F.opts) {
+      return `<div class="seo-t-apply"><div class="seo-fx-bar">
+        <button class="seo-fx-b is-accept" type="button" data-ta-go="${esc(key)}"${F.busy ? " disabled" : ""}>${
+          F.busy === "go" ? spinT + "Writing options… (about 15 seconds)" : `✨ Write a new ${name}`}</button>
+        <button class="seo-fx-b is-ghost" type="button" data-wsfix="${esc(`${path}|${field}|${metaTarget(s)}`)}">Open in the Website tab</button>
+      </div>${err}</div>`;
+    }
+    const L = field === "title" ? [30, 60] : [120, 155], pick = F.pick ?? 0;
+    return `<div class="seo-t-apply"><div class="seo-fx-opts">
+        ${F.now ? `<div class="seo-fx-col is-now"><div class="seo-fx-lab">Now · ${F.now.length} characters</div><div class="seo-fx-txt">${esc(F.now)}</div></div>` : ""}
+        <div class="seo-fx-lab" style="margin-top:6px">Choose the ${name}</div>
+        ${F.opts.map((o, n) => `<button type="button" class="seo-fx-opt${pick === n ? " is-on" : ""}${(o.flags || []).length ? " is-flag" : ""}"
+            data-ta-pick="${esc(key)}|${n}" aria-pressed="${pick === n}"><span class="seo-fx-radio"></span><span class="seo-fx-otxt"><b>${esc(o.text)}</b>
+          <small>${o.text.length} characters${o.text.length >= L[0] && o.text.length <= L[1] ? " ✓" : ` · best ${L[0]}–${L[1]}`}${o.why ? " · " + esc(o.why) : ""}</small>
+          ${(o.flags || []).map((f) => `<small class="seo-fx-flag">⚠ ${esc(f)}</small>`).join("")}</span></button>`).join("")}
+        <label class="seo-fx-lab" style="display:block;margin-top:8px">Or edit it
+          <input class="seo-input seo-t-apin" data-ta-text="${esc(key)}" value="${esc(F.text ?? "")}" maxlength="${field === "title" ? 70 : 170}"></label></div>
+      <div class="seo-fx-bar">
+        <button class="seo-fx-b is-accept" type="button" data-ta-ok="${esc(key)}"${F.busy ? " disabled" : ""}>${F.busy === "apply" ? spinT + "Saving…" : "✓ Use it on the page"}</button>
+        <button class="seo-fx-b is-ghost" type="button" data-ta-go="${esc(key)}"${F.busy ? " disabled" : ""}>${F.busy === "go" ? spinT + "Writing…" : "↻ More options"}</button>
+        <button class="seo-fx-b is-ghost" type="button" data-ta-cancel="${esc(key)}"${F.busy ? " disabled" : ""}>Cancel</button></div>${err}</div>`;
+  }
+
+  // Tick a step after its change was made here (only the SEO team and admins can tick)
+  async function tickStep(t, sId, note) {
+    const s = t.steps[sId];
+    if (!S.canDo || !s || (s.status && s.status !== "todo")) return;
+    const P = `steps.${sId}.`;
+    try {
+      await act(c, S, t, { [P + "status"]: "ticked", [P + "by"]: uid(), [P + "byName"]: myName(c),
+        [P + "at"]: new Date().toISOString(), [P + "misses"]: 0, [P + "missing"]: false },
+        { action: "tick", stepId: sId, text: s.text, note });
+    } catch (e) { toast("Changed on the website, but the step couldn't be ticked: " + errMsg(e), true); }
+  }
+
+  // After an alt text or wording change: tick the steps it finished
+  async function tickApplied() {
+    const H = hStatus();
+    for (const t of todayTasks()) {
+      for (const s of stepsOf(t)) {
+        if (s.status && s.status !== "todo") continue;
+        const path = s.check?.page || t.path;
+        const done = s.check?.k === "alt" ? H[altIssueId(path)]?.status === "fixed"
+          : s.check?.k === "absent" && t.group === "quality" ? !!qIssue(path, s.check.word)?.fixed : false;
+        if (done) await tickStep(t, s.id, "Changed on the website from Tasks");
+      }
+    }
+    draw();
+  }
+
+  // Write, choose, apply and undo a title or description
+  async function applyClick(e) {
+    const b = e.target.closest("[data-ta-go],[data-ta-pick],[data-ta-ok],[data-ta-cancel],[data-ta-undo]");
+    if (!b) return false;
+    e.stopPropagation();
+    const d = b.dataset;
+    const [tId, sId, n] = String(d.taGo || d.taPick || d.taOk || d.taCancel || d.taUndo).split("|");
+    const key = tId + "|" + sId;
+    const t = S.tasks.get(tId);
+    const s = t && t.steps[sId] ? { id: sId, ...t.steps[sId] } : null;
+    if (!s) return true;
+    const F = AP.get(key) || {};
+    AP.set(key, F);
+    const inp = b.closest(".seo-t-apply")?.querySelector("[data-ta-text]");
+    if (inp) F.text = inp.value.replace(/\s+/g, " ").trim();
+    const field = FIXK[s.check?.k], path = s.check?.page || t.path, iid = stepIssueId(t, s);
+    const name = field === "title" ? "title" : "meta description";
+    const base = { issueId: iid, path, key: ("task:" + sId).slice(0, 300), label: s.text.slice(0, 300) };
+    const run = async (busy, op, body = {}) => {
+      F.busy = busy; F.err = ""; draw();
+      try { return await fixApi(op, { ...base, ...body }); }
+      catch (err) { F.err = fixErr(err); return null; }
+      finally { F.busy = ""; draw(); }
+    };
+
+    if (d.taCancel) { AP.delete(key); draw(); return true; }
+    if (d.taPick) { F.pick = Number(n); F.text = F.opts?.[F.pick]?.text || ""; draw(); return true; }
+    if (d.taGo) {
+      const r = await run("go", "hxMeta", { field, target: metaTarget(s) });
+      if (r) {
+        F.opts = r.options || [];
+        F.now = r.now || "";
+        const ok = F.opts.findIndex((o) => !(o.flags || []).length);
+        F.pick = ok < 0 ? 0 : ok;
+        F.text = F.opts[F.pick]?.text || "";
+        if (!F.opts.length) F.err = "No options came back. Try again.";
+        draw();
+      }
+      return true;
+    }
+    if (d.taOk) {
+      const text = F.text || "";
+      if (text.length < (field === "title" ? 20 : 50)) { F.err = `That's too short for a ${name}.`; draw(); return true; }
+      const yes = await askConfirm({ title: `Use this ${name} on the page?`, ok: "✓ Yes, use it",
+        body: `<div class="seo-fx-mpage"><b>${esc(titleOf(c.work, c.data, path))}</b><span class="seo-note seo-w-mono">${esc(path)}</span></div>
+          <div class="seo-fx-ba">
+            <div class="seo-fx-col is-now"><div class="seo-fx-lab">Now</div><div class="seo-fx-txt">${F.now ? esc(F.now) : "<i>(none)</i>"}</div></div>
+            <div class="seo-fx-arrow" aria-hidden="true">→</div>
+            <div class="seo-fx-col is-new"><div class="seo-fx-lab">After · ${text.length} characters</div><div class="seo-fx-txt">${esc(text)}</div></div></div>
+          <ul class="seo-fx-mlist"><li>Live straight away, and added to the Change log.</li>
+            <li>The step is ticked, and tonight's website check confirms it.</li><li>You can <b>Undo</b> it from this card.</li></ul>` });
+      if (!yes) return true;
+      const r = await run("apply", "hxMetaApply", { field, value: text });
+      if (r) {
+        hStatus()[iid] = r.rec;
+        AP.delete(key);
+        await tickStep(t, sId, "Changed on the website from Tasks");
+        toast("Saved on the website ✓ Step ticked.");
+        draw();
+      }
+      return true;
+    }
+    if (d.taUndo) {
+      const yes = await askConfirm({ title: `Put the old ${name} back?`, ok: "↶ Yes, put it back", tone: "reject",
+        body: `<ul class="seo-fx-mlist"><li>The page goes back to how it was, and the step goes back on the list.</li>
+          <li>If someone has edited the page in WordPress since, it can't be undone from here.</li></ul>` });
+      if (!yes) return true;
+      const r = await run("undo", "hxUndo");
+      if (r) {
+        hStatus()[iid] = r.rec;
+        if (S.canDo && t.steps[sId]?.status === "ticked") {
+          const P = `steps.${sId}.`;
+          try {
+            await act(c, S, t, { [P + "status"]: "todo", [P + "by"]: "", [P + "byName"]: "", [P + "at"]: "" },
+              { action: "untick", stepId: sId, text: s.text, note: "Change undone from Tasks" });
+          } catch (e2) { console.warn("Step not unticked:", e2); }
+        }
+        toast("Put back");
+        draw();
+      }
+      return true;
+    }
+    return true;
+  }
   const stepsOf = (t) => (t.order || []).map((id) => ({ id, ...t.steps[id] })).filter((s) => s.text);
   const doneish = (s) => s.status === "confirmed" || s.status === "done";
   const todayTasks = () => (S.day?.ids || []).map((id) => S.tasks.get(id)).filter(Boolean);
@@ -475,7 +646,7 @@ export async function renderTasks(body, c) {
         <div>${esc(s.text)} <span class="seo-w-eff is-${String(s.effort || "quick").toLowerCase()}">${esc(s.effort || "Quick")}</span></div>
         ${s.detail ? `<div class="seo-note">${esc(s.detail)}</div>` : ""}
         ${who ? `<div class="seo-note">${who}</div>` : ""}
-        ${fixOfStep(t, s)}
+        ${applyHtml(t, s)}
       </div>
       <span class="seo-note seo-t-chk" title="What tonight's website check looks at">${esc(CHECK[s.check?.k] || "")}</span>
     </div>`;
@@ -868,6 +1039,8 @@ export async function renderTasks(body, c) {
   }
 
   wrap.addEventListener("click", async (e) => {
+    if (await applyClick(e)) return;   // titles and descriptions
+    if (await contentClick(e, c, ui, draw)) { await tickApplied(); return; }   // alt text, spelling, grammar and wording
     const t0 = e.target.closest("button");
     if (!t0) {
       const ph = e.target.closest("[data-t-page]");
@@ -1148,6 +1321,10 @@ const CSS = `
 }
 .seo-t-ai{display:inline-block;margin-right:6px;padding:0 6px;border-radius:999px;background:#f5f3ff;color:#6d28d9;font-size:10.5px;font-weight:700;letter-spacing:.03em;vertical-align:2px}
 .seo-t-steps{margin-top:8px}
+.seo-t-apply{margin-top:8px}
+.seo-t-apply .seo-fx{border-top:0;padding-top:0}
+.seo-t-apply .seo-fx.is-done{padding-top:12px}
+.seo-t-apin{display:block;width:100%;max-width:640px;margin-top:4px;box-sizing:border-box;font-weight:400;text-transform:none;letter-spacing:0}
 .seo-t-step{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:10px;align-items:start;padding:8px 0;border-top:1px solid var(--border,#e5e7eb);font-size:13px}
 .seo-t-step.is-confirmed .seo-t-sm > div:first-child{color:var(--text-muted,#6b7280)}
 .seo-t-sm{min-width:0;line-height:1.45}

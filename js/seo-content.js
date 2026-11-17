@@ -1705,5 +1705,14 @@ function injectCss() {
   document.head.appendChild(s);
 }
 
-// Shared with the Advisor's one-click changes (seo-advisor-act.js)
-export { fixApi, fixErr, askConfirm, injectCss };
+// SEO → Tasks: the same Accept / Reject / Regenerate card for one problem
+export function issueFixHtml(c, issueId) {
+  injectCss();
+  const w = c.work;
+  const i = Object.values(w?.health?.content?.deep || {}).filter((d) => d && d.path)
+    .flatMap((d) => contentIssues(w, d.path)).find((x) => x.id === issueId);
+  return i ? `<div data-fxcard>${fixRow(c, i, c.can("seo.work"), c.can("seo.manage"))}</div>` : "";
+}
+
+// Shared with the Advisor's one-click changes (seo-advisor-act.js) and SEO → Tasks (seo-tasks.js)
+export { fixApi, fixErr, askConfirm, injectCss, alId as altIssueId };
