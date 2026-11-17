@@ -7,7 +7,7 @@ import { db, auth } from "./firebase-config.js";
 import {
   doc, collection, query, where, orderBy, limit, onSnapshot, writeBatch, updateDoc, getDocs, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { npath, titleOf, pageIndex, pageOf } from "./seo-work.js";
+import { npath, titleOf, pageIndex, pageOf, trackChip } from "./seo-work.js";
 import { stashPostDraft } from "./seo-post.js";
 import { actionsHtml, actionsClick } from "./seo-advisor-act.js";
 
@@ -337,6 +337,25 @@ export function renderAdvisor(body, c) {
     });
     return groups;
   }
+    // An applied change → its result in SEO → Results (seo_fix_tracks: the same page, about the same day, the same kind)
+  const ACT_KIND = { title: "snippet", description: "snippet", wording: "content", link: "links" };
+  const perthDay = (iso) => { const d = new Date(iso); return isNaN(d) ? "" : new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Perth" }).format(d); };
+  function actResult(a, st) {
+    const day = st?.at ? perthDay(st.at) : "";
+    if (!day) return "";
+    const k = npath(a.page);
+    const near = (w.tracks || []).filter((T) => npath(T.path) === k && Math.abs(daysBetween(T.date, day)) <= 1)
+      .sort((x, y) => Math.abs(daysBetween(x.date, day)) - Math.abs(daysBetween(y.date, day)));
+    const T = near.find((x) => x.kind === ACT_KIND[a.kind]) || near[0];
+    if (!T) {
+      return `<div class="seo-aa-res"><span class="seo-note">📈 ${w.errors?.tracks ? "Results can't be read yet."
+        : "The results check picks this up tomorrow morning, then reads it at 7, 14 and 28 days."}</span></div>`;
+    }
+    return `<div class="seo-aa-res"><span class="seo-note">📈 Result:</span> ${trackChip(T, c.h)}
+      ${T.reason ? `<span class="seo-note">${esc(T.reason)}</span>` : ""}
+      <button class="seo-w-link" type="button" data-tab="results" data-rsgo="${esc(T.id)}">See the details</button></div>`;
+  }
+
   // When the answer has no one-click changes (or some didn't match the live page): say why, and offer to ask for them
   function noActsHtml(m, a) {
     const acts = Array.isArray(a.actions) ? a.actions : [];
@@ -391,7 +410,7 @@ export function renderAdvisor(body, c) {
                 <summary>Draft ready: ${esc(d.label)}</summary>${draftHtmlView(d, m.id, canWp)}</details>`).join("")}
             </div></div>`).join("")}</div></div>`).join("")}</div></div>` : ""}
 
-      ${actionsHtml(m.id, a, m.acts, (p) => typeof c.can === "function" && c.can(p))}
+      ${actionsHtml(m.id, a, m.acts, (p) => typeof c.can === "function" && c.can(p), { result: actResult })}
       ${noActsHtml(m, a)}
 
       ${a.drafts.filter((d) => !used.has(d.i)).length ? `<div class="seo-adv-sec"><h4>Drafts</h4>

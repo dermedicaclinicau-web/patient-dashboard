@@ -40,7 +40,7 @@ function counter(kind, text) {
   return `<span class="seo-aa-cnt${good ? " is-ok" : ""}">${n} characters${good ? " ✓" : ` · best ${L[0]}–${L[1]}`}</span>`;
 }
 
-export function actionsHtml(msgId, ans, actsRaw, can) {
+export function actionsHtml(msgId, ans, actsRaw, can, opts = {}) {
   const list = Array.isArray(ans?.actions) ? ans.actions : [];
   if (!list.length || !msgId) return "";
   injectCss();
@@ -53,11 +53,11 @@ export function actionsHtml(msgId, ans, actsRaw, can) {
       <div><strong>Changes you can make now</strong>
         <div class="seo-note">Checked against the live page. Nothing changes until you press Apply, and every change can be undone.</div></div>
       <span class="seo-sp"></span><span class="seo-aa-tally">${done} of ${list.length} done</span></div>
-    ${list.map((a) => card(msgId, a, acts[a.id], can)).join("")}
+    ${list.map((a) => card(msgId, a, acts[a.id], can, opts)).join("")}
   </section>`;
 }
 
-function card(msgId, a, st, can) {
+function card(msgId, a, st, can, opts = {}) {
   const key = `${msgId}|${a.id}`, ref = esc(key);
   const F = S.get(key) || {};
   const canDo = typeof can === "function" ? can(a.kind === "title" || a.kind === "description" ? "seo.pages" : "seo.fix") : false;
@@ -80,14 +80,14 @@ function card(msgId, a, st, can) {
         <span class="seo-sp"></span>
         ${st.link ? `<a class="seo-fx-b is-ghost" href="${esc(st.link)}" target="_blank" rel="noopener">View live ↗</a>` : ""}
         ${canDo ? `<button class="seo-fx-b is-ghost" type="button" data-aa-undo="${ref}"${F.busy ? " disabled" : ""}>${F.busy === "undo" ? spin + "Undoing…" : "↶ Undo"}</button>` : ""}
-      </div>${errBox}</div>`;
+      </div>${opts.result ? opts.result(a, st) : ""}${errBox}</div>`;
   }
 
   const text = F.text != null ? F.text : (a.text || "");
   const editable = a.kind !== "link";
   return `<div class="seo-aa-card" data-aa-card>${head}
     ${a.why ? `<div class="seo-aa-why">💡 ${esc(a.why)}</div>` : ""}
-    ${st?.st === "undone" ? `<div class="seo-note">Undone${st.undoneBy ? ` by ${esc(st.undoneBy)}` : ""}. You can apply it again.</div>` : ""}
+    ${st?.st === "undone" ? `<div class="seo-note">Undone${st.undoneBy ? ` by ${esc(st.undoneBy)}` : ""}. You can apply it again.</div>${opts.result ? opts.result(a, st) : ""}` : ""}
     ${F.edit && editable ? editView(a, key, text) : view(a, text, a.before, false)}
     ${a.warn ? `<small class="seo-fx-flag">⚠ ${esc(a.warn)}</small>` : ""}
     <div class="seo-fx-bar">
@@ -217,6 +217,7 @@ function css() {
 .seo-aa-spin{display:inline-block;width:12px;height:12px;margin-right:6px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;
   vertical-align:-2px;animation:seoAaSpin .7s linear infinite}
 @keyframes seoAaSpin{to{transform:rotate(360deg)}}
+.seo-aa-res{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:8px;padding-top:8px;border-top:1px dashed #bbf7d0;font-size:13px}
 @media (max-width:640px){.seo-aa{padding:10px}.seo-aa-card{padding:10px}}
 `;
   document.head.appendChild(s);
