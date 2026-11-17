@@ -87,6 +87,19 @@ const titleIn = (w, path) => (w?.wp?.pages || []).find((p) => npath(p.path) === 
 const pageId = (c, path) => (c.data?.pages || []).filter((x) => npath(x.path) === npath(path))
   .sort((a, b) => (b.m28?.impressions || 0) - (a.m28?.impressions || 0))[0]?.id || "";
 
+// The forms Consistency replaced on this page ("skin care" → "skincare"), until tonight's check reads it again
+function termGone(w, path) {
+  const k = npath(path), st = w?.health?.status || {}, out = [];
+  for (const g of w?.health?.content?.consist || []) {
+    const s = st[groupId(g.key)];
+    if (s?.status !== "fixed") continue;
+    let res = [];
+    try { res = JSON.parse(s.results || "[]"); } catch { res = []; }
+    for (const r of res) if (r.ok && r.count && r.from && npath(r.path) === k) out.push(String(r.from).toLowerCase());
+  }
+  return out;
+}
+
 // A page's proofreading problems (words you've accepted left out), with whether each was ignored
 export function contentIssues(w, path) {
   const d = w?.health?.content?.deep?.[npath(path)];
@@ -94,9 +107,11 @@ export function contentIssues(w, path) {
   const ok = new Set((Array.isArray(w.settings?.spellWords) ? w.settings.spellWords : []).map((x) => String(x).toLowerCase()));
   // "Never flag this again" from Reject (seo_settings/main.proofIgnore: "type|text")
   const skip = new Set((Array.isArray(w.settings?.proofIgnore) ? w.settings.proofIgnore : []).map((x) => String(x).toLowerCase()));
+  const gone = termGone(w, d.path || path);   // already changed from Consistency
   return d.ai.issues
     .filter((i) => !((i.type === "spelling" || i.type === "au") && ok.has(String(i.text).toLowerCase())))
     .filter((i) => !skip.has(i.type + "|" + String(i.text).toLowerCase()))
+    .filter((i) => { const t = String(i.text).toLowerCase(); return !gone.some((f) => t === f || (i.type === "consistency" && t.includes(f))); })
     .map((i) => {
       const id = contentIssueId(d.path || path, i);
       const st = w.health.status?.[id] || null;
@@ -160,13 +175,14 @@ export function contentHtml(c, ui) {
   const open = (test) => issues.filter((i) => !i.ignored && !i.fixed && test(i.type));
   const openSpell = open(isProof), openAds = open((t) => t === "compliance"), openCons = open((t) => t === "consistency");
   const groupsOpen = consistAll.filter((g) => !g.ignored && g.st?.status !== "fixed").length;
+  const groupsDone = consistAll.filter((g) => g.st?.status === "fixed").length;
   const pagesIn = (list) => new Set(list.map((i) => npath(i.path))).size;
   const tiles = [
     ["spell", "Spelling and grammar", proofed ? openSpell.length : null,
       proofed ? `on ${plural(pagesIn(openSpell), "page")} · ${proofed} of ${deep.length} proofread` : `not proofread yet · ${deep.length} waiting`],
     ["dup", "Duplicate content", dupsAll.filter((x) => !x.ignored && x.st?.status !== "fixed").length, "pairs of pages"],
     ["consist", "Consistency", proofed || consistAll.length ? groupsOpen + openCons.length : null,
-      proofed || consistAll.length ? `${groupsOpen} across pages · ${openCons.length} within pages` : "not checked yet"],
+      proofed || consistAll.length ? `${groupsOpen} across pages · ${openCons.length} within pages${groupsDone ? ` · ${groupsDone} changed` : ""}` : "not checked yet"],
     ["faq", "FAQs", noFaq.length, "pages to improve"],
     ["ads", "Advertising rules", proofed ? openAds.length : null, proofed ? "TGA and AHPRA" : "not proofread yet"],
     ["fresh", "Freshness and trust", fresh.length, "pages"],
@@ -177,7 +193,7 @@ export function contentHtml(c, ui) {
     const list = issues.filter((i) => (cat === "ads" ? i.type === "compliance" : isProof(i.type)) && i.ignored === showIgn);
     body = issuesHtml(c, list, canWork, canManage, cat, proofed);
   } else if (cat === "consist") {
-    body = consistHtml(c, consistAll.filter((g) => g.ignored === showIgn),
+    body = consistHtml(c, ui, consistAll.filter((g) => g.ignored === showIgn),
       issues.filter((i) => i.type === "consistency" && i.ignored === showIgn), canWork, canManage, proofed);
   } else if (cat === "dup") {
     body = dupsHtml(c, dupsAll.filter((x) => x.ignored === showIgn), canWork);
@@ -224,22 +240,57 @@ function pageLinks(c, paths) {
   }).join(", ") + (paths.length > 4 ? ` and ${paths.length - 4} more` : "");
 }
 
-// Terms written different ways across pages, then pages that contradict themselves
-function consistHtml(c, groups, pageIssues, canWork, canManage, proofed) {
-  if (!groups.length && !pageIssues.length) {
+// Terms written different ways across pages: open ones as an even grid of cards, changed ones folded into one list.
+// Then pages that contradict themselves.
+function consistHtml(c, ui, groups, pageIssues, canWork, canManage, proofed) {
+  const open = groups.filter((g) => g.st?.status !== "fixed");
+  const done = groups.filter((g) => g.st?.status === "fixed");
+  if (!open.length && !done.length && !pageIssues.length) {
     return `<div class="seo-empty">${proofed ? "Nothing written different ways, and no page contradicts itself." : "Not checked yet."}</div>`;
   }
   let out = "";
-  if (groups.length) {
+  if (open.length || done.length) {
     out += `<div class="seo-card"><h3 style="margin:0 0 4px">Written different ways across your pages</h3>
-      <p class="seo-note">Choose the way to write it, preview the changes, then use it everywhere. Words written in capitals (headings) are left as they are.</p>
-      ${groups.map((g) => termRow(c, g, canWork)).join("")}</div>`;
+      ${open.length ? `<p class="seo-note">Choose the way to write it, preview the changes, then use it everywhere. Words written in capitals (headings) are left as they are.</p>
+        <div class="seo-ct-tgrid">${open.map((g) => termRow(c, g, canWork)).join("")}</div>`
+        : `<p class="seo-note">Nothing left to choose. 👍</p>`}
+      ${done.length ? `<div class="seo-ct-done">
+        <button type="button" class="seo-ct-dtog" data-ch-tdone aria-expanded="${!!ui.cdone}">
+          <span class="seo-ct-car">${ui.cdone ? "▾" : "▸"}</span><strong>Changed (${done.length})</strong>
+          <span class="seo-note">each drops off after tonight's check</span></button>
+        ${ui.cdone ? done.map((g) => termDoneRow(c, g)).join("") : ""}</div>` : ""}
+    </div>`;
   }
   if (pageIssues.length) {
     out += `<h3 style="margin:16px 0 8px;font-size:14px">Pages that contradict themselves</h3>` + issuesHtml(c, pageIssues, canWork, canManage, "consist", proofed);
   }
   return out;
 }
+
+// A change made from here, as one line: the words, how many pages, who and when, and Undo
+function termDoneRow(c, g) {
+  const T = TM.get(g.id) || {};
+  let res = [];
+  try { res = JSON.parse(g.st.results || "[]"); } catch { res = []; }
+  const ok = res.filter((r) => r.ok && r.count), bad = res.filter((r) => !r.ok);
+  const from = [...new Set(ok.map((r) => r.from).filter(Boolean))];
+  const pages = new Set(ok.map((r) => npath(r.path))).size;
+  return `<div class="seo-ct-drow">
+    <div style="min-width:0">
+      <span class="seo-fx-sum">${from.map((f) => `<del class="seo-fx-del">${esc(f)}</del>`).join(" ")} → <ins class="seo-fx-ins">${esc(g.st.to || "")}</ins></span>
+      <div class="seo-note">${plural(pages, "page")}${bad.length ? ` · <span class="seo-ct-bad">${bad.length} couldn't be changed</span>` : ""} · ${
+        esc(g.st.byName || "")}${g.st.at ? " · " + esc(whenC(g.st.at)) : ""}</div>
+      <details class="seo-ct-dmore"><summary>Pages</summary><ul class="seo-fx-res">${res.map((r) => `<li class="${r.ok ? (r.count ? "is-ok" : "") : "is-bad"}">
+        <span>${r.ok ? (r.count ? "✓" : "–") : "⚠"}</span><b>${esc(r.title || r.path)}</b>
+        <span class="seo-note">“${esc(r.from)}”${r.ok ? (r.count ? ` · ${plural(r.count, "place")}` : " · nothing to change") : ` · ${esc(r.why || "")}`}</span>
+        ${r.ok && r.count && r.link ? `<a class="seo-w-link" href="${esc(r.link)}" target="_blank" rel="noopener">View ↗</a>` : ""}</li>`).join("")}</ul></details>
+      ${T.err ? `<div class="seo-fx-err"><span>⚠</span><div>${esc(T.err)}</div></div>` : ""}
+    </div>
+    ${c.can("seo.fix") ? `<button class="seo-fx-b is-ghost" type="button" data-ch-tundo="${esc(g.id)}"${T.busy ? " disabled" : ""}>${
+      T.busy === "undo" ? spin + "Putting it back…" : "↶ Undo"}</button>` : ""}
+  </div>`;
+}
+
 
 // One term: choose the way to write it, preview, use it everywhere (or the result, with Undo)
 function termRow(c, g, canWork) {
@@ -296,7 +347,7 @@ function termRow(c, g, canWork) {
           T.busy === "prev" ? spin + "Reading the pages…" : "Preview the changes"}</button>`) : "")
     + (canWork ? `<button class="seo-fx-b is-ghost" type="button" data-ch-ign="${esc(g.id)}">Ignore</button>` : "");
 
-  return `<div class="seo-fx">
+  return `<div class="seo-fx${T.prev ? " is-wide" : ""}">
     <div class="seo-fx-head"><span class="seo-pr-pill is-violet">Written ${g.forms.length} ways</span>
       <span class="seo-fx-sum">${others.map((f) => `<del class="seo-fx-del">${esc(f.f)}</del>`).join(" ")} → <ins class="seo-fx-ins">${esc(pick)}</ins></span></div>
     ${canFix ? `<div class="seo-fx-lab" style="margin-top:10px">Choose the way to write it</div>` : ""}${forms}
@@ -877,7 +928,7 @@ export function altBody(c, path) {
 /* ---------- clicks (called by seo-health.js) ---------- */
 
 export async function contentClick(e, c, ui, redraw) {
-  const t = e.target.closest("[data-ch-cat],[data-ch-ign],[data-ch-undo],[data-ch-word],[data-ch-showign]," +
+  const t = e.target.closest("[data-ch-cat],[data-ch-tdone],[data-ch-ign],[data-ch-undo],[data-ch-word],[data-ch-showign]," +
     "[data-ch-accept],[data-ch-rej],[data-ch-rejok],[data-ch-rejno],[data-ch-regen],[data-ch-pick],[data-ch-fundo],[data-ch-recheck]," +
     "[data-ch-place],[data-ch-placeall],[data-ch-placeno]," +
     "[data-ch-tpick],[data-ch-tprev],[data-ch-tapply],[data-ch-tcancel],[data-ch-tundo]," +
@@ -890,6 +941,7 @@ export async function contentClick(e, c, ui, redraw) {
   const d = t.dataset, w = c.work, H = w.health;
   if (d.chCat) { ui.ccat = d.chCat; ui.cign = false; redraw(); return true; }
   if (d.chShowign !== undefined) { ui.cign = !ui.cign; redraw(); return true; }
+  if (d.chTdone !== undefined) { ui.cdone = !ui.cdone; redraw(); return true; }
   if (d.chRecheck) { await recheckPages(c, redraw, [d.chRecheck]); return true; }
   if (d.chTpick || d.chTprev || d.chTapply || d.chTcancel || d.chTundo) { await termClick(d, c, redraw); return true; }
   if (d.chFqprev || d.chFqtick || d.chFqapply || d.chFqcancel || d.chFqundo) { await faqClick(d, c, redraw); return true; }
@@ -1693,6 +1745,21 @@ const CSS = `
   .seo-fx-b{flex:1 1 auto;justify-content:center}
 }
 .seo-ct-rej .seo-check{margin:2px 0}
+/* Consistency: open terms as an even grid, changed ones as a compact list */
+.seo-ct-tgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(360px,100%),1fr));gap:10px;align-items:start;margin-top:10px}
+.seo-ct-tgrid > .seo-fx{display:block;width:auto;min-width:0;margin:0;padding:12px 14px;border:1px solid var(--border,#e5e7eb);border-radius:12px;
+  background:var(--card,#fff);font-size:13.5px;font-weight:400;line-height:1.45;white-space:normal;text-align:left;color:inherit}
+.seo-ct-tgrid > .seo-fx.is-wide{grid-column:1 / -1}
+.seo-ct-tgrid > .seo-fx.is-ignored{opacity:.75}
+.seo-ct-tgrid .seo-fx-form{flex:1 1 150px}
+.seo-ct-done{margin-top:14px;padding-top:4px;border-top:1px solid var(--border,#e5e7eb)}
+.seo-ct-dtog{display:flex;align-items:center;gap:8px;width:100%;padding:8px 0;border:0;background:none;font:inherit;font-size:13.5px;color:inherit;text-align:left;cursor:pointer}
+.seo-ct-car{display:inline-block;width:14px;color:var(--text-muted,#6b7280)}
+.seo-ct-drow{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:start;padding:8px 0 8px 22px;border-top:1px solid var(--border,#e5e7eb);font-size:13px}
+.seo-ct-drow .seo-fx-sum{font-size:13.5px}
+.seo-ct-drow .seo-fx-b{min-height:30px;padding:0 12px;font-size:12.5px}
+.seo-ct-dmore summary{cursor:pointer;font-size:12px;color:var(--accent,#2563eb);margin-top:2px}
+.seo-ct-bad{color:#b91c1c;font-weight:600}
 
 @media (max-width:640px){.seo-ct-pair{grid-template-columns:1fr}}
 `;

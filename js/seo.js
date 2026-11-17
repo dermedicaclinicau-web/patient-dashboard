@@ -4,16 +4,17 @@
 // ⚠️ Make these match recall.js exactly (same Firebase version, same db instance)
 import { db } from "./firebase-config.js";
 import { doc, getDoc, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan, titleOf } from "./seo-work.js?v=17";
-import { renderTasks } from "./seo-tasks.js?v=10";
-import { renderClusters } from "./seo-clusters.js?v=2";
-import { renderAdvisor } from "./seo-advisor.js?v=3";
-import { drillHtml, loadWindows } from "./seo-drill.js?v=4";
-import { compareHtml } from "./seo-compare.js?v=1";
-import { mountSeoSite } from "./seo-site.js?v=4";
-import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js?v=9";
-import { renderAds, clearAds, loadAds, adsPageHtml, peekAds, adsTotals } from "./seo-ads.js?v=6";
-import { loadLeads, peekLeads, clearLeads, leadsPageHtml, leadsTotals, leadsByPage } from "./seo-leads.js?v=2";
+import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan, titleOf } from "./seo-work.js";
+import { renderTasks } from "./seo-tasks.js";
+import { renderClusters } from "./seo-clusters.js";
+import { renderAdvisor } from "./seo-advisor.js";
+import { drillHtml, loadWindows } from "./seo-drill.js";
+import { compareHtml } from "./seo-compare.js";
+import { mountSeoSite } from "./seo-site.js";
+import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js";
+import { renderAds, clearAds, loadAds, adsPageHtml, peekAds, adsTotals } from "./seo-ads.js";
+import { loadLeads, peekLeads, clearLeads, leadsPageHtml, leadsTotals, leadsByPage } from "./seo-leads.js";
+import { renderResults } from "./seo-results.js";
 
 const TABS = [
   { id: "overview", label: "Overview" },
@@ -25,6 +26,7 @@ const TABS = [
   { id: "opps", label: "Tasks" },
   { id: "health", label: "Site health" },
   { id: "audience", label: "Audience" },
+  { id: "results", label: "Results" },
   { id: "log", label: "Change log" },
   { id: "settings", label: "Settings", manage: true },
 ];
@@ -648,6 +650,12 @@ export async function mountSeo(el, opts = {}) {
 
   function setTabs() {
     el.querySelectorAll("[data-tab]").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
+    const rb = el.querySelector('.seo-tabs [data-tab="results"]');
+    if (rb) {
+      const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Perth" }).format(new Date());
+      const worse = (work?.tracks || []).filter((T) => T.status === "final" && T.verdict === "worse" && daysBetween(T.date, today) <= 75).length;
+      rb.innerHTML = `Results${worse ? ` <span class="seo-tab-n is-bad" title="${worse} change${worse === 1 ? "" : "s"} made things worse in the last 10 weeks">${worse}</span>` : ""}`;
+    }
   }
 
   async function load(force) {
@@ -703,6 +711,7 @@ export async function mountSeo(el, opts = {}) {
     if (tab === "ads") { renderAds(body, ctx()); return; }
     if (tab === "website") { const sp = siteParam; siteParam = ""; mountSeoSite(body, { param: sp }); return; }
     if (tab === "opps") { renderTasks(body, ctx()); return; }
+    if (tab === "results") { renderResults(body, ctx()); return; }
     if (tab === "pages" && ui.pview === "clusters") { renderClusters(body, ctx()); return; }
     if (tab !== "overview" && tab !== "pages") { renderWorkTab(tab, body, ctx()); return; }
     body.innerHTML = warn + (tab === "overview" ? overviewHtml() : pagesShellHtml());
@@ -1363,6 +1372,7 @@ export async function mountSeo(el, opts = {}) {
 
     if (ds.tab !== undefined) {
       panel.hidden = true;
+      if (ds.rsgo && work) work.rui = { ...(work.rui || {}), v: "", kind: "", q: "", pri: false, open: ds.rsgo, scroll: true };
       tab = ds.tab;
       // replaceState doesn't fire hashchange, so the router won't remount the page
       history.replaceState(null, "", "#/seo" + (tab === "overview" ? "" : "/" + tab));
