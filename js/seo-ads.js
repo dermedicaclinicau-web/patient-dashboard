@@ -1,7 +1,7 @@
 // seo-ads.js — SEO → Ads: Google Ads numbers through GA4
 // Reads seo_state/ads and seo_state/ads_run (written each morning by runSeoAds in SeoAds.gs)
 import { db, auth } from "./firebase-config.js";
-import { doc, getDoc, collection, writeBatch, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { doc, getDoc, getDocs, query, orderBy, limit, collection, writeBatch, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
 
 // Apps Script action "seoAds" (SeoAds.gs → handleSeoAds_)
@@ -37,20 +37,24 @@ export async function loadAds() {
   if (store.data) return store.data;
   if (store.pending) return store.pending;
   store.pending = (async () => {
-    const [a, run, cSnap, sSnap] = await Promise.all([
+    const [a, run, cSnap, sSnap, lSnap, ops] = await Promise.all([
       getDoc(doc(db, "seo_state", "ads")),
       getDoc(doc(db, "seo_state", "ads_run")).catch(() => null),
       getDoc(doc(db, "seo_state", "ads_coach")).catch(() => null),
       getDoc(doc(db, "seo_state", "ads_coach_status")).catch(() => null),
+      getDoc(doc(db, "seo_state", "ads_live")).catch(() => null),
+      fetchOps().catch(() => []),
     ]);
     const r = run && run.exists() ? run.data() : null;
     const coach = cSnap && cSnap.exists() ? coachOf(cSnap.data()) : null;
     let status = {};
     try { status = sSnap && sSnap.exists() ? JSON.parse(sSnap.data().s || "{}") : {}; } catch { status = {}; }
-    if (!a.exists()) return { none: true, run: r, days: [] };
+    const Lv = lSnap && lSnap.exists() ? lSnap.data() : null;
+    const live = Lv ? { at: Lv.atIso ? new Date(Lv.atIso) : null, account: Lv.account || "" } : null;
+    if (!a.exists()) return { none: true, run: r, days: [], ops, live };
     const x = a.data();
     return {
-      coach, status, run: r, from: x.from, to: x.to, kwFrom: x.kwFrom, kwTo: x.kwTo, lpFrom: x.lpFrom, lpTo: x.lpTo,
+      coach, status, run: r, ops, live, from: x.from, to: x.to, kwFrom: x.kwFrom, kwTo: x.kwTo, lpFrom: x.lpFrom, lpTo: x.lpTo,
       updatedAt: x.updatedAt?.toDate ? x.updatedAt.toDate() : null,
       camps: J(x.camps).map((c) => ({ name: String(c[0] || ""), type: String(c[1] || ""), id: String(c[2] || "") })),
       leads: J(x.leads).map((l) => ({ date: l[0], c: l[1], enq: l[2], cb: l[3], came: l[4], tx: l[5], lost: l[6] })),
@@ -220,6 +224,14 @@ const CSS = `
 .seo-adk .seo-table td .seo-path{max-width:240px}
 .seo-adk .seo-table td a{color:var(--accent,#2563eb);text-decoration:none;font-weight:600}
 .seo-adk .seo-table td a:hover{text-decoration:underline}
+.seo-ad-chg{margin:8px 0 0;padding:8px 12px;border:1px dashed #c7d2fe;border-radius:8px;background:#f8faff;font-size:13px}
+.seo-ad-chg ul{list-style:none;margin:6px 0;padding:0}
+.seo-ad-chg li{padding:4px 0;line-height:1.45}
+.seo-ad-chg li label{display:flex;gap:6px;align-items:baseline;cursor:pointer}
+.seo-ad-val{width:86px;padding:2px 6px;display:inline-block}
+.seo-ad-st{display:block;font-size:12px;color:var(--text-muted,#6b7280)}
+.seo-ad-chg li.is-done .seo-ad-st{color:#15803d}.seo-ad-chg li.is-failed .seo-ad-st{color:#b91c1c}
+.seo-ad-res{margin:6px 0;padding:6px 10px;border-radius:6px;background:#f1f5f9;font-size:12.5px;line-height:1.5}
 `;
 function injectCss() {
   if (document.getElementById("seo-ads-css")) return;
@@ -306,6 +318,116 @@ let coachBusy = false, coachErr = "", coachFilter = "todo";
 const IMPACT = { high: "Big win", medium: "Worth doing", low: "Small" };
 const EFFORT = { quick: "Quick", medium: "Under an hour", big: "Bigger job" };
 
+/* ---------- Apply in Google Ads (SeoAdsApply.gs + the Google Ads script) ---------- */
+
+const OP_ST = { queued: "Waiting for Google Ads (it checks every hour)", sent: "Being applied now…", done: "✓ Applied",
+  failed: "⚠ Not applied", undone: "↩ Undone", cancelled: "Cancelled" };
+const perthDay = (ms) => new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Perth" }).format(new Date(ms));
+const negFmt = (t, m) => (m === "exact" ? `[${t}]` : m === "phrase" ? `"${t}"` : t);
+const opBase = (o) => String(o.id || "").replace(/_\d+$/, "");
+const canAds = () => typeof C?.can === "function" && C.can("seo.ads");
+const liveOk = () => !!(AD && AD.live && AD.live.at && Date.now() - AD.live.at.getTime() < 26 * 3600e3);
+function ago(d) {
+  const m = Math.round((Date.now() - d.getTime()) / 60000);
+  return m < 2 ? "just now" : m < 90 ? `${m} min ago` : m < 2880 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`;
+}
+
+async function fetchOps() {
+  const qs = await getDocs(query(collection(db, "seo_ads_ops"), orderBy("atMs", "desc"), limit(400)));
+  return qs.docs.map((d) => ({ ...d.data(), id: d.id }));
+}
+
+function opLabel(o, esc, inp = "") {
+  const pathOf = (u) => String(u || "").replace(/^https?:\/\/[^/]+/i, "") || "/";
+  switch (o.op) {
+    case "pause_keyword": return `Pause keyword <b>${esc(o.keyword)}</b> in ${esc(o.campaign)}${o.adGroup ? ` → ${esc(o.adGroup)}` : ""}${
+      Number(o.places) > 1 ? ` <span class="seo-note">(${o.places} places)</span>` : ""}`;
+    case "add_negative": return `Add negative keyword <b>${esc(negFmt(o.text, o.match))}</b> to ${esc(o.campaign)} <span class="seo-note">${esc(o.match)} match</span>`;
+    case "set_bid": return `Max CPC for <b>${esc(o.keyword)}</b> in ${esc(o.campaign)}: ${money(Number(o.now))} → ${inp || money(Number(o.value))}`;
+    case "set_budget": return `Daily budget for <b>${esc(o.campaign)}</b>: ${money(Number(o.now))} → ${inp || money(Number(o.value))}`;
+    case "add_ad": return `New ad in <b>${esc(o.campaign)}</b>${o.adGroup ? ` → ${esc(o.adGroup)}` : ""}, going to ${esc(pathOf(o.url))} <span class="seo-note">created paused: switch it on in Google Ads</span>`;
+    default: return esc(o.op);
+  }
+}
+const opText = (o) => opLabel(o, (s) => String(s ?? "")).replace(/<[^>]+>/g, "");
+
+// Cost per enquiry (or key event) for the campaigns changed: the 28 days before vs the days since (up to 28)
+function adsResultHtml(h, batch) {
+  const A = AD, K = C.kit, esc = h.esc;
+  const done = batch.filter((o) => o.status === "done");
+  if (!done.length || !A.days?.length) return "";
+  const d = perthDay(Math.min(...done.map((o) => Number(o.doneAtMs) || Date.now())));
+  const idx = [...new Set(done.map((o) => A.camps.findIndex((c) => c.name.toLowerCase() === String(o.campaign || "").toLowerCase())))].filter((i) => i >= 0);
+  if (!idx.length) return `<p class="seo-ad-res">📈 The result shows here once GA4 has this campaign's numbers.</p>`;
+  const a0 = h.addDays(d, 1), last = A.to;
+  const n = last >= a0 ? K.daysBetween(a0, last) + 1 : 0;
+  if (n < 7) return `<p class="seo-ad-res">📈 First result from about ${esc(h.fmtDate(h.addDays(d, 8)))}: it needs a week of numbers after the change.</p>`;
+  const days = Math.min(n, 28), a1 = h.addDays(a0, days - 1);
+  const tot = (f, t) => idx.reduce((s, i) => {
+    const x = sum(A, f, t, String(i)), L = sumLeads(A, f, t, String(i));
+    s.cost += x.cost; s.ke += x.ke; s.enq += L.enq;
+    return s;
+  }, { cost: 0, ke: 0, enq: 0 });
+  const B = tot(h.addDays(d, -28), h.addDays(d, -1)), Af = tot(a0, a1);
+  const useEnq = !!A.leadsFrom && A.leadsFrom <= h.addDays(d, -28) && B.enq >= 5 && Af.enq >= 5;
+  const unit = useEnq ? "enquiry" : "key event", bx = useEnq ? B.enq : B.ke, ax = useEnq ? Af.enq : Af.ke;
+  const spend = `spend per day ${money(B.cost / 28)} → ${money(Af.cost / days)}`;
+  if (bx < 5 || ax < 5) return `<p class="seo-ad-res">📈 ${days} days in: ${spend}. Too few ${unit === "enquiry" ? "enquiries" : "key events"} yet to judge.</p>`;
+  const bv = B.cost / bx, av = Af.cost / ax, ch = av / bv - 1;
+  const v = ch <= -0.15 ? ["Helped", "#15803d"] : ch >= 0.15 ? ["Worse", "#b91c1c"] : ["No clear change", "#475569"];
+  return `<p class="seo-ad-res">📈 ${days < 28 ? `So far (${days} days)` : "28 days after"}: cost per ${unit} ${money(bv)} → ${money(av)}
+    (${ch > 0 ? "+" : ""}${Math.round(ch * 100)}%) · ${spend} · <b style="color:${v[1]}">${v[0]}</b>
+    <br><span class="seo-note">Compared with the 28 days before, for ${idx.length === 1 ? "this campaign" : "these campaigns"}. Not adjusted for season.</span></p>`;
+}
+
+function opsHtml(h, a) {
+  const esc = h.esc, list = a.ops || [];
+  const dropped = (a.opsDropped || []).length
+    ? `<p class="seo-note" style="margin:6px 0 0">Not offered as one click: ${esc(a.opsDropped.join("; "))}</p>` : "";
+  if (!list.length) return dropped;
+  const mine = (AD.ops || []).filter((o) => o.key === a.key);
+  const orig = mine.filter((o) => !o.undoOf).sort((x, y) => Number(y.atMs) - Number(x.atMs));
+  const batch = orig.length ? orig.filter((o) => opBase(o) === opBase(orig[0])) : [];
+  const undos = mine.filter((o) => o.undoOf).sort((x, y) => Number(y.atMs) - Number(x.atMs));
+  const undoWait = undos.some((o) => ["queued", "sent"].includes(o.status));
+  const undoFail = undos[0] && undos[0].status === "failed" ? undos[0] : null;
+  const active = batch.some((o) => ["queued", "sent", "done"].includes(o.status)) || undoWait;
+
+  if (active) {
+    const rows = batch.map((o) => `<li class="is-${esc(o.status)}">${opLabel(o, esc)}<span class="seo-ad-st">${OP_ST[o.status] || esc(o.status)}${
+      o.status === "done" && o.doneAtMs ? ` · ${esc(h.fmtDate(perthDay(Number(o.doneAtMs))))}` : ""}${o.result ? ` · ${esc(o.result)}` : ""}${
+      o.error ? `: ${esc(o.error)}` : ""}</span></li>`).join("");
+    const sending = batch.some((o) => o.status === "sent");
+    const btns = [
+      canAds() && !undoWait && !sending && batch.some((o) => ["queued", "done"].includes(o.status))
+        ? `<button class="seo-btn" type="button" data-ads-unapply="${esc(a.key)}">${batch.some((o) => o.status === "done") ? "Undo in Google Ads" : "Cancel"}</button>` : "",
+      `<button class="seo-btn" type="button" data-ads-recheck>Check again</button>`,
+    ].join("");
+    return `<div class="seo-ad-chg"><b>Changes in Google Ads</b><ul>${rows}</ul>
+      ${undoWait ? `<p class="seo-note" style="margin:4px 0">↩ Undo waiting for Google Ads (it checks every hour).</p>` : ""}
+      ${undoFail ? `<div class="seo-warn">The undo didn't work: ${esc(undoFail.error || "")}. Change it back in Google Ads.</div>` : ""}
+      ${adsResultHtml(h, batch)}<div class="seo-row" style="margin:6px 0 0">${btns}</div>${dropped}</div>`;
+  }
+
+  const ok = canAds() && liveOk();
+  const last = !batch.length ? ""
+    : batch.every((o) => o.status === "undone") ? "Applied before, then undone."
+    : batch.every((o) => o.status === "cancelled") ? "Cancelled before it was applied."
+    : batch.some((o) => o.status === "failed") ? `Last try: ${batch.filter((o) => o.status === "failed").map((o) => o.error).join("; ")}` : "";
+  const rows = list.map((o, i) => {
+    const inp = ok && (o.op === "set_bid" || o.op === "set_budget")
+      ? `$<input class="seo-input seo-ad-val" type="number" step="0.01" min="0.01" data-ads-val="${i}" value="${Number(o.value).toFixed(2)}">` : "";
+    return `<li><label><input type="checkbox" data-ads-pick="${i}" checked${ok ? "" : " disabled"}> <span>${opLabel(o, esc, inp)}</span></label></li>`;
+  }).join("");
+  const why = !canAds() ? "Applying these needs the “SEO: apply changes in Google Ads” permission."
+    : !AD.live ? "Install the Google Ads script to apply these from here."
+    : !liveOk() ? "The Google Ads script hasn't checked in for over a day. In Google Ads → Tools → Scripts, check it's on and set to Hourly." : "";
+  return `<div class="seo-ad-chg"><b>Apply in Google Ads</b> <span class="seo-note">${list.length} change${list.length === 1 ? "" : "s"}</span>
+    <ul>${rows}</ul>${last ? `<p class="seo-note" style="margin:4px 0">${esc(last)}</p>` : ""}${dropped}
+    ${why ? `<p class="seo-note" style="margin:6px 0 0">${esc(why)}</p>`
+      : `<div class="seo-row" style="margin:6px 0 0"><button class="seo-btn on" type="button" data-ads-apply="${esc(a.key)}">Apply in Google Ads</button>
+        <span class="seo-note">Applied within the hour. Budgets move 30% at most, bids 50%, and new ads start paused.</span></div>`}</div>`;
+}
 // Suggestions marked Done, as markers on the chart
 function doneMarks(A) {
   return Object.values(A.status || {}).filter((s) => s && s.st === "done" && s.date)
@@ -322,6 +444,9 @@ function coachHtml(h, A) {
   const head = `<div class="seo-row" style="margin:0 0 8px"><h3 style="margin:0">✨ Claude's suggestions</h3>
     ${when ? `<span class="seo-note">${esc(when)}${c.by ? ` · ${esc(c.by)}` : ""}</span>` : ""}<span class="seo-sp"></span>${btn}</div>`;
   const err = coachErr ? `<div class="seo-warn">${esc(coachErr)}</div>` : "";
+  const Lv = A.live;
+  const bridge = Lv && Lv.at ? `<p class="seo-note" style="margin:-4px 0 8px">Google Ads${Lv.account ? ` (${esc(Lv.account)})` : ""} connected · last checked ${
+    esc(ago(Lv.at))}${liveOk() ? "" : " ⚠ over a day ago: check the script is still scheduled hourly"}</p>` : "";
   if (!c) {
     return `<div class="seo-card seo-ad-coach">${head}${err}<p class="seo-note" style="margin:0">Every Monday morning Claude reads these
       numbers and suggests what to change to get more patients for your spend.${can ? " Press <b>Ask Claude now</b> for the first set." : ""}</p></div>`;
@@ -338,8 +463,10 @@ function coachHtml(h, A) {
   const item = (a) => {
     const copy = (a.headlines || []).length || (a.descriptions || []).length
       ? `<div class="seo-ad-copy">${lines("Headlines", a.headlines, 30)}${lines("Descriptions", a.descriptions, 90)}</div>` : "";
-    const acts = a.st
-      ? `<span class="seo-note">${a.st.st === "done" ? "Done" : "Not now"}${a.st.date ? ` · ${esc(h.fmtDate(a.st.date))}` : ""}${a.st.by ? ` · ${esc(a.st.by)}` : ""}</span>
+    const acts = a.st && a.st.applied
+      ? `<span class="seo-note">✓ Applied in Google Ads${a.st.date ? ` · ${esc(h.fmtDate(a.st.date))}` : ""}${a.st.by ? ` · ${esc(a.st.by)}` : ""}</span>`
+      : a.st
+      ? `<span class="seo-note">${a.st.undone ? "Undone in Google Ads" : a.st.st === "done" ? "Done" : "Not now"}${a.st.date ? ` · ${esc(h.fmtDate(a.st.date))}` : ""}${a.st.by ? ` · ${esc(a.st.by)}` : ""}</span>
          ${can ? `<button class="seo-btn" type="button" data-ads-act="${esc(a.key)}|undo">Undo</button>` : ""}`
       : can ? `<button class="seo-btn on" type="button" data-ads-act="${esc(a.key)}|done">Done</button>
          <button class="seo-btn" type="button" data-ads-act="${esc(a.key)}|later">Not now</button>` : "";
@@ -353,6 +480,7 @@ function coachHtml(h, A) {
       ${copy}
       ${a.risk ? `<div class="seo-warn">⚠ ${esc(a.risk)}</div>` : ""}
       ${(a.flags || []).length ? `<div class="seo-warn">${a.flags.map((f) => `⚠ ${esc(f)}`).join("<br>")}</div>` : ""}
+      ${!a.st || a.st.applied || a.st.undone ? opsHtml(h, a) : ""}
       <div class="seo-row" style="margin:8px 0 0">${acts}
         ${a.page ? `<button class="seo-btn" type="button" data-advpage="${esc(String(a.page).replace(/^https?:\/\/[^/]+/i, "") || "/")}">Ask the Advisor about this page</button>` : ""}
         ${a.keyword ? `<button class="seo-btn" type="button" data-kq="${esc(kq(a.keyword))}">See it in Keywords</button>` : ""}
@@ -389,6 +517,52 @@ function copyText(txt, btn) {
 async function coachClick(t) {
   const d = t.dataset;
   const stillHere = () => B && B.querySelector(".seo-ad-coach");
+  if (d.adsApply !== undefined) {
+    const card = t.closest(".seo-ad-act");
+    const a = (AD.coach?.actions || []).find((x) => x.key === d.adsApply);
+    if (!a || !card) return;
+    const pick = [...card.querySelectorAll("[data-ads-pick]")].filter((x) => x.checked).map((x) => Number(x.dataset.adsPick));
+    if (!pick.length) { adsToast("Tick at least one change.", true); return; }
+    const vals = {};
+    card.querySelectorAll("[data-ads-val]").forEach((x) => { vals[x.dataset.adsVal] = Number(x.value); });
+    const lines = pick.map((i) => "• " + opText({ ...a.ops[i], ...(vals[i] != null ? { value: vals[i] } : {}) }));
+    if (!confirm(`Apply in Google Ads?\n\n${lines.join("\n")}\n\nGoogle Ads makes these within the hour. You can undo them from here.`)) return;
+    t.disabled = true;
+    try {
+      const r = await api("apply", { key: a.key, pick, vals });
+      if (r && r.problem) coachErr = r.problem;
+      else if (r && r.error) coachErr = r.error === "FORBIDDEN" ? "You don't have permission to apply changes in Google Ads." : r.error;
+      else if (r && r.ops) {
+        AD.ops = r.ops.concat((AD.ops || []).filter((o) => o.key !== a.key));
+        coachErr = "";
+        adsToast("Sent to Google Ads. It's applied within the hour.");
+      }
+    } catch (err) { coachErr = err?.message || "Not sent. Try again."; }
+    if (stillHere()) draw();
+    return;
+  }
+  if (d.adsUnapply !== undefined) {
+    if (!confirm("Undo these changes in Google Ads? Anything not applied yet is cancelled; the rest is put back within the hour.")) return;
+    t.disabled = true;
+    try {
+      const r = await api("unapply", { key: d.adsUnapply });
+      if (r && r.problem) coachErr = r.problem;
+      else if (r && r.error) coachErr = r.error === "FORBIDDEN" ? "You don't have permission to change Google Ads." : r.error;
+      else if (r && r.ops) { AD.ops = r.ops.concat((AD.ops || []).filter((o) => o.key !== d.adsUnapply)); coachErr = ""; }
+    } catch (err) { coachErr = err?.message || "Not saved. Try again."; }
+    if (stillHere()) draw();
+    return;
+  }
+  if (d.adsRecheck !== undefined) {
+    t.disabled = true;
+    try {
+      const [ops, s] = await Promise.all([fetchOps(), getDoc(doc(db, "seo_state", "ads_coach_status"))]);
+      AD.ops = ops;
+      try { AD.status = s.exists() ? JSON.parse(s.data().s || "{}") : {}; } catch { /* keep what's shown */ }
+    } catch (err) { coachErr = err?.message || "Couldn't check."; }
+    if (stillHere()) draw();
+    return;
+  }
   if (d.adsCf !== undefined) { coachFilter = d.adsCf; draw(); return; }
   if (d.adsCopy !== undefined) { copyText(d.adsCopy, t); return; }
   if (d.adsTask !== undefined || d.adsCtask !== undefined) {
@@ -1122,7 +1296,7 @@ function bind(body) {
   if (body.dataset.adsBound) return;
   body.dataset.adsBound = "1";
   body.addEventListener("click", (e) => {
-    const ca = e.target.closest("[data-ads-coach],[data-ads-act],[data-ads-cf],[data-ads-copy],[data-ads-task],[data-ads-ctask]");
+    const ca = e.target.closest("[data-ads-coach],[data-ads-act],[data-ads-cf],[data-ads-copy],[data-ads-task],[data-ads-ctask],[data-ads-apply],[data-ads-unapply],[data-ads-recheck]");
     if (ca && AD && body.contains(ca)) { coachClick(ca); return; }
     const t = e.target.closest("[data-ads-preset],[data-ads-metric],[data-ads-camp],[data-ads-sort],[data-ads-kwsort],[data-ads-more],[data-ads-kpi],[data-ads-dtab],[data-ads-dx],[data-ads-pf],[data-ads-pretry]");
     if (!t || !AD || !body.contains(t)) return;
