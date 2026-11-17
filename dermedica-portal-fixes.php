@@ -162,6 +162,16 @@ function dpcfix_all_hits($targets, $needle) {
   return $hits;
 }
 
+// The portal reads a space where a link or bold text ends ("pigmentation , thin"). The exact words are tried first,
+// so a real stray space can still be fixed; if they aren't found, they're tried without a space before punctuation.
+function dpcfix_find_hits($targets, $find) {
+  $needle = dpcfix_needle($find);
+  $hits = dpcfix_all_hits($targets, $needle);
+  if ($hits) return $hits;
+  $loose = preg_replace('/\s+([,.;:!?)\]])/u', '$1', $needle);
+  return $loose !== $needle ? dpcfix_all_hits($targets, $loose) : [];
+}
+
 function &dpcfix_ref(array &$arr, array $path) { $r = &$arr; foreach ($path as $k) { $r = &$r[$k]; } return $r; }
 function dpcfix_get($arr, $path) {
   foreach ($path as $k) { if (!is_array($arr) || !array_key_exists($k, $arr)) return null; $arr = $arr[$k]; }
@@ -205,7 +215,7 @@ function dpcfix_find(WP_REST_Request $req) {
   $id = (int) ($b['id'] ?? 0); $find = trim((string) ($b['find'] ?? ''));
   if (!$id || !get_post($id) || $find === '') return dpcfix_no('bad', 'Nothing to look for.');
   list($targets, $isEl) = dpcfix_targets($id);
-  $hits = dpcfix_all_hits($targets, dpcfix_needle($find));
+  $hits = dpcfix_find_hits($targets, $find);
   return ['ok' => true, 'elementor' => $isEl, 'count' => count($hits), 'hits' => array_map(function ($h) {
     return ['formatted' => $h['tags'], 'context' => $h['ctx'], 'match' => $h['match']];
   }, array_slice($hits, 0, 20))];
@@ -226,7 +236,7 @@ function dpcfix_replace(WP_REST_Request $req) {
   if ($find === '' || $rep === '' || mb_strlen($find) > 1500 || mb_strlen($rep) > 2000 || !$fid) return dpcfix_no('bad', 'Nothing to change.');
 
   list($targets, $isEl, $data) = dpcfix_targets($id);
-  $hits = dpcfix_all_hits($targets, dpcfix_needle($find));
+  $hits = dpcfix_find_hits($targets, $find);
   if (!$hits) return dpcfix_no('not_found', 'Not found in the page.');
   if (count($hits) > 1 && !$all) return dpcfix_no('many', 'Found more than once.', ['count' => count($hits)]);
   if (count($hits) > 20) return dpcfix_no('many', 'Found too many times.', ['count' => count($hits)]);
