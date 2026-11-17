@@ -183,6 +183,8 @@ export function renderResults(body, c) {
       }).join("")}</ol>` : ""}
       <h4>What was changed</h4>
       <ul class="seo-rs-list">${(T.logs || []).map((l) => `<li>${h.esc(l.title)}${l.by ? ` <span class="seo-note">· ${h.esc(l.by)}</span>` : ""}${
+        { advisor: ` <span class="seo-note">· SEO Advisor</span>`, "site-health": ` <span class="seo-note">· Site health</span>`,
+          website: ` <span class="seo-note">· Website tab</span>` }[l.source] || ""}${
         l.undone ? ` <span class="seo-vx is-grey">changed back ${h.fmtDate(l.undone, false)}</span>` : ""}</li>`).join("")}</ul>
       ${(T.overlap || []).length ? `<h4>Other changes to this page within 4 weeks</h4>
         <ul class="seo-rs-list">${T.overlap.map((o) => `<li>${h.fmtDate(o.date)} · ${h.esc(KIND_LABEL[o.kind] || o.kind)}:
