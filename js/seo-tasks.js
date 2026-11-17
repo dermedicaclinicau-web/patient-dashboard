@@ -12,9 +12,9 @@ import {
   doc, getDoc, getDocs, collection, query, where, orderBy, limit, writeBatch, runTransaction, serverTimestamp, arrayUnion,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { npath, pageStory, priorityOf, prioritySettings, titleOf, complianceWords, renderOppsInto, taskConfig, pageOf, makeSortable,
-  clusterOfMain, linkState, redirectState }   from "./seo-work.js?v=28";
+  clusterOfMain, linkState, redirectState }   from "./seo-work.js";
 import { contentIssues, contentClick, altBody, issueFixHtml, altIssueId, fixApi, fixErr, askConfirm, injectCss as fxCss }
-  from "./seo-content.js?v=13";
+  from "./seo-content.js";
 
 const GROUPS = {
   basics:  { order: 0, factor: 1,   title: () => "Fix what's holding it back" },

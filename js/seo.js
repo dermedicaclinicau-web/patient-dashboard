@@ -406,6 +406,9 @@ const CSS = `
 .seo-tabs{display:flex;gap:4px;border-bottom:1px solid var(--border,#e5e7eb);margin-bottom:16px}
 .seo-tab{background:none;border:0;padding:10px 14px;cursor:pointer;font:inherit;color:var(--text-muted,#6b7280);border-bottom:2px solid transparent;margin-bottom:-1px}
 .seo-tab.on{color:inherit;border-bottom-color:var(--accent,#2563eb);font-weight:600}
+.seo-tab{white-space:nowrap}
+.seo-tabs{overflow-x:auto}
+.seo-tab-n{display:inline-block;min-width:16px;margin-left:4px;padding:0 5px;border-radius:999px;background:#dc2626;color:#fff;font-size:11px;font-weight:700;line-height:16px;text-align:center}
 .seo-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
 .seo-row .seo-sp{flex:1}
 .seo-kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-bottom:16px}

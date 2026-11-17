@@ -43,8 +43,8 @@ export function renderResults(body, c) {
   }
   const tracks = (w.tracks || []).slice().sort((a, b) => b.date.localeCompare(a.date) || String(a.id).localeCompare(String(b.id)));
   if (!tracks.length) {
-    wrap.innerHTML = `<div class="seo-empty">Nothing measured yet. In Apps Script, run <code>installSeoFixTrackerTrigger</code> once:
-      it measures every change in the Change log from the last 4 months, then checks again each morning.</div>`;
+    wrap.innerHTML = `<div class="seo-empty">Nothing measured yet. In Apps Script, run <code>runSeoFixTracker</code> once:
+      it measures every change in the Change log from the last 4 months. After that it runs each morning at 11am.</div>`;
     return;
   }
   const end = c.data.ov.periodEnd;
@@ -179,11 +179,11 @@ export function renderResults(body, c) {
       ${ks.length ? `<h4>Readings</h4><ol class="seo-rs-reads">${ks.map((k) => {
         const r = T.cps[k];
         const [l, tone] = VERDICT[r.v] || VERDICT.early;
-        return `<li><span class="seo-fx is-${tone}">Day ${k}: ${h.esc(l)}</span> ${h.esc(r.why || "")}</li>`;
+        return `<li><span class="seo-vx is-${tone}">Day ${k}: ${h.esc(l)}</span> ${h.esc(r.why || "")}</li>`;
       }).join("")}</ol>` : ""}
       <h4>What was changed</h4>
       <ul class="seo-rs-list">${(T.logs || []).map((l) => `<li>${h.esc(l.title)}${l.by ? ` <span class="seo-note">· ${h.esc(l.by)}</span>` : ""}${
-        l.undone ? ` <span class="seo-fx is-grey">changed back ${h.fmtDate(l.undone, false)}</span>` : ""}</li>`).join("")}</ul>
+        l.undone ? ` <span class="seo-vx is-grey">changed back ${h.fmtDate(l.undone, false)}</span>` : ""}</li>`).join("")}</ul>
       ${(T.overlap || []).length ? `<h4>Other changes to this page within 4 weeks</h4>
         <ul class="seo-rs-list">${T.overlap.map((o) => `<li>${h.fmtDate(o.date)} · ${h.esc(KIND_LABEL[o.kind] || o.kind)}:
           ${byId.has(o.id) ? `<button class="seo-w-link" type="button" data-rs-goto="${h.esc(o.id)}">${h.esc(o.title || "a change")}</button>` : h.esc(o.title || "a change")}</li>`).join("")}</ul>` : ""}
@@ -231,7 +231,7 @@ export function renderResults(body, c) {
       : `<div class="seo-empty">No changes match.</div>`;
     if (ui.scroll && ui.open) {
       ui.scroll = false;
-      box.querySelector(`[data-rs-card="${CSS.escape(ui.open)}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      box.querySelector(`[data-rs-card="${window.CSS.escape(ui.open)}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" });
     }
   }
 

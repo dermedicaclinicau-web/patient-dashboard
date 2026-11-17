@@ -13854,9 +13854,6 @@ dialog.pdz::backdrop { background: rgba(15, 23, 42, .45); }
 button.fr-join { cursor: pointer; font: inherit; }
 button.fr-join:hover { text-decoration: underline; }
 
-.seo-fx{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11.5px;font-weight:600;white-space:nowrap;background:#f1f5f9;color:#475569;vertical-align:1px}
-.seo-fx.is-good{background:#ecfdf5;color:#047857}.seo-fx.is-bad{background:#fef2f2;color:#b91c1c}
-.seo-fx.is-blue{background:#eff6ff;color:#1d4ed8}.seo-fx.is-amber{background:#fffbeb;color:#b45309}
 .seo-w-fxlist{list-style:none;margin:0 0 10px;padding:0;font-size:13px}
 .seo-w-fxlist li{display:flex;flex-direction:column;gap:2px;align-items:flex-start;padding:7px 0;border-top:1px solid var(--border,#e5e7eb)}
 .seo-w-fxlist li:first-child{border-top:0}

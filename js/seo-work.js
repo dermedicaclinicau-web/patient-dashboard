@@ -6,7 +6,7 @@ import {
   doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, collection, query, where, getDocs, serverTimestamp, writeBatch,
   arrayUnion, arrayRemove,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { loadHealth, viewHealth, healthPanelHtml } from "./seo-health.js?v=4";
+import { loadHealth, viewHealth, healthPanelHtml } from "./seo-health.js";
 import { loadAudience, viewAudience } from "./seo-audience.js";
 
 const BRAND = "__brand", OTHER = "__other", ALL = "__all", PRI = "__priority";
@@ -118,7 +118,8 @@ export async function loadWork(force) {
   if (wcache.v && !force) return wcache.v;
   if (wcache.pending) return wcache.pending;
   wcache.pending = (async () => {
-    const w = { queries: [], qs: null, settings: null, wp: null, cpages: null, cpagesAt: null, opps: {}, log: [], errors: {}, prefill: null, health: null, audience: null };
+    const w = { queries: [], qs: null, settings: null, wp: null, cpages: null, cpagesAt: null, opps: {}, log: [], errors: {}, prefill: null, health: null, audience: null,
+      tracks: [], trackSum: null };
     const safe = async (k, fn) => { try { await fn(); } catch (e) { w.errors[k] = e.message || String(e); } };
     await Promise.all([
       safe("queries", async () => {
@@ -153,6 +154,11 @@ export async function loadWork(force) {
         const s = await getDocs(collection(db, "seo_opps"));
         s.docs.forEach((d) => { w.opps[d.id] = d.data(); });
       }),
+      safe("tracks", async () => {   // did each change help? (Seo13.gs, each morning)
+        const [s, t] = await Promise.all([getDoc(doc(db, "seo_state", "fix_tracks")), getDocs(collection(db, "seo_fix_tracks"))]);
+        w.trackSum = s.exists() ? jsonFields(s.data(), ["month"]) : null;
+        w.tracks = t.docs.map((d) => ({ ...jsonFields(d.data(), ["cps", "logs", "overlap", "base"]), id: d.id })).filter((T) => T.date && T.path);
+      }),
       safe("log", async () => {
         const s = await getDocs(collection(db, "seo_log"));
         w.log = s.docs.map((d) => ({ id: d.id, ...d.data() }))
@@ -160,9 +166,18 @@ export async function loadWork(force) {
       }),
     ]);
     classify(w);
+
     return w;
   })();
   try { const v = await wcache.pending; wcache.v = v; return v; } finally { wcache.pending = null; }
+}
+
+// A saved document whose fields may be JSON text (or all of it in one "json" field)
+function jsonFields(d, keys) {
+  let x = { ...d };
+  if (typeof x.json === "string") { try { x = { ...x, ...JSON.parse(x.json) }; } catch { /* keep the fields */ } }
+  for (const k of keys) if (typeof x[k] === "string") { try { x[k] = JSON.parse(x[k]); } catch { /* keep as is */ } }
+  return x;
 }
 
 function rowToQ(r) {
@@ -766,17 +781,54 @@ function storyHtml(w, p, h) {
 
 /* ---------- used by seo.js ---------- */
 
+// Results (Seo13.gs): what each verdict says, and what each kind of change is called
+export const VERDICT = {
+  helped: ["Helped", "green"], flat: ["No clear change", "grey"], worse: ["Worse", "red"],
+  early: ["Too early", "blue"], thin: ["Not enough visits", "grey"], undone: ["Changed back", "grey"],
+};
+export const KIND_LABEL = {
+  snippet: "Title and description", content: "Wording and content", links: "Links",
+  engage: "First screen and bounce", speed: "Speed", index: "Indexing",
+};
+export function trackChip(T, h) {
+  const done = T.status === "final" || T.status === "undone";
+  const [l, tone] = VERDICT[T.status === "undone" ? "undone" : T.verdict] || VERDICT.early;
+  const label = done ? l
+    : T.verdict && T.verdict !== "early" && VERDICT[T.verdict] ? `So far: ${VERDICT[T.verdict][0].toLowerCase()}`
+    : `Measuring · day ${Math.max(0, Math.min(28, T.day || 0))}`;
+  return `<span class="seo-vx is-${done ? tone : "blue"}" title="${h.esc(T.reason || "")}">${h.esc(label)}</span>`;
+}
+// A page's results (with or without the end slash), newest first
+export const tracksFor = (w, path) => (w?.tracks || []).filter((T) => npath(T.path) === npath(path))
+  .sort((a, b) => b.date.localeCompare(a.date));
+// The result for one Change log entry: by its id, or the same page on the same day
+function trackOfLog(w, e) {
+  const ts = w?.tracks || [];
+  return ts.find((T) => (T.logs || []).some((l) => (typeof l === "string" ? l : l?.id) === e.id))
+    || (e.url ? ts.find((T) => T.date === e.date && npath(T.path) === npath(e.url)) : null) || null;
+}
+
 export function logMarks(w) {
   return (w?.log || []).map((e) => ({ date: e.date, title: `${e.date} · ${e.title}${e.url ? " (" + e.url + ")" : ""}` }));
 }
 
+
 export function pagePanelExtras(w, p, h, can) {
   if (!w) return "";
   const qs = [];
-  for (const q of w.queries) { const x = q.pages.find((y) => y.path === p.path); if (x) qs.push({ q: q.q, ...x }); }
+  const me = npath(p.path);
+  for (const q of w.queries) { const x = q.pages.find((y) => npath(y.path) === me); if (x) qs.push({ q: q.q, ...x }); }
   qs.sort((a, b) => b.i - a.i);
-  const logs = w.log.filter((e) => e.url === p.path);
+  const logs = w.log.filter((e) => e.url && npath(e.url) === me);
+  const tracks = tracksFor(w, p.path).slice(0, 6);
   return `<div class="seo-w-panel">${storyHtml(w, p, h)}${healthPanelHtml(w.health, p)}
+    <h3>Did the changes help?</h3>
+    ${tracks.length ? `<ul class="seo-w-fxlist">${tracks.map((T) => `<li>
+        <div>${trackChip(T, h)} <span class="seo-note">${h.fmtDate(T.date)} · ${h.esc(KIND_LABEL[T.kind] || T.kind)}</span></div>
+        <div>${h.esc(T.title || "")}</div>
+        ${T.reason ? `<div class="seo-note">${h.esc(T.reason)}</div>` : ""}
+        <button class="seo-w-link" type="button" data-tab="results" data-rsgo="${h.esc(T.id)}">See the details</button></li>`).join("")}</ul>`
+      : `<p class="seo-note">${w.errors.tracks ? "Results couldn't be read." : "Nothing to measure yet. Changes made from the portal are measured automatically."}</p>`}
     <h3>Top searches for this page <small class="seo-note">(28 days)</small></h3>
     ${qs.length
       ? `<table class="seo-kv"><tr><th>Search</th><th>Clicks</th><th>Impr.</th><th>Pos.</th></tr>${qs.slice(0, 15).map((x) =>
@@ -785,7 +837,10 @@ export function pagePanelExtras(w, p, h, can) {
       : `<p class="seo-note">${w.queries.length ? "No searches with enough impressions." : "Search data isn't loaded yet."}</p>`}
     <h3>Changes to this page</h3>
     ${logs.length
-      ? `<ul class="seo-w-plog">${logs.map((e) => `<li><span>${h.fmtDate(e.date)}</span> ${h.esc(e.title)}</li>`).join("")}</ul>`
+      ? `<ul class="seo-w-plog">${logs.map((e) => {
+          const T = trackOfLog(w, e);
+          return `<li><span>${h.fmtDate(e.date)}</span> ${h.esc(e.title)}${T ? " " + trackChip(T, h) : ""}</li>`;
+        }).join("")}</ul>`
       : `<p class="seo-note">None logged.</p>`}
     ${can("seo.work") ? `<button class="seo-btn" data-logpage="${h.esc(p.path)}">Log a change to this page</button>` : ""}
   </div>`;
@@ -1175,11 +1230,16 @@ function viewOpps(wrap, c, ui) {
 
 function effect(e, c) {
   const { data, h } = c;
+  const T = trackOfLog(c.work, e);
+  if (T) {
+    return `${trackChip(T, h)} <span class="seo-note">${h.esc(T.reason || "")}</span>
+      <button class="seo-w-link" type="button" data-tab="results" data-rsgo="${h.esc(T.id)}">Details</button>`;
+  }
   const end = data.ov.periodEnd;
   const gap = Math.floor((Date.parse(end) - Date.parse(e.date)) / 864e5);
   if (gap < 14) return `<span class="seo-note">Too soon to see an effect (needs 2 weeks of data after the change).</span>`;
   const ba = (b, a, what) => `<span class="seo-note">${what}:</span> ${b.toFixed(1)} → <strong>${a.toFixed(1)}</strong> ${h.delta(a, b)}`;
-  const pg = e.url ? c.byPath.get(e.url) : null;
+  const pg = e.url ? pageOf(c.data, e.url) : null;
   if (pg && Array.isArray(pg.weekly) && pg.weekly.length === 12) {
     const wEnd = (i) => h.addDays(end, -7 * (11 - i));
     const k = pg.weekly.findIndex((_, i) => e.date <= wEnd(i) && e.date >= h.addDays(wEnd(i), -6));
@@ -1241,7 +1301,7 @@ function viewLog(wrap, c, ui) {
       const head = m !== month
         ? `<h4 class="seo-w-month">${new Date(e.date + "T00:00:00Z").toLocaleDateString("en-AU", { month: "long", year: "numeric", timeZone: "UTC" })}</h4>` : "";
       month = m;
-      const pg = e.url ? c.byPath.get(e.url) : null;
+      const pg = e.url ? pageOf(c.data, e.url) : null;
       const mine = canManage || (canWork && e.by === me);
       return head + `<div class="seo-w-entry">
         <div class="seo-w-edate">${h.fmtDate(e.date)}</div>
@@ -2331,6 +2391,13 @@ body.seo-dragging,body.seo-dragging *{cursor:grabbing !important;user-select:non
 .seo-pr-pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap}
 .seo-pr-pill.is-red{background:#fef2f2;color:#b91c1c}.seo-pr-pill.is-amber{background:#fffbeb;color:#b45309}
 .seo-pr-pill.is-green{background:#ecfdf5;color:#047857}.seo-pr-pill.is-grey{background:#f1f5f9;color:#475569}
+.seo-vx{display:inline-flex;align-items:center;gap:4px;padding:1px 8px;border-radius:999px;font-size:11.5px;font-weight:600;white-space:nowrap;background:#f1f5f9;color:#475569;vertical-align:1px}
+.seo-vx.is-green{background:#ecfdf5;color:#047857}.seo-vx.is-red{background:#fef2f2;color:#b91c1c}
+.seo-vx.is-blue{background:#eff6ff;color:#1d4ed8}.seo-vx.is-amber{background:#fffbeb;color:#b45309}
+.seo-w-fxlist{list-style:none;margin:0 0 8px;padding:0;font-size:13px}
+.seo-w-fxlist li{padding:7px 0;border-top:1px solid var(--border,#e5e7eb)}
+.seo-w-fxlist li:first-child{border-top:0}
+.seo-w-fxlist li > div{margin-top:2px}
 @media (max-width:900px){.seo-w-log,.seo-w-set{grid-template-columns:1fr}}
 @media (max-width:640px){.seo-w-cl .seo-w-oacts{grid-template-columns:1fr 1fr}}
 @media (max-width:640px){
