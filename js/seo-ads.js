@@ -448,7 +448,7 @@ function coachHtml(h, A) {
   const bridge = Lv && Lv.at ? `<p class="seo-note" style="margin:-4px 0 8px">Google Ads${Lv.account ? ` (${esc(Lv.account)})` : ""} connected · last checked ${
     esc(ago(Lv.at))}${liveOk() ? "" : " ⚠ over a day ago: check the script is still scheduled hourly"}</p>` : "";
   if (!c) {
-    return `<div class="seo-card seo-ad-coach">${head}${err}<p class="seo-note" style="margin:0">Every Monday morning Claude reads these
+    return `<div class="seo-card seo-ad-coach">${head}${bridge}${err}<p class="seo-note" style="margin:0">Every Monday morning Claude reads these
       numbers and suggests what to change to get more patients for your spend.${can ? " Press <b>Ask Claude now</b> for the first set." : ""}</p></div>`;
   }
   const all = c.actions.map((a) => ({ ...a, st: S[a.key] || null }));
@@ -487,7 +487,7 @@ function coachHtml(h, A) {
         ${a.page && !a.st && canTask() ? `<button class="seo-btn" type="button" data-ads-ctask="${esc(a.key)}">Add to Tasks</button>` : ""}</div>
     </div>`;
   };
-  return `<div class="seo-card seo-ad-coach">${head}${err}
+  return `<div class="seo-card seo-ad-coach">${head}${bridge}${err}
     ${c.summary ? `<p class="seo-ad-sum">${esc(c.summary)}</p>` : ""}
     <div class="seo-row">${seg}</div>
     ${list.length ? list.map(item).join("") : `<p class="seo-note">${coachFilter === "todo" ? "Nothing left to do from this set. 👍" : "None yet."}</p>`}
