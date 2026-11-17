@@ -2,14 +2,23 @@
 /**
  * Plugin Name: Dermedica Portal Fixes
  * Description: Lets the staff portal fix a word or phrase on a page (spelling, grammar, wording) and undo it. Works alongside Dermedica Portal Connector.
- * Version: 1.1.0
+ * Version: 1.3.0
  */
 if (!defined('ABSPATH')) exit;
 
 const DPCFIX_NS = 'dermedica-portal/v1';
 const DPCFIX_LOG = '_dpc_fix_log';
-// Elementor settings that never hold readable text
-const DPCFIX_SKIP_KEY = '/(^_|url|link|image|icon|^id$|css|class|colou?r|font|size|width|height|align|position|animation|motion|background|border|padding|margin|gap|style|tag$|type$|layout|view|selected|^source$|anchor|lightbox|video|embed|shortcode|^template)/i';
+// Does this Elementor setting hold words people read? Judged by the last part of its name ("link_text" yes, "title_size" no),
+// so text fields whose names contain "link", "view" or "size" somewhere aren't missed.
+function dpcfix_is_text($k, $v) {
+  if (!is_string($k) || $k === '' || $k[0] === '_') return false;
+  $base = preg_replace('/_(tablet|mobile|mobile_extra|tablet_extra|laptop|widescreen|hover|active)$/', '', strtolower($k));
+  $parts = explode('_', $base);
+  $last = end($parts);
+  if (preg_match('/^(id|url|link|href|image|img|icon|icons|svg|css|class|classes|color|colour|font|family|weight|size|width|height|align|alignment|position|animation|motion|background|bg|border|radius|padding|margin|gap|spacing|style|tag|type|layout|view|selected|source|anchor|lightbox|video|embed|shortcode|template|target|rel|nofollow|ratio|duration|delay|direction|effect|transition|shadow|opacity|blend|display|overflow|unit|units|key|slug|lang)$/', $last)) return false;
+  if (preg_match('/^[a-z0-9_#.%-]+$/', $v)) return false;   // a single setting word: center, h2, solid, yes, #fff
+  return (bool) preg_match('/\p{L}{2}/u', $v);
+}
 
 add_action('rest_api_init', function () {
   foreach (['find' => 'dpcfix_find', 'replace' => 'dpcfix_replace', 'undo' => 'dpcfix_undo', 'faq' => 'dpcfix_faq',
@@ -52,7 +61,10 @@ function dpcfix_no($code, $msg, $extra = []) { return array_merge(['ok' => false
 // Curly quotes, long dashes and odd spaces count as the plain ones (capitals kept)
 function dpcfix_fold_char($ch) {
   static $map = ["\u{2018}" => "'", "\u{2019}" => "'", "\u{02BC}" => "'", '`' => "'", "\u{201C}" => '"', "\u{201D}" => '"',
-    "\u{2013}" => '-', "\u{2014}" => '-', "\u{00A0}" => ' '];
+    "\u{2013}" => '-', "\u{2014}" => '-', "\u{00A0}" => ' ', "\u{2010}" => '-', "\u{2011}" => '-', "\u{2012}" => '-', "\u{2212}" => '-'];
+  // Invisible: soft hyphens and zero-width characters don't count at all
+  static $drop = ["\u{00AD}" => 1, "\u{200B}" => 1, "\u{200C}" => 1, "\u{200D}" => 1, "\u{2060}" => 1, "\u{FEFF}" => 1];
+  if (isset($drop[$ch])) return '';
   if (isset($map[$ch])) $ch = $map[$ch];
   if (preg_match('/^\s$/u', $ch)) return ' ';
   return $ch;
@@ -74,6 +86,7 @@ function dpcfix_index($src) {
     $txt = ($tok[0] === '&' && strlen($tok) > 1) ? html_entity_decode($tok, ENT_QUOTES | ENT_HTML5, 'UTF-8') : $tok;
     foreach (preg_split('//u', $txt, -1, PREG_SPLIT_NO_EMPTY) as $ch) {
       $f = dpcfix_fold_char($ch);
+      if ($f === '') continue;   // invisible
       $c = mb_strtolower($f, 'UTF-8');
       if ($c === ' ' && (!$chars || end($chars) === ' ')) continue;
       $chars[] = $c; $orig[] = $f; $st[] = $off; $en[] = $end;
@@ -82,31 +95,102 @@ function dpcfix_index($src) {
   return [implode('', $chars), $st, $en, $orig];
 }
 
-// The smallest change: only the characters that differ between the page and the new wording, so formatting
-// around them (bold, links) is kept. keepCase (spelling): capitals on the page stay as they are.
-// Returns [start, end, new HTML], or null when the part that changes has formatting inside it.
-function dpcfix_edit($src, $st, $en, $orig, $at, $n, $rep, $keepCase) {
-  $pc = array_slice($orig, $at, $n);                                  // the words on the page
-  $rc = preg_split('//u', $rep, -1, PREG_SPLIT_NO_EMPTY);             // the new words
-  $rf = array_map('dpcfix_fold_char', $rc);
-  $same = function ($x, $y) use ($keepCase) {
-    return $keepCase ? mb_strtolower($x, 'UTF-8') === mb_strtolower($y, 'UTF-8') : $x === $y;
-  };
-  $m = count($rc);
-  $p = 0;
-  while ($p < $n && $p < $m && $same($pc[$p], $rf[$p])) $p++;
-  $s = 0;
-  while ($s < $n - $p && $s < $m - $p && $same($pc[$n - 1 - $s], $rf[$m - 1 - $s])) $s++;
-  $mid = htmlspecialchars(implode('', array_slice($rc, $p, $m - $p - $s)), ENT_NOQUOTES, 'UTF-8');
-  if ($n - $p - $s === 0) {                                           // only adding words
-    $pos = $p > 0 ? $en[$at + $p - 1] : $st[$at];
-    return [$pos, $pos, $mid];
+// Tokens for the diff: whole words (letters and digits), or one other character. Each: [first char, length, key]
+function dpcfix_toks($chars, $keepCase) {
+  $out = []; $n = count($chars); $i = 0;
+  while ($i < $n) {
+    $j = $i + 1;
+    if (preg_match('/^[\p{L}\p{N}]$/u', $chars[$i])) {
+      while ($j < $n && preg_match('/^[\p{L}\p{N}]$/u', $chars[$j])) $j++;
+    }
+    $k = implode('', array_slice($chars, $i, $j - $i));
+    $out[] = [$i, $j - $i, $keepCase ? mb_strtolower($k, 'UTF-8') : $k];
+    $i = $j;
   }
-  $a = $st[$at + $p];
-  $b = $en[$at + $n - $s - 1];
-  if (strpos(substr($src, $a, $b - $a), '<') !== false) return null;  // formatting inside the part that changes
-  return [$a, $b, $mid];
+  return $out;
 }
+
+// The parts that differ, in order: [[a0, a1, b0, b1], …] token ranges (page a, new wording b)
+function dpcfix_diff($A, $B) {
+  $n = count($A); $m = count($B);
+  $p = 0; while ($p < $n && $p < $m && $A[$p][2] === $B[$p][2]) $p++;
+  $s = 0; while ($s < $n - $p && $s < $m - $p && $A[$n - 1 - $s][2] === $B[$m - 1 - $s][2]) $s++;
+  $a = array_slice($A, $p, $n - $p - $s); $b = array_slice($B, $p, $m - $p - $s);
+  $N = count($a); $M = count($b);
+  if (!$N && !$M) return [];
+  if (!$N || !$M || $N * $M > 250000) return [[$p, $n - $s, $p, $m - $s]];
+  $L = array_fill(0, $N + 1, array_fill(0, $M + 1, 0));   // longest common run, from the end
+  for ($i = $N - 1; $i >= 0; $i--) for ($j = $M - 1; $j >= 0; $j--) {
+    $L[$i][$j] = $a[$i][2] === $b[$j][2] ? $L[$i + 1][$j + 1] + 1 : max($L[$i + 1][$j], $L[$i][$j + 1]);
+  }
+  $hunks = []; $h = null; $i = 0; $j = 0;
+  while ($i < $N || $j < $M) {
+    if ($i < $N && $j < $M && $a[$i][2] === $b[$j][2]) {
+      if ($h) { $hunks[] = $h; $h = null; }
+      $i++; $j++; continue;
+    }
+    if (!$h) $h = [$p + $i, $p + $i, $p + $j, $p + $j];
+    if ($j < $M && ($i >= $N || $L[$i][$j + 1] >= $L[$i + 1][$j])) { $j++; $h[3] = $p + $j; }
+    else { $i++; $h[1] = $p + $i; }
+  }
+  if ($h) $hunks[] = $h;
+  return $hunks;
+}
+
+// The change as small separate edits: each changed piece is replaced where it sits, so bold, links, table cells and
+// paragraph breaks between the pieces stay as they are. keepCase (spelling): capitals on the page stay.
+// The first letter of a paragraph, cell or line keeps its capital. Returns [[start, end, new HTML], …], or null.
+function dpcfix_edit($src, $st, $en, $orig, $at, $n, $rep, $keepCase) {
+  $rc = array_values(array_filter(preg_split('//u', $rep, -1, PREG_SPLIT_NO_EMPTY),
+    function ($ch) { return dpcfix_fold_char($ch) !== ''; }));
+  $rf = array_map('dpcfix_fold_char', $rc);
+  $pc = array_slice($orig, $at, $n);
+  $total = count($orig);
+  $len = strlen($src);
+  // A space that's really a tag (a paragraph, cell or line break)
+  $virt = function ($i) use ($src, $st, $orig) { return $orig[$i] === ' ' && substr($src, $st[$i], 1) === '<'; };
+  $same = function ($i, $y) use ($orig, $keepCase, $virt) {
+    $x = $orig[$i];
+    if ($x === $y) return true;
+    $lx = mb_strtolower($x, 'UTF-8');
+    if ($keepCase && $lx === mb_strtolower($y, 'UTF-8')) return true;
+    return $lx === $y && ($i === 0 || $virt($i - 1));   // a capital at the start of a block stays
+  };
+  $A = dpcfix_toks($pc, $keepCase); $B = dpcfix_toks($rf, $keepCase);
+  $cA = function ($k) use ($A, $n) { return $k < count($A) ? $A[$k][0] : $n; };
+  $cB = function ($k) use ($B, $rf) { return $k < count($B) ? $B[$k][0] : count($rf); };
+  $edits = [];
+  foreach (dpcfix_diff($A, $B) as $h) {
+    $i0 = $cA($h[0]); $i1 = $cA($h[1]); $j0 = $cB($h[2]); $j1 = $cB($h[3]);
+    while ($i0 < $i1 && $j0 < $j1 && $same($at + $i0, $rf[$j0])) { $i0++; $j0++; }
+    while ($i1 > $i0 && $j1 > $j0 && $same($at + $i1 - 1, $rf[$j1 - 1])) { $i1--; $j1--; }
+    if ($i0 === $i1 && $j0 === $j1) continue;
+    $txt = htmlspecialchars(implode('', array_slice($rc, $j0, $j1 - $j0)), ENT_NOQUOTES, 'UTF-8');
+    $real = [];
+    for ($k = $at + $i0; $k < $at + $i1; $k++) if (!$virt($k)) $real[] = $k;
+    if (!$real) {   // only adding words (a break that would "change" stays where it is)
+      if ($txt === '') continue;
+      $p = $at + $i0;
+      $pos = $p > $at ? $en[$p - 1] : $st[$p];
+      $edits[] = [$pos, $pos, $txt];
+      continue;
+    }
+    $first = true; $seen = [];
+    foreach ($real as $k) {
+      if (isset($seen[$st[$k]])) continue;
+      // Part of one &entity; changing on its own: leave it to WordPress
+      if (($k > 0 && $st[$k - 1] === $st[$k] && $k - 1 < $at + $i0) ||
+          ($k + 1 < $total && $st[$k + 1] === $st[$k] && $k + 1 >= $at + $i1)) return null;
+      $seen[$st[$k]] = 1;
+      $b = $en[$k];
+      if ($orig[$k] === ' ') while ($b < $len && strpos(" \t\r\n", $src[$b]) !== false) $b++;   // the extra spaces in the HTML too
+      $edits[] = [$st[$k], $b, $first ? $txt : ''];
+      $first = false;
+    }
+  }
+  return $edits;
+}
+
 
 function dpcfix_needle($text) { return trim(dpcfix_index(htmlspecialchars((string) $text, ENT_NOQUOTES, 'UTF-8'))[0]); }
 
@@ -150,7 +234,7 @@ function dpcfix_walk($node, $path, $inSettings, &$out) {
   foreach ($node as $k => $v) {
     $p = array_merge($path, [$k]);
     if (is_array($v)) dpcfix_walk($v, $p, $inSettings || $k === 'settings', $out);
-    elseif ($inSettings && is_string($v) && is_string($k) && !preg_match(DPCFIX_SKIP_KEY, $k) && preg_match('/\p{L}{2}/u', $v)) {
+    elseif ($inSettings && is_string($v) && dpcfix_is_text($k, $v)) {
       $out[] = ['path' => $p, 'value' => $v];
     }
   }
@@ -207,6 +291,114 @@ function dpcfix_log($id, $e) {
   update_post_meta($id, DPCFIX_LOG, wp_slash(array_slice($log, 0, 8)));
 }
 
+/* ---------- When the words aren't in the page itself ---------- */
+
+// Does this content point to the template or block? Any setting with "templ" in its name (Elementor's global widgets
+// and template widget, and add-ons like Essential Addons, JetElements and ElementsKit), the shortcode, or a reusable block.
+function dpcfix_refers($raw, $tid) {
+  $t = (int) $tid;
+  return (bool) preg_match('/"[a-z0-9_]*templ[a-z0-9_]*"\s*:\s*"?' . $t . '(?![0-9])|template[^\]]{0,20}?id=\\\\?["\']?' . $t . '(?![0-9])|"ref":' . $t . '(?![0-9])/i', (string) $raw);
+}
+
+// How many other published pages show this template or block (drafts and revisions don't count)
+function dpcfix_uses($tid, $not) {
+  global $wpdb;
+  $t = (int) $tid;
+  $like = '%' . $t . '%';
+  $rows = array_merge(
+    $wpdb->get_results($wpdb->prepare("SELECT post_id AS id, meta_value AS v FROM {$wpdb->postmeta} WHERE meta_key = '_elementor_data' AND meta_value LIKE %s LIMIT 300", $like)),
+    $wpdb->get_results($wpdb->prepare("SELECT ID AS id, post_content AS v FROM {$wpdb->posts} WHERE post_status = 'publish' AND post_content LIKE %s LIMIT 300", $like))
+  );
+  $seen = [];
+  foreach ($rows as $r) {
+    $pid = (int) $r->id;
+    if ($pid === $t || $pid === (int) $not || isset($seen[$pid])) continue;
+    $p = get_post($pid);
+    if (!$p || ($p->post_status !== 'publish' && $p->post_type !== 'elementor_library')) continue;
+    if (dpcfix_refers($r->v, $t)) $seen[$pid] = 1;
+  }
+  return count($seen);
+}
+
+// Elementor Theme Builder display conditions: 'only' (just this page), 'wide' (other pages too), or 'none'
+function dpcfix_conditions($tid, $id) {
+  $c = get_post_meta($tid, '_elementor_conditions', true);
+  if (!is_array($c) || !$c) return 'none';
+  $inc = array_values(array_filter($c, function ($x) { return strpos((string) $x, 'include/') === 0; }));
+  if (!$inc) return 'none';
+  foreach ($inc as $x) {
+    if (!preg_match('#^include/singular/[a-z0-9_-]+/(\d+)$#', (string) $x, $m) || (int) $m[1] !== (int) $id) return 'wide';
+  }
+  return 'only';
+}
+
+// Every other place the words are: the page's custom fields and excerpt, the templates and blocks it shows,
+// and any Elementor template or reusable block containing them (Theme Builder templates apply by their conditions).
+// Each: { src: { post, mode, key, label, shared, uses, editUrl }, targets, data, hits }
+function dpcfix_elsewhere($id, $find) {
+  global $wpdb;
+  $out = [];
+  $p = get_post($id);
+  if (!$p) return $out;
+  $try = function ($src, $targets, $data) use (&$out, $find) {
+    $hits = dpcfix_find_hits($targets, $find);
+    if ($hits) $out[] = ['src' => $src, 'targets' => $targets, 'data' => $data, 'hits' => $hits];
+  };
+
+  // 1. The page's own excerpt and custom fields (ACF and the like)
+  if (trim((string) $p->post_excerpt) !== '') {
+    $try(['post' => $id, 'mode' => 'excerpt', 'label' => 'the page excerpt', 'shared' => false],
+      [['path' => [], 'value' => (string) $p->post_excerpt]], null);
+  }
+  foreach (get_post_meta($id) as $k => $vals) {
+    if ($k === '' || $k[0] === '_' || count($vals) !== 1) continue;
+    $v = maybe_unserialize($vals[0]);
+    if (!is_string($v) || strlen($v) > 200000 || !preg_match('/\p{L}{2}/u', $v)) continue;
+    $try(['post' => $id, 'mode' => 'meta', 'key' => $k, 'label' => 'the custom field “' . $k . '”', 'shared' => false],
+      [['path' => [], 'value' => $v]], null);
+  }
+
+  // 2. Templates and blocks: the ones this page shows (1), and any containing the words (2)
+  $refs = [];
+  $raw = (string) get_post_meta($id, '_elementor_data', true) . ' ' . $p->post_content;
+  if (preg_match_all('/"[a-z0-9_]*templ[a-z0-9_]*"\s*:\s*"?(\d+)|template[^\]]{0,20}?id=\\\\?["\']?(\d+)|"ref":(\d+)/i', $raw, $m, PREG_SET_ORDER)) {
+    foreach ($m as $x) {
+      $n = (int) (!empty($x[1]) ? $x[1] : (!empty($x[2]) ? $x[2] : ($x[3] ?? 0)));
+      if ($n) $refs[$n] = 1;
+    }
+  }
+  $words = preg_split('/[^\p{L}\p{N}]+/u', dpcfix_needle($find), -1, PREG_SPLIT_NO_EMPTY);
+  usort($words, function ($a, $b) { return mb_strlen($b) - mb_strlen($a); });
+  $w = $words[0] ?? '';
+  if (mb_strlen($w) >= 5) {
+    $like = '%' . $wpdb->esc_like($w) . '%';
+    $ids = $wpdb->get_col($wpdb->prepare(
+      "SELECT DISTINCT p.ID FROM {$wpdb->posts} p LEFT JOIN {$wpdb->postmeta} m ON m.post_id = p.ID AND m.meta_key = '_elementor_data'
+       WHERE p.post_type IN ('elementor_library', 'wp_block') AND p.post_status = 'publish' AND (p.post_content LIKE %s OR m.meta_value LIKE %s) LIMIT 20",
+      $like, $like));
+    foreach ($ids as $n) { $n = (int) $n; if (!isset($refs[$n])) $refs[$n] = 2; }
+  }
+  foreach ($refs as $tid => $how) {
+    if ($tid === $id) continue;
+    $tp = get_post($tid);
+    if (!$tp) continue;
+    list($t, $isEl, $data) = dpcfix_targets($tid);
+    $hits = dpcfix_find_hits($t, $find);
+    if (!$hits) continue;
+    $uses = dpcfix_uses($tid, $id);
+    $cond = dpcfix_conditions($tid, $id);
+    $kind = $tp->post_type === 'wp_block' ? 'reusable block' : 'Elementor template';
+    // This page's own: no other page shows it, its conditions don't reach further, and this page points to it or is its only condition
+    $only = $uses === 0 && $cond !== 'wide' && ($how === 1 || $cond === 'only');
+    $out[] = ['src' => [
+      'post' => $tid, 'mode' => $isEl ? 'elementor' : 'content', 'uses' => $uses, 'cond' => $cond, 'linked' => $how === 1,
+      'label' => 'the ' . $kind . ' “' . $tp->post_title . '”',
+      'shared' => !$only,
+      'editUrl' => $isEl ? admin_url('post.php?post=' . $tid . '&action=elementor') : (string) get_edit_post_link($tid, 'raw'),
+    ], 'targets' => $t, 'data' => $data, 'hits' => $hits];
+  }
+  return $out;
+}
 /* ---------- The routes ---------- */
 
 // Looks only: how many times the words appear, and where. Changes nothing.
@@ -216,13 +408,44 @@ function dpcfix_find(WP_REST_Request $req) {
   if (!$id || !get_post($id) || $find === '') return dpcfix_no('bad', 'Nothing to look for.');
   list($targets, $isEl) = dpcfix_targets($id);
   $hits = dpcfix_find_hits($targets, $find);
-  return ['ok' => true, 'elementor' => $isEl, 'count' => count($hits), 'hits' => array_map(function ($h) {
+  $out = ['ok' => true, 'elementor' => $isEl, 'count' => count($hits), 'hits' => array_map(function ($h) {
     return ['formatted' => $h['tags'], 'context' => $h['ctx'], 'match' => $h['match']];
   }, array_slice($hits, 0, 20))];
+  if (!$hits) {
+    $out['elsewhere'] = array_map(function ($f) {
+      return ['in' => $f['src']['label'], 'post' => $f['src']['post'], 'shared' => $f['src']['shared'],
+        'uses' => $f['src']['uses'] ?? null, 'cond' => $f['src']['cond'] ?? '', 'linked' => !empty($f['src']['linked']),
+        'count' => count($f['hits'])];
+    }, dpcfix_elsewhere($id, $find));
+    // Where the longest word sits in the page's Elementor data, and whether that field is read as text
+    $raw = [];
+    $data = json_decode((string) get_post_meta($id, '_elementor_data', true), true);
+    $words = preg_split('/[^\p{L}\p{N}]+/u', dpcfix_needle($find), -1, PREG_SPLIT_NO_EMPTY);
+    usort($words, function ($a, $b) { return mb_strlen($b) - mb_strlen($a); });
+    $w = $words[0] ?? '';
+    if (is_array($data) && $w !== '') {
+      $scan = function ($node, $path) use (&$scan, &$raw, $w) {
+        foreach ($node as $k => $v) {
+          if (is_array($v)) { $scan($v, array_merge($path, [$k])); continue; }
+          if (is_string($v) && count($raw) < 10 && mb_stripos($v, $w) !== false) {
+            $raw[] = ['key' => implode('.', array_merge($path, [$k])), 'read' => dpcfix_is_text((string) $k, $v),
+              'text' => mb_substr(trim(wp_strip_all_tags($v)), 0, 200)];
+          }
+        }
+      };
+      $scan($data, []);
+    }
+    $out['inPageData'] = $raw;
+    $out['template'] = get_post_meta($id, '_wp_page_template', true);
+  }
+  $out['v'] = '1.3.0';
+  return $out;
 }
 
 // Changes the words. Exactly one place, unless "all" (spelling: every place the misspelt word appears).
 // Only the characters that differ are replaced, so formatting around them stays.
+// Not in the page itself: its custom field, excerpt, or a template or block only this page shows is changed instead.
+// A template or block other pages show too is named, not changed (unless "shared" is sent).
 function dpcfix_replace(WP_REST_Request $req) {
   $b = $req->get_json_params() ?: [];
   $id = (int) ($b['id'] ?? 0);
@@ -236,8 +459,21 @@ function dpcfix_replace(WP_REST_Request $req) {
   if ($find === '' || $rep === '' || mb_strlen($find) > 1500 || mb_strlen($rep) > 2000 || !$fid) return dpcfix_no('bad', 'Nothing to change.');
 
   list($targets, $isEl, $data) = dpcfix_targets($id);
+  $src = ['post' => $id, 'mode' => $isEl ? 'elementor' : 'content', 'label' => '', 'shared' => false];
   $hits = dpcfix_find_hits($targets, $find);
-  if (!$hits) return dpcfix_no('not_found', 'Not found in the page.');
+  if (!$hits) {
+    $found = dpcfix_elsewhere($id, $find);
+    if (!$found) return dpcfix_no('not_found', 'Not found in the page.');
+    if (count($found) > 1) {
+      return dpcfix_no('many_places', 'Found in more than one place.', ['places' => array_map(function ($f) { return $f['src']['label']; }, $found)]);
+    }
+    $f = $found[0];
+    if ($f['src']['shared'] && empty($b['shared'])) {
+      return dpcfix_no('shared', 'In a shared template.', ['label' => $f['src']['label'], 'uses' => $f['src']['uses'] ?? 0,
+        'cond' => $f['src']['cond'] ?? '', 'editUrl' => $f['src']['editUrl'] ?? '']);
+    }
+    $src = $f['src']; $targets = $f['targets']; $data = $f['data']; $hits = $f['hits'];
+  }
   if (count($hits) > 1 && !$all) return dpcfix_no('many', 'Found more than once.', ['count' => count($hits)]);
   if (count($hits) > 20) return dpcfix_no('many', 'Found too many times.', ['count' => count($hits)]);
 
@@ -251,29 +487,50 @@ function dpcfix_replace(WP_REST_Request $req) {
     foreach ($hs as $h) {
       if ($skipCaps && preg_match('/\p{L}/u', $h['match']) && $h['match'] === mb_strtoupper($h['match'], 'UTF-8')) continue;
       $e = dpcfix_edit($v, $st, $en, $orig, $h['at'], $h['n'], $rep, $keep);
-      if (!$e) return dpcfix_no('formatted', 'Formatting inside the part that changes.', ['context' => $h['ctx']]);
-      $edits[] = $e;
+      if (!is_array($e)) return dpcfix_no('formatted', 'Formatting inside the part that changes.', ['context' => $h['ctx']]);
+      $edits = array_merge($edits, $e);
     }
-    usort($edits, function ($x, $y) { return $y[0] - $x[0]; });   // from the end, so earlier positions stay right
+    usort($edits, function ($x, $y) { return ($y[0] - $x[0]) ?: ($y[1] - $x[1]); });   // from the end, so earlier positions stay right
     foreach ($edits as $e) $v = substr_replace($v, $e[2], $e[0], $e[1] - $e[0]);
+    // A link left with no words would vanish from the page: stop instead
+    $emptyA = '/<a\b[^>]*>\s*<\/a\s*>/i';
+    if (preg_match_all($emptyA, $v) > preg_match_all($emptyA, $targets[$ti]['value'])) {
+      return dpcfix_no('link', 'The change would remove the words of a link.', ['context' => $hs[0]['ctx']]);
+    }
+    // Bold or italics left with nothing inside: tidied away
+    $emptyI = '/<(strong|b|em|i|u|span)\b[^>]*>\s*<\/\1\s*>/i';
+    if (!preg_match($emptyI, $targets[$ti]['value'])) $v = preg_replace($emptyI, '', $v);
     if ($v !== $targets[$ti]['value']) $changes[] = ['path' => $targets[$ti]['path'], 'before' => $targets[$ti]['value'], 'after' => $v];
   }
   if (!$changes) return dpcfix_no('same', 'The new wording is the same as what the page says.');
 
-  $entry = ['fid' => $fid, 'at' => time(), 'where' => $isEl ? 'elementor' : 'content', 'find' => $find, 'replace' => $rep];
-  if ($isEl) {
+  $pid = (int) $src['post'];
+  $entry = ['fid' => $fid, 'at' => time(), 'find' => $find, 'replace' => $rep, 'page' => $id];
+  if ($src['mode'] === 'elementor') {
     foreach ($changes as $c) { $ref = &dpcfix_ref($data, $c['path']); $ref = $c['after']; unset($ref); }
-    dpcfix_save_elementor($id, $data);
+    dpcfix_save_elementor($pid, $data);
+    $entry['where'] = 'elementor';
     $entry['changes'] = $changes;
-  } else {
-    $r = dpcfix_save_content($id, $changes[0]['after']);
+  } elseif ($src['mode'] === 'meta') {
+    update_post_meta($pid, $src['key'], wp_slash($changes[0]['after']));
+    $entry += ['where' => 'meta', 'key' => $src['key'], 'before' => $changes[0]['before'], 'after' => $changes[0]['after']];
+  } elseif ($src['mode'] === 'excerpt') {
+    kses_remove_filters();
+    $r = wp_update_post(['ID' => $pid, 'post_excerpt' => wp_slash($changes[0]['after'])], true);
+    kses_init();
     if (is_wp_error($r)) return dpcfix_no('save', $r->get_error_message());
-    $entry['before'] = $changes[0]['before'];
-    $entry['after_hash'] = md5(get_post($id)->post_content);
+    $entry += ['where' => 'excerpt', 'before' => $changes[0]['before'], 'after' => (string) get_post($pid)->post_excerpt];
+  } else {
+    $r = dpcfix_save_content($pid, $changes[0]['after']);
+    if (is_wp_error($r)) return dpcfix_no('save', $r->get_error_message());
+    $entry += ['where' => 'content', 'before' => $changes[0]['before'], 'after_hash' => md5(get_post($pid)->post_content)];
   }
-  dpcfix_log($id, $entry);
-  dpcfix_purge($id);
-  return ['ok' => true, 'where' => $entry['where'], 'count' => count($hits), 'link' => get_permalink($id), 'context' => $hits[0]['ctx']];
+  dpcfix_log($pid, $entry);
+  dpcfix_purge($pid);
+  if ($pid !== $id) dpcfix_purge($id);   // the page showing the template
+  return ['ok' => true, 'where' => $entry['where'], 'post' => $pid, 'in' => $src['label'], 'wide' => !empty($src['shared']),
+    'uses' => $src['uses'] ?? 0, 'count' => count($hits),
+    'link' => get_permalink($id), 'context' => $hits[0]['ctx']];
 }
 
 
@@ -323,6 +580,13 @@ function dpcfix_undo(WP_REST_Request $req) {
       $cur = get_post_meta($id, '_dpc_faq', true);
       if (md5(wp_json_encode(is_array($cur) ? $cur : [])) !== $e['after_hash']) return dpcfix_no('changed', 'Edited since.');
       if (!empty($e['before'])) update_post_meta($id, '_dpc_faq', wp_slash($e['before'])); else delete_post_meta($id, '_dpc_faq');
+    } elseif ($e['where'] === 'meta') {
+      if ((string) get_post_meta($id, $e['key'], true) !== (string) $e['after']) return dpcfix_no('changed', 'Edited since.');
+      update_post_meta($id, $e['key'], wp_slash((string) $e['before']));
+    } elseif ($e['where'] === 'excerpt') {
+      $p = get_post($id);
+      if (!$p || (string) $p->post_excerpt !== (string) $e['after']) return dpcfix_no('changed', 'Edited since.');
+      kses_remove_filters(); wp_update_post(['ID' => $id, 'post_excerpt' => wp_slash((string) $e['before'])]); kses_init();
     } elseif ($e['where'] === 'elementor') {
       $data = json_decode((string) get_post_meta($id, '_elementor_data', true), true);
       if (!is_array($data)) return dpcfix_no('changed', 'Elementor data unreadable.');
@@ -338,6 +602,7 @@ function dpcfix_undo(WP_REST_Request $req) {
     $log[$i]['undone'] = time();
     update_post_meta($id, DPCFIX_LOG, wp_slash($log));
     dpcfix_purge($id);
+    if (!empty($e['page']) && (int) $e['page'] !== $id) dpcfix_purge((int) $e['page']);
     return ['ok' => true, 'link' => get_permalink($id)];
   }
   return dpcfix_no('not_found', "That change isn't in the page's history (the last 8 are kept).");
