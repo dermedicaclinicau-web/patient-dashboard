@@ -343,8 +343,8 @@ export function renderAdvisor(body, c) {
   function actResult(a, st) {
     const day = st?.at ? perthDay(st.at) : "";
     if (!day) return "";
-    const k = npath(a.page);
-    const near = (w.tracks || []).filter((T) => npath(T.path) === k && Math.abs(daysBetween(T.date, day)) <= 1)
+    const keys = (a.kind === "link" && a.to ? [a.to, a.page] : [a.page]).map(npath);
+    const near = (w.tracks || []).filter((T) => keys.includes(npath(T.path)) && Math.abs(daysBetween(T.date, day)) <= 1)
       .sort((x, y) => Math.abs(daysBetween(x.date, day)) - Math.abs(daysBetween(y.date, day)));
     const T = near.find((x) => x.kind === ACT_KIND[a.kind]) || near[0];
     if (!T) {
