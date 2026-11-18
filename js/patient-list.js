@@ -24,17 +24,21 @@ const ICONS = {
   list: svg('<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>'),
   merge: svg('<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/>'),
   check: svg('<polyline points="20 6 9 17 4 12"/>'),
+  cake: svg('<path d="M20 21v-8a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8"/><path d="M4 16s.5-1 2-1 2.5 2 4 2 2.5-2 4-2 2.5 2 4 2 2-1 2-1"/><path d="M2 21h20"/><path d="M7 8v3M12 8v3M17 8v3"/><path d="M7 4h.01M12 4h.01M17 4h.01"/>'),
+  noMsg: svg('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="3" y1="3" x2="21" y2="21"/>'),
+  copy: svg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
+  sliders: svg('<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>'),
 };
 
 const PLACEHOLDERS = {
-  name: "Search by name or email…",
+  name: "Search name, email, mobile or ID",
   dupes: "Filter duplicates by name or email…",
 };
 
 // Cards or List, remembered on this computer
 const readView = () => { try { return localStorage.getItem(VIEW_KEY) === "list" ? "list" : "grid"; } catch { return "grid"; } };
 const saveView = (v) => { try { localStorage.setItem(VIEW_KEY, v); } catch { /* private mode */ } };
-const LIST_HEAD = `<div class="pt-list-head" aria-hidden="true"><span>Patient</span><span>Email</span><span>Mobile</span><span>Birthday</span></div>`;
+const LIST_HEAD = `<div class="pt-list-head" aria-hidden="true"><span>Patient</span><span>Email</span><span>Mobile</span><span></span></div>`;
 
 /* ===================== In-memory cache (cleared on logout) ===================== */
 // Loaded from the nightly patient index (a few documents) plus anything added or edited since.
@@ -187,7 +191,34 @@ function scorePatient(p, q) {
   if (q.email.length >= 2 && p._email && p._email.includes(q.email)) return 4;     // any part of the email
   return Infinity;
 }
+// The Patients page search: name, email, mobile or patient ID
+function matchScore(p, query, term) {
+  const t = String(term || "").trim();
+  const lower = t.toLowerCase();
+  const pid = String(p.pttId || "").toLowerCase();
+  if (pid && pid === lower) return 0;                                         // their patient ID
+  if (lower.length >= 6 && String(p.id).toLowerCase() === lower) return 0;    // the system ID
+  const digits = t.replace(/\D/g, "");
+  if (digits.length >= 3 && digits.length >= t.replace(/[\s+()-]/g, "").length) {
+    return p.mobile && phoneCore(p.mobile).includes(phoneCore(t)) ? 1 : Infinity;   // a mobile number
+  }
+  return scorePatient(p, query);
+}
 
+// Counts on the quick filter chips, worked out once per loaded list
+const chipCounts = new WeakMap();
+function quickCounts(all) {
+  let c = chipCounts.get(all);
+  if (c) return c;
+  const today = new Date();
+  c = {
+    bday: all.filter((p) => birthdayOk(p, "week", today)).length,
+    dnc: all.filter((p) => p.marketingOk === false).length,
+    dupes: findDuplicates(all).length,
+  };
+  chipCounts.set(all, c);
+  return c;
+}
 /* ===================== Search for pickers elsewhere (e.g. Calendar → Add booking) ===================== */
 // The same search as the Patients page: name in any order, part words, email, or mobile.
 // Uses the same in-memory list, so after the first load it's instant.
@@ -229,44 +260,59 @@ export function mountPatientList(container) {
       <div class="pt-head">
         <div class="pt-title"><h2>Patients</h2><span class="pt-total"></span></div>
         <div class="pt-actions">
-          <button type="button" class="icon-btn pt-refresh" title="Refresh" aria-label="Refresh">${ICONS.refresh}</button>
+          <button type="button" class="icon-btn pt-refresh" title="Refresh (Shift-click reloads everyone)" aria-label="Refresh">${ICONS.refresh}</button>
           <button type="button" class="btn-ghost pt-merge-mode" hidden aria-pressed="false"
             title="Choose patients to merge into one record">${ICONS.merge}Merge patients</button>
-          <button type="button" class="pt-new">${ICONS.plus}New Patient</button>
+          <button type="button" class="pt-new">${ICONS.plus}New patient</button>
         </div>
       </div>
 
-      <div class="pt-toolbar">
-        <label class="pt-search">${ICONS.search}
-          <input type="search" placeholder="${PLACEHOLDERS.name}" autocomplete="off" spellcheck="false" aria-label="Search patients" />
-        </label>
-        <div class="pt-tabs" role="group" aria-label="Search mode">
-          <button type="button" data-mode="name" class="active" aria-pressed="true">Name / Email</button>
-          <button type="button" data-mode="dupes" class="dupes" aria-pressed="false">Duplicates</button>
+      <label class="pt-search pt-search-big">${ICONS.search}
+        <input type="search" placeholder="${PLACEHOLDERS.name}" autocomplete="off" spellcheck="false" aria-label="Search patients" />
+        <kbd class="pt-kbd" aria-hidden="true">/</kbd>
+      </label>
+
+      <div class="pt-filterbar">
+        <div class="pt-chips" role="group" aria-label="Quick filters">
+          <button type="button" class="pt-chip" data-quick="all" aria-pressed="true">All</button>
+          <button type="button" class="pt-chip" data-quick="bday" aria-pressed="false">${ICONS.cake}Birthdays this week<em data-count="bday"></em></button>
+          <button type="button" class="pt-chip" data-quick="dnc" aria-pressed="false">${ICONS.noMsg}Do not contact<em data-count="dnc"></em></button>
+          <button type="button" class="pt-chip" data-quick="dupes" aria-pressed="false">${ICONS.copy}Possible duplicates<em data-count="dupes"></em></button>
+          <button type="button" class="pt-chip pt-chip-more" aria-expanded="false" aria-controls="pt-filterbox">${ICONS.sliders}More filters<em></em></button>
         </div>
-        <select class="pt-select" data-filter="birthday" aria-label="Birthday filter">
-          <option value="all">All Birthdays</option>
-          <option value="today">Birthdays today</option>
-          <option value="week">Next 7 days</option>
-          <option value="month">This month</option>
-        </select>
-        <select class="pt-select" data-filter="age" aria-label="Age filter">
-          <option value="all">All Ages</option>
-          <option value="0-24">Under 25</option>
-          <option value="25-34">25–34</option>
-          <option value="35-44">35–44</option>
-          <option value="45-54">45–54</option>
-          <option value="55-200">55+</option>
-        </select>
-        <select class="pt-select" data-filter="contact" aria-label="Contact filter">
-          <option value="all">All contact</option>
-          <option value="dnc">Do not contact</option>
-          <option value="ok">Can be contacted</option>
-        </select>
         <div class="pt-view" role="group" aria-label="View">
           <button type="button" data-view="grid" title="Cards" aria-label="Show as cards">${ICONS.grid}</button>
           <button type="button" data-view="list" title="List" aria-label="Show as a list">${ICONS.list}</button>
         </div>
+      </div>
+
+      <div class="pt-filterbox" id="pt-filterbox" hidden>
+        <label class="pt-fb"><span>Birthday</span>
+          <select class="pt-select" data-filter="birthday">
+            <option value="all">Any birthday</option>
+            <option value="today">Today</option>
+            <option value="week">Next 7 days</option>
+            <option value="month">This month</option>
+          </select>
+        </label>
+        <label class="pt-fb"><span>Age</span>
+          <select class="pt-select" data-filter="age">
+            <option value="all">Any age</option>
+            <option value="0-24">Under 25</option>
+            <option value="25-34">25–34</option>
+            <option value="35-44">35–44</option>
+            <option value="45-54">45–54</option>
+            <option value="55-200">55+</option>
+          </select>
+        </label>
+        <label class="pt-fb"><span>Contact</span>
+          <select class="pt-select" data-filter="contact">
+            <option value="all">Anyone</option>
+            <option value="dnc">Do not contact</option>
+            <option value="ok">Can be contacted</option>
+          </select>
+        </label>
+        <button type="button" class="btn-ghost sm pt-clear">Clear filters</button>
       </div>
 
       <p class="pt-meta" aria-live="polite"></p>
@@ -286,7 +332,9 @@ export function mountPatientList(container) {
 
   const q = (s) => container.querySelector(s);
   const input = q(".pt-search input");
-  const tabs = container.querySelectorAll(".pt-tabs button");
+  const chips = container.querySelectorAll(".pt-chip[data-quick]");
+  const moreChip = q(".pt-chip-more");
+  const filterBox = q(".pt-filterbox");
   const selects = container.querySelectorAll(".pt-select");
   const viewBtns = container.querySelectorAll(".pt-view button");
   const total = q(".pt-total");
@@ -302,7 +350,8 @@ export function mountPatientList(container) {
     client: { list: [], shown: CLIENT_PAGE, groups: null, shownGroups: GROUP_PAGE },
   };
   const pageSize = () => (state.view === "list" ? LIST_PAGE : CLIENT_PAGE);
-  const card = (p) => cardHtml(p, state.pick);
+  // IDs only show where they help: comparing duplicates, or picking records to merge
+  const card = (p) => cardHtml(p, state.pick, { showId: state.mode === "dupes" || !!state.pick });
 
   function applyView() {
     results.classList.toggle("is-list", state.view === "list");
@@ -354,13 +403,14 @@ export function mountPatientList(container) {
   }
 
   function render(all) {
+    showCounts(all);
     const today = new Date();
     const query = buildQuery(state.term);
     let list = all.filter((p) => birthdayOk(p, state.birthday, today) && ageOk(p, state.age) && contactOk(p, state.contact));
 
     if (state.mode === "dupes") {
       let groups = findDuplicates(list);
-      if (state.term) groups = groups.filter((g) => g.list.some((p) => scorePatient(p, query) < Infinity));
+      if (state.term) groups = groups.filter((g) => g.list.some((p) => matchScore(p, query, state.term) < Infinity));
       state.client.groups = groups;
       state.client.shownGroups = GROUP_PAGE;
       renderGroups();
@@ -370,7 +420,7 @@ export function mountPatientList(container) {
     if (state.term) {
       // Best matches first, then A–Z by surname
       list = list
-        .map((p) => ({ p, s: scorePatient(p, query) }))
+        .map((p) => ({ p, s: matchScore(p, query, state.term) }))
         .filter((x) => x.s < Infinity)
         .sort((a, b) => a.s - b.s || a.p._alt.localeCompare(b.p._alt))
         .map((x) => x.p);
@@ -510,6 +560,19 @@ export function mountPatientList(container) {
     if (e.key === "Escape" && state.pick && !document.querySelector("dialog[open]")) setPicking(false);
   };
   document.addEventListener("keydown", onKey);
+
+  // "/" jumps to the search box (not while typing somewhere else)
+  const onSlash = (e) => {
+    if (!input.isConnected) { document.removeEventListener("keydown", onSlash); return; }
+    if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey) return;
+    const t = e.target;
+    if (t && t.closest && t.closest("input, textarea, select, [contenteditable='true']")) return;
+    if (document.querySelector("dialog[open]")) return;
+    e.preventDefault();
+    input.focus();
+    input.select();
+  };
+  document.addEventListener("keydown", onSlash);
   /* ---------- events ---------- */
   let debounce;
   input.addEventListener("input", () => {
@@ -522,24 +585,68 @@ export function mountPatientList(container) {
     }, 150);
   });
 
-  tabs.forEach((btn) => btn.addEventListener("click", () => {
-    if (btn.dataset.mode === state.mode) return;
-    state.mode = btn.dataset.mode;
-    tabs.forEach((b) => {
-      const active = b === btn;
-      b.classList.toggle("active", active);
-      b.setAttribute("aria-pressed", String(active));
+  /* ---------- quick filters and More filters ---------- */
+  const QUICK = {
+    all: { mode: "name", birthday: "all", contact: "all" },
+    bday: { mode: "name", birthday: "week", contact: "all" },
+    dnc: { mode: "name", birthday: "all", contact: "dnc" },
+    dupes: { mode: "dupes", birthday: "all", contact: "all" },
+  };
+  // Which chip matches what's set ("" when it's a mix only More filters can describe)
+  function quickNow() {
+    if (state.mode === "dupes") return "dupes";
+    if (state.age !== "all") return "";
+    return ["all", "bday", "dnc"].find((k) => QUICK[k].birthday === state.birthday && QUICK[k].contact === state.contact) || "";
+  }
+  function syncFilters() {
+    const on = quickNow();
+    chips.forEach((c) => {
+      const a = c.dataset.quick === on;
+      c.classList.toggle("is-on", a);
+      c.setAttribute("aria-pressed", String(a));
     });
+    selects.forEach((s) => { s.value = state[s.dataset.filter]; s.classList.toggle("active", s.value !== "all"); });
+    const set = [...selects].filter((s) => s.value !== "all").length;
+    const extra = on === "dupes" ? set : on ? 0 : set;   // filters a chip doesn't already show
+    moreChip.querySelector("em").textContent = extra ? String(extra) : "";
+    moreChip.classList.toggle("is-on", extra > 0 || !filterBox.hidden);
+    moreChip.setAttribute("aria-expanded", String(!filterBox.hidden));
     input.placeholder = PLACEHOLDERS[state.mode];
-    input.focus();
+  }
+  function showCounts(all) {
+    const c = quickCounts(all);
+    container.querySelectorAll("[data-count]").forEach((em) => {
+      const k = em.dataset.count;
+      if (k in c) em.textContent = c[k].toLocaleString();
+    });
+  }
+
+  chips.forEach((btn) => btn.addEventListener("click", () => {
+    const k = btn.dataset.quick === quickNow() ? "all" : btn.dataset.quick;   // tapping the chip that's on turns it off
+    Object.assign(state, QUICK[k]);
+    state.age = "all";
+    syncFilters();
     run();
   }));
 
+  moreChip.addEventListener("click", () => {
+    filterBox.hidden = !filterBox.hidden;
+    syncFilters();
+  });
+
   selects.forEach((sel) => sel.addEventListener("change", () => {
     state[sel.dataset.filter] = sel.value;
-    sel.classList.toggle("active", sel.value !== "all");
+    syncFilters();
     run();
   }));
+
+  q(".pt-clear").addEventListener("click", () => {
+    Object.assign(state, { birthday: "all", age: "all", contact: "all" });
+    syncFilters();
+    run();
+  });
+
+  syncFilters();
 
   // Cards / List: redraws what's already loaded, no reload needed
   viewBtns.forEach((btn) => btn.addEventListener("click", () => {
@@ -671,10 +778,23 @@ function findDuplicates(list) {
 /* ===================== Templates ===================== */
 
 // The same card is used for both views; List view lays it out as one row with CSS
-function cardHtml(p, pick = null) {
+function cardHtml(p, pick = null, { showId = false } = {}) {
   const age = calcAge(p.dobKey);
-  const dob = p.dobKey ? `${formatDobLong(p.dobKey)}${age !== null ? ` · ${age} yrs` : ""}` : "";
+  const sub = p.dobKey
+    ? `${age !== null ? `${age} yrs · ` : ""}${formatDobLong(p.dobKey)}`
+    : "Birthday not recorded";
   const on = !!pick && pick.has(p.id);
+
+  const flags = [];
+  if (p.marketingOk === false) {
+    flags.push('<span class="pt-flag is-dnc" title="On the do-not-contact list: no marketing or recall messages">Do not contact</span>');
+  }
+  const days = birthdayInDays(p);
+  if (days === 0) flags.push(`<span class="pt-flag is-bday">${ICONS.cake}Birthday today</span>`);
+  else if (days !== null && days < 7) {
+    flags.push(`<span class="pt-flag is-bday">${ICONS.cake}${days === 1 ? "Birthday tomorrow" : `Birthday in ${days} days`}</span>`);
+  }
+
   return `
     <li>
       <a class="pt-card${on ? " is-picked" : ""}" href="#/patient/${encodeURIComponent(p.id)}"${
@@ -684,17 +804,27 @@ function cardHtml(p, pick = null) {
           <span class="pt-avatar" style="--h:${hueFromString(p.name)}">${escapeHtml(getInitials(p.name))}</span>
           <div class="pt-ident">
             <span class="pt-name">${escapeHtml(p.name)}</span>
-            <span class="pt-id">ID ${escapeHtml(p.pttId || p.id)}${p.marketingOk === false
-              ? ' <span class="pt-dnc" title="On the do-not-contact list: no marketing or recall messages">Do not contact</span>' : ""}</span>
+            <span class="pt-sub${p.dobKey ? "" : " is-none"}">${escapeHtml(sub)}</span>
+            ${showId ? `<span class="pt-id">ID ${escapeHtml(p.pttId || p.id)}</span>` : ""}
           </div>
         </div>
         <div class="pt-contact">
           <span>${ICONS.mail}<span class="t">${p.email ? escapeHtml(p.email) : "<em>No email</em>"}</span></span>
           <span>${ICONS.phone}<span class="t">${p.mobile ? escapeHtml(formatMobile(p.mobile)) : "<em>No mobile</em>"}</span></span>
         </div>
-        <div class="pt-foot">${escapeHtml(dob)}</div>
+        ${flags.length ? `<div class="pt-foot">${flags.join("")}</div>` : ""}
       </a>
     </li>`;
+}
+
+// Days until their next birthday (0 = today), or null if no birthday is recorded
+function birthdayInDays(p) {
+  if (!p.dobKey) return null;
+  const today = new Date();
+  const next = nextBirthday(p, today);
+  if (next === Infinity) return null;
+  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+  return Math.round((next - start) / 86_400_000);
 }
 
 function skeletonGrid(n) {

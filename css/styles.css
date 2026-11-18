@@ -13920,3 +13920,58 @@ button.fr-join:hover { text-decoration: underline; }
   .nav-foot { display: flex; flex: none; padding: 0; border: 0; }
 }
 @media (prefers-reduced-motion: reduce) { .sidebar, .nav-collapse svg { transition: none; } }
+
+/* ===================== Patient list: refreshed ===================== */
+.pt-new { background: var(--primary); }
+.pt-new:hover { background: var(--primary-hover); }
+
+/* Search across the full width */
+.pt-search.pt-search-big { display: block; max-width: none; margin: 0 0 .75rem; }
+.pt-search-big input { height: 48px; padding-right: 2.6rem; border-radius: 12px; font-size: 1rem; }
+.pt-kbd { position: absolute; right: .8rem; top: 50%; transform: translateY(-50%); padding: .05rem .45rem;
+  border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; background: #fff; color: var(--muted);
+  font: 600 .72rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; pointer-events: none; }
+.pt-search-big:focus-within .pt-kbd { display: none; }
+@media (hover: none) { .pt-kbd { display: none; } }
+
+/* Quick filter chips */
+.pt-filterbar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-bottom: .9rem; }
+.pt-chips { display: flex; flex-wrap: wrap; gap: .4rem; }
+.pt-chip { display: inline-flex; align-items: center; gap: .4rem; height: 36px; padding: 0 .85rem; border: 1px solid var(--border);
+  border-radius: 999px; background: #fff; color: #475569; font: inherit; font-size: .85rem; font-weight: 600; white-space: nowrap;
+  cursor: pointer; transition: background .15s, border-color .15s, color .15s; }
+.pt-chip svg { width: 15px; height: 15px; flex: none; }
+.pt-chip em { min-width: 20px; padding: 0 .4rem; border-radius: 999px; background: var(--surface-2); color: #334155;
+  font-size: .72rem; font-style: normal; line-height: 20px; text-align: center; }
+.pt-chip em:empty { display: none; }
+.pt-chip:hover { border-color: #94a3b8; color: var(--text); }
+.pt-chip.is-on { border-color: #99d5cf; background: var(--primary-soft); color: var(--primary-hover); }
+.pt-chip.is-on em { background: #fff; color: var(--primary); }
+.pt-chip:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+/* More filters */
+.pt-filterbox { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .75rem; margin: -.25rem 0 1rem; padding: .85rem 1rem;
+  border: 1px solid var(--border); border-radius: 12px; background: #fff; }
+.pt-fb { display: flex; flex-direction: column; gap: .3rem; font-size: .75rem; font-weight: 600; color: var(--muted); }
+.pt-fb .pt-select { height: 40px; min-width: 170px; font-weight: 400; color: var(--text); }
+.pt-clear { margin-left: auto; }
+
+/* Cards: birthday under the name, flags at the bottom */
+.pt-sub { font-size: .78rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pt-sub.is-none { font-style: italic; color: #94a3b8; }
+.pt-card .pt-contact:last-child { padding-bottom: 0; border-bottom: 0; }
+.pt-card .pt-foot { display: flex; flex-wrap: wrap; gap: .3rem; min-height: 0; padding-top: .7rem; }
+.pt-flag { display: inline-flex; align-items: center; gap: .25rem; padding: .12rem .55rem; border-radius: 999px;
+  font-size: .72rem; font-weight: 600; white-space: nowrap; }
+.pt-flag svg { width: 12px; height: 12px; }
+.pt-flag.is-dnc { background: #fef2f2; color: #b91c1c; }
+.pt-flag.is-bday { background: #fdf2f8; color: #9d174d; }
+.pt-results.is-list .pt-foot { flex-wrap: nowrap; }
+
+/* Phones: the chips scroll sideways in one line */
+@media (max-width: 640px) {
+  .pt-chips { flex-wrap: nowrap; width: 100%; overflow-x: auto; scrollbar-width: none; }
+  .pt-chips::-webkit-scrollbar { display: none; }
+  .pt-chip { flex: none; }
+  .pt-clear { margin-left: 0; }
+}
