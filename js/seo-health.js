@@ -929,7 +929,8 @@ export function viewHealth(wrap, c, ui) {
           <div class="seo-fx-arrow" aria-hidden="true">→</div>
           <div class="seo-fx-col is-new"><div class="seo-fx-lab">After</div><div class="seo-fx-txt">${esc(x.before)}<ins class="seo-fx-ins">${esc(x.text)}</ins>${esc(x.after)}</div></div></div>`).join("")}${after}` });
       if (!yes) return true;
-      const r = await run("apply", "hxWordApply", { items: items.map((x) => ({ find: x.find, text: x.text, term: x.term || "" })) });
+      const r = await run("apply", "hxWordApply", { items: items.map((x) => ({ find: x.find, text: x.text, term: x.term || "",
+        before: String(x.before || "").slice(-80), after: String(x.after || "").slice(0, 80) })) });
       if (r) saved(r, "Reworded ✓");
       return true;
     }
