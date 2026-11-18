@@ -44,13 +44,19 @@ export async function listTaskEmails() {
     const snap = await getDocs(query(collection(db, "mkt_templates"), where("taskOn", "==", true)));
     return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
       .filter((t) => t.status !== "archived")
-      .map((t) => ({
-        id: MKT_TASK_PREFIX + t.id, mkt: true,
-        name: String(t.taskName || t.name || "Marketing email"),
-        description: String(t.taskDescription || ""),
-        category: "patient", channel: "email", status: "live",
-        recipients: {}, fields: [], attachments: [],
-      }));
+      .map((t) => {
+        const n = Number(t.offersPending) || 0;   // offers not yet ticked as set up in Timely
+        return {
+          id: MKT_TASK_PREFIX + t.id, mkt: true,
+          name: String(t.taskName || t.name || "Marketing email"),
+          description: n
+            ? `Not ready to send: ${n} offer${n === 1 ? "" : "s"} to set up in Timely first.`
+            : String(t.taskDescription || ""),
+          notReady: n > 0,
+          category: "patient", channel: "email", status: "live",
+          recipients: {}, fields: [], attachments: [],
+        };
+      });
   } catch (err) {
     console.warn("Marketing emails not listed in To Patient:", err);
     return [];
@@ -109,10 +115,19 @@ export async function mountMktTaskRunner(container, { templateId, patientId = ""
   if (!String(t.html || "").trim()) { fail("This email is empty", "Ask an admin to finish it in Marketing → Templates."); return; }
 
   const title = String(t.taskName || t.name || "Marketing email");
+  // Offers not ticked as set up in Timely (the builder saves these; the server checks again when sending)
+  const pendingNames = (Array.isArray(t.offers) ? t.offers : []).filter((o) => o && !o.timely).map((o) => String(o.name || "Offer"));
+  const pendingCount = Math.max(pendingNames.length, Number(t.offersPending) || 0);
+  const offerBlock = pendingCount
+    ? `This email can't be sent yet. ${pendingNames.length ? `Set up ${pendingNames.map((n) => `"${n}"`).join(", ")}`
+        : `Set up its ${pendingCount} offer${pendingCount === 1 ? "" : "s"}`} in Timely first, then tick ${pendingCount === 1 ? "it" : "them"} in the email builder (Email settings → Offers).`
+    : "";
+  const canEditTpl = /^admin$/i.test(String((staff && staff.role) || ""))
+    || (Array.isArray(staff && staff.perms) && staff.perms.includes("marketing.manage"));
   const dw = Number(t.design && t.design.style && t.design.style.width);
   const width = WIDTHS.includes(dw) ? dw : 600;
   const st = {
-    patient: null, sending: false, subjectEdited: false,
+    patient: null, sending: false, subjectEdited: false, offerBlock,
     combo: { results: [], active: -1, status: "", seq: 0 },
     check: { seq: 0, busy: false, blocked: "" },
   };
@@ -195,10 +210,13 @@ export async function mountMktTaskRunner(container, { templateId, patientId = ""
   function renderState() {
     const box = $('[data-role="block"]');
     const c = st.check;
-    box.innerHTML = !st.patient ? ""
+    box.innerHTML = st.offerBlock
+      ? `<p class="mtr-block">${esc(st.offerBlock)}${canEditTpl
+          ? ` <a href="#/tasks/marketing/templates/${encodeURIComponent(templateId)}">Open the email builder</a>` : " Ask whoever manages marketing emails."}</p>`
+      : !st.patient ? ""
       : c.busy ? '<p class="mtr-wait">Checking the do-not-contact list…</p>'
       : c.blocked ? `<p class="mtr-block">${esc(c.blocked)}</p>` : "";
-    sendBtn.disabled = st.sending || !st.patient || !EMAIL_RE.test(toVal()) || c.busy || !!c.blocked;
+    sendBtn.disabled = st.sending || !!st.offerBlock || !st.patient || !EMAIL_RE.test(toVal()) || c.busy || !!c.blocked;
   }
 
   async function check() {
