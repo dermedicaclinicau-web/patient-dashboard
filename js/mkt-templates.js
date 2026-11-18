@@ -95,6 +95,7 @@ function normTpl(d) {
     // Task Manager → To Patient
     taskOn: x.taskOn === true, taskName: String(x.taskName || ""), taskDescription: String(x.taskDescription || ""),
     codeLock: x.codeLock === true,   // only Admins see a Custom HTML block's code
+    timely: x.timely && typeof x.timely === "object" ? x.timely : {},   // offers ticked as set up in Timely
   };
 }
 export async function listTemplates() {
@@ -114,12 +115,52 @@ const clean = (t) => ({
   taskName: String(t.taskName || "").replace(/\s+/g, " ").trim().slice(0, 120),
   taskDescription: String(t.taskDescription || "").replace(/\s+/g, " ").trim().slice(0, 300),
   codeLock: t.codeLock === true,
+  timely: cleanTimely(t.timely),
 });
+const cleanTimely = (m) => {
+  const out = {};
+  Object.entries(m && typeof m === "object" ? m : {}).slice(0, 50).forEach(([k, v]) => {
+    if (!v || typeof v !== "object") return;
+    out[String(k).slice(0, 200)] = { name: String(v.name || "").slice(0, 120), by: String(v.by || "").slice(0, 120), at: Number(v.at) || 0 };
+  });
+  return out;
+};
+
+/* ---------- Offers: what the email's payment buttons sell ---------- */
+// Read from the finished email, so every kind of block counts (Custom HTML too).
+// The key changes when the name or price changes, so a changed offer has to be ticked again.
+const offerKey = (name, price) => `${String(name || "").replace(/\s+/g, " ").trim().toLowerCase()}|${String(price || "").replace(/[^0-9.]/g, "")}`;
+export function listOffers(t, html) {
+  const doc = new DOMParser().parseFromString(html || renderEmail(t), "text/html");
+  const out = new Map();
+  doc.querySelectorAll("a[href]").forEach((a) => {
+    const pl = readPayLink(a.getAttribute("href"));
+    if (!pl) return;
+    const name = String(pl.name || "").replace(/\s+/g, " ").trim();
+    const price = String(pl.price || "").replace(/[^0-9.]/g, "");
+    const key = offerKey(name, price);
+    if (!out.has(key)) out.set(key, { key, name: name || "(no name)", price, uses: 0 });
+    out.get(key).uses++;
+  });
+  return [...out.values()];
+}
+// What's saved on the template, for the server: the offers, and how many aren't ticked yet
+function offerFields(data, html) {
+  const offers = listOffers(data, html);
+  const timely = Object.fromEntries(Object.entries(data.timely || {}).filter(([k]) => offers.some((o) => o.key === k)));
+  return {
+    timely,
+    offers: offers.map((o) => ({ key: o.key, name: o.name, price: o.price, timely: !!timely[o.key], timelyName: (timely[o.key] && timely[o.key].name) || "" })),
+    offersPending: offers.filter((o) => !timely[o.key]).length,
+  };
+}
+
 export async function createTemplate({ name, starter = "blank", from = null }, staff) {
   const s = STARTERS.find((x) => x.key === starter) || STARTERS[0];
   const data = clean(from ? { ...from, name } : { name, subject: s.subject, preview: s.preview, design: s.design() });
+  const html = renderEmail(data);
   const ref = await addDoc(collection(db, COL), {
-    ...data, taskOn: false, html: renderEmail(data), status: "active",   // a copy isn't in Task Manager until it's switched on
+    ...data, ...offerFields(data, html), taskOn: false, html, status: "active",   // a copy isn't in Task Manager until it's switched on
     createdAt: serverTimestamp(), createdBy: who(staff), createdByUid: me(),
     updatedAt: serverTimestamp(), updatedBy: who(staff), updatedByUid: me(),
   });
@@ -127,8 +168,9 @@ export async function createTemplate({ name, starter = "blank", from = null }, s
 }
 export async function saveTemplate(t, staff) {
   const data = clean(t);
+  const html = renderEmail(data);
   await updateDoc(doc(db, COL, t.id), {
-    ...data, html: renderEmail(data), updatedAt: serverTimestamp(), updatedBy: who(staff), updatedByUid: me(),
+    ...data, ...offerFields(data, html), html, updatedAt: serverTimestamp(), updatedBy: who(staff), updatedByUid: me(),
   });
 }
 export async function archiveTemplate(id, staff) {
@@ -647,8 +689,32 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
   window.addEventListener("hashchange", () => { window.removeEventListener("beforeunload", onUnload); if (dirty) save(); }, { once: true });
 
   /* ---------- The email ---------- */
+  // Offers with no price, or not ticked as set up in Timely
+  const offerProblems = () => {
+    const tm = t.timely || {};
+    return listOffers(t).flatMap((o) => [
+      ...(o.price ? [] : [`"${o.name}" has a payment button with no price.`]),
+      ...(tm[o.key] ? [] : [`Set up "${o.name}"${o.price ? ` ($${o.price})` : ""} in Timely, then tick it under Email settings → Offers.`]),
+    ]);
+  };
+  function offersHtml() {
+    const list = listOffers(t);
+    if (!list.length) return "";
+    const tm = t.timely || {};
+    return `<div class="fe-insp-field"><span class="fe-insp-label mb-colh">Offers in this email</span></div>
+      <p class="fe-note fe-pad">Each payment button sells something. Set it up as a package in Timely first, so it's ready to sell when the payment comes in.</p>
+      <ul class="mb-offers">${list.map((o) => {
+        const done = tm[o.key];
+        return `<li class="mb-offer${done ? " is-done" : ""}">
+          <div class="mb-offer-top"><strong>${esc(o.name)}</strong><span>${o.price ? `$${esc(o.price)}` : "No price"}</span></div>
+          <label class="fe-check"><input type="checkbox" data-timely="${esc(o.key)}"${done ? " checked" : ""} /> Set up in Timely</label>
+          ${done ? `<input class="fe-input" data-timelyname="${esc(o.key)}" value="${esc(done.name || "")}" placeholder="Its name in Timely (optional)" maxlength="120" autocomplete="off" />
+            <small class="fe-note">Ticked by ${esc(done.by || "someone")}${done.at ? ` on ${esc(day(new Date(done.at)))}` : ""}</small>` : ""}
+        </li>`;
+      }).join("")}</ul>`;
+  }
   function checksHtml() {
-    const p = checkDesign(t);
+    const p = [...checkDesign(t), ...offerProblems()];
     return p.length
       ? `<div class="mb-checks" data-role="checks"><strong>Before sending</strong><ul>${p.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>`
       : '<div class="mb-checks is-ok" data-role="checks">Ready to send. Send yourself a test first.</div>';
@@ -705,6 +771,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       ${isAdminOf(staff) ? `<div class="fe-insp-field"><span class="fe-insp-label mb-colh">Custom HTML</span></div>
         ${fCheck("codeLock", "Only Admins can see the HTML code", t.codeLock)}
         <p class="fe-note fe-pad">Other staff can still change words, pictures and links on the email, and move, copy or remove sections.</p>` : ""}
+      ${offersHtml()}
       <div class="fe-insp-field"><span class="fe-insp-label mb-colh">Task Manager</span></div>
       ${fCheck("taskOn", "Show in Task Manager → To Patient", t.taskOn)}
       ${t.taskOn ? fText("taskName", "Task name", t.taskName, t.name, "What staff see in the list. Leave empty to use the email's name.")
@@ -1544,6 +1611,26 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
   side.addEventListener("change", (e) => {
     if (e.target.closest(".re")) return;
     const el = e.target;
+    // Offers: set up in Timely
+    if (el.matches("[data-timely]")) {
+      const key = el.dataset.timely;
+      const o = listOffers(t).find((x) => x.key === key);
+      const tm = { ...(t.timely || {}) };
+      if (el.checked) tm[key] = { name: (tm[key] && tm[key].name) || (o ? o.name : ""), by: who(staff), at: Date.now() };
+      else delete tm[key];
+      t.timely = tm;
+      drawSide();
+      changed();
+      return;
+    }
+    if (el.matches("[data-timelyname]")) {
+      const key = el.dataset.timelyname;
+      if (t.timely && t.timely[key]) {
+        t.timely = { ...t.timely, [key]: { ...t.timely[key], name: el.value.trim().slice(0, 120) } };
+        changed();
+      }
+      return;
+    }
     if (edChange(el)) return;
     // QR code: its link changed, so it's made again
     const qb = selBlock();

@@ -69,11 +69,17 @@ service cloud.firestore {
       && request.resource.data.name is string && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 120
       && request.resource.data.html is string && request.resource.data.html.size() < 400000
       && request.resource.data.design is map
+      && request.resource.data.get('timely', {}) is map && request.resource.data.get('timely', {}).size() <= 50
+      && request.resource.data.get('offers', []) is list && request.resource.data.get('offers', []).size() <= 50
+      && request.resource.data.get('offersPending', 0) is int
       && request.resource.data.createdByUid == request.auth.uid;
     allow update: if can('marketing.manage')
       && request.resource.data.name is string && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 120
       && request.resource.data.html is string && request.resource.data.html.size() < 400000
       && request.resource.data.design is map
+      && request.resource.data.get('timely', {}) is map && request.resource.data.get('timely', {}).size() <= 50
+      && request.resource.data.get('offers', []) is list && request.resource.data.get('offers', []).size() <= 50
+      && request.resource.data.get('offersPending', 0) is int
       && request.resource.data.createdByUid == resource.data.createdByUid
       && request.resource.data.updatedByUid == request.auth.uid;
     allow delete: if false;
