@@ -612,7 +612,8 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     if (st.mode === "docket") {   // the docket screen draws itself
       root.innerHTML = `${headHtml()}${bannerHtml()}<div data-role="docket"></div>`;
       mountDocketResult(root.querySelector('[data-role="docket"]'),
-        { photo: st.photo, photoUrl: st.photoUrl, result: st.result, products, staff, onAgain: again });
+        { photo: st.photo, photoUrl: st.photoUrl, result: st.result, products, staff, onAgain: again,
+          onSaved: () => { pendingClear(); if (st.openJob) { finishScanJob(st.openJob); st.openJob = ""; } } });
       return;
     }
     // A note being typed survives a redraw (e.g. after changing a quantity)

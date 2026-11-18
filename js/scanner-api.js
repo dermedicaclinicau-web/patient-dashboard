@@ -125,7 +125,7 @@ export async function readAuto(base64, thumb, products, rxProducts) {
   try {
     res = await scanCall({
       action: "scanner", op: "auto", mime: "image/jpeg", image: base64, thumb,
-      products: stableList(products).map((p) => ({ id: p.id, name: p.name, brand: p.brand || "", sell: sell.has(p.id) })),
+      products: stableList(products).map((p) => ({ id: p.id, name: p.name, brand: p.brand || "", sell: sell.has(p.id), code: productCodes(p) })),
       rxProducts: stableNames(rxProducts),
     });
   } catch (err) {
@@ -418,7 +418,7 @@ export async function saveBillingScan({ photo, result, review, note = "", patien
 
 /* ---------- Delivery dockets ---------- */
 const ymd = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || "")) ? String(v) : "");
-const expiryOf = (v) => { const s = String(v || "").trim(); return /^\d{4}-\d{2}(-\d{2})?$/.test(s) ? s : ""; };
+const expiryOf = (v) => { const s = String(v || "").trim(); return /^\d{4}-(0[1-9]|1[0-2])(-(0[1-9]|[12]\d|3[01]))?$/.test(s) ? s : ""; };
 // "PO-0042", "po 42", "42" → "42"
 const poKey = (s) => String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^PO/, "").replace(/^0+/, "");
 // Words that tell suppliers apart ("Pty Ltd", "Australia" don't)
@@ -427,13 +427,33 @@ const supplierWords = (s) => new Set(normName(s).split(" ").filter((w) => w.leng
 
 export const poSupplier = (po) => String((po && po.supplier && po.supplier.name) || (po && po.supplierName) || "");
 
-// The docket read by Gemini (all products are sent: dockets aren't only Retail)
-export async function readDocket(base64, products) {
+// A product's codes (main and other suppliers, and its barcode): "ZO-123, 9300..."
+const codeKey = (s) => String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+export function productCodes(p) {
+  return [...new Set([p.supplierCode, ...(p.altSuppliers || []).map((a) => a && a.supplierCode), p.barcode]
+    .map((c) => String(c || "").trim()).filter(Boolean))].join(", ");
+}
+// Code → product id. A code two products share matches neither.
+function codeIndex(products) {
+  const m = new Map();
+  products.forEach((p) => productCodes(p).split(", ").forEach((c) => {
+    const k = codeKey(c);
+    if (k.length < 3) return;
+    m.set(k, m.has(k) && m.get(k) !== p.id ? "" : p.id);
+  }));
+  return m;
+}
+
+// The docket read by the AI (all products are sent: dockets aren't only Retail).
+// pages: one photo (base64) or several, one per page, in order.
+export async function readDocket(pages, products) {
+  const list = (Array.isArray(pages) ? pages : [pages]).filter(Boolean);
   let res;
   try {
     res = await scanCall({
-      action: "scanner", op: "docket", mime: "image/jpeg", image: base64,
-      products: stableList(products).map((p) => ({ id: p.id, name: p.name, brand: p.brand || "" })),
+      action: "scanner", op: "docket", mime: "image/jpeg",
+      ...(list.length > 1 ? { images: list } : { image: list[0] }),
+      products: stableList(products).map((p) => ({ id: p.id, name: p.name, brand: p.brand || "", code: productCodes(p) })),
     });
   } catch (err) {
     if (err && err.code === "UNAUTHORIZED") throw err;
@@ -448,7 +468,8 @@ export async function readDocket(base64, products) {
 // Cleans what Gemini read. Product ids not on the list are dropped.
 export function reviewDocket(result, products) {
   const known = new Set(products.map((p) => p.id));
-  return {
+  const byCode = codeIndex(products);
+  const review = {
     supplier: String(result.supplier || "").slice(0, 150),
     docketNumber: String(result.docketNumber || "").slice(0, 60),
     docketDate: ymd(result.docketDate),
@@ -458,27 +479,53 @@ export function reviewDocket(result, products) {
     receivedTime: /^\d{2}:\d{2}$/.test(String(result.receivedTime || "")) ? result.receivedTime : "",
     formType: result.formType === "dermedica" ? "dermedica" : "supplier",
     transferType: ["delivery", "transfer"].includes(result.transferType) ? result.transferType : "",
-    lines: joinDocketLines((result.lines || []).slice(0, 60).map((l) => ({
-      productId: known.has(String(l.productId || "")) ? String(l.productId) : "",
-      text: String(l.text || "").slice(0, 150), code: String(l.code || "").slice(0, 60),
-      qty: Math.max(0, parseInt(l.qty, 10) || 0), unit: String(l.unit || "").slice(0, 30),
-      batch: String(l.batch || "").slice(0, 60), expiry: expiryOf(l.expiry),
-      conf: conf(l.confidence), fixed: false, count: 1,
-      formQty: intOrNull(l.formQty), toShelf: intOrNull(l.toShelf), toJt: intOrNull(l.toJt),
-    }))),
+    lines: joinDocketLines((result.lines || []).slice(0, 60).map((l) => {
+      const read = known.has(String(l.productId || "")) ? String(l.productId) : "";
+      const fromCode = byCode.get(codeKey(l.code)) || "";
+      const clash = !!read && !!fromCode && read !== fromCode;   // the code says a different product: staff decide
+      return {
+        productId: read || fromCode,
+        text: String(l.text || "").slice(0, 150), code: String(l.code || "").slice(0, 60),
+        qty: Math.max(0, parseInt(l.qty, 10) || 0), unit: String(l.unit || "").slice(0, 30),
+        batch: String(l.batch || "").slice(0, 60), expiry: expiryOf(l.expiry),
+        conf: clash ? Math.min(0.5, conf(l.confidence)) : read ? conf(l.confidence) : fromCode ? 0.9 : conf(l.confidence),
+        codeMatch: !!fromCode && fromCode === (read || fromCode), codeClash: clash ? fromCode : "",
+        fixed: false, count: 1,
+        formQty: intOrNull(l.formQty), toShelf: intOrNull(l.toShelf), toJt: intOrNull(l.toJt),
+      };
+    })),
   };
+  // A row's batches should add up to its total: "4 across the batches, 10 on the docket"
+  const sums = new Map();
+  review.lines.forEach((l) => {
+    if (!l.productId || l.formQty === null) return;
+    const k = `${l.productId}|${l.formQty}`;
+    sums.set(k, (sums.get(k) || 0) + l.qty);
+  });
+  review.lines.forEach((l) => {
+    if (!l.productId || l.formQty === null || !l.formQty) return;
+    const sum = sums.get(`${l.productId}|${l.formQty}`);
+    if (sum !== l.formQty && sum % l.formQty !== 0) l.qtyCheck = `${sum} across the batches, ${l.formQty} on the docket`;
+  });
+  return review;
 }
 
 // The same product, batch and expiry printed on several lines → one line (quantities added).
-// Different batches stay separate: each is received on its own row.
+// "AB 123" = "ab123", and 2027-03 = 2027-03-31 (the fuller date is kept). Different batches stay separate.
+const batchKey = (s) => String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+const sameExpiry = (a, b) => a === b || (!!a && !!b && (a.length === 7 ? b.startsWith(a) : b.length === 7 && a.startsWith(b)));
 function joinDocketLines(lines) {
   const out = [];
   lines.forEach((l) => {
-    const same = l.productId && out.find((x) => x.productId === l.productId && x.batch === l.batch && x.expiry === l.expiry);
+    const same = l.productId && out.find((x) => x.productId === l.productId
+      && batchKey(x.batch) === batchKey(l.batch) && sameExpiry(x.expiry, l.expiry));
     if (!same) { out.push(l); return; }
     same.qty += l.qty;
     same.count += 1;
     same.conf = Math.min(same.conf, l.conf);
+    if (l.expiry.length > same.expiry.length) same.expiry = l.expiry;
+    if (same.toShelf === null && l.toShelf !== null) same.toShelf = l.toShelf;
+    if (same.toJt === null && l.toJt !== null) same.toJt = l.toJt;
   });
   return out;
 }
@@ -501,7 +548,26 @@ export function rankPos(review, pos) {
     return { po, hits, numberMatch, supplierMatch, score: (numberMatch ? 100 : 0) + (supplierMatch ? 10 : 0) + hits };
   }).sort((a, b) => b.score - a.score || String(b.po.number || "").localeCompare(String(a.po.number || "")));
 }
-
+// The docket against what the order still expects, per product (the order counts in the supplier's order units).
+// state: ok · short · over · missing (ordered, not on the docket) · done (already all received) ·
+// units (the docket seems to count stock units: it equals what's outstanding × the pack size)
+export function compareToPo(review, po) {
+  const out = new Map();
+  ((po && po.lines) || []).forEach((l) => {
+    if (!l.productId) return;
+    const x = out.get(l.productId) || { productId: l.productId, name: l.name, ordered: 0, outstanding: 0,
+      unit: l.orderUnit, packSize: l.packSize || 1, onDocket: 0 };
+    x.ordered += l.qty;
+    x.outstanding += Math.max(0, l.qty - (l.received || 0));
+    out.set(l.productId, x);
+  });
+  review.lines.forEach((l) => { const x = l.productId && out.get(l.productId); if (x) x.onDocket += l.qty; });
+  return [...out.values()].map((x) => ({ ...x,
+    state: !x.outstanding ? "done" : !x.onDocket ? "missing"
+      : x.onDocket === x.outstanding ? "ok"
+      : x.packSize > 1 && x.onDocket === x.outstanding * x.packSize ? "units"
+      : x.onDocket > x.outstanding ? "over" : "short" }));
+}
 // Active staff (names only), for "Received by"
 let staffCache = null;   // once per page load: the docket screen no longer waits on Apps Script for it
 export function staffList() {

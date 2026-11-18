@@ -36,7 +36,7 @@ const fullExpiry = (e) => {
   return m ? `${m[1]}-${m[2]}-${pad2(new Date(+m[1], +m[2], 0).getDate())}` : "";
 };
 
-export function mountDocketResult(el, { photo, photoUrl, result, products, staff, onAgain }) {
+export function mountDocketResult(el, { photo, photoUrl, result, products, staff, onAgain, onSaved }) {
   const myUid = (auth.currentUser && auth.currentUser.uid) || "";
   const byId = new Map(products.map((p) => [p.id, p]));
   const review = reviewDocket(result, products);
@@ -74,10 +74,18 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
     s.rels = rels;
     rerank();
     const top = s.ranked[0];
-    if (top && (top.numberMatch || top.supplierMatch)) s.poId = top.po.id;
+    // Chosen for them only when it's clear: the PO number is on the docket, or it's that supplier's only open order
+    const sameSupplier = s.ranked.filter((r) => r.supplierMatch);
+    if (top && (top.numberMatch || (top.supplierMatch && sameSupplier.length === 1))) s.poId = top.po.id;
     const read = matchStaff(s.review.receivedByText, people);
     if (read) s.recvUid = read.id;
-    if (s.review.receivedDate) s.recvAt = `${s.review.receivedDate}T${s.review.receivedTime || localDT(new Date()).slice(11)}`;
+    // The date written on the docket, only if it's sensible (not in the future, not months ago)
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s.review.receivedDate || "")) {
+      const t = /^\d{2}:\d{2}$/.test(s.review.receivedTime || "") ? s.review.receivedTime : localDT(new Date()).slice(11);
+      const v = `${s.review.receivedDate}T${t}`;
+      const days = (Date.now() - new Date(v)) / 864e5;
+      if (days > -1 && days < 60) s.recvAt = v;
+    }
     draw();
   }
 
@@ -103,6 +111,11 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
     } else if (!p) flags.push(["bad", "Not matched to a product"]);
     if (p && !l.skip && !l.fixed && l.conf < 0.6) flags.push(["warn", "Check this is the right product"]);
     if (!l.skip && !l.qty) flags.push(["warn", "None supplied (back-ordered?)"]);
+    if (p && p.tracked && !l.skip && l.qty) {
+      if (!String(l.batch || "").trim()) flags.push(["warn", `${batchName(p)} not read: enter it from the docket`]);
+      if (l.expiry && !fullExpiry(l.expiry)) flags.push(["warn", `Expiry read as “${l.expiry}”: enter it below`]);
+      else if (!l.expiry) flags.push(["warn", "Expiry not read: enter it from the docket"]);
+    }
     const bad = flags.some((f) => f[0] === "bad");
     const name = p ? p.name : "this line";
     return `<div class="dk-row${l.skip ? " is-skip" : bad ? " is-bad" : flags.length ? " is-warn" : ""}" data-row="${i}">
@@ -407,11 +420,12 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
 
   // Saved once: trying again after a problem uses the same scan (and so the same transfer id)
   async function saveScanOnce(po) {
-    if (s.scanId) return { id: s.scanId, photoUrl: "", photoPath: "" };
+    if (s.saved) return s.saved;
     const w = who();
     const saved = await saveDocketScan({ photo, result, review: s.review, lines: scanLines(po), po,
       receivedBy: w ? w.name : (staff && staff.name) || "", receivedByUid: s.recvUid, receivedAt: recvDate(), note: s.note }, staff);
     s.scanId = saved.id;
+    s.saved = saved;
     return saved;
   }
 
@@ -441,12 +455,13 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
         poId: po.id, scanId: saved.id, photoUrl: saved.photoUrl, photoPath: saved.photoPath,
         docketNumber: s.review.docketNumber, supplier: s.review.supplier,
         receivedBy: w ? w.name : "", receivedByUid: s.recvUid, receivedAt: recvDate().toISOString(), note: s.note,
-        lines: lines.filter((l) => !l.extra && l.productId && l.qty > 0)
+        lines: lines.filter((l) => !l.extra && !l.skip && l.productId && l.qty > 0)
           .map((l) => ({ productId: l.productId, qty: l.qty, unit: l.unit, batch: l.batch, expiry: l.expiry })),
         // Not on the order, but received too: the receive page shows them with Shelf | JT storage boxes
         extras: lines.filter((l) => l.extra && !l.skip && l.productId && l.qty > 0)
           .map((l) => ({ productId: l.productId, qty: l.qty, unit: l.unit, batch: l.batch, expiry: l.expiry, text: l.text })),
       }));
+      if (onSaved) onSaved();   // finished: not offered again as unfinished, and off Ready to check
       showToast(`Docket saved. Opening ${po.number || "the order"} to receive it.`);
       location.hash = `#/inventory/receive/${encodeURIComponent(po.id)}`;
     } catch (err) {
@@ -529,7 +544,13 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
 
   el.addEventListener("click", (e) => {
     const md = e.target.closest("[data-dkmode]");
-    if (md) { s.mode = md.dataset.dkmode; s.fixing = -1; draw(); return; }
+    if (md) {
+      s.mode = md.dataset.dkmode;
+      s.fixing = -1;
+      s.review.lines.forEach((l) => { l.skip = false; });   // "Don't move/receive this" belongs to one mode
+      draw();
+      return;
+    }
     const sk = e.target.closest("[data-dkskip]");
     if (sk) { const l = s.review.lines[Number(sk.dataset.dkskip)]; if (l) { l.skip = !l.skip; draw(); } return; }
     const fx = e.target.closest("[data-dkfix]");
