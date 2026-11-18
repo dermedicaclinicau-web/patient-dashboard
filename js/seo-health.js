@@ -2,7 +2,7 @@
 // Reads seo_state/health, seo_health (current build) and seo_issues (what staff have ignored).
 
 import { db, auth } from "./firebase-config.js";
-import { contentHtml, contentClick, recheckPages, altBody, fixApi, fixErr, askConfirm, injectCss as fxCss } from "./seo-content.js?v=12";
+import { contentHtml, contentClick, recheckPages, altBody, fixApi, fixErr, askConfirm, injectCss as fxCss } from "./seo-content.js";
 import {
   doc, getDoc, setDoc, collection, query, where, getDocs, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -83,6 +83,7 @@ const ADVQ = {
   speed: (p) => `The page ${p} is slow on phones. What's slowing it down, and what exactly should we change to make it faster?`,
   bounce: (p) => `Too many visitors from Google leave ${p} straight away. Why, and what should we change at the top of the page, in the title and in the description so it matches what they searched for?`,
   index: (p) => `Google isn't showing ${p} properly in search. What's the cause, and what should we change to fix it?`,
+  page: (p) => `What should we fix first on ${p} to get more people from Google to book, and exactly how?`,
 };
 const advBtn = (path, kind, show) => (show
   ? `<button class="seo-btn seo-h-adv" type="button" data-h-adv="${esc(path)}|${kind}" title="Opens the Advisor with this page and problem filled in">🧭 Fix with the Advisor</button>` : "");
@@ -293,6 +294,7 @@ export function viewHealth(wrap, c, ui) {
     return;
   }
   if (!ui.hview) Object.assign(ui, { hview: "content", hsev: "all", hgroup: "all", hstatus: "open" });
+  if (ui.hkpi === undefined) Object.assign(ui, { hkpi: "", hkx: "", hpage: "" });   // the number card that's open, its open row, Issues for one page
   fxCss();   // the Accept / overlay styles, also when Issues is opened first
   const canWork = c.can("seo.work");
   const isPri = priOf(c);
@@ -305,6 +307,287 @@ export function viewHealth(wrap, c, ui) {
   };
   const highBounce = (e) => !!e && e.c[0] >= 20 && bRate(e.c) > 0.65;
 
+  /* --- Click a number: what's behind it --- */
+
+  // What to try on a page that loses visitors (also used by the Engagement view)
+  const tipsOf = (hp, e) => {
+    if (!highBounce(e)) return "";
+    const out = [];
+    const mob = e.m[0] >= 10 ? bRate(e.m) : null, desk = e.d[0] >= 10 ? bRate(e.d) : null;
+    const m = metricsOf(hp.speed);
+    if (mob != null && desk != null && mob - desk >= 0.1) out.push("Check it on a phone: the top should load fast, with the Book button showing straight away.");
+    if (m && m.score != null && m.score < 50) out.push(`It's slow on phones (score ${m.score}): compress the top image.`);
+    if (e.c[2] / e.c[0] < 20) out.push("People leave within seconds: make the first screen answer what they searched for.");
+    if (hp.words && hp.words < 400) out.push(`Only about ${hp.words} words: add what people want to know (cost, downtime, results).`);
+    if (!out.length) out.push("Add a short answer near the top, and links to related treatments, so people read on.");
+    return out.slice(0, 2).join(" ");
+  };
+  const VNAME = { lcp: "Loading (LCP)", inp: "Responding (INP)", cls: "Shifting (CLS)" };
+  const CODE_L = {
+    fetch: "Page couldn't be read", blocked: "Website blocks the check", status: "Page returns an error", redirect: "Priority page redirects",
+    noindex: "Hidden from Google (noindex)", no_canonical: "No canonical tag", canonical: "Canonical points elsewhere",
+    no_title: "No title", title_long: "Title too long", title_short: "Title too short", dup_title: "Same title as another page",
+    no_desc: "No meta description", desc_long: "Meta description too long", desc_short: "Meta description too short", dup_desc: "Same description as another page",
+    no_h1: "No main heading (H1)", many_h1: "More than one main heading", alt: "Images without alt text",
+    broken_link: "Broken links", redirect_links: "Links that redirect", wording: "Advertising wording",
+    cwv_lcp: "Slow to load (LCP)", cwv_inp: "Slow to respond (INP)", cwv_cls: "Page shifts while loading (CLS)", score: "Low mobile score",
+    g_not_indexed: "Not in Google", g_blocked: "Google told not to index it", g_robots: "Blocked by robots.txt", g_fetch: "Google couldn't load it",
+    g_canonical: "Google chose a different main version", g_stale: "Google hasn't visited lately", g_sitemap_missing: "Not in the sitemap",
+    g_rich: "Structured data errors", g_error: "URL Inspection didn't answer",
+    sm_none: "No sitemap in Search Console", sm_errors: "Sitemap errors", sm_stale: "Sitemap not read lately",
+    sm_pages_out: "Sitemap pages not in Google", sm_clicks_missing: "Pages with clicks missing from the sitemap",
+  };
+  const fixable = (code) => !!META[code] || ["redirect_links", "broken_link", "many_h1", "alt"].includes(code);
+  const fieldOf = (sp) => (sp && sp.field && sp.field.src === "page" ? sp.field : null);
+  const openOf = (all, path) => all.filter((i) => i.status === "open" && i.path === path);
+  const pageLink = (path) => {
+    if (path === "Whole site") return "<b>Whole site</b>";
+    const pg = c.byPath.get(path);
+    return starMark(isPri(path)) + (pg ? `<button class="seo-w-link" type="button" data-open="${pg.id}">${esc(path)}</button>` : esc(path));
+  };
+  const openBtn = (path) => { const pg = c.byPath.get(path); return pg ? `<button class="seo-btn" type="button" data-open="${pg.id}">Open page details</button>` : ""; };
+  const goBtn = (label, o) => `<button class="seo-btn" type="button" data-hk-go="${esc(JSON.stringify(o))}">${esc(label)} →</button>`;
+  const psBtn = (url) => (url ? `<a class="seo-btn" href="https://pagespeed.web.dev/report?url=${encodeURIComponent(url)}&form_factor=mobile" target="_blank" rel="noopener">Test it on PageSpeed ↗</a>` : "");
+  const hkActs = (btns) => `<div class="seo-hk-acts">${btns.filter(Boolean).join("")}</div>`;
+  const hkStats = (pairs) => `<div class="seo-hk-stats">${pairs.filter(Boolean).map(([l, v]) => `<div><small>${l}</small>${v}</div>`).join("")}</div>`;
+  const hkTable = (head, rows) => `<div class="seo-table-wrap" style="max-height:none"><table class="seo-table seo-hk-t"><thead><tr>${
+    head.map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table></div>`;
+  const hkRow = (k, cells, detail) => {
+    const on = ui.hkx === k;
+    return `<tr class="seo-hk-r${on ? " is-open" : ""}" data-hk-x="${esc(k)}" tabindex="0" aria-expanded="${on}">${
+      cells.map((x, n) => `<td>${n === 0 ? `<i class="seo-hk-car">${on ? "▾" : "▸"}</i>` : ""}${x}</td>`).join("")}</tr>${
+      on ? `<tr class="seo-hk-xr"><td colspan="${cells.length}">${detail()}</td></tr>` : ""}`;
+  };
+  const split = (parts) => {
+    const shown = parts.filter((p) => p.n);
+    if (!shown.length) return "";
+    return `<div class="seo-hk-split" role="img" aria-label="${esc(shown.map((p) => `${p.label}: ${p.n}`).join(", "))}">${
+      shown.map((p) => `<i class="is-${p.tone}" style="flex:${p.n}" title="${esc(p.label)}: ${p.n}"></i>`).join("")}</div>
+      <div class="seo-hk-legend">${shown.map((p) => `<span><i class="is-${p.tone}"></i>${esc(p.label)} <b>${p.n}</b></span>`).join("")}</div>`;
+  };
+  const bars = (items) => {
+    if (!items.length) return "";
+    const max = Math.max(1, ...items.map((x) => x.n));
+    return `<div class="seo-hk-bars">${items.map((x) => `<div class="seo-hk-bar"><span>${esc(x.label)}</span><b><i style="width:${
+      Math.round((x.n / max) * 100)}%"></i></b><em>${x.n}</em></div>`).join("")}</div>`;
+  };
+  const sevPills = (list) => {
+    const parts = ["high", "medium", "low"].map((s) => [s, list.filter((i) => i.sev === s).length]).filter((x) => x[1]);
+    return parts.length ? parts.map(([s, n]) => `<span class="seo-w-pill is-${SEV[s].tone}" title="${SEV[s].label}">${n} ${SEV[s].label.toLowerCase()}</span>`).join(" ")
+      : `<span class="seo-h-good">✓ None</span>`;
+  };
+  const issueList = (list, max = 8) => (list.length
+    ? `<ul class="seo-hk-il">${list.slice().sort((a, b) => SEV[a.sev].rank - SEV[b.sev].rank).slice(0, max).map((i) =>
+      `<li><span class="seo-w-pill is-${SEV[i.sev].tone}">${SEV[i.sev].label}</span> ${esc(i.msg)}${
+        i.detail ? ` <span class="seo-note">· ${esc(String(i.detail).slice(0, 120))}</span>` : ""}${
+        fixable(i.code) ? ` <span class="seo-hk-one" title="Fix it in one click on the Issues tab">✨ one click</span>` : ""}</li>`).join("")}</ul>${
+      list.length > max ? `<p class="seo-note">and ${list.length - max} more</p>` : ""}`
+    : `<p class="seo-h-good" style="margin:4px 0">No open issues. 👍</p>`);
+  const helpBox = (code) => (HELP[code] ? `<div class="seo-hk-help"><b>How to fix</b><p>${esc(HELP[code])}</p></div>` : "");
+  const gCell = (g) => (!g ? `<span class="seo-note">—</span>` : g.err ? `<span class="seo-note">Not answered</span>`
+    : g.v === "PASS" ? `<span class="seo-h-good">✓ Yes</span>` : `<span class="seo-h-poor">✗ No</span>`);
+  const hkCard = (key, o) => `<div class="seo-card seo-hk">
+    <div class="seo-hk-head"><div><h3>${o.title}</h3>${o.sub ? `<div class="seo-note">${o.sub}</div>` : ""}</div><span class="seo-sp"></span>
+      <button class="seo-btn" type="button" data-h-kpi="${key}">✕ Close</button></div>
+    ${o.sum ? `<p class="seo-hk-sum">${o.sum}</p>` : ""}${o.viz || ""}${o.body || ""}
+    ${o.note ? `<p class="seo-note" style="margin:8px 0 0">${o.note}</p>` : ""}
+    ${o.tip ? `<div class="seo-hk-tip">💡 ${o.tip}</div>` : ""}
+    ${o.body && o.body.indexOf("data-hk-x") !== -1 ? `<p class="seo-note" style="margin:8px 0 0">Click a row to see more.</p>` : ""}
+  </div>`;
+
+  function pagesCard(all) {
+    const rows = H.pages.map((p) => {
+      const iss = openOf(all, p.path), m = metricsOf(p.speed), g = p.google, e = engOf(p.path);
+      const out = !!(g && !g.err && g.v !== "PASS");
+      const bad = iss.reduce((a, i) => a + (i.sev === "high" ? 100 : i.sev === "medium" ? 10 : 1), 0) + (out ? 100 : 0) + (m?.score != null && m.score < 50 ? 30 : 0);
+      return { p, iss, m, g, e, bad };
+    }).sort((a, b) => b.bad - a.bad || a.p.path.localeCompare(b.p.path));
+    const clean = rows.filter((x) => !x.iss.length).length;
+    const hi = rows.filter((x) => x.iss.some((i) => i.sev === "high")).length;
+    const worst = rows.find((x) => x.bad > 0);
+    const sum = `${plural(rows.length, "priority page")} checked${H.state.at ? ` (${esc(when(H.state.at))})` : ""}. ${
+      clean ? `<b>${clean}</b> ${clean === 1 ? "has" : "have"} no open issues` : "Every page has something to fix"}${
+      hi ? `, <b class="seo-h-poor">${hi}</b> ${hi === 1 ? "has" : "have"} a high issue` : ""}.${worst ? ` Start with ${pageLink(worst.p.path)}.` : ""}`;
+    const body = hkTable(["Page", "Open issues", "Mobile score", "In Google", "Bounce"], rows.map(({ p, iss, m, g, e }) => hkRow("p:" + p.path, [
+      pageLink(p.path), sevPills(iss), m ? val("score", m.score) : `<span class="seo-note">—</span>`, gCell(g),
+      e && e.c[0] ? chipB(bRate(e.c), e.c[0]) : `<span class="seo-note">—</span>`,
+    ], () => issueList(iss) + hkActs([openBtn(p.path), iss.length ? goBtn("See its issues", { view: "issues", page: p.path }) : "", advBtn(p.path, "page", true)]))));
+    return hkCard("pages", { title: "Priority pages: how each one is doing", sub: "Most to fix first", sum,
+      viz: split([{ n: clean, tone: "green", label: "No open issues" }, { n: rows.length - clean - hi, tone: "amber", label: "Medium or low only" },
+        { n: hi, tone: "red", label: "Has a high issue" }]),
+      body, tip: "Site health checks priority pages every night. A fixed issue drops off at the next check (about 8am)." });
+  }
+
+  function sevCard(all, sev) {
+    const S = SEV[sev];
+    const list = all.filter((i) => i.status === "open" && i.sev === sev);
+    const by = new Map();
+    list.forEach((i) => {
+      const g = by.get(i.code) || { code: i.code, group: i.group, label: CODE_L[i.code] || i.msg, items: [] };
+      g.items.push(i);
+      by.set(i.code, g);
+    });
+    const groups = [...by.values()].map((g) => ({ ...g, pages: new Set(g.items.map((i) => i.path)).size }))
+      .sort((a, b) => b.items.length - a.items.length || a.label.localeCompare(b.label));
+    const pages = new Set(list.map((i) => i.path)).size;
+    const quick = list.filter((i) => fixable(i.code) && i.path !== "Whole site").length;
+    const types = {};
+    list.forEach((i) => { types[i.group] = (types[i.group] || 0) + 1; });
+    const sum = list.length
+      ? `<b>${list.length}</b> open ${S.label.toLowerCase()} issue${list.length === 1 ? "" : "s"} on ${plural(pages, "page")}. Most common: <b>${esc(groups[0].label)}</b> (${groups[0].items.length}).${
+        quick ? ` <span class="seo-hk-one">✨ ${quick} can be fixed in one click</span>` : ""}`
+      : `No open ${S.label.toLowerCase()} issues. 👍`;
+    const body = groups.length ? hkTable(["Problem", "Type", "Pages", "Fix"], groups.map((g) => hkRow("c:" + g.code, [
+      `<b>${esc(g.label)}</b>`, `<span class="seo-note">${esc(GROUPS[g.group] || g.group)}</span>`, String(g.pages),
+      fixable(g.code) ? `<span class="seo-hk-one">✨ One click</span>` : HELP[g.code] ? `<span class="seo-note">How-to</span>` : "—",
+    ], () => `<ul class="seo-hk-il">${g.items.slice(0, 12).map((i) => `<li>${pageLink(i.path)}${
+      i.detail ? ` <span class="seo-note">· ${esc(String(i.detail).slice(0, 140))}</span>` : ""}</li>`).join("")}</ul>${
+      g.items.length > 12 ? `<p class="seo-note">and ${g.items.length - 12} more</p>` : ""}${helpBox(g.code)}${
+      hkActs([goBtn(fixable(g.code) ? "Fix them in Issues" : "See them in Issues", { view: "issues", sev, group: g.group })])}`))) : "";
+    return hkCard(sev, { title: `${S.label} issues: what they are`, sub: "Open issues on priority pages, grouped by problem", sum,
+      viz: list.length ? bars(Object.entries(types).sort((a, b) => b[1] - a[1]).map(([k, n]) => ({ label: GROUPS[k] || k, n }))) : "",
+      body, tip: { high: "Fix these first: they can stop a page showing in Google or put people off booking.",
+        medium: "Worth doing this week: they hold pages back in Google.",
+        low: "Small wins. Do them when you're working on the page anyway." }[sev] });
+  }
+
+  function scoreCard() {
+    const rows = H.pages.map((p) => ({ p, m: metricsOf(p.speed) })).sort((a, b) => (a.m?.score ?? 999) - (b.m?.score ?? 999));
+    const sc = rows.filter((x) => x.m && x.m.score != null);
+    const count = (f) => sc.filter((x) => f(x.m.score)).length;
+    const good = count((s) => s >= 90), ni = count((s) => s >= 50 && s < 90), poor = count((s) => s < 50);
+    const avg = sc.length ? Math.round(sc.reduce((a, x) => a + x.m.score, 0) / sc.length) : null;
+    const worst = sc[0];
+    const sum = avg == null ? "No pages have been speed-tested yet."
+      : `Average <b>${val("score", avg)}</b> out of 100 on phones. ${good ? `${good} fast` : "None fast"}${ni ? `, ${ni} need work` : ""}${
+        poor ? `, <b class="seo-h-poor">${poor} slow</b>` : ""}.${worst && worst.m.score < 90 ? ` Slowest: ${pageLink(worst.p.path)} (${worst.m.score}).` : ""}`;
+    const body = hkTable(["Page", "Score", VNAME.lcp, VNAME.cls, VNAME.inp, "Trend", "Measured from"], rows.map(({ p, m }) => {
+      const hist = (p.history || []).map((r) => r.s).filter((v) => v != null);
+      if (!m) {
+        return hkRow("s:" + p.path, [pageLink(p.path), `<span class="seo-note">${esc(p.speedError || "Not tested yet")}</span>`, "", "", "", "", ""],
+          () => `<p class="seo-note">${esc(p.speedError || "Speed is tested three times a day. It shows here after the next test.")}</p>${hkActs([psBtn(p.url), openBtn(p.path)])}`);
+      }
+      return hkRow("s:" + p.path, [pageLink(p.path), val("score", m.score), val("lcp", m.lcp), val("cls", m.cls), val("inp", m.inp),
+        hist.length > 1 ? c.h.sparkline(hist, 80, 20) : "", `<span class="seo-note">${esc(m.from)}</span>`], () => {
+        const why = ["lcp", "inp", "cls"].filter((k) => m[k] != null && rate(k, m[k]) !== "good").map((k) =>
+          `<li><b>${VNAME[k]}: ${fmtM[k](m[k])}</b> <span class="seo-note">(${rate(k, m[k]) === "poor" ? "slow" : "needs work"})</span><br>${esc(HELP["cwv_" + k])}</li>`);
+        if (!why.length && m.score != null && m.score < 90) why.push(`<li>${esc(HELP.score)}</li>`);
+        return hkStats([["Mobile score", val("score", m.score)], [VNAME.lcp, val("lcp", m.lcp)], [VNAME.inp, val("inp", m.inp)], [VNAME.cls, val("cls", m.cls)],
+          ["Measured from", esc(m.from)], ["Tested", p.speedAt ? esc(when(p.speedAt)) : "—"],
+          hist.length > 1 ? ["Lowest / highest kept", `${Math.min(...hist)} / ${Math.max(...hist)}`] : null])
+          + (why.length ? `<div class="seo-hk-h">What's holding it back</div><ul class="seo-hk-why">${why.join("")}</ul>`
+            : `<p class="seo-h-good" style="margin:4px 0">Fast on phones. Nothing to do here. 👍</p>`)
+          + hkActs([psBtn(p.url), advBtn(p.path, "speed", why.length > 0), openBtn(p.path)]);
+      });
+    }));
+    return hkCard("score", { title: "Mobile speed: page by page", sub: "Google PageSpeed Insights on a phone, slowest first", sum,
+      viz: split([{ n: good, tone: "green", label: "Fast (90+)" }, { n: ni, tone: "amber", label: "Needs work (50–89)" },
+        { n: poor, tone: "red", label: "Slow (under 50)" }, { n: rows.length - sc.length, tone: "grey", label: "Not tested" }]),
+      body, tip: "Loading (LCP) matters most, to visitors and to Google. It's nearly always the big image at the top: compress it, and don't lazy-load it." });
+  }
+
+  function googleCard(all) {
+    if (!H.index?.data) {
+      return hkCard("google", { title: "Priority pages in Google", body: `<p class="seo-note">No indexing data yet. In Apps Script, run <code>runSeoIndex()</code> once.</p>` });
+    }
+    const X = H.index.data, missing = new Set(X.keyNotInSitemap || []);
+    const day = (iso) => { const d = daysSince(iso); return d == null ? "—" : d === 0 ? "today" : d + " days ago"; };
+    const rows = H.pages.map((p) => {
+      const g = p.google, diff = !!(g && g.gc && g.uc && normU(g.gc) !== normU(g.uc));
+      const rank = !g ? 4 : g.err ? 3 : g.v !== "PASS" ? 0 : diff ? 1 : (daysSince(g.lc) || 0) > 60 ? 2 : 2.5;
+      return { p, g, diff, rank };
+    }).sort((a, b) => a.rank - b.rank || a.p.path.localeCompare(b.p.path));
+    const chk = rows.filter((x) => x.g && !x.g.err), yes = chk.filter((x) => x.g.v === "PASS"), no = chk.filter((x) => x.g.v !== "PASS");
+    const other = yes.filter((x) => x.diff).length;
+    const sum = chk.length
+      ? `<b>${yes.length} of ${chk.length}</b> priority pages are in Google.${no.length ? ` Not in Google: ${no.slice(0, 3).map((x) => pageLink(x.p.path)).join(", ")}${
+        no.length > 3 ? ` and ${no.length - 3} more` : ""}.` : " 👍"}${other ? ` ${plural(other, "page")} ${other === 1 ? "has" : "have"} a different main version in Google.` : ""}`
+      : "Not checked yet.";
+    const body = hkTable(["Page", "In Google", "Google says", "Google's last visit", "Main version", "In sitemap"], rows.map(({ p, g, diff }) => hkRow("g:" + p.path, [
+      pageLink(p.path), gCell(g), `<span class="seo-note">${esc(g?.err ? g.err : g?.cs || "")}</span>`, g && !g.err ? day(g.lc) : "—",
+      diff ? `<span class="seo-h-ni" title="${esc(g.gc)}">${esc(shortU(g.gc))}</span>` : g && !g.err ? `<span class="seo-note">Same</span>` : "—",
+      X.sitemapUrls ? (missing.has(p.path) ? `<span class="seo-h-poor">No</span>` : `<span class="seo-h-good">Yes</span>`) : "—",
+    ], () => {
+      const idx = openOf(all, p.path).filter((i) => i.group === "index").sort((a, b) => SEV[a.sev].rank - SEV[b.sev].rank);
+      return issueList(idx) + (idx[0] ? helpBox(idx[0].code) : "")
+        + hkActs([g?.link ? `<a class="seo-btn" href="${esc(g.link)}" target="_blank" rel="noopener">Inspect in Search Console ↗</a>` : "",
+          advBtn(p.path, "index", idx.length > 0), goBtn("Open In Google", { view: "index" })]);
+    })));
+    return hkCard("google", { title: "Priority pages in Google", sub: "Search Console's URL Inspection, checked each morning. Problems first.", sum,
+      viz: split([{ n: yes.length, tone: "green", label: "In Google" }, { n: no.length, tone: "red", label: "Not in Google" },
+        { n: rows.length - chk.length, tone: "grey", label: "Not checked" }]),
+      body, tip: "After fixing a page, open Inspect and press Request indexing. Google usually visits within a few days." });
+  }
+
+  function cwvCard() {
+    const rows = H.pages.map((p) => {
+      const f = fieldOf(p.speed);
+      return { p, f, fails: f ? ["lcp", "inp", "cls"].filter((k) => f[k] && f[k].c && f[k].c !== "FAST") : [] };
+    });
+    const withF = rows.filter((x) => x.f).sort((a, b) => b.fails.length - a.fails.length || a.p.path.localeCompare(b.p.path));
+    const pass = withF.filter((x) => !x.fails.length).length, noData = rows.length - withF.length;
+    const failN = { lcp: 0, inp: 0, cls: 0 };
+    withF.forEach((x) => x.fails.forEach((k) => { failN[k]++; }));
+    const top = Object.entries(failN).sort((a, b) => b[1] - a[1])[0];
+    const cell = (f, k) => (f && f[k] ? `<span class="seo-h-${f[k].c === "FAST" ? "good" : f[k].c === "AVERAGE" ? "ni" : "poor"}">${fmtM[k](f[k].v)}</span>` : "—");
+    const sum = withF.length
+      ? `<b>${pass} of ${withF.length}</b> pages pass with real visitors.${top && top[1] ? ` Most common problem: <b>${VNAME[top[0]]}</b> on ${plural(top[1], "page")}.` : " 👍"}`
+      : "None of the priority pages have enough visits from Chrome users yet for real-visitor data.";
+    const body = withF.length ? hkTable(["Page", "Result", VNAME.lcp, VNAME.inp, VNAME.cls], withF.map(({ p, f, fails }) => hkRow("w:" + p.path, [
+      pageLink(p.path), fails.length ? `<span class="seo-h-poor">✗ ${fails.length} failing</span>` : `<span class="seo-h-good">✓ Pass</span>`,
+      cell(f, "lcp"), cell(f, "inp"), cell(f, "cls"),
+    ], () => (fails.length
+      ? `<ul class="seo-hk-why">${fails.map((k) => `<li><b>${VNAME[k]}: ${fmtM[k](f[k].v)}</b><br>${esc(HELP["cwv_" + k])}</li>`).join("")}</ul>`
+      : `<p class="seo-h-good" style="margin:4px 0">All three are good for real visitors. 👍</p>`)
+      + hkActs([psBtn(p.url), advBtn(p.path, "speed", fails.length > 0), openBtn(p.path)])))) : "";
+    return hkCard("cwv", { title: "Core Web Vitals: real visitors", sub: "Chrome users over the last 28 days. Google uses these in ranking.", sum,
+      viz: split([{ n: pass, tone: "green", label: "Pass" }, { n: withF.length - pass, tone: "red", label: "Fail" }, { n: noData, tone: "grey", label: "Not enough visits" }])
+        + bars(["lcp", "inp", "cls"].filter((k) => failN[k]).map((k) => ({ label: VNAME[k], n: failN[k] }))),
+      body, note: noData ? `${plural(noData, "page")} ${noData === 1 ? "doesn't" : "don't"} have enough real visits yet, so ${
+        noData === 1 ? "it's" : "they're"} judged on Google's test instead (Avg mobile score).` : "",
+      tip: "These are 28 days of real visits, so a fix takes up to four weeks to show fully here. Google's test (Avg mobile score) shows it the next day." });
+  }
+
+  function bounceCard() {
+    const E = c.data?.eng;
+    if (!E) return hkCard("bounce", { title: "Visitors who leave straight away", body: `<p class="seo-note">No engagement data yet.</p>` });
+    const rows = H.pages.map((hp) => ({ hp, e: engOf(hp.path) })).filter((x) => x.e && x.e.c[0])
+      .sort((a, b) => (b.e.c[0] >= 20) - (a.e.c[0] >= 20) || bRate(b.e.c) - bRate(a.e.c));
+    const judged = rows.filter((x) => x.e.c[0] >= 20);
+    const hi = judged.filter((x) => bRate(x.e.c) > 0.65), fair = judged.filter((x) => bRate(x.e.c) > 0.45 && bRate(x.e.c) <= 0.65);
+    const s = E.site.c;
+    const sum = `${hi.length ? `<b class="seo-h-poor">${hi.length}</b> priority page${hi.length === 1 ? " loses" : "s lose"} more than 65% of Google visitors straight away.`
+      : "No priority page loses more than 65% of Google visitors. 👍"} Whole site: ${chipB(bRate(s), s[0])}.`;
+    const body = rows.length ? hkTable(["Page", "Visits", "Bounce", "vs before", "Engaged time", "Phones", "Computers"], rows.map(({ hp, e }) => {
+      const b = bRate(e.c), was = e.p[0] >= 20 ? bRate(e.p) : null;
+      return hkRow("b:" + hp.path, [pageLink(hp.path), c.h.fmtInt(e.c[0]), chipB(b, e.c[0]),
+        was == null || e.c[0] < 20 ? "—" : c.h.delta(b * 100, was * 100, { invert: true, abs: true, digits: 0 }),
+        durB(e.c[2] / e.c[0]), chipB(bRate(e.m), e.m[0]), chipB(bRate(e.d), e.d[0])], () => {
+        const t = tipsOf(hp, e);
+        return hkStats([["Visits from Google", c.h.fmtInt(e.c[0])], ["Bounce", chipB(b, e.c[0])], ["28 days before", was == null ? "—" : pctB(was)],
+          ["Engaged time", durB(e.c[2] / e.c[0])], ["Key events", c.h.fmtInt(e.c[3] || 0)]])
+          + (t ? `<div class="seo-hk-h">What to try</div><p class="seo-hk-p">${esc(t)}</p>`
+            : `<p class="seo-note">${e.c[0] < 20 ? "Fewer than 20 visits: not judged yet." : "This page keeps visitors well. 👍"}</p>`)
+          + hkActs([advBtn(hp.path, "bounce", highBounce(e)), goBtn("Open Engagement", { view: "engage" }), openBtn(hp.path)]);
+      });
+    })) : `<p class="seo-note">No visits from Google to priority pages in the last 28 days.</p>`;
+    return hkCard("bounce", { title: "Visitors who leave straight away", sub: `Visits from Google · ${esc(E.from || "")} to ${esc(E.to || "")}`, sum,
+      viz: split([{ n: judged.length - hi.length - fair.length, tone: "green", label: "Good (45% or less)" }, { n: fair.length, tone: "amber", label: "Fair (45–65%)" },
+        { n: hi.length, tone: "red", label: "High (over 65%)" }, { n: rows.length - judged.length, tone: "grey", label: "Under 20 visits" }]),
+      body, tip: "A bounce is a visit that left within 10 seconds without clicking or booking. The first screen has to answer what they searched for, with a clear way to book." });
+  }
+
+  function kpiHtml(all) {
+    switch (ui.hkpi) {
+      case "pages": return pagesCard(all);
+      case "high": case "medium": case "low": return sevCard(all, ui.hkpi);
+      case "score": return scoreCard();
+      case "google": return googleCard(all);
+      case "cwv": return cwvCard();
+      case "bounce": return bounceCard();
+      default: return "";
+    }
+  }
   function tiles(all) {
     const open = all.filter((i) => i.status === "open");
     const n = (s) => open.filter((i) => i.sev === s).length;
@@ -312,26 +595,26 @@ export function viewHealth(wrap, c, ui) {
     const scores = ms.map((m) => m.score).filter((v) => v != null);
     const avg = scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : null;
     const real = ms.filter((m) => m.pass !== null);
-    const tile = (l, v, p) => `<div class="seo-kpi"><div class="l">${l}</div><div class="v">${v}</div>${p ? `<div class="p">${p}</div>` : ""}</div>`;
-    return `<div class="seo-kpis">
-      ${tile("Priority pages checked", H.pages.length, when(H.state.at))}
-      ${tile("High", `<span class="seo-h-poor">${n("high")}</span>`, "open issues")}
-      ${tile("Medium", `<span class="seo-h-ni">${n("medium")}</span>`, "open issues")}
-      ${tile("Low", n("low"), "open issues")}
-      ${tile("Avg mobile score", avg == null ? "—" : val("score", avg), "out of 100")}
-      ${H.index?.data ? tile("In Google", (() => {
+    const tile = (key, l, v, p) => `<button type="button" class="seo-kpi${ui.hkpi === key ? " is-on" : ""}" data-h-kpi="${key}"
+      aria-expanded="${ui.hkpi === key}" title="See what's behind this number"><div class="l">${l}</div><div class="v">${v}</div>${p ? `<div class="p">${p}</div>` : ""}</button>`;
+    return `<div class="seo-kpis seo-hk-tiles">
+      ${tile("pages", "Priority pages checked", H.pages.length, when(H.state.at))}
+      ${tile("high", "High", `<span class="seo-h-poor">${n("high")}</span>`, "open issues")}
+      ${tile("medium", "Medium", `<span class="seo-h-ni">${n("medium")}</span>`, "open issues")}
+      ${tile("low", "Low", n("low"), "open issues")}
+      ${tile("score", "Avg mobile score", avg == null ? "—" : val("score", avg), "out of 100")}
+      ${H.index?.data ? tile("google", "In Google", (() => {
         const k = H.pages.filter((p) => p.google && !p.google.err);
         return k.length ? `${k.filter((p) => p.google.v === "PASS").length}/${k.length}` : "—";
       })(), "key pages indexed") : ""}
-      ${tile("Core Web Vitals", real.length ? `${real.filter((m) => m.pass).length}/${real.length}` : "—",
+      ${tile("cwv", "Core Web Vitals", real.length ? `${real.filter((m) => m.pass).length}/${real.length}` : "—",
         real.length ? "pages passing (real visitors)" : "not enough visits yet")}
       ${c.data?.eng ? (() => {
-        const n = H.pages.filter((p) => highBounce(engOf(p.path))).length;
-        return tile("High bounce", n ? `<span class="seo-h-poor">${n}</span>` : "0", "priority pages over 65%");
+        const hb = H.pages.filter((p) => highBounce(engOf(p.path))).length;
+        return tile("bounce", "High bounce", hb ? `<span class="seo-h-poor">${hb}</span>` : "0", "priority pages over 65%");
       })() : ""}
     </div>`;
   }
-
   function issueRow(i) {
     const pg = c.byPath.get(i.path);
     const where = starMark(isPri(i.path)) + (pg ? `<button class="seo-w-link" data-open="${pg.id}">${esc(i.path)}</button>`
@@ -567,7 +850,7 @@ export function viewHealth(wrap, c, ui) {
     const gcount = {};
     for (const i of inStatus) gcount[i.group] = (gcount[i.group] || 0) + 1;
     const shown = inStatus
-      .filter((i) => (ui.hsev === "all" || i.sev === ui.hsev) && (ui.hgroup === "all" || i.group === ui.hgroup))
+      .filter((i) => (ui.hsev === "all" || i.sev === ui.hsev) && (ui.hgroup === "all" || i.group === ui.hgroup) && (!ui.hpage || i.path === ui.hpage))
       .sort((a, b) => (isPri(b.path) - isPri(a.path)) || SEV[a.sev].rank - SEV[b.sev].rank || a.path.localeCompare(b.path));
     const chip = (attr, k, l, on, n) =>
       `<button class="seo-w-chip ${on ? "is-on" : ""}" ${attr}="${k}">${esc(l)}${n != null ? ` <em>${n}</em>` : ""}</button>`;
@@ -583,6 +866,8 @@ export function viewHealth(wrap, c, ui) {
         ${chip("data-h-group", "all", "All types", ui.hgroup === "all")}
         ${Object.entries(GROUPS).map(([k, l]) => chip("data-h-group", k, l, ui.hgroup === k, gcount[k] || 0)).join("")}
       </div>
+      ${ui.hpage ? `<div class="seo-row"><span class="seo-w-chip is-on">Only ${esc(ui.hpage)}
+        <button type="button" class="seo-hk-clear" data-h-page title="Show every page">✕</button></span></div>` : ""}
       ${shown.length ? shown.map(issueRow).join("") : `<div class="seo-empty">${ui.hstatus === "open" ? "Nothing to fix here. 👍" : "Nothing ignored."}</div>`}
       <p class="seo-note" style="margin-top:8px">Fixed something? It disappears after the next nightly check (about 8am).</p>`;
   }
@@ -726,6 +1011,7 @@ export function viewHealth(wrap, c, ui) {
       ${st.blocked ? `<div class="seo-warn">${st.blocked} key page${st.blocked === 1 ? "" : "s"} couldn't be read. The website may be blocking automated checks.</div>` : ""}
       ${st.speedProblem ? `<div class="seo-warn">${esc(st.speedProblem)}</div>` : ""}
       ${tiles(all)}
+      ${ui.hkpi ? kpiHtml(all) : ""}
       <div class="seo-row">
         <button class="seo-btn ${ui.hview === "content" ? "on" : ""}" data-h-view="content">Content</button>
         <button class="seo-btn ${ui.hview === "issues" ? "on" : ""}" data-h-view="issues">Issues</button>
@@ -742,6 +1028,28 @@ export function viewHealth(wrap, c, ui) {
   wrap.onclick = async (e) => {
     if (await hxClick(e)) return;   // one-click fixes and Fix with the Advisor (first: some sit inside a row that opens the page panel)
     if (e.target.closest("[data-open]")) return;   // seo.js opens the page panel
+    // The number cards: open or close a card, open a row, or go to a view with its filters set
+    const hk = e.target.closest("[data-h-kpi],[data-hk-x],[data-hk-go],[data-h-page]");
+    if (hk && wrap.contains(hk)) {
+      const d = hk.dataset;
+      if (d.hkX !== undefined) {
+        const inner = e.target.closest("button,a");
+        if (inner && inner !== hk && hk.contains(inner)) return;   // a link inside the row does its own job
+        ui.hkx = ui.hkx === d.hkX ? "" : d.hkX;
+        draw();
+        return;
+      }
+      if (d.hKpi !== undefined) { ui.hkpi = ui.hkpi === d.hKpi ? "" : d.hKpi; ui.hkx = ""; draw(); return; }
+      if (d.hPage !== undefined) { ui.hpage = ""; draw(); return; }
+      let o = {};
+      try { o = JSON.parse(d.hkGo || "{}"); } catch { o = {}; }
+      ui.hview = o.view || "issues";
+      if (ui.hview === "issues") Object.assign(ui, { hstatus: "open", hsev: o.sev || "all", hgroup: o.group || "all", hpage: o.page || "" });
+      ui.hkpi = ""; ui.hkx = "";
+      draw();
+      wrap.querySelector("[data-h-view]")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
     if (await contentClick(e, c, ui, draw)) return;   // the Content view's buttons
     const t = e.target.closest("[data-h-view],[data-h-sev],[data-h-group],[data-h-status],[data-h-log],[data-h-ignore],[data-h-undo]");
     if (!t) return;
@@ -769,6 +1077,13 @@ export function viewHealth(wrap, c, ui) {
       draw();
     } catch (err) { t.disabled = false; toast(errText(err.message || err), true); }
   };
+
+  // Enter or Space opens a row in a number card
+  wrap.onkeydown = (e) => {
+    const r = e.target.closest && e.target.closest("[data-hk-x]");
+    if (r && wrap.contains(r) && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); r.click(); }
+  };
+
   draw();
   // Refresh on this tab: re-check the pages changed from here, so fixed issues drop off now
   if (c.work.recheckNow) { c.work.recheckNow = false; recheckPages(c, draw); }
@@ -792,6 +1107,50 @@ const CSS = `
 .seo-h-adv{margin-left:4px;white-space:nowrap}
 .seo-h-try .seo-h-adv{display:inline-block;margin:6px 0 0}
 .seo-h-issue .seo-fx.is-done{margin-top:10px}
+.seo-hk-tiles .seo-kpi[data-h-kpi]{cursor:pointer;font:inherit;text-align:left;transition:transform .12s ease,box-shadow .12s ease,border-color .12s ease}
+.seo-hk-tiles .seo-kpi[data-h-kpi]:hover{transform:translateY(-1px);box-shadow:0 6px 16px rgba(15,23,42,.08)}
+.seo-hk-tiles .seo-kpi[data-h-kpi]:focus-visible{outline:2px solid var(--accent,#2563eb);outline-offset:2px}
+.seo-hk-tiles .seo-kpi.is-on{border-color:var(--accent,#2563eb);box-shadow:0 0 0 3px rgba(37,99,235,.14)}
+.seo-hk{border-color:#bfdbfe;box-shadow:0 8px 24px rgba(37,99,235,.07);animation:seoHkIn .18s ease-out}
+@keyframes seoHkIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+.seo-hk-head{display:flex;align-items:flex-start;gap:10px;margin-bottom:2px}
+.seo-hk-head h3{margin:0 0 2px}
+.seo-hk-sum{margin:8px 0 10px;font-size:14px;line-height:1.6}
+.seo-hk-split{display:flex;gap:2px;height:10px;margin:2px 0 8px;border-radius:6px;overflow:hidden;background:#f1f5f9}
+.seo-hk-split i{display:block;min-width:6px}
+.seo-hk-legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin:0 0 14px;font-size:12px;color:var(--text-muted,#6b7280)}
+.seo-hk-legend i{display:inline-block;width:9px;height:9px;margin-right:6px;border-radius:3px;vertical-align:-1px}
+.seo-hk-legend b{color:var(--text,#111827);margin-left:2px}
+.seo-hk .is-green{background:#22c55e}.seo-hk .is-amber{background:#f59e0b}.seo-hk .is-red{background:#ef4444}.seo-hk .is-grey{background:#cbd5e1}
+.seo-hk-bars{display:grid;gap:6px;max-width:560px;margin:0 0 14px}
+.seo-hk-bar{display:grid;grid-template-columns:190px minmax(0,1fr) 34px;align-items:center;gap:10px;font-size:12.5px}
+.seo-hk-bar b{height:8px;border-radius:5px;background:#f1f5f9;overflow:hidden}
+.seo-hk-bar b i{display:block;height:100%;border-radius:5px;background:linear-gradient(90deg,#60a5fa,#2563eb)}
+.seo-hk-bar em{font-style:normal;font-weight:600;text-align:right}
+.seo-hk-t tbody tr.seo-hk-r{cursor:pointer;transition:background .1s}
+.seo-hk-t tbody tr.seo-hk-r:hover{background:#f8fbff}
+.seo-hk-t tbody tr.seo-hk-r.is-open{background:#eff6ff}
+.seo-hk-t tbody tr.seo-hk-r:focus-visible{outline:2px solid var(--accent,#2563eb);outline-offset:-2px}
+.seo-hk-car{display:inline-block;width:14px;font-style:normal;color:var(--text-muted,#6b7280)}
+.seo-hk-t tr.seo-hk-xr td{white-space:normal;text-align:left;max-width:none;padding:12px 16px 14px 30px;background:#f8fbff;border-top:0}
+.seo-hk-stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px 16px;margin:0 0 10px;font-size:13px}
+.seo-hk-stats small{display:block;font-size:11.5px;color:var(--text-muted,#6b7280)}
+.seo-hk-h{margin:8px 0 4px;font-size:12px;font-weight:700;letter-spacing:.02em;color:var(--text-muted,#6b7280);text-transform:uppercase}
+.seo-hk-il,.seo-hk-why{margin:0 0 6px;padding:0;list-style:none;font-size:13px;line-height:1.5}
+.seo-hk-il li{padding:5px 0;border-top:1px solid var(--border,#e5e7eb)}
+.seo-hk-il li:first-child{border-top:0}
+.seo-hk-why li{margin:0 0 6px;padding:8px 10px;border-radius:8px;background:#fff;border:1px solid var(--border,#e5e7eb)}
+.seo-hk-p{margin:0 0 6px;font-size:13px;line-height:1.5}
+.seo-hk-help{margin:8px 0;padding:8px 12px;border-radius:8px;background:#fff;border:1px solid var(--border,#e5e7eb);font-size:13px}
+.seo-hk-help p{margin:4px 0 0;line-height:1.5}
+.seo-hk-one{display:inline-block;padding:1px 8px;border-radius:999px;background:#f5f3ff;color:#6d28d9;font-size:11.5px;font-weight:600;white-space:nowrap}
+.seo-hk-acts{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px}
+.seo-hk-acts a.seo-btn{text-decoration:none}
+.seo-hk-tip{margin-top:12px;padding:9px 12px;border-radius:8px;background:#fffbeb;border:1px solid #fde68a;font-size:13px;line-height:1.5}
+.seo-hk-clear{border:0;background:none;padding:0 0 0 6px;cursor:pointer;font:inherit;color:inherit;opacity:.7}
+.seo-hk-clear:hover{opacity:1}
+@media (max-width:640px){.seo-hk-bar{grid-template-columns:120px minmax(0,1fr) 28px}.seo-hk-t tr.seo-hk-xr td{padding:10px 12px}}
+
 `;
 
 function injectCss() {
