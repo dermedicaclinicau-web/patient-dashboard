@@ -650,6 +650,7 @@ export function viewHealth(wrap, c, ui) {
     if (i.code === "redirect_links" || i.code === "broken_link") return linksBody(i, F, errBox);
     if (i.code === "many_h1") return h1Body(i, F, errBox);
     if (i.code === "alt") return altBody(c, i.path);
+    if (i.code === "wording") return wordBody(i, F, errBox);
     return "";
   }
 
@@ -718,11 +719,48 @@ export function viewHealth(wrap, c, ui) {
         <button class="seo-fx-b is-ghost" type="button" data-hx-cancel="${i.id}"${F.busy ? " disabled" : ""}>Cancel</button></div></div>${errBox}`;
   }
 
+  function wordBody(i, F, errBox) {
+    if (!F.places) {
+      return `<div class="seo-fx-bar"><button class="seo-fx-b is-accept" type="button" data-hx-word="${i.id}"${F.busy ? " disabled" : ""}>${
+        F.busy === "go" ? spinH + "Finding it on the page and writing options… (about 20 seconds)" : "✨ Suggest compliant wording"}</button></div>${errBox}`;
+    }
+    if (!F.places.length) {
+      return `<p class="seo-note" style="margin:8px 0 0">${esc(F.note || "The flagged wording isn't on the page any more. This issue clears at the next check.")}</p>
+        <div class="seo-fx-bar"><button class="seo-fx-b is-ghost" type="button" data-hx-cancel="${i.id}">Close</button></div>${errBox}`;
+    }
+    const on = F.places.filter((p) => p.ok && p.on).length;
+    const busy = F.busy ? " disabled" : "";
+    return `<div class="seo-fx-places">
+      <div class="seo-fx-lab">${plural(F.places.length, "place")} on the page. Choose the new wording for each, or edit it.</div>
+      ${F.places.map((p, x) => p.ok ? `<div class="seo-hx-wp${p.on ? "" : " is-off"}">
+        <label class="seo-hx-won"><input type="checkbox" data-hx-won="${x}"${p.on ? " checked" : ""}><span class="seo-fx-pn">${x + 1}</span> Change this one</label>
+        <div class="seo-fx-txt seo-hx-wsent">${esc(p.before)}<del class="seo-fx-del">${esc(p.find)}</del>${esc(p.after)}</div>
+        ${p.options.map((o, k) => `<button type="button" class="seo-fx-opt${p.pick === k ? " is-on" : ""}${(o.flags || []).length ? " is-flag" : ""}" data-hx-wpick="${i.id}|${x}|${k}" aria-pressed="${p.pick === k}">
+          <span class="seo-fx-radio"></span><span class="seo-fx-otxt"><b>${esc(o.text)}</b>${o.why ? `<small>${esc(o.why)}</small>` : ""}
+          ${(o.flags || []).map((f) => `<small class="seo-fx-flag">⚠ ${esc(f)}</small>`).join("")}</span></button>`).join("")}
+        ${!p.options.length ? `<p class="seo-note" style="margin:4px 0">No options came back for this one. Edit it below, or press Regenerate.</p>` : ""}
+        <label class="seo-fx-lab" style="display:block;margin-top:6px">Or edit it
+          <input class="seo-input seo-hx-in" data-hx-wtext="${x}" value="${esc(p.text || "")}" maxlength="600"></label>
+        <div class="seo-fx-txt seo-hx-wsent seo-hx-after"><span class="seo-note">After:</span> ${esc(p.before)}<ins class="seo-fx-ins">${esc(p.text || "")}</ins>${esc(p.after)}</div>
+      </div>` : `<div class="seo-hx-wp is-off"><span class="seo-fx-pn">${x + 1}</span>
+        <div class="seo-fx-txt seo-hx-wsent">${esc(p.before)}<b>${esc(p.old || "")}</b>${esc(p.after)}</div>
+        <p class="seo-note" style="margin:4px 0 0">⚠ ${esc(p.why || "Change this one in WordPress.")}</p></div>`).join("")}
+    </div>
+    <div class="seo-fx-bar">
+      <button class="seo-fx-b is-accept" type="button" data-hx-wordok="${i.id}"${busy || !on ? " disabled" : ""}>${
+        F.busy === "apply" ? spinH + "Changing…" : `✓ Accept${on ? ` ${plural(on, "change")}` : ""}`}</button>
+      <button class="seo-fx-b is-ghost" type="button" data-hx-word="${i.id}"${busy}>${F.busy === "go" ? spinH + "Writing…" : "↻ Regenerate"}</button>
+      <button class="seo-fx-b is-ghost" type="button" data-hx-wreject="${i.id}"${busy}>✕ Reject: not a problem here</button>
+      <button class="seo-fx-b is-ghost" type="button" data-hx-cancel="${i.id}"${busy}>Cancel</button></div>${errBox}`;
+  }
+
   function hxDone(i, st, F, errBox) {
     let lines = [];
     try { lines = JSON.parse(st.results || "[]"); } catch { lines = []; }
     const what = st.fix === "meta" ? `New ${st.field === "desc" ? "meta description" : "title"} saved`
-      : st.fix === "links" ? `${plural(Number(st.count) || 0, "link")} updated` : `${plural(Number(st.count) || 0, "heading")} changed to H2`;
+      : st.fix === "links" ? `${plural(Number(st.count) || 0, "link")} updated`
+      : st.fix === "wording" ? `Wording changed in ${plural(Number(st.count) || 0, "place")}`
+      : `${plural(Number(st.count) || 0, "heading")} changed to H2`;
     return `<div class="seo-fx is-done">
       <div class="seo-fx-head"><span class="seo-fx-tick">✓</span><strong>${what}</strong><span class="seo-sp"></span>
         <span class="seo-note">${esc(st.byName || "")}${st.at ? " · " + esc(when(st.at)) : ""}</span></div>
@@ -738,7 +776,7 @@ export function viewHealth(wrap, c, ui) {
   }
 
   async function hxClick(e) {
-    const t = e.target.closest("[data-h-adv],[data-hx-meta],[data-hx-pick],[data-hx-metaok],[data-hx-links],[data-hx-linksok],[data-hx-h1],[data-hx-h1ok],[data-hx-cancel],[data-hx-undo]");
+    const t = e.target.closest("[data-h-adv],[data-hx-meta],[data-hx-pick],[data-hx-metaok],[data-hx-links],[data-hx-linksok],[data-hx-h1],[data-hx-h1ok],[data-hx-cancel],[data-hx-undo],[data-hx-word],[data-hx-wpick],[data-hx-wordok],[data-hx-wreject]");
     if (!t) return false;
     e.stopPropagation();   // some sit inside a row that opens the page panel
     const d = t.dataset;
@@ -748,7 +786,8 @@ export function viewHealth(wrap, c, ui) {
       c.setTab("advisor");
       return true;
     }
-    const id = d.hxMeta || d.hxMetaok || d.hxLinks || d.hxLinksok || d.hxH1 || d.hxH1ok || d.hxCancel || d.hxUndo || String(d.hxPick || "").split("|")[0];
+    const id = d.hxMeta || d.hxMetaok || d.hxLinks || d.hxLinksok || d.hxH1 || d.hxH1ok || d.hxCancel || d.hxUndo
+      || d.hxWord || d.hxWordok || d.hxWreject || String(d.hxPick || d.hxWpick || "").split("|")[0];
     const i = byId.get(id);
     if (!i) return true;
     const F = HX.get(id) || {};
@@ -757,6 +796,8 @@ export function viewHealth(wrap, c, ui) {
     const inp = row?.querySelector("[data-hx-text]");
     if (inp) F.text = inp.value.replace(/\s+/g, " ").trim();
     row?.querySelectorAll("[data-hx-to]").forEach((s) => { const it = F.items?.[Number(s.dataset.hxTo)]; if (it) it.choice = s.value; });
+    row?.querySelectorAll("[data-hx-wtext]").forEach((x) => { const p = F.places?.[Number(x.dataset.hxWtext)]; if (p) p.text = x.value.replace(/\s+/g, " ").trim(); });
+    row?.querySelectorAll("[data-hx-won]").forEach((x) => { const p = F.places?.[Number(x.dataset.hxWon)]; if (p) p.on = x.checked; });
     const field = META[i.code];
     const base = { issueId: id, path: i.path, key: i.key, label: (i.msg + (i.detail ? " · " + i.detail : "")).slice(0, 300) };
     const run = async (busy, op, body = {}) => {
@@ -770,6 +811,53 @@ export function viewHealth(wrap, c, ui) {
     const after = `<ul class="seo-fx-mlist"><li>Live straight away.</li><li>It's added to the Change log, and you can <b>Undo</b> it from here.</li></ul>`;
 
     if (d.hxCancel) { HX.delete(id); draw(); return true; }
+    // Advertising wording: suggest or regenerate, choose, accept, reject
+    if (d.hxWord) {
+      const r = await run("go", "hxWord", { msg: i.msg, detail: i.detail || "" });
+      if (r) {
+        F.note = r.note || "";
+        F.places = (r.places || []).map((p) => {
+          const k = (p.options || []).findIndex((o) => !(o.flags || []).length);
+          const pick = k < 0 ? 0 : k;
+          return { ...p, options: p.options || [], pick, text: p.options?.[pick]?.text || "", on: !!p.ok && !!p.options?.length };
+        });
+        if (F.places.some((p) => p.ok) && !F.places.some((p) => p.options.length)) F.err = "No new wording came back. Press Regenerate.";
+        draw();
+      }
+      return true;
+    }
+    if (d.hxWpick) {
+      const [, n, k] = d.hxWpick.split("|").map(Number);
+      const p = F.places?.[n];
+      if (p && p.options[k]) { p.pick = k; p.text = p.options[k].text; p.on = true; }
+      draw();
+      return true;
+    }
+    if (d.hxWordok) {
+      const items = (F.places || []).filter((p) => p.ok && p.on && p.text);
+      if (!items.length) { F.err = "Tick at least one change."; draw(); return true; }
+      const yes = await askConfirm({ title: `Change the wording in ${plural(items.length, "place")}?`, ok: "✓ Yes, change it",
+        body: `${page}${items.map((x) => `<div class="seo-fx-ba">
+          <div class="seo-fx-col is-now"><div class="seo-fx-lab">Now</div><div class="seo-fx-txt">${esc(x.before)}<del class="seo-fx-del">${esc(x.find)}</del>${esc(x.after)}</div></div>
+          <div class="seo-fx-arrow" aria-hidden="true">→</div>
+          <div class="seo-fx-col is-new"><div class="seo-fx-lab">After</div><div class="seo-fx-txt">${esc(x.before)}<ins class="seo-fx-ins">${esc(x.text)}</ins>${esc(x.after)}</div></div></div>`).join("")}${after}` });
+      if (!yes) return true;
+      const r = await run("apply", "hxWordApply", { items: items.map((x) => ({ find: x.find, text: x.text, term: x.term || "" })) });
+      if (r) saved(r, "Reworded ✓");
+      return true;
+    }
+    if (d.hxWreject) {
+      const note = prompt("Why isn't this a problem on this page? The reason is kept with the issue.", "");
+      if (note === null) return true;
+      if (note.trim().length < 3) { F.err = "Add a short reason, so others know why it was left."; draw(); return true; }
+      try {
+        await setStatus(c, i, "ignored", "Not a problem here: " + note.trim());
+        HX.delete(id);
+        toast("Marked as not a problem");
+        draw();
+      } catch (err) { F.err = errText(err.message || err); draw(); }
+      return true;
+    }
     if (d.hxPick) {
       const n = Number(d.hxPick.split("|")[1]);
       F.pick = n; F.text = F.opts?.[n]?.text || "";
@@ -1083,7 +1171,15 @@ export function viewHealth(wrap, c, ui) {
     const r = e.target.closest && e.target.closest("[data-hk-x]");
     if (r && wrap.contains(r) && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); r.click(); }
   };
-
+  // Typing your own wording updates its "After" line straight away
+  if (!wrap.dataset.hxWordIn) {
+    wrap.dataset.hxWordIn = "1";
+    wrap.addEventListener("input", (e) => {
+      const x = e.target.closest && e.target.closest("[data-hx-wtext]");
+      const ins = x && x.closest(".seo-hx-wp")?.querySelector(".seo-hx-after ins");
+      if (ins) ins.textContent = x.value;
+    });
+  }
   draw();
   // Refresh on this tab: re-check the pages changed from here, so fixed issues drop off now
   if (c.work.recheckNow) { c.work.recheckNow = false; recheckPages(c, draw); }
@@ -1150,7 +1246,12 @@ const CSS = `
 .seo-hk-clear{border:0;background:none;padding:0 0 0 6px;cursor:pointer;font:inherit;color:inherit;opacity:.7}
 .seo-hk-clear:hover{opacity:1}
 @media (max-width:640px){.seo-hk-bar{grid-template-columns:120px minmax(0,1fr) 28px}.seo-hk-t tr.seo-hk-xr td{padding:10px 12px}}
-
+.seo-hx-wp{padding:12px 0;border-top:1px solid var(--border,#e5e7eb);transition:opacity .15s}
+.seo-hx-wp:first-of-type{border-top:0}
+.seo-hx-wp.is-off{opacity:.55}
+.seo-hx-won{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;cursor:pointer;margin-bottom:6px}
+.seo-hx-wsent{margin:4px 0 8px;padding:8px 10px;border-radius:8px;background:#f8fafc;line-height:1.6}
+.seo-hx-after{background:#f0fdf4;margin-top:8px}
 `;
 
 function injectCss() {
