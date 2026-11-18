@@ -13872,3 +13872,51 @@ button.fr-join:hover { text-decoration: underline; }
 
 .mt-timely { color: #92400e; background: #fef3c7; border-radius: 6px; padding: 2px 6px; align-self: flex-start; font-weight: 600; }
 .mb-offer-warn { margin: 6px 0 10px; padding: 8px 10px; border-radius: 8px; background: #fef3c7; color: #92400e; font-size: 13px; }
+
+/* ===================== Sidebar: grouped, scrolls, collapses ===================== */
+/* A group with no visible links hides its heading too */
+.nav-sec:not(:has(.nav-item:not([hidden]))) { display: none; }
+
+@media (min-width: 861px) {
+  .sidebar { width: var(--sidebar-w); padding: 0; gap: 0; transition: width .2s ease; }
+  .nav-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: .75rem .65rem;
+    scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; }
+  .nav-foot { flex: none; padding: .5rem .65rem; border-top: 1px solid var(--border); }
+  .nav-group { margin: 1.1rem .7rem .35rem; font-size: .72rem; font-weight: 600; letter-spacing: .04em;
+    color: #94a3b8; white-space: nowrap; overflow: hidden; }
+
+  .nav-item { position: relative; gap: .7rem; height: 40px; padding: 0 .7rem; margin: 1px 0;
+    font-size: .92rem; white-space: nowrap; }
+  .nav-item svg { width: 19px; height: 19px; }
+  .nav-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .nav-item:hover { background: var(--surface-2); color: var(--text); }
+  .nav-item.active { background: var(--primary-soft); color: var(--primary-hover); font-weight: 600; }
+  .nav-item.active::before { content: ""; position: absolute; left: -.65rem; top: 9px; bottom: 9px; width: 3px;
+    border-radius: 0 3px 3px 0; background: var(--primary); }
+  .nav-item:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+  .nav-collapse { display: flex; align-items: center; gap: .7rem; width: 100%; height: 40px; padding: 0 .7rem;
+    border: 0; border-radius: var(--radius-sm); background: none; color: var(--muted); font: inherit;
+    font-size: .92rem; font-weight: 500; text-align: left; white-space: nowrap; cursor: pointer;
+    transition: background .15s, color .15s; }
+  .nav-collapse:hover { background: var(--surface-2); color: var(--text); }
+  .nav-collapse:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+  .nav-collapse svg { width: 19px; height: 19px; flex-shrink: 0; transition: transform .2s; }
+
+  /* Collapsed to icons */
+  body.nav-rail .sidebar { width: 68px; }
+  body.nav-rail .nav-label { display: none; }
+  body.nav-rail .nav-group { height: 1px; margin: .7rem .5rem; background: var(--border); color: transparent; }
+  body.nav-rail :is(.nav-item, .nav-collapse) { justify-content: center; padding: 0; }
+  body.nav-rail .nav-badge { position: absolute; top: 2px; right: 6px; min-width: 17px; height: 17px;
+    padding: 0 4px; margin: 0; font-size: .62rem; }
+  body.nav-rail .nav-collapse svg { transform: rotate(180deg); }
+}
+
+/* iPad portrait: the existing sideways strip, without headings or the collapse button */
+@media (max-width: 860px) {
+  .nav-scroll { display: flex; align-items: center; gap: .25rem; padding: 0; }
+  .nav-sec { display: contents; }
+  .nav-group, .nav-collapse { display: none; }
+  .nav-foot { display: flex; flex: none; padding: 0; border: 0; }
+}
+@media (prefers-reduced-motion: reduce) { .sidebar, .nav-collapse svg { transition: none; } }

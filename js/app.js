@@ -93,6 +93,30 @@ let currentStaff = null;
 initFormPicker(els.content, { getStaff: () => currentStaff });
 initTopbar();
 
+/* ===================== Sidebar: collapse to icons ===================== */
+// Remembered on each computer. When collapsed, hovering an icon shows the page name.
+const navCollapse = $("nav-collapse");
+function setNavRail(on) {
+  document.body.classList.toggle("nav-rail", on);
+  if (navCollapse) {
+    navCollapse.setAttribute("aria-label", on ? "Expand menu" : "Collapse menu");
+    navCollapse.title = on ? "Expand menu" : "Collapse menu";
+    const t = navCollapse.querySelector(".nav-label");
+    if (t) t.textContent = on ? "Expand" : "Collapse";
+  }
+  els.navItems.forEach((a) => {
+    const name = (a.querySelector(".nav-label") || a).textContent.trim();
+    if (on) a.title = name; else a.removeAttribute("title");
+  });
+}
+let navRailOn = false;
+try { navRailOn = localStorage.getItem("navRail") === "1"; } catch { /* private mode */ }
+setNavRail(navRailOn);
+if (navCollapse) navCollapse.addEventListener("click", () => {
+  const on = !document.body.classList.contains("nav-rail");
+  setNavRail(on);
+  try { localStorage.setItem("navRail", on ? "1" : "0"); } catch { /* private mode */ }
+});
 function showView(name) {
   for (const [key, el] of Object.entries(views)) el.hidden = key !== name;
 }
