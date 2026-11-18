@@ -144,6 +144,8 @@ export function listOffers(t, html) {
   });
   return [...out.values()];
 }
+// Offers not ticked yet (the list, Task Manager and the builder use this)
+export const pendingOffers = (t) => listOffers(t).filter((o) => !(t.timely || {})[o.key]);
 // What's saved on the template, for the server: the offers, and how many aren't ticked yet
 function offerFields(data, html) {
   const offers = listOffers(data, html);
@@ -351,6 +353,7 @@ export function mountTemplateList(box, { staff = null } = {}) {
           <small>${esc(t.subject || "No subject yet")}</small>
           <small>Edited ${esc(day(t.updatedAt))}${t.updatedBy ? ` · ${esc(t.updatedBy)}` : ""}</small>
           ${t.taskOn ? '<small class="mt-intask">In Task Manager → To Patient</small>' : ""}
+          ${(() => { const n = pendingOffers(t).length; return n ? `<small class="mt-timely">${n} offer${n === 1 ? "" : "s"} to set up in Timely</small>` : ""; })()}
         </div>
         <div class="mt-acts">
           <a class="lh-btn is-primary" href="${LIST_HREF}/${encodeURIComponent(t.id)}" data-open>Edit</a>
@@ -697,11 +700,10 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       ...(tm[o.key] ? [] : [`Set up "${o.name}"${o.price ? ` ($${o.price})` : ""} in Timely, then tick it under Email settings → Offers.`]),
     ]);
   };
-  function offersHtml() {
-    const list = listOffers(t);
+  function offersHtml(list = listOffers(t), title = "Offers in this email") {
     if (!list.length) return "";
     const tm = t.timely || {};
-    return `<div class="fe-insp-field"><span class="fe-insp-label mb-colh">Offers in this email</span></div>
+    return `<div class="fe-insp-field"><span class="fe-insp-label mb-colh">${esc(title)}</span></div>
       <p class="fe-note fe-pad">Each payment button sells something. Set it up as a package in Timely first, so it's ready to sell when the payment comes in.</p>
       <ul class="mb-offers">${list.map((o) => {
         const done = tm[o.key];
@@ -774,6 +776,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       ${offersHtml()}
       <div class="fe-insp-field"><span class="fe-insp-label mb-colh">Task Manager</span></div>
       ${fCheck("taskOn", "Show in Task Manager → To Patient", t.taskOn)}
+      ${t.taskOn && pendingOffers(t).length ? `<p class="mb-offer-warn">Staff can't send this from Task Manager until every offer is set up in Timely and ticked above.</p>` : ""}
       ${t.taskOn ? fText("taskName", "Task name", t.taskName, t.name, "What staff see in the list. Leave empty to use the email's name.")
         + fText("taskDescription", "Description (optional)", t.taskDescription, "For a patient who asked about our packages") : ""}
       <p class="fe-note fe-pad">${t.taskOn
@@ -922,7 +925,8 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     const b = selBlock();
     if (!b) { side.innerHTML = emailForm(); return; }
     if (b.type === "html" && (!edStart || edStart.bid !== b.id)) edStart = { bid: b.id, code: b.code };
-    side.innerHTML = `<div class="fe-insp-head">${ICONS[b.type]}<span>${esc(BLOCKS[b.type].label)}</span></div>${blockForm(b)}
+    side.innerHTML = `<div class="fe-insp-head">${ICONS[b.type]}<span>${esc(BLOCKS[b.type].label)}</span></div>${blockForm(b)}${
+      offersHtml(listOffers(t, blockHtml(b, styleOf(t.design), true)), "Set up in Timely")}
       <div class="mb-side-acts"><button type="button" class="lh-btn" data-act="done">Done</button>
         <button type="button" class="fe-remove" data-act="remove">${ICONS.trash}Remove</button></div>`;
     mountEditors();
@@ -1860,7 +1864,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
   /* ---------- Send a test ---------- */
   async function sendTest() {
     await save();
-    const probs = checkDesign(t);
+    const probs = [...checkDesign(t), ...offerProblems()];
     const dlg = openDialog(`
       <form class="lh-form" novalidate>
         <div class="lh-dialog-head"><h3>Send a test</h3><p>See exactly what patients will get. The subject starts with [Test].</p></div>
