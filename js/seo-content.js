@@ -68,7 +68,30 @@ const groupId = (key) => "k_" + hash("consist|" + key) + hash(key + "#consist");
 const toD = (t) => { const d = t?.toDate ? t.toDate() : t ? new Date(t) : null; return d && !isNaN(d) ? d : null; };
 const whenC = (t) => { const d = toD(t); return d ? d.toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : ""; };
 const hoursAgo = (t) => { const d = toD(t); return d ? (Date.now() - d.getTime()) / 36e5 : null; };
-
+// Fixes made today that a re-check has since cleared: rebuilt from the saved record, so they can still be reviewed or undone
+const perthDay = (d) => (d ? d.toLocaleDateString("en-AU", { timeZone: "Australia/Perth" }) : "");
+function goneFixes(w, liveIds) {
+  const today = perthDay(new Date());
+  return Object.entries(w.health?.status || {})
+    .filter(([id, s]) => id.startsWith("c_") && !liveIds.has(id) && s?.status === "fixed" && s.path && perthDay(toD(s.at)) === today)
+    .map(([id, s]) => {
+      const k = String(s.key || ""), cut = k.indexOf(":");
+      const type = s.type || (cut > 0 ? k.slice(0, cut) : "");
+      return { id, path: s.path, type: TYPE[type] ? type : "spelling", text: s.from || (cut > 0 ? k.slice(cut + 1) : ""),
+        st: s, fixed: true, gone: true, ignored: false, rejects: [] };
+    });
+}
+// The green "N fixed today" bar: tap to open, review, or undo
+const whoOfList = (arr) => [...new Set(arr.map((x) => x.st?.byName).filter(Boolean))].join(", ");
+function fixedFold(ui, n, who, inner, tools = "") {
+  if (!n) return "";
+  return `<div class="seo-sh-fixed${ui.cfix ? " is-open" : ""}">
+    <button type="button" class="seo-sh-fixed-h" data-ch-cfix aria-expanded="${!!ui.cfix}">
+      <span class="seo-sh-tick" aria-hidden="true">✓</span><b>${n} fixed today</b>
+      <span class="seo-note">${who ? "by " + esc(who) + " · " : ""}${ui.cfix ? "Hide" : "Show to review or undo"}</span>
+      <span class="seo-sh-chev" aria-hidden="true">▾</span></button>
+    ${ui.cfix ? `<div class="seo-sh-fixed-list">${tools}${inner}</div>` : ""}</div>`;
+}
 function toast(msg, bad) {
   const t = document.createElement("div");
   t.className = "seo-w-toast" + (bad ? " is-bad" : "");
@@ -157,6 +180,7 @@ export function contentHtml(c, ui) {
   const st = C.state || {};
   const deep = Object.values(C.deep || {}).filter((d) => d && d.path);
   const issues = deep.flatMap((d) => contentIssues(w, d.path));
+  const gone = goneFixes(w, new Set(issues.map((i) => i.id)));
   const dupsAll = (C.dups || []).map((x) => {
     const id = dupId(x.a, x.b);
     const s = H.status?.[id] || null;
@@ -190,13 +214,15 @@ export function contentHtml(c, ui) {
 
   let body = "";
   if (cat === "spell" || cat === "ads") {
-    const list = issues.filter((i) => (cat === "ads" ? i.type === "compliance" : isProof(i.type)) && i.ignored === showIgn);
-    body = issuesHtml(c, list, canWork, canManage, cat, proofed);
+    const pick = (i) => (cat === "ads" ? i.type === "compliance" : isProof(i.type));
+    body = issuesHtml(c, issues.filter((i) => pick(i) && i.ignored === showIgn), canWork, canManage, cat, proofed, ui,
+      showIgn ? [] : gone.filter(pick));
   } else if (cat === "consist") {
     body = consistHtml(c, ui, consistAll.filter((g) => g.ignored === showIgn),
-      issues.filter((i) => i.type === "consistency" && i.ignored === showIgn), canWork, canManage, proofed);
+      issues.filter((i) => i.type === "consistency" && i.ignored === showIgn), canWork, canManage, proofed,
+      showIgn ? [] : gone.filter((i) => i.type === "consistency"));
   } else if (cat === "dup") {
-    body = dupsHtml(c, dupsAll.filter((x) => x.ignored === showIgn), canWork);
+    body = dupsHtml(c, ui, dupsAll.filter((x) => x.ignored === showIgn), canWork);
   } else if (cat === "faq") {
     body = faqHtml(c, noFaq);
   } else {
@@ -242,10 +268,10 @@ function pageLinks(c, paths) {
 
 // Terms written different ways across pages: open ones as an even grid of cards, changed ones folded into one list.
 // Then pages that contradict themselves.
-function consistHtml(c, ui, groups, pageIssues, canWork, canManage, proofed) {
+function consistHtml(c, ui, groups, pageIssues, canWork, canManage, proofed, goneC = []) {
   const open = groups.filter((g) => g.st?.status !== "fixed");
   const done = groups.filter((g) => g.st?.status === "fixed");
-  if (!open.length && !done.length && !pageIssues.length) {
+  if (!open.length && !done.length && !pageIssues.length && !goneC.length) {
     return `<div class="seo-empty">${proofed ? "Nothing written different ways, and no page contradicts itself." : "Not checked yet."}</div>`;
   }
   let out = "";
@@ -261,8 +287,9 @@ function consistHtml(c, ui, groups, pageIssues, canWork, canManage, proofed) {
         ${ui.cdone ? done.map((g) => termDoneRow(c, g)).join("") : ""}</div>` : ""}
     </div>`;
   }
-  if (pageIssues.length) {
-    out += `<h3 style="margin:16px 0 8px;font-size:14px">Pages that contradict themselves</h3>` + issuesHtml(c, pageIssues, canWork, canManage, "consist", proofed);
+  if (pageIssues.length || goneC.length) {
+    out += `<h3 style="margin:16px 0 8px;font-size:14px">Pages that contradict themselves</h3>`
+      + issuesHtml(c, pageIssues, canWork, canManage, "consist", proofed, ui, goneC);
   }
   return out;
 }
@@ -355,22 +382,26 @@ function termRow(c, g, canWork) {
     ${prev}<div class="seo-fx-bar">${bar}</div>${errBox}</div>`;
 }
 
-function issuesHtml(c, list, canWork, canManage, cat, proofed = 1) {
-  if (!list.length) {
+function issuesHtml(c, list, canWork, canManage, cat, proofed = 1, ui = {}, gone = []) {
+  const open = list.filter((i) => !i.fixed);
+  const done = list.filter((i) => i.fixed).concat(gone);
+  if (!open.length && !done.length) {
     if (!proofed) {
       return `<div class="seo-empty">These pages haven't been proofread yet. Proofreading runs every 20 minutes until every priority and cluster page is done.</div>`;
     }
     return `<div class="seo-empty">${cat === "ads" ? "No advertising rule problems found." : cat === "consist" ? "No page contradicts itself."
       : "No spelling or grammar mistakes found."}</div>`;
   }
-  const by = new Map();
-  list.forEach((i) => { const k = npath(i.path); if (!by.has(k)) by.set(k, []); by.get(k).push(i); });
-  return [...by.values()].map((arr) => {
+  const byPage = (arr) => {
+    const m = new Map();
+    arr.forEach((i) => { const k = npath(i.path); if (!m.has(k)) m.set(k, []); m.get(k).push(i); });
+    return [...m.values()];
+  };
+  const openHtml = open.length ? byPage(open).map((arr) => {
     const pid = pageId(c, arr[0].path);
-    const left = arr.filter((i) => !i.fixed).length;
     return `<div class="seo-card seo-ct-page">
       <div class="seo-row" style="margin:0 0 2px"><strong>${esc(titleIn(c.work, arr[0].path))}</strong>
-        <span class="seo-note">${left ? `${plural(left, "thing")} to fix` : "all fixed ✓"}</span><span class="seo-sp"></span>
+        <span class="seo-note">${plural(arr.length, "thing")} to fix</span><span class="seo-sp"></span>
         ${c.can("seo.fix") || canWork ? `<button class="seo-fx-b is-ghost" type="button" data-ch-recheck="${esc(arr[0].path)}"${RC.busy ? " disabled" : ""}
           title="Read and proofread this page again now">↻ Re-check this page</button>` : ""}
         ${pid ? `<button class="seo-btn" type="button" data-open="${esc(pid)}">Open page details</button>` : ""}</div>
@@ -379,7 +410,15 @@ function issuesHtml(c, list, canWork, canManage, cat, proofed = 1) {
     </div>`;
   }).join("") + `<p class="seo-note">Accept changes the wording on the live website straight away and adds it to the Change log.
     Elementor and normal pages both work. If the words are in a header, footer or template, or have bold or a link inside them,
-    it tells you to change them in WordPress instead.</p>`;
+    it tells you to change them in WordPress instead.</p>`
+    : `<div class="seo-empty">Nothing left to fix here. 👍</div>`;
+  const waiting = done.some((i) => !i.gone);
+  const tools = waiting && (c.can("seo.fix") || canWork) ? `<div class="seo-ct-ftools"><button class="seo-fx-b is-ghost" type="button" data-ch-recheckall${
+    RC.busy ? " disabled" : ""}>↻ Re-check these pages now</button></div>` : "";
+  const inner = byPage(done).map((arr) => `<div class="seo-ct-fpage">
+    <div class="seo-ct-fh"><strong>${esc(titleIn(c.work, arr[0].path))}</strong><span class="seo-note seo-w-mono">${esc(arr[0].path)}</span></div>
+    ${arr.map((i) => fixRow(c, i, canWork, canManage)).join("")}</div>`).join("");
+  return openHtml + fixedFold(ui, done.length, whoOfList(done), inner, tools);
 }
 
 // The sentence around the problem, split into [before, the words, after]
@@ -453,9 +492,10 @@ function fixRow(c, i, canWork, canManage) {
       ${seen ? `<div class="seo-note" style="margin-top:4px">${esc(seen)}</div>` : ""}
       <div class="seo-fx-bar">
         ${s.link ? `<a class="seo-fx-b is-accept" href="${esc(s.link)}" target="_blank" rel="noopener">View live page ↗</a>` : ""}
-        ${canFix ? `<button class="seo-fx-b is-ghost" type="button" data-ch-fundo="${esc(i.id)}"${f.busy ? " disabled" : ""}>${
+        ${canFix ? `<button class="seo-fx-b is-ghost" type="button" data-ch-${i.gone ? "gundo" : "fundo"}="${esc(i.id)}"${f.busy ? " disabled" : ""}>${
           f.busy === "undo" ? spin + "Putting it back…" : "↶ Undo"}</button>` : ""}
-        <span class="seo-sp"></span><span class="seo-note">Drops off when the page is re-checked (Refresh, or tonight).</span>
+        <span class="seo-sp"></span><span class="seo-note">${i.gone ? "Cleared from the list when the page was re-checked."
+          : "Drops off when the page is re-checked (Refresh, or tonight)."}</span>
       </div>${errBox}</div>`;
   }
 
@@ -557,17 +597,17 @@ function askConfirm({ title, body, ok = "Confirm", tone = "accept" }) {
   });
 }
 
-function dupsHtml(c, list, canWork) {
+function dupsHtml(c, ui, list, canWork) {
   if (!list.length) return `<div class="seo-empty">No pages that say nearly the same thing, among the pages compared so far.</div>`;
   const canFix = c.can("seo.fix");
+  const done = list.filter((x) => x.st?.status === "fixed" && x.st?.kind === "dup");
+  const open = list.filter((x) => !done.includes(x));
   const line = (p) => {
     const pid = pageId(c, p);
     return `<div class="seo-ct-pp"><strong>${esc(titleIn(c.work, p))}</strong><div class="seo-note seo-w-mono">${esc(p)}</div>
       ${pid ? `<button class="seo-w-link" type="button" data-open="${esc(pid)}">Open page details</button>` : ""}</div>`;
   };
-  return list.map((x) => {
-    if (x.st?.status === "fixed" && x.st?.kind === "dup") return dupDone(c, x, canFix);
-    return `<div class="seo-card" data-fxcard>
+  const openHtml = open.length ? open.map((x) => `<div class="seo-card" data-fxcard>
       <div class="seo-row" style="margin:0 0 6px"><span class="seo-pr-pill is-${x.sim >= 70 ? "red" : "amber"}">${x.sim}% the same</span>
         <strong>${plural(x.shared, "paragraph")} repeat</strong></div>
       <div class="seo-ct-pair">${line(x.a)}${line(x.b)}</div>
@@ -581,10 +621,9 @@ function dupsHtml(c, list, canWork) {
         ${canWork ? (x.ignored ? `<button class="seo-fx-b is-ghost" type="button" data-ch-undo="${esc(x.id)}">Back to open</button>`
           : `<button class="seo-fx-b is-ghost" type="button" data-ch-ign="${esc(x.id)}">Ignore</button>`) : ""}
       </div>
-    </div>`;
-  }).join("");
+    </div>`).join("") : `<div class="seo-empty">Nothing left to fix here. 👍</div>`;
+  return openHtml + fixedFold(ui, done.length, whoOfList(done), done.map((x) => dupDone(c, x, canFix)).join(""));
 }
-
 // Choose the page, Claude rewrites the shared paragraphs, you check each one
 function dupRewrite(c, x) {
   const F = DP.get(x.id) || {};
@@ -928,7 +967,7 @@ export function altBody(c, path) {
 /* ---------- clicks (called by seo-health.js) ---------- */
 
 export async function contentClick(e, c, ui, redraw) {
-  const t = e.target.closest("[data-ch-cat],[data-ch-tdone],[data-ch-ign],[data-ch-undo],[data-ch-word],[data-ch-showign]," +
+  const t = e.target.closest("[data-ch-cat],[data-ch-tdone],[data-ch-cfix],[data-ch-gundo],[data-ch-recheckall],[data-ch-ign],[data-ch-undo],[data-ch-word],[data-ch-showign]," +
     "[data-ch-accept],[data-ch-rej],[data-ch-rejok],[data-ch-rejno],[data-ch-regen],[data-ch-pick],[data-ch-fundo],[data-ch-recheck]," +
     "[data-ch-place],[data-ch-placeall],[data-ch-placeno]," +
     "[data-ch-tpick],[data-ch-tprev],[data-ch-tapply],[data-ch-tcancel],[data-ch-tundo]," +
@@ -943,6 +982,29 @@ export async function contentClick(e, c, ui, redraw) {
   if (d.chShowign !== undefined) { ui.cign = !ui.cign; redraw(); return true; }
   if (d.chTdone !== undefined) { ui.cdone = !ui.cdone; redraw(); return true; }
   if (d.chRecheck) { await recheckPages(c, redraw, [d.chRecheck]); return true; }
+  if (d.chCfix !== undefined) { ui.cfix = !ui.cfix; redraw(); return true; }
+  if (d.chRecheckall !== undefined) { await recheckPages(c, redraw); return true; }
+  if (d.chGundo) {   // Undo a fix the re-check has already cleared from the list
+    const id = d.chGundo, s = H?.status?.[id] || {};
+    const f = FX.get(id) || {};
+    FX.set(id, f);
+    const yes = await askConfirm({ title: "Put the old wording back?", ok: "↶ Yes, put it back", tone: "reject",
+      body: `<div class="seo-fx-mpage"><b>${esc(titleIn(w, s.path))}</b><span class="seo-note seo-w-mono">${esc(s.path || "")}</span></div>
+        <div class="seo-fx-sum" style="margin:10px 0"><del class="seo-fx-del">${esc(s.to || "")}</del> → <ins class="seo-fx-ins">${esc(s.from || "")}</ins></div>
+        <ul class="seo-fx-mlist"><li>It goes live straight away, and the Change log notes it.</li>
+          <li>If someone has edited the page in WordPress since, it can't be put back from here.</li></ul>` });
+    if (!yes) return true;
+    f.busy = "undo"; f.err = ""; redraw();
+    try {
+      const r = await fixApi("fixUndo", { issueId: id });
+      H.status[id] = r.rec;
+      FX.delete(id);
+      toast("Put back");
+      if (s.path) recheckPages(c, redraw, [s.path]);   // the problem shows again once the page is read
+    } catch (err) { f.err = fixErr(err); f.editUrl = err?.editUrl || ""; }
+    finally { f.busy = ""; redraw(); }
+    return true;
+  }
   if (d.chTpick || d.chTprev || d.chTapply || d.chTcancel || d.chTundo) { await termClick(d, c, redraw); return true; }
   if (d.chFqprev || d.chFqtick || d.chFqapply || d.chFqcancel || d.chFqundo) { await faqClick(d, c, redraw); return true; }
   if (d.chLkgo || d.chLktick || d.chLkapply || d.chLkcancel || d.chLkundo) { await lkClick(d, c, redraw); return true; }
@@ -1760,8 +1822,25 @@ const CSS = `
 .seo-ct-drow .seo-fx-b{min-height:30px;padding:0 12px;font-size:12.5px}
 .seo-ct-dmore summary{cursor:pointer;font-size:12px;color:var(--accent,#2563eb);margin-top:2px}
 .seo-ct-bad{color:#b91c1c;font-weight:600}
-
 @media (max-width:640px){.seo-ct-pair{grid-template-columns:1fr}}
+/* Tiles in the new style, the fixed-today bar's page groups, and phones */
+.seo-ct-tile{padding:12px 14px;border-radius:14px;transition:border-color .15s,box-shadow .15s,transform .15s}
+.seo-ct-tile:hover{border-color:#94a3b8;transform:translateY(-1px)}
+.seo-ct-tile.is-on{border-color:#0f766e;box-shadow:0 0 0 3px rgba(15,118,110,.14)}
+.seo-ct-tile:focus-visible{outline:2px solid #0f766e;outline-offset:2px}
+.seo-ct-ftools{display:flex;justify-content:flex-end;margin:0 0 4px}
+.seo-ct-fpage{margin:8px 0 0;padding:10px 12px;border:1px solid #dcfce7;border-radius:10px;background:#fff}
+.seo-ct-fpage .seo-fx.is-done{margin:8px 0 0}
+.seo-ct-fh{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;font-size:13px}
+.seo-sh-fixed-list > .seo-card{margin:8px 0 0}
+@media (max-width:760px){
+  .seo-ct-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .seo-ct-tile strong{font-size:18px}
+  .seo-ct-page > .seo-row{flex-wrap:wrap}
+  .seo-ct-page > .seo-row .seo-sp{display:none}
+  .seo-ct-page > .seo-row .seo-btn,.seo-ct-page > .seo-row .seo-fx-b{flex:1 1 auto;justify-content:center}
+  .seo-ct-drow{grid-template-columns:1fr;padding-left:0}
+}
 `;
 
 function injectCss() {

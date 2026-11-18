@@ -241,13 +241,16 @@ export async function loadHealth() {
   }
   await Promise.all(jobs);
   attachIndex(out);
+  const checkedAt = tsDate(out.state.at);
   for (const p of out.pages.concat(out.site ? [out.site] : [])) {
     for (const i of p.issues || []) {
       i.path = p.path;
       i.url = p.url;
       i.id = issueId(p.path, i.key);
       i.st = out.status[i.id] || null;
-      i.status = i.st?.status === "ignored" ? "ignored" : "open";
+      // Fixed since the last check: waiting to drop off. Fixed before it and still found: the fix didn't take, so it's open again.
+      const fixedSince = i.st?.status === "fixed" && (!checkedAt || (tsDate(i.st.at) || 0) > checkedAt);
+      i.status = i.st?.status === "ignored" ? "ignored" : fixedSince ? "fixed" : "open";
     }
   }
   return out;
@@ -293,7 +296,9 @@ export function viewHealth(wrap, c, ui) {
       : "No site health data yet. In Apps Script, run <code>runSeoHealth()</code> once (it takes a few minutes), then <code>installSeoHealthTrigger()</code>."}</div>`;
     return;
   }
-  if (!ui.hview) Object.assign(ui, { hview: "content", hsev: "all", hgroup: "all", hstatus: "open" });
+  if (!ui.hview) Object.assign(ui, { hview: "issues", hsev: "all", hgroup: "all", hstatus: "open" });
+  if (ui.hcode === undefined) Object.assign(ui, { hcode: "", hone: false, hfix: false });   // one problem only, one-click only, Fixed today open
+  
   if (ui.hkpi === undefined) Object.assign(ui, { hkpi: "", hkx: "", hpage: "" });   // the number card that's open, its open row, Issues for one page
   fxCss();   // the Accept / overlay styles, also when Issues is opened first
   const canWork = c.can("seo.work");
@@ -338,6 +343,62 @@ export function viewHealth(wrap, c, ui) {
     sm_pages_out: "Sitemap pages not in Google", sm_clicks_missing: "Pages with clicks missing from the sitemap",
   };
   const fixable = (code) => !!META[code] || ["redirect_links", "broken_link", "many_h1", "alt"].includes(code);
+
+  // Score, "Do these first", and fixes from today
+  const avgScore = () => {
+    const s = H.pages.map((p) => metricsOf(p.speed)?.score).filter((v) => v != null);
+    return s.length ? Math.round(s.reduce((a, b) => a + b, 0) / s.length) : null;
+  };
+  function scoreOf(all) {
+    const open = all.filter((i) => i.status === "open");
+    const pen = open.reduce((a, i) => a + (i.sev === "high" ? 6 : i.sev === "medium" ? 2 : 0.5), 0);
+    const issues = Math.max(0, 100 - (pen / Math.max(1, H.pages.length)) * 10);
+    const speed = avgScore();
+    const gk = H.pages.filter((p) => p.google && !p.google.err);
+    const google = gk.length ? (gk.filter((p) => p.google.v === "PASS").length / gk.length) * 100 : null;
+    let w = 0.6, s = 0.6 * issues;
+    if (speed != null) { w += 0.25; s += 0.25 * speed; }
+    if (google != null) { w += 0.15; s += 0.15 * google; }
+    return Math.round(s / w);
+  }
+  function trendOf(score) {
+    const day = (d) => d.toLocaleDateString("en-CA", { timeZone: "Australia/Perth" });
+    let h = {};
+    try { h = JSON.parse(localStorage.getItem("seoHealthScore") || "{}") || {}; } catch { h = {}; }
+    h[day(new Date())] = score;
+    const keys = Object.keys(h).sort().slice(-40);
+    try { localStorage.setItem("seoHealthScore", JSON.stringify(Object.fromEntries(keys.map((k) => [k, h[k]])))); } catch { /* private mode */ }
+    const past = keys.filter((k) => k <= day(new Date(Date.now() - 7 * 864e5))).pop();
+    if (!past) return "High issues and phone speed count most";
+    const d = score - h[past];
+    return d > 0 ? `Up ${d} since last week` : d < 0 ? `Down ${-d} since last week` : "Same as last week";
+  }
+  function todoOf(all) {
+    const by = new Map();
+    all.filter((i) => i.status === "open").forEach((i) => {
+      const g = by.get(i.code) || { code: i.code, sev: i.sev, pages: new Set(), n: 0, site: true };
+      g.n++; g.pages.add(i.path);
+      if (i.path !== "Whole site") g.site = false;
+      if (SEV[i.sev].rank < SEV[g.sev].rank) g.sev = i.sev;
+      by.set(i.code, g);
+    });
+    return [...by.values()]
+      .map((g) => ({ ...g, w: ({ high: 10, medium: 3, low: 1 })[g.sev] * Math.sqrt(g.site ? g.n : g.pages.size) * (fixable(g.code) ? 1.3 : 1) }))
+      .sort((a, b) => b.w - a.w).slice(0, 3);
+  }
+  function fixedToday(all) {
+    const day = (d) => (d && !isNaN(d) ? d.toLocaleDateString("en-AU", { timeZone: "Australia/Perth" }) : "");
+    const today = day(new Date());
+    const ids = new Set(all.map((i) => i.id));
+    const GRP = { meta: "content", links: "links", wording: "wording", alt: "images" };
+    // Fixed today but already cleared by a check since: rebuilt from the saved record so it can still be reviewed or undone
+    const gone = Object.entries(H.status || {})
+      .filter(([id, st]) => !ids.has(id) && st && st.status === "fixed" && st.kind === "hx" && day(tsDate(st.at)) === today)
+      .map(([id, st]) => ({ id, key: st.key, path: st.path || "", url: "", msg: String(st.label || "Fixed").split(" · ")[0], detail: "",
+        sev: "low", group: GRP[st.fix] || "content", code: "", st, status: "fixed", gone: true }));
+    return all.filter((i) => i.status === "fixed").concat(gone)
+      .sort((a, b) => (tsDate(b.st?.at) || 0) - (tsDate(a.st?.at) || 0));
+  }
   const fieldOf = (sp) => (sp && sp.field && sp.field.src === "page" ? sp.field : null);
   const openOf = (all, path) => all.filter((i) => i.status === "open" && i.path === path);
   const pageLink = (path) => {
@@ -419,37 +480,43 @@ export function viewHealth(wrap, c, ui) {
   }
 
   function sevCard(all, sev) {
-    const S = SEV[sev];
-    const list = all.filter((i) => i.status === "open" && i.sev === sev);
+    const every = sev === "all";
+    const S = every ? { label: "Open" } : SEV[sev];
+    const list = all.filter((i) => i.status === "open" && (every || i.sev === sev));
     const by = new Map();
     list.forEach((i) => {
-      const g = by.get(i.code) || { code: i.code, group: i.group, label: CODE_L[i.code] || i.msg, items: [] };
+      const g = by.get(i.code) || { code: i.code, group: i.group, sev: i.sev, label: CODE_L[i.code] || i.msg, items: [] };
       g.items.push(i);
+      if (SEV[i.sev].rank < SEV[g.sev].rank) g.sev = i.sev;
       by.set(i.code, g);
     });
     const groups = [...by.values()].map((g) => ({ ...g, pages: new Set(g.items.map((i) => i.path)).size }))
-      .sort((a, b) => b.items.length - a.items.length || a.label.localeCompare(b.label));
+      .sort((a, b) => (every ? SEV[a.sev].rank - SEV[b.sev].rank : 0) || b.items.length - a.items.length || a.label.localeCompare(b.label));
     const pages = new Set(list.map((i) => i.path)).size;
     const quick = list.filter((i) => fixable(i.code) && i.path !== "Whole site").length;
     const types = {};
     list.forEach((i) => { types[i.group] = (types[i.group] || 0) + 1; });
     const sum = list.length
-      ? `<b>${list.length}</b> open ${S.label.toLowerCase()} issue${list.length === 1 ? "" : "s"} on ${plural(pages, "page")}. Most common: <b>${esc(groups[0].label)}</b> (${groups[0].items.length}).${
+      ? `<b>${list.length}</b> open ${every ? "" : S.label.toLowerCase() + " "}issue${list.length === 1 ? "" : "s"} on ${plural(pages, "page")}. ${every ? "Start with" : "Most common"}: <b>${esc(groups[0].label)}</b> (${groups[0].items.length}).${
         quick ? ` <span class="seo-hk-one">✨ ${quick} can be fixed in one click</span>` : ""}`
-      : `No open ${S.label.toLowerCase()} issues. 👍`;
+      : `No open ${every ? "" : S.label.toLowerCase() + " "}issues. 👍`;
     const body = groups.length ? hkTable(["Problem", "Type", "Pages", "Fix"], groups.map((g) => hkRow("c:" + g.code, [
-      `<b>${esc(g.label)}</b>`, `<span class="seo-note">${esc(GROUPS[g.group] || g.group)}</span>`, String(g.pages),
+      `${every ? `<span class="seo-w-pill is-${SEV[g.sev].tone}">${SEV[g.sev].label}</span> ` : ""}<b>${esc(g.label)}</b>`,
+      `<span class="seo-note">${esc(GROUPS[g.group] || g.group)}</span>`, String(g.pages),
       fixable(g.code) ? `<span class="seo-hk-one">✨ One click</span>` : HELP[g.code] ? `<span class="seo-note">How-to</span>` : "—",
     ], () => `<ul class="seo-hk-il">${g.items.slice(0, 12).map((i) => `<li>${pageLink(i.path)}${
       i.detail ? ` <span class="seo-note">· ${esc(String(i.detail).slice(0, 140))}</span>` : ""}</li>`).join("")}</ul>${
       g.items.length > 12 ? `<p class="seo-note">and ${g.items.length - 12} more</p>` : ""}${helpBox(g.code)}${
-      hkActs([goBtn(fixable(g.code) ? "Fix them in Issues" : "See them in Issues", { view: "issues", sev, group: g.group })])}`))) : "";
-    return hkCard(sev, { title: `${S.label} issues: what they are`, sub: "Open issues on priority pages, grouped by problem", sum,
+      hkActs([goBtn(fixable(g.code) ? "Fix them in To fix" : "See them in To fix", { view: "issues", sev: every ? "all" : sev, code: g.code })])}`))) : "";
+    return hkCard(sev, { title: every ? "Open issues: what they are" : `${S.label} issues: what they are`,
+      sub: every ? "Every open issue on priority pages, worst first" : "Open issues on priority pages, grouped by problem", sum,
       viz: list.length ? bars(Object.entries(types).sort((a, b) => b[1] - a[1]).map(([k, n]) => ({ label: GROUPS[k] || k, n }))) : "",
-      body, tip: { high: "Fix these first: they can stop a page showing in Google or put people off booking.",
-        medium: "Worth doing this week: they hold pages back in Google.",
-        low: "Small wins. Do them when you're working on the page anyway." }[sev] });
+      body, tip: every ? "Red ones first: they can stop a page showing in Google or put people off booking."
+        : { high: "Fix these first: they can stop a page showing in Google or put people off booking.",
+          medium: "Worth doing this week: they hold pages back in Google.",
+          low: "Small wins. Do them when you're working on the page anyway." }[sev] });
   }
+
 
   function scoreCard() {
     const rows = H.pages.map((p) => ({ p, m: metricsOf(p.speed) })).sort((a, b) => (a.m?.score ?? 999) - (b.m?.score ?? 999));
@@ -483,8 +550,9 @@ export function viewHealth(wrap, c, ui) {
     return hkCard("score", { title: "Mobile speed: page by page", sub: "Google PageSpeed Insights on a phone, slowest first", sum,
       viz: split([{ n: good, tone: "green", label: "Fast (90+)" }, { n: ni, tone: "amber", label: "Needs work (50–89)" },
         { n: poor, tone: "red", label: "Slow (under 50)" }, { n: rows.length - sc.length, tone: "grey", label: "Not tested" }]),
-      body, tip: "Loading (LCP) matters most, to visitors and to Google. It's nearly always the big image at the top: compress it, and don't lazy-load it." });
-  }
+      body, note: `<button type="button" class="seo-sh-link" data-h-kpi="cwv">See real visitors (Core Web Vitals) →</button>`,
+      tip: "Loading (LCP) matters most, to visitors and to Google. It's nearly always the big image at the top: compress it, and don't lazy-load it." }); 
+    }
 
   function googleCard(all) {
     if (!H.index?.data) {
@@ -579,6 +647,7 @@ export function viewHealth(wrap, c, ui) {
 
   function kpiHtml(all) {
     switch (ui.hkpi) {
+      case "issues": return sevCard(all, "all");
       case "pages": return pagesCard(all);
       case "high": case "medium": case "low": return sevCard(all, ui.hkpi);
       case "score": return scoreCard();
@@ -588,46 +657,61 @@ export function viewHealth(wrap, c, ui) {
       default: return "";
     }
   }
-  function tiles(all) {
+  function summary(all) {
     const open = all.filter((i) => i.status === "open");
-    const n = (s) => open.filter((i) => i.sev === s).length;
-    const ms = H.pages.map((p) => metricsOf(p.speed)).filter(Boolean);
-    const scores = ms.map((m) => m.score).filter((v) => v != null);
-    const avg = scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : null;
-    const real = ms.filter((m) => m.pass !== null);
-    const tile = (key, l, v, p) => `<button type="button" class="seo-kpi${ui.hkpi === key ? " is-on" : ""}" data-h-kpi="${key}"
-      aria-expanded="${ui.hkpi === key}" title="See what's behind this number"><div class="l">${l}</div><div class="v">${v}</div>${p ? `<div class="p">${p}</div>` : ""}</button>`;
-    return `<div class="seo-kpis seo-hk-tiles">
-      ${tile("pages", "Priority pages checked", H.pages.length, when(H.state.at))}
-      ${tile("high", "High", `<span class="seo-h-poor">${n("high")}</span>`, "open issues")}
-      ${tile("medium", "Medium", `<span class="seo-h-ni">${n("medium")}</span>`, "open issues")}
-      ${tile("low", "Low", n("low"), "open issues")}
-      ${tile("score", "Avg mobile score", avg == null ? "—" : val("score", avg), "out of 100")}
-      ${H.index?.data ? tile("google", "In Google", (() => {
-        const k = H.pages.filter((p) => p.google && !p.google.err);
-        return k.length ? `${k.filter((p) => p.google.v === "PASS").length}/${k.length}` : "—";
-      })(), "key pages indexed") : ""}
-      ${tile("cwv", "Core Web Vitals", real.length ? `${real.filter((m) => m.pass).length}/${real.length}` : "—",
-        real.length ? "pages passing (real visitors)" : "not enough visits yet")}
-      ${c.data?.eng ? (() => {
-        const hb = H.pages.filter((p) => highBounce(engOf(p.path))).length;
-        return tile("bounce", "High bounce", hb ? `<span class="seo-h-poor">${hb}</span>` : "0", "priority pages over 65%");
-      })() : ""}
-    </div>`;
+    const cnt = (s) => open.filter((i) => i.sev === s).length;
+    const sc = scoreOf(all), avg = avgScore();
+    const tone = sc >= 80 ? "good" : sc >= 50 ? "ni" : "poor";
+    const word = sc >= 80 ? "Good" : sc >= 50 ? "Needs work" : "Poor";
+    const C = 2 * Math.PI * 44;
+    const todo = todoOf(all);
+    const real = H.pages.map((p) => metricsOf(p.speed)).filter((m) => m && m.pass !== null);
+    const gk = H.pages.filter((p) => p.google && !p.google.err);
+    const gin = gk.filter((p) => p.google.v === "PASS").length;
+    const hb = H.pages.filter((p) => highBounce(engOf(p.path))).length;
+    const card = (key, label, value, sub, extra = "") => `<button type="button" class="seo-sh-card${ui.hkpi === key ? " is-on" : ""}" data-h-kpi="${key}"
+      aria-expanded="${ui.hkpi === key}" title="See what's behind this number"><span class="seo-sh-cl">${label}</span><span class="seo-sh-cv">${value}</span>${extra}<span class="seo-sh-cs">${sub}</span></button>`;
+    const bar = open.length ? `<span class="seo-sh-bar" aria-hidden="true"><i class="is-h" style="flex:${cnt("high")}"></i><i class="is-m" style="flex:${cnt("medium")}"></i><i class="is-l" style="flex:${cnt("low")}"></i></span>` : "";
+    const doRow = (t) => `<div class="seo-sh-do"><span class="seo-w-pill is-${SEV[t.sev].tone}">${SEV[t.sev].label}</span>
+      <span class="seo-sh-dt">${esc(CODE_L[t.code] || t.code)} <span class="seo-note">· ${t.site ? plural(t.n, "problem") : plural(t.pages.size, "page")}</span></span>
+      <button class="seo-btn" type="button" data-h-do="${esc(t.code)}">${fixable(t.code) ? "✨ Fix in one click" : "See them →"}</button></div>`;
+    return `
+      <div class="seo-sh-head">Checked ${esc(when(H.state.at))} · <button type="button" class="seo-sh-link" data-h-kpi="pages">${plural(H.pages.length, "priority page")}</button></div>
+      <div class="seo-sh-top">
+        <div class="seo-sh-box seo-sh-score" title="Open issues count most (high ones most of all), then phone speed, then pages in Google">
+          <svg class="seo-sh-ring is-${tone}" viewBox="0 0 104 104" role="img" aria-label="Site health ${sc} out of 100">
+            <circle class="bg" cx="52" cy="52" r="44" fill="none" stroke-width="10"/>
+            <circle class="fg" cx="52" cy="52" r="44" fill="none" stroke-width="10" stroke-linecap="round"
+              stroke-dasharray="${((sc / 100) * C).toFixed(1)} ${C.toFixed(1)}" transform="rotate(-90 52 52)"/>
+            <text x="52" y="61" text-anchor="middle">${sc}</text></svg>
+          <div><div class="seo-sh-word is-${tone}">${word}</div><div class="seo-sh-trend">${esc(trendOf(sc))}</div></div>
+        </div>
+        <div class="seo-sh-box seo-sh-todo"><h3>Do these first</h3>
+          ${todo.length ? todo.map(doRow).join("") : `<p class="seo-note" style="margin:6px 14px 12px">Nothing open. 👍</p>`}</div>
+      </div>
+      <div class="seo-sh-cards">
+        ${card("issues", "Open issues", open.length, `${cnt("high")} high · ${cnt("medium")} medium · ${cnt("low")} low`, bar)}
+        ${card("score", "Phone speed", avg == null ? "—" : `<span class="seo-h-${rate("score", avg)}">${avg}</span><small> /100</small>`,
+          real.length ? `Core Web Vitals: ${real.filter((m) => m.pass).length} of ${real.length} pass` : "Google's test, on a phone")}
+        ${H.index?.data ? card("google", "In Google", gk.length ? `<span class="${gin === gk.length ? "seo-h-good" : "seo-h-poor"}">${gin}/${gk.length}</span>` : "—",
+          !gk.length ? "Not checked yet" : gin === gk.length ? "All priority pages" : `${gk.length - gin} not in Google`) : ""}
+        ${c.data?.eng ? card("bounce", "Leave straight away", hb ? `<span class="seo-h-poor">${hb}</span>` : "0", "priority pages over 65%") : ""}
+      </div>`;
   }
+  
   function issueRow(i) {
     const pg = c.byPath.get(i.path);
     const where = starMark(isPri(i.path)) + (pg ? `<button class="seo-w-link" data-open="${pg.id}">${esc(i.path)}</button>`
-      : `<a class="seo-w-link" href="${esc(i.url)}" target="_blank" rel="noopener">${esc(i.path)}</a>`);
-    const ignored = i.status === "ignored";
-    return `<div class="seo-h-issue is-${SEV[i.sev].tone}" data-hx-row>
-      <div class="seo-h-ihead"><span class="seo-w-pill is-${SEV[i.sev].tone}">${SEV[i.sev].label}</span>
-        <span class="seo-note">${esc(GROUPS[i.group] || i.group)}</span> · ${where}</div>
+      : i.url ? `<a class="seo-w-link" href="${esc(i.url)}" target="_blank" rel="noopener">${esc(i.path)}</a>` : esc(i.path));
+    const ignored = i.status === "ignored", done = i.status === "fixed";
+    const lvl = done ? `<span class="seo-sh-donepill">✓ Fixed</span>` : `<span class="seo-w-pill is-${SEV[i.sev].tone}">${SEV[i.sev].label}</span>`;
+    return `<div class="seo-h-issue is-${done ? "done" : SEV[i.sev].tone}" data-hx-row>
+      <div class="seo-h-ihead">${lvl}<span class="seo-note">${esc(GROUPS[i.group] || i.group)}</span> · ${where}</div>
       <div><strong>${esc(i.msg)}</strong>${i.detail ? `<div class="seo-note seo-h-detail">${esc(i.detail)}</div>` : ""}</div>
-      ${HELP[i.code] ? `<details class="seo-h-help"><summary>How to fix</summary><p>${esc(HELP[i.code])}</p></details>` : ""}
+      ${!done && HELP[i.code] ? `<details class="seo-h-help"><summary>How to fix</summary><p>${esc(HELP[i.code])}</p></details>` : ""}
       ${!ignored ? hxBody(i) : ""}
       ${ignored ? `<p class="seo-note">Ignored by ${esc(i.st?.byName || "someone")}${i.st?.at ? " · " + esc(when(i.st.at)) : ""}${i.st?.note ? ": " + esc(i.st.note) : ""}</p>` : ""}
-      ${(() => {
+      ${done ? "" : (() => {
         const fix = (!ignored && FIX[i.code] && i.path !== "Whole site" && c.can("seo.pages") ? fixBtn(i.path, FIX[i.code]) : "")
           + (!ignored && ADVK[i.code] && i.path !== "Whole site" ? advBtn(i.path, ADVK[i.code], true) : "");
         const acts = canWork ? (ignored
@@ -637,13 +721,15 @@ export function viewHealth(wrap, c, ui) {
       })()}
     </div>`;
   }
+  
+  
   /* --- One-click fixes on the Issues tab --- */
   const shortI = (u) => String(u || "").replace(/^https?:\/\/[^/]+/i, "") || "/";
   function hxBody(i) {
     if (i.path === "Whole site") return "";
     const F = HX.get(i.id) || {};
     const errBox = F.err ? `<div class="seo-fx-err"><span>⚠</span><div>${esc(F.err)}</div></div>` : "";
-    if (i.st?.status === "fixed" && i.st?.kind === "hx") return hxDone(i, i.st, F, errBox);
+    if (i.status === "fixed" && i.st?.kind === "hx") return hxDone(i, i.st, F, errBox);
     const field = META[i.code];
     if (field) return c.can("seo.pages") ? metaBody(i, field, F, errBox) : "";
     if (!c.can("seo.fix")) return "";
@@ -772,7 +858,7 @@ export function viewHealth(wrap, c, ui) {
         ${st.link ? `<a class="seo-fx-b is-accept" href="${esc(st.link)}" target="_blank" rel="noopener">View live page ↗</a>` : ""}
         ${c.can(st.fix === "meta" ? "seo.pages" : "seo.fix") ? `<button class="seo-fx-b is-ghost" type="button" data-hx-undo="${i.id}"${F.busy ? " disabled" : ""}>${
           F.busy === "undo" ? spinH + "Putting it back…" : "↶ Undo"}</button>` : ""}
-        <span class="seo-sp"></span><span class="seo-note">This issue clears at the next Site health check (about 8am).</span></div>${errBox}</div>`;
+        <span class="seo-sp"></span><span class="seo-note">${i.gone ? "Cleared from the list at the last check." : "Drops off the list at the next check (about 8am)."}</span></div>${errBox}</div>`;
   }
 
   async function hxClick(e) {
@@ -806,7 +892,8 @@ export function viewHealth(wrap, c, ui) {
       catch (err) { F.err = fixErr(err); return null; }
       finally { F.busy = ""; draw(); }
     };
-    const saved = (r, msg) => { c.work.health.status[id] = r.rec; i.st = r.rec; HX.delete(id); toast(msg); draw(); };
+    const saved = (r, msg) => { c.work.health.status[id] = r.rec; i.st = r.rec; i.status = r.rec?.status === "fixed" ? "fixed" : "open";
+      HX.delete(id); toast(msg + " · moved to Fixed today"); draw(); };
     const page = `<div class="seo-fx-mpage"><b>${esc(i.path)}</b></div>`;
     const after = `<ul class="seo-fx-mlist"><li>Live straight away.</li><li>It's added to the Change log, and you can <b>Undo</b> it from here.</li></ul>`;
 
@@ -932,16 +1019,20 @@ export function viewHealth(wrap, c, ui) {
     }
     return true;
   }
-  function issuesHtml(all) {
+  function issuesHtml(all, fx) {
+    const match = (i) => (ui.hsev === "all" || i.sev === ui.hsev) && (ui.hgroup === "all" || i.group === ui.hgroup)
+      && (!ui.hpage || i.path === ui.hpage) && (!ui.hcode || i.code === ui.hcode)
+      && (!ui.hone || (fixable(i.code) && i.path !== "Whole site"));
     const inStatus = all.filter((i) => i.status === ui.hstatus);
     const counts = { open: all.filter((i) => i.status === "open").length, ignored: all.filter((i) => i.status === "ignored").length };
     const gcount = {};
     for (const i of inStatus) gcount[i.group] = (gcount[i.group] || 0) + 1;
-    const shown = inStatus
-      .filter((i) => (ui.hsev === "all" || i.sev === ui.hsev) && (ui.hgroup === "all" || i.group === ui.hgroup) && (!ui.hpage || i.path === ui.hpage))
+    const quick = inStatus.filter((i) => fixable(i.code) && i.path !== "Whole site").length;
+    const shown = inStatus.filter(match)
       .sort((a, b) => (isPri(b.path) - isPri(a.path)) || SEV[a.sev].rank - SEV[b.sev].rank || a.path.localeCompare(b.path));
-    const chip = (attr, k, l, on, n) =>
-      `<button class="seo-w-chip ${on ? "is-on" : ""}" ${attr}="${k}">${esc(l)}${n != null ? ` <em>${n}</em>` : ""}</button>`;
+    const chip = (attr, k, l, on, n) => `<button class="seo-w-chip ${on ? "is-on" : ""}" ${attr}="${k}">${esc(l)}${n != null ? ` <em>${n}</em>` : ""}</button>`;
+    const fxs = ui.hstatus === "open" ? fx.filter((i) => !ui.hpage || i.path === ui.hpage) : [];
+    const who = [...new Set(fxs.map((i) => i.st?.byName).filter(Boolean))].join(", ");
     return `
       <div class="seo-row">
         <button class="seo-btn ${ui.hstatus === "open" ? "on" : ""}" data-h-status="open">Open <span class="seo-w-n">${counts.open}</span></button>
@@ -953,13 +1044,21 @@ export function viewHealth(wrap, c, ui) {
       <div class="seo-row">
         ${chip("data-h-group", "all", "All types", ui.hgroup === "all")}
         ${Object.entries(GROUPS).map(([k, l]) => chip("data-h-group", k, l, ui.hgroup === k, gcount[k] || 0)).join("")}
+        ${quick ? `<button class="seo-w-chip ${ui.hone ? "is-on" : ""}" data-h-one>✨ One click only <em>${quick}</em></button>` : ""}
       </div>
-      ${ui.hpage ? `<div class="seo-row"><span class="seo-w-chip is-on">Only ${esc(ui.hpage)}
-        <button type="button" class="seo-hk-clear" data-h-page title="Show every page">✕</button></span></div>` : ""}
+      ${ui.hpage || ui.hcode ? `<div class="seo-row">
+        ${ui.hpage ? `<span class="seo-w-chip is-on">Only ${esc(ui.hpage)} <button type="button" class="seo-hk-clear" data-h-page title="Show every page">✕</button></span>` : ""}
+        ${ui.hcode ? `<span class="seo-w-chip is-on">Only: ${esc(CODE_L[ui.hcode] || ui.hcode)} <button type="button" class="seo-hk-clear" data-h-code title="Show every problem">✕</button></span>` : ""}
+      </div>` : ""}
       ${shown.length ? shown.map(issueRow).join("") : `<div class="seo-empty">${ui.hstatus === "open" ? "Nothing to fix here. 👍" : "Nothing ignored."}</div>`}
-      <p class="seo-note" style="margin-top:8px">Fixed something? It disappears after the next nightly check (about 8am).</p>`;
+      ${fxs.length ? `<div class="seo-sh-fixed${ui.hfix ? " is-open" : ""}">
+        <button type="button" class="seo-sh-fixed-h" data-h-fixed aria-expanded="${!!ui.hfix}">
+          <span class="seo-sh-tick" aria-hidden="true">✓</span><b>${fxs.length} fixed today</b>
+          <span class="seo-note">${who ? "by " + esc(who) + " · " : ""}${ui.hfix ? "Hide" : "Show to review or undo"}</span>
+          <span class="seo-sh-chev" aria-hidden="true">▾</span></button>
+        ${ui.hfix ? `<div class="seo-sh-fixed-list">${fxs.map(issueRow).join("")}</div>` : ""}</div>` : ""}
+      <p class="seo-note" style="margin-top:8px">Fixed something by hand in WordPress? Use Log a fix. It drops off at the next check (about 8am).</p>`;
   }
-
   function speedHtml() {
     const rows = H.pages.slice().sort((a, b) => (isPri(b.path) - isPri(a.path)) || (a.speed?.score ?? 999) - (b.speed?.score ?? 999));
     return `<div class="seo-table-wrap"><table class="seo-table">
@@ -1092,52 +1191,64 @@ export function viewHealth(wrap, c, ui) {
   }
   function draw() {
     const all = H.pages.concat(H.site ? [H.site] : []).flatMap((p) => p.issues || []);
-    byId = new Map(all.map((i) => [i.id, i]));
+    const fx = fixedToday(all);
+    byId = new Map(all.concat(fx.filter((i) => i.gone)).map((i) => [i.id, i]));
     const st = H.state;
+    const open = all.filter((i) => i.status === "open");
+    const hi = open.some((i) => i.sev === "high");
+    const avg = avgScore();
+    const notIn = H.pages.filter((p) => p.google && !p.google.err && p.google.v !== "PASS").length;
+    const hb = c.data?.eng ? H.pages.filter((p) => highBounce(engOf(p.path))).length : 0;
+    const n = (v, tone) => (v ? `<span class="seo-sh-n is-${tone}">${v}</span>` : "");
+    const tab = (v, l, b = "") => `<button type="button" role="tab" class="seo-sh-tab${ui.hview === v ? " is-on" : ""}" data-h-view="${v}" aria-selected="${ui.hview === v}">${l}${b}</button>`;
     wrap.innerHTML = `
       ${st.ok === false ? `<div class="seo-warn">The last site health check failed, so this may be out of date: ${esc(st.error || "")}</div>` : ""}
-      ${st.blocked ? `<div class="seo-warn">${st.blocked} key page${st.blocked === 1 ? "" : "s"} couldn't be read. The website may be blocking automated checks.</div>` : ""}
+      ${st.blocked ? `<div class="seo-warn">${plural(st.blocked, "key page")} couldn't be read. The website may be blocking automated checks.</div>` : ""}
       ${st.speedProblem ? `<div class="seo-warn">${esc(st.speedProblem)}</div>` : ""}
-      ${tiles(all)}
+      ${summary(all)}
       ${ui.hkpi ? kpiHtml(all) : ""}
-      <div class="seo-row">
-        <button class="seo-btn ${ui.hview === "content" ? "on" : ""}" data-h-view="content">Content</button>
-        <button class="seo-btn ${ui.hview === "issues" ? "on" : ""}" data-h-view="issues">Issues</button>
-        <button class="seo-btn ${ui.hview === "speed" ? "on" : ""}" data-h-view="speed">Speed</button>
-        <button class="seo-btn ${ui.hview === "engage" ? "on" : ""}" data-h-view="engage">Engagement</button>
-        <button class="seo-btn ${ui.hview === "index" ? "on" : ""}" data-h-view="index">In Google</button>
-        <span class="seo-sp"></span>
-        <span class="seo-note">${st.linksChecked != null ? `${st.linksChecked} of ${st.linksFound} internal links checked · ` : ""}${c.isAdmin ? `Star pages (☆) in the <a href="#/seo/pages">Pages tab</a> to check them` : ""}</span>
+      <div class="seo-sh-tabs" role="tablist" aria-label="Site health">
+        ${tab("issues", "To fix", n(open.length, hi ? "red" : "amber"))}
+        ${tab("content", "Proofreading")}
+        ${tab("speed", "Speed", avg != null && avg < 50 ? n("slow", "red") : "")}
+        ${tab("engage", "Visitors", n(hb, "amber"))}
+        ${tab("index", "In Google", n(notIn, "red"))}
       </div>
+      <p class="seo-sh-note">${st.linksChecked != null ? `${st.linksChecked} of ${st.linksFound} internal links checked` : ""}${
+        c.isAdmin ? `${st.linksChecked != null ? " · " : ""}Star pages (☆) in the <a href="#/seo/pages">Pages tab</a> to check them` : ""}</p>
       ${ui.hview === "content" ? contentHtml(c, ui) : ui.hview === "speed" ? speedHtml() : ui.hview === "engage" ? engageHtml()
-        : ui.hview === "index" ? indexHtml() : issuesHtml(all)}`;
+        : ui.hview === "index" ? indexHtml() : issuesHtml(all, fx)}`;
   }
-
   wrap.onclick = async (e) => {
     if (await hxClick(e)) return;   // one-click fixes and Fix with the Advisor (first: some sit inside a row that opens the page panel)
     if (e.target.closest("[data-open]")) return;   // seo.js opens the page panel
     // The number cards: open or close a card, open a row, or go to a view with its filters set
-    const hk = e.target.closest("[data-h-kpi],[data-hk-x],[data-hk-go],[data-h-page]");
+    const hk = e.target.closest("[data-h-kpi],[data-hk-x],[data-hk-go],[data-h-page],[data-h-do],[data-h-fixed],[data-h-code],[data-h-one]");
     if (hk && wrap.contains(hk)) {
       const d = hk.dataset;
       if (d.hkX !== undefined) {
         const inner = e.target.closest("button,a");
-        if (inner && inner !== hk && hk.contains(inner)) return;   // a link inside the row does its own job
+        if (inner && inner !== hk && hk.contains(inner)) return;
         ui.hkx = ui.hkx === d.hkX ? "" : d.hkX;
         draw();
         return;
       }
       if (d.hKpi !== undefined) { ui.hkpi = ui.hkpi === d.hKpi ? "" : d.hKpi; ui.hkx = ""; draw(); return; }
       if (d.hPage !== undefined) { ui.hpage = ""; draw(); return; }
+      if (d.hCode !== undefined) { ui.hcode = ""; draw(); return; }
+      if (d.hOne !== undefined) { ui.hone = !ui.hone; draw(); return; }
+      if (d.hFixed !== undefined) { ui.hfix = !ui.hfix; draw(); return; }
       let o = {};
-      try { o = JSON.parse(d.hkGo || "{}"); } catch { o = {}; }
+      if (d.hDo !== undefined) o = { view: "issues", code: d.hDo };
+      else { try { o = JSON.parse(d.hkGo || "{}"); } catch { o = {}; } }
       ui.hview = o.view || "issues";
-      if (ui.hview === "issues") Object.assign(ui, { hstatus: "open", hsev: o.sev || "all", hgroup: o.group || "all", hpage: o.page || "" });
+      if (ui.hview === "issues") Object.assign(ui, { hstatus: "open", hsev: o.sev || "all", hgroup: o.group || "all", hpage: o.page || "", hcode: o.code || "", hone: false });
       ui.hkpi = ""; ui.hkx = "";
       draw();
-      wrap.querySelector("[data-h-view]")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      wrap.querySelector(".seo-sh-tabs")?.scrollIntoView({ behavior: "smooth", block: "start" });
       return;
     }
+    
     if (await contentClick(e, c, ui, draw)) return;   // the Content view's buttons
     const t = e.target.closest("[data-h-view],[data-h-sev],[data-h-group],[data-h-status],[data-h-log],[data-h-ignore],[data-h-undo]");
     if (!t) return;
@@ -1252,6 +1363,81 @@ const CSS = `
 .seo-hx-won{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;cursor:pointer;margin-bottom:6px}
 .seo-hx-wsent{margin:4px 0 8px;padding:8px 10px;border-radius:8px;background:#f8fafc;line-height:1.6}
 .seo-hx-after{background:#f0fdf4;margin-top:8px}
+
+/* ---------- SEO → Site health: summary, tabs, Fixed today ---------- */
+.seo-sh-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px;margin:0 0 12px;font-size:13px;color:#64748b}
+.seo-sh-link{padding:0;border:0;background:none;font:inherit;color:#0f766e;text-decoration:underline;text-underline-offset:2px;cursor:pointer}
+.seo-sh-top{display:grid;grid-template-columns:230px minmax(0,1fr);gap:12px;margin-bottom:12px}
+.seo-sh-box{background:#fff;border:1px solid #e5e7eb;border-radius:14px}
+.seo-sh-score{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:16px;text-align:center}
+.seo-sh-ring{width:108px;height:108px;flex:none}
+.seo-sh-ring .bg{stroke:#f1f5f9}
+.seo-sh-ring .fg{transition:stroke-dasharray .6s ease}
+.seo-sh-ring.is-good .fg{stroke:#16a34a}.seo-sh-ring.is-ni .fg{stroke:#d97706}.seo-sh-ring.is-poor .fg{stroke:#dc2626}
+.seo-sh-ring text{font-size:26px;font-weight:700;fill:#0f172a}
+.seo-sh-word{font-size:15px;font-weight:700}
+.seo-sh-word.is-good{color:#15803d}.seo-sh-word.is-ni{color:#b45309}.seo-sh-word.is-poor{color:#b91c1c}
+.seo-sh-trend{margin-top:2px;font-size:12px;color:#64748b}
+.seo-sh-todo{padding:12px 0 4px}
+.seo-sh-todo h3{margin:0 14px 6px;font-size:14px}
+.seo-sh-do{display:flex;align-items:center;gap:10px;padding:10px 14px;border-top:1px solid #f1f5f9}
+.seo-sh-dt{flex:1;min-width:0;font-size:13.5px;font-weight:600;color:#0f172a}
+.seo-sh-dt .seo-note{font-weight:400}
+.seo-sh-do .seo-btn{flex:none;white-space:nowrap}
+.seo-sh-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:16px}
+.seo-sh-card{display:flex;flex-direction:column;align-items:flex-start;gap:3px;min-width:0;padding:12px 14px;border:1px solid #e5e7eb;border-radius:14px;
+  background:#fff;font:inherit;text-align:left;cursor:pointer;transition:border-color .15s,box-shadow .15s,transform .15s}
+.seo-sh-card:hover{border-color:#94a3b8;transform:translateY(-1px)}
+.seo-sh-card:focus-visible{outline:2px solid #0f766e;outline-offset:2px}
+.seo-sh-card.is-on{border-color:#0f766e;box-shadow:0 0 0 3px rgba(15,118,110,.14)}
+.seo-sh-cl{font-size:12px;color:#64748b}
+.seo-sh-cv{font-size:24px;font-weight:700;line-height:1.15;color:#0f172a}
+.seo-sh-cv small{font-size:12px;font-weight:500;color:#64748b}
+.seo-sh-cs{font-size:12px;color:#64748b}
+.seo-sh-bar{display:flex;width:100%;height:6px;margin:4px 0 2px;border-radius:4px;overflow:hidden;background:#f1f5f9}
+.seo-sh-bar i{display:block;min-width:0}
+.seo-sh-bar .is-h{background:#ef4444}.seo-sh-bar .is-m{background:#f59e0b}.seo-sh-bar .is-l{background:#cbd5e1}
+.seo-sh-tabs{display:flex;gap:2px;border-bottom:1px solid #e5e7eb;overflow-x:auto;scrollbar-width:none;scroll-margin-top:80px}
+.seo-sh-tabs::-webkit-scrollbar{display:none}
+.seo-sh-tab{flex:none;display:inline-flex;align-items:center;gap:6px;height:44px;margin-bottom:-1px;padding:0 14px;border:0;border-bottom:2px solid transparent;
+  background:none;font:inherit;font-size:14px;font-weight:600;color:#64748b;white-space:nowrap;cursor:pointer}
+.seo-sh-tab:hover{color:#0f172a}
+.seo-sh-tab.is-on{color:#0f766e;border-bottom-color:#0f766e}
+.seo-sh-tab:focus-visible{outline:2px solid #0f766e;outline-offset:-2px}
+.seo-sh-n{min-width:20px;padding:0 6px;border-radius:999px;font-size:11px;font-weight:700;line-height:20px;text-align:center}
+.seo-sh-n.is-red{background:#fee2e2;color:#b91c1c}.seo-sh-n.is-amber{background:#fef3c7;color:#92400e}
+.seo-sh-note{margin:6px 0 12px;font-size:12px;color:#64748b;text-align:right}
+.seo-sh-note:empty{display:none}
+.seo-h-issue.is-done{--tone:#16a34a}
+.seo-sh-donepill{padding:1px 8px;border-radius:999px;background:#dcfce7;color:#166534;font-size:11px;font-weight:700}
+.seo-sh-fixed{margin-top:14px;border:1px solid #bbf7d0;border-radius:12px;background:#f0fdf4}
+.seo-sh-fixed-h{display:flex;align-items:center;gap:10px;width:100%;padding:12px 14px;border:0;background:none;font:inherit;text-align:left;color:#14532d;cursor:pointer}
+.seo-sh-fixed-h .seo-note{flex:1;min-width:0}
+.seo-sh-tick{display:grid;place-items:center;width:24px;height:24px;flex:none;border-radius:50%;background:#16a34a;color:#fff;font-size:13px;font-weight:700}
+.seo-sh-chev{transition:transform .15s}
+.seo-sh-fixed.is-open .seo-sh-chev{transform:rotate(180deg)}
+.seo-sh-fixed-list{padding:0 10px 10px}
+.seo-sh-fixed-list .seo-h-issue{margin-bottom:6px}
+
+/* Phones and narrow iPads */
+@media (max-width:760px){
+  .seo-sh-top{grid-template-columns:minmax(0,1fr)}
+  .seo-sh-score{flex-direction:row;justify-content:flex-start;gap:14px;padding:12px 14px;text-align:left}
+  .seo-sh-ring{width:68px;height:68px}
+  .seo-sh-cards{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .seo-sh-card{padding:10px 12px}
+  .seo-sh-cv{font-size:20px}
+  .seo-sh-do{flex-wrap:wrap}
+  .seo-sh-do .seo-btn{width:100%;min-height:40px}
+  .seo-sh-note{text-align:left}
+  .seo-h-issue{padding:12px}
+  .seo-h-issue .seo-w-acts{display:flex;flex-direction:column;align-items:stretch;gap:6px}
+  .seo-h-issue .seo-w-acts .seo-btn{width:100%;min-height:40px;margin:0}
+  .seo-h-issue .seo-fx-bar{flex-wrap:wrap}
+  .seo-h-issue .seo-fx-bar .seo-fx-b{flex:1 1 auto;min-height:40px;justify-content:center}
+  .seo-sh-fixed-h{flex-wrap:wrap}
+  .seo-sh-fixed-h .seo-note{flex-basis:100%;order:3}
+}
 `;
 
 function injectCss() {
