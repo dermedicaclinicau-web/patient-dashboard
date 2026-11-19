@@ -141,7 +141,7 @@ function takeCopy(pid, tid) {
 // "Saved" overlay on the record page, after saving in its own tab.
 // sessionStorage, so it only ever shows in the tab that saved it.
 const SAVED_KEY = "dm.justSaved";
-const SAVED_OVERLAY = ["treatment"];   // add "consent", "prescription"… to use it for those too
+const SAVED_OVERLAY = ["treatment", "consent", "prescription"];   // these get the Saved pop-up after saving
 function markJustSaved(id, edited = false) {
   try { sessionStorage.setItem(SAVED_KEY, JSON.stringify({ id, edited, at: Date.now() })); } catch { /* private mode */ }
 }
@@ -1863,6 +1863,7 @@ function showSavedOverlay({ sub, edited, patientHref, editHref }) {
       <p class="ff-saved-who"><strong>${esc(sub.patientName)}</strong> · ${esc(niceDate(sub.recordDate))}${
         sub.createdBy ? ` · by ${esc(sub.createdBy)}` : ""}</p>
       <p class="ff-saved-note">It's on ${esc(first)}'s profile. If the profile is open in another tab, it has updated by itself.</p>
+      <div class="ff-saved-next" data-role="saved-next" hidden></div>
       <div class="ff-saved-acts">
         ${editHref
           ? `<a class="ff-btn" href="${editHref}">${BAR_ICONS.edit}<span>Edit</span></a>`
@@ -1894,4 +1895,28 @@ function showSavedOverlay({ sub, edited, patientHref, editHref }) {
   document.body.appendChild(dlg);
   dlg.showModal();
   dlg.querySelector('[data-act="saved-close"]').focus();
+
+  // A consent just saved: offer the treatment record in the same treatment group (the same forms as "Create Tx")
+  if (sub.category === "consent" && !edited) {
+    const group = sub.group || formGroup({ name: sub.templateName });
+    if (group && group !== "other") {
+      listPublishedForms()
+        .then((forms) => {
+          if (!dlg.isConnected || !dlg.open) return;
+          const tx = forms.filter((t) => t.category === "treatment" && formGroup(t) === group).slice(0, 4);
+          if (!tx.length) return;
+          const host = dlg.querySelector('[data-role="saved-next"]');
+          host.innerHTML = (tx.length > 1 ? '<p class="ff-saved-next-h">Next: start a treatment record</p>' : "")
+            + tx.map((t) => `<a class="ff-btn is-primary" href="#/fill/${encodeURIComponent(sub.patientId)}/${encodeURIComponent(t.id)}">${
+              BAR_ICONS.edit}<span>Start ${esc(t.name)}</span></a>`).join("");
+          host.hidden = false;
+          // The treatment record is the main next step now, so Close tab steps back
+          const close = dlg.querySelector('[data-act="saved-close"]');
+          if (close) close.classList.remove("is-primary");
+          const go = host.querySelector("a");
+          if (go) go.focus();
+        })
+        .catch((err) => console.warn("Treatment record not offered:", err));
+    }
+  }
 }

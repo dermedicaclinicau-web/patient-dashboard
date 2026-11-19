@@ -14060,3 +14060,7 @@ body.scan-full { overflow: hidden; }
 .rx-addlist { display: flex; align-items: flex-start; gap: .5rem; padding: .15rem 0; font-size: .86rem; color: #0f766e; cursor: pointer; }
 .rx-addlist input { flex: none; width: 18px; height: 18px; margin-top: .1rem; accent-color: #0f766e; }
 .rx-addlist small { display: block; margin-top: .1rem; font-size: .76rem; color: #64748b; }
+/* Saved pop-up: "Start the treatment record" after a consent */
+.ff-saved-next { display: grid; gap: .5rem; margin: .25rem 0 .75rem; }
+.ff-saved-next-h { margin: 0; font-size: .85rem; color: #64748b; }
+.ff-saved-next .ff-btn { justify-content: center; width: 100%; }
