@@ -70,7 +70,6 @@ const stageText = (j) => (j.stage === "writing" || j.stage === "transcribed" ? "
 const BAD = ["failed", "error", "recovered"];
 const BUSY = ["uploading", "processing"];
 const jobViews = new Set();   // the "Recordings on this device" cards that are open (My dashboard)
-let lastReady = 0;
 
 // Counts only, never names (hover text on the menu badge)
 function summaryText(jobs) {
@@ -83,52 +82,45 @@ function summaryText(jobs) {
   return `${jobs.length} recording${jobs.length === 1 ? "" : "s"}: ${parts.join(", ")}`;
 }
 
-// The number beside "My dashboard" in the menu
-function renderNavBadge(jobs) {
+// The number beside "My dashboard" in the menu: the same recordings as the card
+function renderNavBadge(all) {
   const link = document.querySelector('.nav-item[data-page="home"]');
   if (!link) return;
+  const jobs = all.filter((j) => j.status !== "ready");
   let b = link.querySelector(".nav-badge");
   if (!jobs.length) {
     if (b) b.remove();
     link.removeAttribute("title");
-    lastReady = 0;
     return;
   }
   if (!b) {
     b = document.createElement("span");
     link.appendChild(b);
   }
-  const bad = jobs.some((j) => BAD.includes(j.status));
-  const ready = jobs.filter((j) => j.status === "ready").length;
-  b.className = `nav-badge ${bad ? "is-bad" : ready ? "is-ready" : "is-busy"}`;
+  b.className = `nav-badge ${jobs.some((j) => BAD.includes(j.status)) ? "is-bad" : "is-busy"}`;
   b.textContent = jobs.length > 9 ? "9+" : String(jobs.length);
   link.title = summaryText(jobs);
-  if (ready > lastReady) {   // a short pulse when more notes become ready
-    b.classList.remove("is-pulse");
-    void b.offsetWidth;
-    b.classList.add("is-pulse");
-  }
-  lastReady = ready;
 }
-
 // My dashboard: the recordings on this device, live. Only shows when there's something in it.
 export function mountRecordingJobs(el) {
   if (!el) return;
   el.addEventListener("click", onClick);
-  const draw = (jobs) => {
+  // Only recordings still on their way or needing someone. Written notes are under "Notes to review".
+  const draw = (all) => {
     if (!el.isConnected) { jobViews.delete(draw); return; }
+    const jobs = all.filter((j) => j.status !== "ready");
     el.hidden = !jobs.length;
     if (!jobs.length) { el.innerHTML = ""; return; }
-    const ready = jobs.filter((j) => j.status === "ready").length;
     const bad = jobs.some((j) => BAD.includes(j.status));
+    const list = jobs.slice().sort((a, b) => (BAD.includes(b.status) ? 1 : 0) - (BAD.includes(a.status) ? 1 : 0));
     el.innerHTML = `<section class="md-card md-rec-card${bad ? " is-bad" : ""}">
       <div class="md-card-head">
         <h3>Recordings on this device</h3>
         <span class="md-count">${jobs.length}</span>
-        ${ready > 1 ? '<button type="button" class="rec-link" data-rec="clear-ready">Hide all ready</button>' : ""}
       </div>
-      <p class="muted md-rec-note">Uploads and notes carry on in the background. Finished notes also appear on each patient's page.</p>
-      <div class="rec-tray">${jobs.map(jobHtml).join("")}</div>
+      <p class="muted md-rec-note">${bad ? "<strong>Any in red need you.</strong> " : ""}Recordings still uploading or
+        being turned into notes. You can keep working. When the notes are written, they move to Notes to review.</p>
+      <div class="rec-tray">${list.map(jobHtml).join("")}</div>
     </section>`;
   };
   jobViews.add(draw);
@@ -192,6 +184,12 @@ function announce(s) {
   if (!fresh.length) return;
   fresh.forEach((j) => toasted.add(j.recId));
   showToast(`Notes are ready for ${fresh.length} recording${fresh.length === 1 ? "" : "s"}. They're on My dashboard when you're done.`);
+}
+
+// Notes written and already shown: nothing is left to do on this device, so the recording is cleared from it.
+// The same as the old × (Hide): the notes stay in Notes to review and on the patient's page.
+function clearDone() {
+  getState().jobs.filter((j) => j.status === "ready" && j.announced).forEach((j) => dismissJob(j.recId));
 }
 
 /* ===================== Drawing ===================== */
@@ -320,6 +318,8 @@ function render(s) {
   if (!bar) return;
   const L = s.live;
   announce(s);
+  // Straight after this redraw, not during it (clearing one redraws again)
+  if (s.jobs.some((j) => j.status === "ready" && j.announced)) setTimeout(clearDone, 0);
 
   // A recording finished or changed: ask again what can be continued
   const jobSig = s.jobs.map((j) => `${j.recId}:${j.status}`).join(",");
