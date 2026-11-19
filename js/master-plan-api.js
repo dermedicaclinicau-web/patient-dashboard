@@ -2,7 +2,7 @@
 import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, getDocs, collection, query, orderBy, limit, runTransaction, serverTimestamp }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { CATEGORIES, canonicalCategory, catKey, PATTERNS, schedulesOf, afterText, AFTER_RE } from "./plan-editor.js";
+import { CATEGORIES, canonicalCategory, catKey, PATTERNS, schedulesOf, afterText, AFTER_RE, START_RE } from "./plan-editor.js";
 import { scheduleText } from "./plan-frequency.js";
 
 export const PLAN_STATUS = {
@@ -65,7 +65,7 @@ export function lineNote(l) {
   if (parts.length < 2) return "";
   const sched = normTx(scheduleText(l));
   const rest = parts.filter((p) => normTx(p) !== sched);
-  return (rest.length < parts.length ? rest : parts.slice(1)).filter((p) => !AFTER_RE.test(p)).join(" · ");
+  return (rest.length < parts.length ? rest : parts.slice(1)).filter((p) => !AFTER_RE.test(p) && !START_RE.test(p)).join(" · ");
 }
 
 // "starts 6 months after the last Ulthera" ("" when it starts as planned)
@@ -205,7 +205,7 @@ function linesFrom(c, startMonth, key, services, countFrom) {
       note: hasSched ? (s.note || "") : "",   // no schedule: the wording itself is shown, comment and all
       afterN: s.after_n, afterUnit: s.after_unit, afterService: s.after_service,
       pattern: s.pattern, sessions: s.sessions, intervalWeeks: s.interval_weeks, intervalUnit: s.interval_unit,
-      startMonth,
+      startMonth: s.start_month || startMonth,   // the month chosen for this treatment wins over the timeline's
       countFrom,
       services: matchServices(t, key, services),
     });
@@ -236,7 +236,13 @@ export function isTreatmentEvent(name, names = []) {
 export function planChanges(master, consult, { recordId = "", services = [], fromKey = "", treatments = [] } = {}) {
   const cur = master ? master.concerns : [];
   const tl = consult.timeline || [];
-  const sig = (x) => [x.lines.map((l) => `${normTx(l.treatment)}/${l.pattern}/${l.sessions}/${l.intervalWeeks}/${normTx(lineNote(l))}/${l.afterN}${l.afterUnit}${normTx(l.afterService)}`).join("|"), normTx(x.quote)].join("#");
+  // ref: the consultation's version. Its start months are compared only where it has one
+  // (a month set by hand on the plan isn't a change when the consultation doesn't give one).
+  const sig = (x, ref = x) => {
+    const wants = new Set(ref.lines.filter((l) => l.startMonth).map((l) => normTx(l.treatment)));
+    return [x.lines.map((l) => `${normTx(l.treatment)}/${l.pattern}/${l.sessions}/${l.intervalWeeks}/${normTx(lineNote(l))}/${
+      l.afterN}${l.afterUnit}${normTx(l.afterService)}/${wants.has(normTx(l.treatment)) ? l.startMonth : ""}`).join("|"), normTx(x.quote)].join("#");
+  };
   const drafts = (consult.concerns || []).map((c) => {
     const key = canonicalCategory(c.concern_category);
     const start = tl.filter((t) => t.concern && t.concern === c.key).map((t) => monthKey(t.date)).filter(Boolean).sort()[0] || "";
@@ -274,7 +280,7 @@ export function planChanges(master, consult, { recordId = "", services = [], fro
       listed.add(key);
       return { kind: "new", key, before: null, after, targetId: "", again };
     }
-    return { kind: sig(before) === sig(after) ? "same" : "changed", key, before, after, targetId: before.id, again: false };
+    return { kind: sig(before, after) === sig(after) ? "same" : "changed", key, before, after, targetId: before.id, again: false };
   });
   const have = new Set((master ? master.events : []).map((e) => `${normTx(e.name)}|${e.month}`));
   // Treatment names to check events against: this consultation's, the services, and the clinic's list

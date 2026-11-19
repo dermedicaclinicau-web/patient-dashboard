@@ -7,7 +7,7 @@ import {
   planCardHtml, fieldHtml, getPlanValue, setPlanValue, refFrom, catKey, planFromText,
   schedulesOf, setSchedule, treatmentLines,
 } from "./plan-editor.js";
-import { freqHtml, mountFreq } from "./plan-frequency.js";
+import { freqHtml, mountFreq, countOf } from "./plan-frequency.js";
 import { fetchTranscriptRecords, parseRecordDate } from "./transcripts.js";
 import {
   emailItemsFrom, emailCardHtml, openEmailComposer, openEmailInTab, emailItemsToText, emailItemsToSidecar,
@@ -19,7 +19,7 @@ import { escapeHtml, showToast, toDateKey } from "./utils.js";
 import { openPlanReview } from "./master-plan-review.js";
 import { setTabTitle } from "./tab-icon.js";
 import { fetchPreconsult } from "./appointments.js";
-import { visitsFrom, lastVisitOf, afterMatch, fromAnchor, dayLabel, dateKeyOf } from "./plan-track.js";
+import { visitsFrom, lastVisitOf, afterMatch, fromAnchor, dayLabel, dateKeyOf, addMonths, thisMonth } from "./plan-track.js";
 import { getPlanSettings } from "./plan-api.js";
 import { monthLabel } from "./master-plan-api.js";
 import { serviceKey } from "./inventory-api.js";
@@ -983,6 +983,15 @@ function editFrequency(ci, si) {
       <div class="pe-after">
         <span class="lh-label">When it starts</span>
         <div class="fe-seg">${seg("startmode", [["plan", "As planned"], ["after", "After another treatment"]], hasAfter ? "after" : "plan")}</div>
+        <div class="pe-start" data-role="startline"${hasAfter ? " hidden" : ""}>
+          <div class="pe-start-row">
+            <span>First one in</span>
+            <input class="fe-input pe-start-m" name="start_month" type="month" min="${thisMonth()}"
+              value="${escapeHtml(s.start_month || "")}" placeholder="2027-05" aria-label="Month the first one is due" />
+            <button type="button" class="lh-btn is-quiet" data-start="">Clear</button>
+          </div>
+          <div class="fq-quick" data-role="startquick"></div>
+        </div>
         <div class="pe-after-line" data-role="afterline"${hasAfter ? "" : " hidden"}>
           <span>Start</span>
           <input class="fe-input pe-after-n" name="after_n" type="number" min="1" max="520" step="1" inputmode="numeric"
@@ -1015,13 +1024,44 @@ function editFrequency(ci, si) {
   let visits = [];
 
   // The check underneath: her last one, and when the first of this treatment will be due
+  // As planned: the month the first one is due, with quick picks (one counts from her last visit for this treatment)
+  const nowM = thisMonth();
+  const lastDone = () => {
+    for (let i = visits.length - 1; i >= 0; i--) {
+      if (!visits[i].future && visits[i].services.some((sv) => afterMatch(sv, name))) return visits[i].dateKey;
+    }
+    return "";
+  };
+  const syncStart = (hint) => {
+    const m = f.start_month.value;
+    const v = freq.read();
+    const unit = v.intervalUnit === "m" ? "m" : "w";
+    const every = v.pattern === "once" ? 0 : countOf(v.intervalWeeks, v.intervalUnit);
+    const last = every ? lastDone() : "";
+    const fromLast = last ? fromAnchor(last, every, unit) : "";
+    const picks = [[addMonths(nowM, 1), "Next month"], [addMonths(nowM, 3), "In 3 mths"],
+      [addMonths(nowM, 6), "In 6 mths"], [addMonths(nowM, 12), "In 12 mths"]];
+    if (fromLast) {
+      picks.push([fromLast < nowM ? nowM : fromLast, `${every} ${unit === "m" ? "mth" : "wk"}${every === 1 ? "" : "s"} after the last one (${
+        dayLabel(last)})${fromLast < nowM ? " · due now" : ""}`]);
+    }
+    dlg.querySelector('[data-role="startquick"]').innerHTML = picks.map(([k, l]) =>
+      `<button type="button" class="fq-chip${k === m ? " is-on" : ""}" data-start="${k}">${escapeHtml(l)}</button>`).join("");
+    hint.textContent = m ? `${first}'s first ${name} is due in ${monthLabel(m)}.`
+      : last ? `${first}'s last ${name} was ${dayLabel(last)}. Choose a month, or plan it from her last one.`
+      : "No month chosen: the plan uses the suggested timeline, or shows “Choose a month” until one is set.";
+    hint.hidden = false;
+  };
+
   const syncAfter = () => {
     const on = f.startmode.value === "after";
     dlg.querySelector('[data-role="afterline"]').hidden = !on;
+    dlg.querySelector('[data-role="startline"]').hidden = on;
     const hint = dlg.querySelector('[data-role="afterhint"]');
+    if (!on) { syncStart(hint); return; }
     const svc = f.after_service.value.trim();
     const n = parseInt(f.after_n.value, 10) || 0;
-    if (!on || !svc || !n) { hint.hidden = true; return; }
+    if (!svc || !n) { hint.hidden = true; return; }
     const unit = f.after_unit.value === "w" ? "w" : "m";
     const last = lastVisitOf(visits, svc);
     const inPlan = !last && current.plan.concerns.some((x) => treatmentLines(x).some((t) => afterMatch(t, svc)));
@@ -1033,6 +1073,12 @@ function editFrequency(ci, si) {
   };
   form.addEventListener("input", syncAfter);
   form.addEventListener("change", syncAfter);
+  dlg.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-start]");
+    if (!b) return;
+    f.start_month.value = b.dataset.start;
+    syncAfter();
+  });
 
   // Suggestions: what this patient has had (newest first, with the date), then the clinic's services
   Promise.all([patientVisits(), clinicServices()]).then(([v, svcs]) => {
@@ -1062,9 +1108,16 @@ function editFrequency(ci, si) {
     const an = parseInt(f.after_n.value, 10);
     const asvc = f.after_service.value.trim();
     if (after && (!(an >= 1) || !asvc)) { fail("Enter how long after, and which treatment."); return; }
+    // A month already saved can stay, even once it's passed; a new one is this month or later
+    const sm = after ? "" : f.start_month.value.trim();
+    if (sm && (!/^\d{4}-\d{2}$/.test(sm) || (sm < thisMonth() && sm !== (s.start_month || "")))) {
+      fail("Choose this month or a later one.");
+      return;
+    }
     setSchedule(c, si, {
       pattern: v.pattern, sessions: v.sessions, interval_weeks: v.intervalWeeks, interval_unit: v.intervalUnit,
       note: f.note.value,
+      start_month: sm,
       after_n: after ? an : 0, after_unit: after ? (f.after_unit.value === "w" ? "w" : "m") : "", after_service: after ? asvc : "",
     });
     markDirty();

@@ -106,14 +106,19 @@ const cleanSched = (s = {}) => ({
   after_n: whole(s.after_n),                                              // starts this long after…
   after_unit: /^[wm]$/.test(str(s.after_unit)) ? str(s.after_unit) : "",
   after_service: str(s.after_service).slice(0, 150),                      // …the patient's last of this service
+  start_month: /^\d{4}-\d{2}$/.test(str(s.start_month)) ? str(s.start_month) : "",   // as planned: the first one's month
 });
 
 // "starts 6 months after the last Ulthera" ("" when it starts as planned)
 export const afterText = (n, unit, svc) => (n && svc
   ? `starts ${n} ${unit === "w" ? (n === 1 ? "week" : "weeks") : (n === 1 ? "month" : "months")} after the last ${svc}` : "");
 export const AFTER_RE = /^starts \d+ (?:weeks?|months?) after the last /i;
+// "from May 2027" ("" without a month). The master plan also reads the month back out of this wording.
+const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+export const startText = (k) => { const m = /^(\d{4})-(\d{2})$/.exec(k || ""); return m ? `from ${MON[+m[2] - 1]} ${m[1]}` : ""; };
+export const START_RE = /^from [A-Z][a-z]{2} \d{4}$/;
 const schedText = (s) => [scheduleText({ pattern: s.pattern, sessions: s.sessions, intervalWeeks: s.interval_weeks, intervalUnit: s.interval_unit }),
-  afterText(s.after_n, s.after_unit, s.after_service), s.note].filter(Boolean).join(" · ");
+  afterText(s.after_n, s.after_unit, s.after_service), startText(s.start_month), s.note].filter(Boolean).join(" · ");
 
 // One schedule per treatment line (always at least one). Set in the notes → as saved.
 // Otherwise from the recorder's fields (first treatment) or read from the Frequency wording.
@@ -125,7 +130,7 @@ export function schedulesOf(c) {
     const text = freqs[i] || "";
     // "1 every 2 weeks · Neck to be trialled first": the schedule, then the comment
     const [head, ...rest] = text.split(/\s+·\s+/);
-    const note = rest.filter((p) => !AFTER_RE.test(p)).join(" · ");
+    const note = rest.filter((p) => !AFTER_RE.test(p) && !START_RE.test(p)).join(" · ");
     if (i === 0 && !saved.length && ((c.pattern && c.pattern !== "unknown") || whole(c.interval_weeks))) {
       return cleanSched({ pattern: c.pattern, sessions: c.sessions, interval_weeks: c.interval_weeks,
         interval_unit: c.interval_unit || (/month|mth/i.test(text) ? "m" : /week|wk/i.test(text) ? "w" : ""), note });
@@ -150,7 +155,7 @@ export function setSchedule(c, i, s) {
   const all = schedulesOf(c);
   // Anything not given stays as it was (the comment, and when it starts)
   const keep = { ...s };
-  ["note", "after_n", "after_unit", "after_service"].forEach((k) => { if (keep[k] === undefined) keep[k] = all[i] ? all[i][k] : ""; });
+  ["note", "after_n", "after_unit", "after_service", "start_month"].forEach((k) => { if (keep[k] === undefined) keep[k] = all[i] ? all[i][k] : ""; });
   c.schedules = all.map((x, k) => (k === i ? cleanSched(keep) : saved[k] ? cleanSched(saved[k]) : null));
   const lines = all.map((x, k) => (c.schedules[k] ? schedText(c.schedules[k]) : freqs[k] || ""));
   c.frequency_interval = lines.some(Boolean) ? lines.map((l) => l || "—").join("\n") : "";
@@ -271,7 +276,7 @@ function txTableHtml(c, ci) {
   const quotes = quoteRows(c);
   const rows = names.map((name, k) => {
     const s = sch[k] || {};
-    const label = [schedLabel(s), afterText(s.after_n, s.after_unit, s.after_service)].filter(Boolean).join(" · ");
+    const label = [schedLabel(s), afterText(s.after_n, s.after_unit, s.after_service), startText(s.start_month)].filter(Boolean).join(" · ");
     return `<div class="pe-tx-row">
       <div class="pe-tx-c" data-lbl="Treatment">${fieldHtml({ pf: "row_treatment", ci, si: k }, name)}</div>
       <div class="pe-tx-c" data-lbl="Frequency"><button type="button" class="pe-freq${label ? "" : " is-empty"}" data-pe="freq" data-ci="${ci}" data-si="${k}" title="Set how often">

@@ -14076,3 +14076,9 @@ body.scan-full { overflow: hidden; }
 /* Wrinkle Relaxer: "treated recently" pop-up */
 .wr-again .lh-dialog-head h3::before { content: "⚠ "; color: #b45309; }
 .wr-again-q { margin: .35rem 0 0; font-size: 1rem; }
+
+
+/* How often: the month under "As planned" */
+.pe-start { display: grid; gap: 8px; margin-top: 10px; }
+.pe-start-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pe-start-m { max-width: 190px; }
