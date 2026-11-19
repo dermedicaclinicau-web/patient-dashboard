@@ -688,6 +688,14 @@ export async function mountFormFill(container, param, { staff, embedded = null }
         skipped.length === 1 ? "it" : "them"} by hand.</li>`);
     },
   });
+  // "Treatment or touch-up?" under a picture: the answer sets every mark's tag (the picture's own toggle is hidden)
+  sheet.addEventListener("change", (e) => {
+    const t = e.target;
+    if (!t.closest("[data-imgq]") || !(t.type === "radio" || t.tagName === "SELECT") || !t.value) return;
+    const w = t.closest("[data-fid]");
+    const an = w && annots[w.dataset.fid];
+    if (an && an.setTag) an.setTag(t.value);
+  });
   const msgEl = root.querySelector('[data-role="msg"]');
   const progressEl = root.querySelector('[data-role="progress"]');
   const saveBtns = $all(root, "[data-save]");
@@ -1070,7 +1078,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
         { id: q.id, label: q.label, value: opt, ...(q.type === "checks" ? { values: [opt] } : {}) }]);
     }
     const an = annots[f.id];
-    if (an && an.retag) an.retag("treatment", "touchup");
+    if (!(an && an.setTag && opt && an.setTag(opt)) && an && an.retag) an.retag("treatment", "touchup");
     noteChange();
     refresh();
   }

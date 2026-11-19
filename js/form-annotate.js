@@ -30,8 +30,9 @@ const segDist = (px, py, ax, ay, bx, by) => {
 // sets: the marking sets staff can use on this picture (in the order they were ticked).
 // marks: the older single-set option, still accepted.
 // compact: one toolbar row (values, then Freehand icons), with the total shown in headTotal (the Compact bar)
+// tagQ: a question under the picture sets the marks' tag (e.g. "Treatment or touch-up?"), so the tag toggle is hidden
 export function createAnnotator(box, src, { base = "", sets = null, marks = null, compact = false, headTotal = null,
-  initial = null, onInitial = null } = {}) {
+  initial = null, onInitial = null, tagQ = false } = {}) {
   const order = (Array.isArray(sets) ? sets : marks ? [marks] : [])
     .filter((s) => s && Array.isArray(s.values) && s.values.length);
   const marking = order.length > 0;
@@ -48,7 +49,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
         `<button type="button" class="an-pick${i === 0 ? " is-on" : ""}" data-pick="${si}:${i}" aria-pressed="${i === 0}"
           title="${esc(s.type === "label" ? (x.name ? `${x.code}: ${x.name}` : x.code) : `${fmt(x.v)} ${s.unit || ""}`)}">${
           valueSvg(s, x, compact ? 34 : 30)}${s.type === "label" && x.name ? `<small>${esc(x.name)}</small>` : ""}</button>`).join("")}</div>
-      ${tagsOf(s).length ? `<div class="an-seg an-tags" role="group" aria-label="Tag">${tagsOf(s).map((t, i) =>
+      ${tagsOf(s).length && !tagQ ? `<div class="an-seg an-tags" role="group" aria-label="Tag">${tagsOf(s).map((t, i) =>
         `<button type="button" class="an-btn${i === 0 ? " is-on" : ""}" data-tag="${si}:${i}" aria-pressed="${i === 0}">${esc(t)}</button>`).join("")}</div>` : ""}
     </div>`;
 
@@ -536,6 +537,32 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     },
     // The first number set's total (for Calculations and Consumables)
     total: primary ? () => sum(marksOf(primary)) : null,
+    // The question's answer sets the tag: every mark takes it, and so do new marks. Each change can be undone.
+    // → true if the answer is one of the tags
+    setTag: (name) => {
+      const k = (t) => String(t || "").toLowerCase().replace(/[^a-z]/g, "");
+      let known = false, n = 0;
+      order.forEach((s, si) => {
+        const b = tagsOf(s).findIndex((t) => k(t) === k(name));
+        if (b < 0) return;
+        known = true;
+        tagSel[si] = b;
+        const btn = box.querySelector(`[data-tag="${si}:${b}"]`);
+        if (btn) pickOne(btn.closest("[data-setrow]").querySelectorAll("[data-tag]"), btn);
+      });
+      if (!known) return false;
+      ops.forEach((o, i) => {
+        if (o.type !== "mark") return;
+        const b = tagsOf(order[o.si]).findIndex((t) => k(t) === k(name));
+        if (b < 0 || (o.tag || 0) === b) return;
+        const by = { ...o, tag: b };
+        ops[i] = by;
+        history.push({ replaced: o, by });
+        n++;
+      });
+      if (n) changed(); else redraw();
+      return true;
+    },
     // Every mark with one tag gets the other (e.g. "treatment" → "touchup", matched by tag name), and new marks follow.
     // Each change can be undone. → how many marks changed
     retag: (from, to) => {
@@ -597,7 +624,12 @@ export function attachAnnotators(root, fields, { markSets = [], initial = null, 
         if (!box.isConnected) return;
         const chart = f.chartLayout === "header";
         const head = chart && box.closest(".fe-chart") ? box.closest(".fe-chart").querySelector("[data-chart-total]") : null;
-        map[f.id] = createAnnotator(box, src, { sets, compact: chart, headTotal: head,
+        // A choose-one question under the picture that has every tag as a choice sets the marks' tag
+        const k = (t) => String(t || "").toLowerCase().replace(/[^a-z]/g, "");
+        const tagged = sets.find((s) => s.type !== "label" && s.tagMarks && (s.tags || []).filter(Boolean).length);
+        const tagQ = !!tagged && (f.questions || []).some((q) => ["radio", "choice", "dropdown", undefined, ""].includes(q && q.type)
+          && tagged.tags.filter(Boolean).every((t) => (q.options || []).some((o) => k(o) === k(t))));
+        map[f.id] = createAnnotator(box, src, { sets, compact: chart, headTotal: head, tagQ,
           initial: initial && initial[f.id], onInitial: onInitial && ((s) => onInitial(f, s)) });
         if (wantsMarks && sets.length < ids.length) {
           box.insertAdjacentHTML("afterbegin", `<p class="an-warn">${sets.length
