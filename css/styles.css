@@ -14013,3 +14013,44 @@ button.fr-join:hover { text-decoration: underline; }
     max-height: calc(100vh - var(--topbar-h) - var(--recbar-h, 0px) - 24px); display: flex; flex-direction: column; margin-top: 0; }
   .scan-panel-body { overflow-y: auto; min-height: 0; }
 }
+
+/* Scanner on phones and iPads: one column, the camera as big as the screen allows */
+.page.scan.is-touch { max-width: none; }
+.page.scan.is-touch .scan-desk { grid-template-columns: minmax(0, 1fr); }
+.page.scan.is-touch .scan-panel { position: static; max-height: none; }
+.page.scan.is-touch .scan-panel-body { overflow: visible; }
+body:not(.scan-app) .page.scan.is-touch .scan-vf { aspect-ratio: auto; height: calc(100dvh - 300px); min-height: 360px; max-height: none; }
+@media (max-width: 640px) {
+  body:not(.scan-app) .page.scan.is-touch .scan-vf { height: calc(100dvh - 320px); min-height: 300px; }
+}
+
+/* The full-screen button (bottom right of the camera) */
+.scan-fs { position: absolute; right: .7rem; bottom: .9rem; z-index: 2; display: grid; place-items: center; width: 2.6rem; height: 2.6rem;
+  padding: 0; border: 0; border-radius: 50%; background: rgba(0, 0, 0, .55); color: #fff; cursor: pointer; touch-action: manipulation; }
+.scan-fs svg { width: 1.2rem; height: 1.2rem; }
+.scan-fs-host { display: none; }
+
+/* Full screen */
+body.scan-full { overflow: hidden; }
+.page.scan.is-full { position: fixed; inset: 0; z-index: 90; display: flex; flex-direction: column; max-width: none; margin: 0;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  background: #0b1414; color: #fff; overflow: hidden; }
+.page.scan.is-full .scan-head { flex: none; margin: .5rem .6rem; }
+.page.scan.is-full .scan-modes { display: flex; width: 100%; border-color: rgba(255, 255, 255, .25); background: rgba(255, 255, 255, .06); }
+.page.scan.is-full .scan-mode { flex: 1; min-height: 40px; background: transparent; color: #e2e8f0; }
+.page.scan.is-full .scan-mode.is-on { background: #0f766e; color: #fff; }
+.page.scan.is-full .scan-desk { display: flex; flex: 1; flex-direction: column; min-height: 0; gap: 0; }
+.page.scan.is-full .scan-desk-main { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.page.scan.is-full .scan-panel, .page.scan.is-full .scan-drop, .page.scan.is-full .scan-keys { display: none; }
+.page.scan.is-full .scan-vf { flex: 1; height: auto; min-height: 0; max-height: none; aspect-ratio: auto; border-radius: 0; }
+.page.scan.is-full .scan-bar { flex: none; padding: .7rem 1rem .4rem; }
+.page.scan.is-full .scan-side { color: #e2e8f0; }
+.page.scan.is-full .scan-shutter { width: 78px; height: 78px; border-color: #fff; background: transparent; }
+.page.scan.is-full .scan-shutter span { background: #fff; }
+.page.scan.is-full :is(.scan-pending, .scan-pageback, .scan-queue) { margin: .4rem .6rem; }
+.page.scan.is-full .scan-pageback { color: #5eead4; }
+.page.scan.is-full .scan-fs-host { display: flex; flex: none; justify-content: center; padding: 0 .75rem .6rem; }
+.scan-fs-pill { display: inline-flex; align-items: center; gap: .5rem; min-height: 40px; padding: 0 1rem; border: 1px solid rgba(255, 255, 255, .3);
+  border-radius: 999px; background: rgba(255, 255, 255, .08); color: #e2e8f0; font: inherit; font-size: .88rem; font-weight: 600; cursor: pointer; }
+.scan-fs-pill.has-items { border-color: #f59e0b; background: rgba(245, 158, 11, .18); color: #fde68a; }
+.scan-fs-pill span { font-size: 1.1rem; line-height: 1; }

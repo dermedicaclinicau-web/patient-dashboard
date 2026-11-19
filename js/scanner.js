@@ -29,6 +29,8 @@ const I = {
   photo: svg('<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>'),
   camera: svg('<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>'),
   bolt: svg('<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>'),
+  expand: svg('<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>'),
+  shrink: svg('<polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/>'),
 };
 const niceDate = (key) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
@@ -36,6 +38,7 @@ const niceDate = (key) => {
 };
 const KIND_KEY = "dm.scanKind2";   // the last tab used on this device
 const AUTO_KEY = "dm.scanAuto";   // Auto on or off on this device
+const FULL_KEY = "dm.scanFull";   // full screen on or off on this device (phones and iPads)
 const MAX_PAGES = 3;
 const SHOT_MAX = 2200;   // long edge of a camera photo: it's sent at 1600, and docket pages are joined at up to 1600 wide
 const KIND_TAG = { billing: "Billing", docket: "Docket", rx: "Prescription", auto: "Scan" };
@@ -246,6 +249,8 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
   if (can("scanner.docket") || can("scanner.rx")) staffList().catch(() => {});   // ready before the first docket or prescription
 
   const savedKind = readLocal(KIND_KEY);
+  // Phones and iPads: the camera fills the screen. On in the portal unless turned off; off in the Scan app unless turned on.
+  const fullDefault = () => isMobile() && (kindPicker ? readLocal(FULL_KEY) !== "0" : readLocal(FULL_KEY) === "1");
   const st = {
     mode: "camera", stream: null, track: null, starting: false, zoom: 1, hw: null, torch: false, canTorch: false, canFocus: false,
     camErr: "", photo: null, photoUrl: "", base64: "", thumb: "", result: null, lines: [], review: null, error: "", fixing: -1, busy: false,
@@ -262,6 +267,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     rxDone: null, doneTimer: 0,                   // a prescription just saved (or sent to be checked)
     checks: null, checksAt: 0,                    // prescriptions waiting to be checked
     side: "", checkKind: "all",                   // the work panel: which tab, and To check's filter
+    full: fullDefault(),                          // full screen camera (phones and iPads)
   };
   // Photos are docket pages: the Docket tab, or Auto-detect after "+ Add a page"
   const collecting = () => st.kind === "docket" || (st.kind === "auto" && st.pages.length > 0);
@@ -416,8 +422,17 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
           esc(label)}${n === null ? "" : ` <span>${n}</span>`}</button>`).join("")}</div>
       <div class="scan-panel-body">${on === "check" ? checksBody() : on === "ready" ? readyBody() : todayBody()}</div>`;
   };
+  // Full screen: one button under the shutter that leads to the lists
+  const pillHtml = () => {
+    const c = canCheck() ? (st.checks || []).length : 0, j = (st.jobs || []).length;
+    const text = [c && `${c} to check`, j && `${j} ready to check`].filter(Boolean).join(" · ");
+    return `<button type="button" class="scan-fs-pill${c || j ? " has-items" : ""}" data-act="lists">${esc(text || "Today's scans")}
+      <span aria-hidden="true">›</span></button>`;
+  };
   // Redrawn as each list loads, keeping the scroll position
   function drawSide() {
+    const pill = root.querySelector('[data-role="fs-pill"]');
+    if (pill) pill.innerHTML = pillHtml();
     const h = root.querySelector('[data-role="side"]');
     if (!h) return;
     const old = h.querySelector(".scan-panel-body");
@@ -426,7 +441,20 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     const b = h.querySelector(".scan-panel-body");
     if (b) b.scrollTop = top;
   }
-
+  // Full screen on or off, without redrawing (the camera keeps running)
+  function setFull(on, remember = false) {
+    st.full = !!on;
+    if (remember) writeLocal(FULL_KEY, st.full ? "1" : "0");
+    const full = st.full && st.mode === "camera";
+    root.classList.toggle("is-full", full);
+    document.body.classList.toggle("scan-full", full);
+    const b = root.querySelector('[data-act="full"]');
+    if (b) {
+      b.innerHTML = full ? I.shrink : I.expand;
+      b.setAttribute("aria-pressed", String(full));
+      b.setAttribute("aria-label", full ? "Exit full screen" : "Full screen");
+    }
+  }
   // Photos being read and saved in the background
   const queueHtml = () => {
     const q = queueState();
@@ -479,6 +507,8 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
           <div class="scan-zoom" role="group" aria-label="Zoom">${[1, 1.5, 2].map((z) =>
             `<button type="button" data-zoom="${z}" class="${z === st.zoom ? "is-on" : ""}">${z}×</button>`).join("")}</div>
           <button type="button" class="scan-torch" data-act="torch" aria-label="Torch" hidden>${I.bolt}</button>
+          ${isMobile() ? `<button type="button" class="scan-fs" data-act="full" aria-pressed="${st.full}"
+            aria-label="${st.full ? "Exit full screen" : "Full screen"}">${st.full ? I.shrink : I.expand}</button>` : ""}
         </div>
         <div class="scan-bar">
           <label class="scan-side">${I.photo}<span>Upload</span><input type="file" accept="image/*" data-role="file" hidden /></label>
@@ -490,6 +520,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
           <small>or choose files · JPG or PNG · several at once${collecting() ? ` (up to ${MAX_PAGES} pages)` : ""}</small>
           <input type="file" accept="image/jpeg,image/png,image/webp" multiple data-role="files" hidden /></label>`}
         <div data-role="queue-host">${queueHtml()}</div>
+        <div data-role="fs-pill" class="scan-fs-host">${pillHtml()}</div>
         ${isMobile() ? "" : '<p class="scan-keys">Tip: press Space to take the photo.</p>'}
       </div>
       <aside class="scan-panel" data-role="side">${panelHtml()}</aside>
@@ -669,6 +700,9 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     clearInterval(st.secTimer);
     clearInterval(st.doneTimer);
     root.classList.toggle("is-wide", st.mode === "camera");   // two columns (camera + work panel) on wide screens
+    root.classList.toggle("is-touch", isMobile());              // phones and iPads: one column, bigger camera
+    root.classList.toggle("is-full", st.full && st.mode === "camera");
+    document.body.classList.toggle("scan-full", st.full && st.mode === "camera");
     if (st.mode === "rx") {   // the prescription screen draws itself
       root.innerHTML = `${headHtml()}${bannerHtml()}<div data-role="rx"></div>`;
       mountRxResult(root.querySelector('[data-role="rx"]'),
@@ -1304,7 +1338,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     Object.assign(st, { mode: "camera", photo: null, photoUrl: "", base64: "", thumb: "", result: null, lines: [], review: null, error: "",
       fixing: -1, camErr: "", booking: null, patient: null, pickPatient: false, shooting: false,
       pages: [], pageUrls: [], pageB64: [], step: 0, busyT0: 0, todayAt: 0, pq: "", phits: [], psearching: false,
-      readAs: "", autoInfo: null, changing: false, prevMode: "", jobId: "", openJob: "", jobsAt: 0 });
+      readAs: "", autoInfo: null, changing: false, prevMode: "", jobId: "", openJob: "", jobsAt: 0, full: fullDefault() });
     render();
   }
 
@@ -1530,6 +1564,14 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     const act = b.dataset.act;
     if (act === "cam-retry") { st.camErr = ""; stopCamera(); render(); }
     else if (act === "shoot") shoot();
+    else if (act === "full") setFull(!st.full, true);   // remembered on this device
+    else if (act === "lists") {   // out of full screen until the next scan, then down to the lists
+      setFull(false);
+      requestAnimationFrame(() => {
+        const p = root.querySelector('[data-role="side"]');
+        if (p) p.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
     else if (act === "torch" && st.track) {
       st.torch = !st.torch;
       st.track.applyConstraints({ advanced: [{ torch: st.torch }] }).catch(() => {});
@@ -1667,6 +1709,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     offQueue();
     stopCamera();
     letSleep();
+    document.body.classList.remove("scan-full");
     clearInterval(autoTimer);
     clearInterval(st.secTimer);
     clearInterval(st.doneTimer);
