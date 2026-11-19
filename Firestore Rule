@@ -1760,7 +1760,19 @@ match /inv_count_drafts/{id} {
           || (can('scanner.rx') && (resource == null || request.resource.data.names.hasAll(resource.data.names))));
       allow delete: if false;
     }
-    
+    // Older records (synced from Sheets): the category staff corrected. The record itself isn't changed.
+    match /record_categories/{id} {
+      allow read: if isStaff();
+      allow create, update: if can('records.move')
+        && request.resource.data.keys().hasOnly(['kind', 'recordId', 'group', 'changes', 'updatedAt', 'updatedBy', 'updatedByUid'])
+        && request.resource.data.kind in ['treatment', 'consent']
+        && request.resource.data.recordId is string && request.resource.data.recordId.size() > 0
+        && id == request.resource.data.kind + '__' + request.resource.data.recordId
+        && request.resource.data.group in ['wr', 'filler', 'cc', 'mn', 'firm', 'peel', 'body', 'other']
+        && request.resource.data.changes is list && request.resource.data.changes.size() <= 50
+        && request.resource.data.updatedByUid == request.auth.uid;
+      allow delete: if false;
+    }
     // ===================== Safety net =====================
     // Anything not allowed by a rule above stays locked
     // (this includes staff_roles and staff_audit, which only Apps Script writes)

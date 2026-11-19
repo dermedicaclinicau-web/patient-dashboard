@@ -92,6 +92,28 @@ async function portalRecords(patient) {
 
 const byDateDesc = (a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0);
 
+// Older records: categories staff corrected (record_categories/<kind>__<id>). A problem here never stops the records showing.
+async function categoryFixes(ids) {
+  const out = new Map();
+  const list = [...new Set(ids)];
+  const chunks = [];
+  for (let i = 0; i < list.length; i += 30) chunks.push(list.slice(i, i + 30));
+  try {
+    const snaps = await Promise.all(chunks.map((c) => getDocs(query(collection(db, "record_categories"), where("recordId", "in", c)))));
+    snaps.forEach((s) => s.forEach((d) => out.set(d.id, d.data())));
+  } catch (err) {
+    console.warn("Category corrections not loaded:", err);
+  }
+  return out;
+}
+// A corrected category wins over the one guessed from the record's name
+function fixedCat(fixes, kind, id, title) {
+  const f = fixes.get(`${kind}__${id}`);
+  if (!f || !GROUP_KEYS.includes(f.group)) return { category: categorize(title), catFix: null };
+  const ch = Array.isArray(f.changes) ? f.changes[f.changes.length - 1] : null;
+  return { category: f.group, catFix: ch ? { from: String(ch.from || ""), by: String(ch.by || ""), at: String(ch.at || "") } : null };
+}
+
 export function fetchPatientRecords(patient) {
   return cachedRead(`records|${patient.id}|${patientIds(patient).join(",")}|${patient.name || ""}`, () => loadPatientRecords(patient));
 }
@@ -102,12 +124,13 @@ async function loadPatientRecords(patient) {
     byPatient("consent_records", patient, null),
     portalRecords(patient),
   ]);
+  const fixes = await categoryFixes([...txDocs, ...consentDocs].map((d) => d.id));
 
   const consents = consentDocs.map(({ id, data, byName }) => {
     const title = String(data["Consent Type"] || "Consent");
     return {
       id, title,
-      category: categorize(title),
+      ...fixedCat(fixes, "consent", id, title),
       date: keyDate(String(data["Record Date"] || "")) || parseRecordDate(data["Record Date"]),
       dateText: String(data["Record Date"] || ""),
       staff: String(data.Staff || ""),
@@ -124,7 +147,7 @@ async function loadPatientRecords(patient) {
     const title = String(data["Treatment Record Type"] || "Treatment record");
     return {
       id, title,
-      category: categorize(title),
+      ...fixedCat(fixes, "treatment", id, title),
       date: parseRecordDate(data["Record Date"]),
       dateText: String(data["Record Date"] || ""),
       staff: String(data.Staff || ""),

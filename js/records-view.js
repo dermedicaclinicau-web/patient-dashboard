@@ -6,7 +6,7 @@ import { patientIds } from "./patients.js";
 import { getFormVersion, listPublishedForms } from "./form-templates.js";
 import { openMoveRecordDialog, canMoveRecords } from "./record-move.js";
 import { db, auth } from "./firebase-config.js";
-import { doc, getDoc, updateDoc, arrayUnion, increment, serverTimestamp }
+import { doc, getDoc, setDoc, updateDoc, arrayUnion, increment, serverTimestamp }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { showToast } from "./utils.js";
 import { isAdmin } from "./perms.js";
@@ -352,6 +352,39 @@ export function mountRecords(root, patient, staff = null) {
       b.disabled = false;
     }
   });
+  // Category for older records: saved in record_categories, with each change kept. The record itself isn't changed.
+  grid.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-recat-legacy]");
+    if (!b || b.disabled) return;
+    e.preventDefault();
+    const kind = b.dataset.recatLegacy;
+    const r = (lists[kind] || []).find((x) => !x.portalId && x.id === b.dataset.id);
+    if (!r) return;
+    const pick = await pickCategory(r, false);
+    if (!pick || !grid.isConnected || pick.group === r.category) return;
+    b.disabled = true;
+    try {
+      const ref = doc(db, "record_categories", `${kind}__${r.id}`);
+      const snap = await getDoc(ref);
+      const prev = snap.exists() && Array.isArray(snap.data().changes) ? snap.data().changes : [];
+      const by = (staff && staff.name) || "";
+      const byUid = (auth.currentUser && auth.currentUser.uid) || "";
+      await setDoc(ref, {
+        kind, recordId: r.id, group: pick.group,
+        changes: [...prev, { from: r.category, to: pick.group, at: new Date().toISOString(), by, byUid }].slice(-50),
+        updatedAt: serverTimestamp(), updatedBy: by, updatedByUid: byUid,
+      });
+      showToast(`Moved to ${(ALL_CATS.find((c) => c.key === pick.group) || {}).title || pick.group}`);
+      reload();
+    } catch (err) {
+      console.error("Category change failed:", err);
+      showToast(err.code === "permission-denied"
+        ? "Changing the category is blocked. Check the record_categories Firestore rule has been published, and your Move records access."
+        : "Couldn't change the category. Try again.");
+    } finally {
+      b.disabled = false;
+    }
+  });
   // Edit date: correct a portal record's date. The first original date and every change are kept.
   grid.addEventListener("click", async (e) => {
     const b = e.target.closest("[data-edit-sub]");
@@ -564,7 +597,8 @@ function portalView(r) {
 }
 
 // The window for a record's type and category. Resolves with { kind, group }, or null.
-function pickCategory(r) {
+// withKind false (older records): the category only, without Type
+function pickCategory(r, withKind = true) {
   return new Promise((resolve) => {
     let picked = null;
     const suggested = categorize(r.title);
@@ -576,14 +610,14 @@ function pickCategory(r) {
         <div class="lh-dialog-head"><h3>Type &amp; category</h3>
           <p>${escapeHtml(r.title)} · ${escapeHtml(fmt(r))}</p></div>
 
-        <div class="rc-cat-sec">
+        ${withKind ? `<div class="rc-cat-sec">
           <span class="rc-cat-h">Type</span>
           <div class="rc-cat-opts is-two">${kinds.map(([k, label]) => `
             <label class="rc-cat-opt">
               <input type="radio" name="kind" value="${k}"${k === r.kind ? " checked" : ""} />
               <span>${label}</span>${k === r.kind ? "<small>Now</small>" : ""}
             </label>`).join("")}</div>
-        </div>
+        </div>` : ""}
 
         <div class="rc-cat-sec">
           <span class="rc-cat-h">Category</span>
@@ -597,7 +631,8 @@ function pickCategory(r) {
             </label>`).join("")}</div>
         </div>
 
-        <p class="fe-note">Only changes where it's listed. The form and its answers stay exactly as they are.</p>
+        <p class="fe-note">${withKind ? "Only changes where it's listed. The form and its answers stay exactly as they are."
+          : "Only changes where it's listed. The record and its PDF stay exactly as they are."}</p>
         <div class="lh-actions">
           <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
           <button type="submit" class="lh-btn is-primary">Save</button>
@@ -668,6 +703,18 @@ function dateEditedNote(r) {
 }
 const legacyMove = (kind, r) => (canMoveRecords()
   ? `<button type="button" class="rc-act" data-move-legacy="${kind}" data-id="${escapeHtml(r.id)}">${ICONS.move}Move</button>` : "");
+// Older records: which treatment it's listed under (Admins, and Move records)
+const legacyCat = (kind, r) => (canMoveRecords() || isAdmin()
+  ? `<button type="button" class="rc-act" data-recat-legacy="${kind}" data-id="${escapeHtml(r.id)}" title="Change which treatment it's listed under">${ICONS.tag}Category</button>` : "");
+// "Category changed from Wrinkle Relaxer · by Bethany · 19 Nov 2026"
+function catNote(r) {
+  const f = r.catFix;
+  if (!f) return "";
+  const from = (ALL_CATS.find((c) => c.key === f.from) || {}).title || "";
+  const d = new Date(f.at);
+  return `<p class="rc-moved">Category changed${from ? ` from ${escapeHtml(from)}` : ""}${f.by ? ` · by ${escapeHtml(f.by)}` : ""}${
+    isNaN(d) ? "" : ` · ${escapeHtml(d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }))}`}</p>`;
+}
 // Old-app Wrinkle Relaxer records: start a new portal record with the same markings
 const wrCopyBtn = (t) => (t.category === "wr" && t.recordId
   ? `<button type="button" class="rc-act" data-wrcopy="${escapeHtml(t.recordId)}" title="Open a new Wrinkle Relaxer record with these markings">${ICONS.copy}Copy and create new</button>`
@@ -750,10 +797,12 @@ function txItemHtml(t) {
       ${t.staff ? `<p class="rc-staff">${escapeHtml(t.staff)}</p>` : ""}
       ${t.matchedByName ? `<span class="task-flag neutral">Matched by name</span>` : ""}
       ${movedNote(t)}
+      ${catNote(t)}
       <div class="rc-actions">
         ${viewLink(t.link)}
         ${wrCopyBtn(t)}
         ${legacyMove("treatment", t)}
+        ${legacyCat("treatment", t)}
         <button type="button" class="rc-act" data-soon="Edit record">${ICONS.edit}Edit Record</button>
         <button type="button" class="rc-act" data-soon="Rename record">${ICONS.rename}Rename</button>
         ${isAdmin() ? `<button type="button" class="rc-act danger" data-del-legacy="treatment" data-id="${escapeHtml(t.id)}">${ICONS.trash}Delete</button>` : ""}
@@ -778,9 +827,11 @@ function consentItemHtml(c) {
       ${rxBadge(c)}
       ${c.staff ? `<p class="rc-staff">${escapeHtml(c.staff)}</p>` : ""}
       ${movedNote(c)}
+      ${catNote(c)}
       <div class="rc-actions">
         ${viewLink(c.link)}
         ${legacyMove("consent", c)}
+        ${legacyCat("consent", c)}
         <button type="button" class="rc-act" data-soon="Edit consent">${ICONS.edit}Edit</button>
         ${isAdmin() ? `<button type="button" class="rc-act danger" data-del-legacy="consent" data-id="${escapeHtml(c.id)}">${ICONS.trash}Delete</button>` : ""}
       </div>
