@@ -23,6 +23,7 @@ const ALIASES = {
   "forehead": ["frontalis"],
   "frown": ["glabella", "frown lines"],
   "crows feet": ["crows", "lateral canthal"],
+  "cf": ["crows feet", "crows"],
   "dao chin": ["dao", "chin", "mentalis"],
   "bunny lines": ["nasalis", "nose"],
   "lip flip": ["lip", "orbicularis"],
@@ -276,3 +277,6 @@ export async function copyOldWrRecord({ patientId, record }) {
     fail(err && err.code === "permission-denied" ? "You don't have access to that record." : "Couldn't copy the record. Try again.");
   }
 }
+
+// Shared with wr-recent.js (the "treated in the last 6 weeks" check)
+export { readOld as readOldWr, pictureFor as wrPictureFor };

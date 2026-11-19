@@ -14072,3 +14072,7 @@ body.scan-full { overflow: hidden; }
 .fe-grp-pick select { border: 0; background: transparent; font: inherit; font-size: .85rem; color: #0f172a;
   padding: .15rem .3rem; cursor: pointer; max-width: 22rem; }
 .fe-grp-pick:focus-within { border-color: #0f766e; box-shadow: 0 0 0 3px rgba(15, 118, 110, .15); }
+
+/* Wrinkle Relaxer: "treated recently" pop-up */
+.wr-again .lh-dialog-head h3::before { content: "⚠ "; color: #b45309; }
+.wr-again-q { margin: .35rem 0 0; font-size: 1rem; }

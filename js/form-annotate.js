@@ -536,6 +536,32 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     },
     // The first number set's total (for Calculations and Consumables)
     total: primary ? () => sum(marksOf(primary)) : null,
+    // Every mark with one tag gets the other (e.g. "treatment" → "touchup", matched by tag name), and new marks follow.
+    // Each change can be undone. → how many marks changed
+    retag: (from, to) => {
+      const k = (t) => String(t || "").toLowerCase().replace(/[^a-z]/g, "");
+      const idx = (s, want) => tagsOf(s).findIndex((t) => k(t) === k(want));
+      let n = 0;
+      ops.forEach((o, i) => {
+        if (o.type !== "mark") return;
+        const s = order[o.si];
+        const a = idx(s, from), b = idx(s, to);
+        if (a < 0 || b < 0 || (o.tag || 0) !== a) return;
+        const by = { ...o, tag: b };
+        ops[i] = by;
+        history.push({ replaced: o, by });
+        n++;
+      });
+      order.forEach((s, si) => {
+        const a = idx(s, from), b = idx(s, to);
+        if (a < 0 || b < 0 || tagSel[si] !== a) return;
+        tagSel[si] = b;
+        const btn = box.querySelector(`[data-tag="${si}:${b}"]`);
+        if (btn) pickOne(btn.closest("[data-setrow]").querySelectorAll("[data-tag]"), btn);
+      });
+      if (n) changed(); else redraw();
+      return n;
+    },
     markData: marking ? () => {
       const setsOut = order.map(setFigures);
       const prim = primary ? setsOut.find((x) => x.id === primary.id) : null;

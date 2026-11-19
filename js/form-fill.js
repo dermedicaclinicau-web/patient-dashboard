@@ -37,6 +37,7 @@ export { readField, applyVisibility, answerTagText, fieldTagValues } from "./for
 import { loadClinicalAlerts, clinicalBannerHtml, allergyChipText } from "./clinical-alerts.js";
 import { can, isAdmin } from "./perms.js";
 import { setFormTab } from "./tab-icon.js";
+import { loadRecentWr, recentTreatment, wrPics, tagQuestion, wrAgo } from "./wr-recent.js";
 import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, updateDoc, arrayUnion, increment, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
@@ -446,6 +447,37 @@ function showSavedViews(sheet, fields, sub, staff) {
       if (host) host.outerHTML = consumablesViewHtml(v) + '<p class="fe-help">Products used are corrected with the button below (amount, product, or which batch it came from), so stock follows the change.</p>';
       renderUsage(w, sub, staff);   // the live stock record, with Correct products used…
     }
+  });
+}
+
+// "Crow's feet was treated recently": Treatment or Touch-up? Resolves "treatment", "touchup", or null (Back to the form)
+function askWrArea(f, hit, { canCancel = false } = {}) {
+  return new Promise((resolve) => {
+    let out = null;
+    const area = String(f.label || f.fileName || "This area").trim();
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog fe-confirm wr-again";
+    dlg.innerHTML = `<div class="lh-form">
+      <div class="lh-dialog-head"><h3>${esc(area)} was treated recently</h3>
+        <p>Treated on <strong>${esc(niceDate(hit.date))}</strong> (${esc(wrAgo(hit.days))})${hit.by ? ` by ${esc(hit.by)}` : ""}.
+          ${hit.form ? `<br><small>${esc(hit.form)}</small>` : ""}</p></div>
+      <p class="wr-again-q">Is today a <strong>Treatment</strong> or a <strong>Touch-up</strong>?</p>
+      <div class="lh-actions">
+        ${canCancel ? '<button type="button" class="lh-btn is-quiet" data-act="back">Back to the form</button>' : ""}
+        <button type="button" class="lh-btn" data-act="treatment">Treatment</button>
+        <button type="button" class="lh-btn is-primary" data-act="touchup">Touch-up</button>
+      </div></div>`;
+    dlg.addEventListener("cancel", (e) => { if (!canCancel) e.preventDefault(); });
+    dlg.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-act]");
+      if (!b) return;
+      out = b.dataset.act === "back" ? null : b.dataset.act;
+      dlg.close();
+    });
+    dlg.addEventListener("close", () => { dlg.remove(); resolve(out); });
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    dlg.querySelector('[data-act="touchup"]').focus();
   });
 }
 
@@ -998,6 +1030,77 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     document.addEventListener("visibilitychange", onVis);
   }
 
+  /* ---------- Wrinkle Relaxer: an area treated again within 6 weeks ---------- */
+  const isWr = !embedded && !editing && tpl.category === "treatment" && formGroup({ name: ver.name,
+    settings: { ...(ver.settings || {}), ...(tpl.settings && typeof tpl.settings.group === "string" ? { group: tpl.settings.group } : {}) } }) === "wr";
+  const wrAreas = isWr ? wrPics(fields) : [];
+  let wrRecent = null;           // fieldId -> earlier treatments, once loaded
+  const wrAsked = new Map();     // fieldId -> the answer given on this form (it isn't asked again)
+  let wrBusy = false, wrTimer = 0;
+  const wrKey = (s) => String(s || "").toLowerCase().replace(/[^a-z]/g, "");
+  const recordDateNow = () => {
+    const rd = fields.find((f) => f.type === "record_date" && shown.has(f.id));
+    const el = rd && wrap(rd.id) && wrap(rd.id).querySelector(".fe-in");
+    return (el && /^\d{4}-\d{2}-\d{2}$/.test(el.value) ? el.value : "") || todayIso();
+  };
+  // Is this area set to Treatment now? Its "Treatment or touch-up?" answer, else the tags on its marks
+  function wrChoice(f) {
+    const w = wrap(f.id);
+    if (!w || w.hidden || !shown.has(f.id)) return "";
+    const q = tagQuestion(f);
+    const a = q ? readImageQs(f, w).find((x) => x.id === q.id) : null;
+    if (a) return wrKey(a.value) === "treatment" ? "treatment" : "touchup";
+    const an = annots[f.id];
+    const md = an && an.markData ? an.markData() : null;
+    return md && md.marks.some((m) => wrKey(m.tag) === "treatment") ? "treatment" : "";
+  }
+  // Areas set to Treatment that were treated in the 6 weeks before this record, not yet answered: [{ f, hit }]
+  const wrClashes = () => (wrRecent ? wrAreas.map((f) => {
+    if (wrAsked.has(f.id) || wrChoice(f) !== "treatment") return null;
+    const hit = recentTreatment(wrRecent.get(f.id), recordDateNow());
+    return hit ? { f, hit } : null;
+  }).filter(Boolean) : []);
+  // Touch-up: the answer in the bar and the marks already placed both change
+  function wrToTouchup(f) {
+    const w = wrap(f.id);
+    const q = tagQuestion(f);
+    const opt = q && (q.options || []).find((o) => wrKey(o) === "touchup");
+    if (w && q && opt) {
+      writeImageQs(f, w, [...readImageQs(f, w).filter((x) => x.id !== q.id),
+        { id: q.id, label: q.label, value: opt, ...(q.type === "checks" ? { values: [opt] } : {}) }]);
+    }
+    const an = annots[f.id];
+    if (an && an.retag) an.retag("treatment", "touchup");
+    noteChange();
+    refresh();
+  }
+  // canCancel: at Save, "Back to the form" stops the save. → false if stopped
+  async function wrResolve(list, canCancel) {
+    for (const { f, hit } of list) {
+      const pick = await askWrArea(f, hit, { canCancel });
+      if (!root.isConnected || !pick) return false;
+      wrAsked.set(f.id, pick);
+      if (pick === "touchup") wrToTouchup(f);
+    }
+    return true;
+  }
+  function wrCheckSoon() {
+    clearTimeout(wrTimer);
+    wrTimer = setTimeout(async () => {
+      if (wrBusy || saving || !root.isConnected || document.querySelector("dialog[open]")) return;
+      const list = wrClashes();
+      if (!list.length) return;
+      wrBusy = true;
+      try { await wrResolve(list, false); } finally { wrBusy = false; }
+    }, 400);
+  }
+  if (wrAreas.length) {
+    loadRecentWr(patient, fields, { templateId: tid })
+      .then((m) => { wrRecent = m; wrCheckSoon(); })
+      .catch((err) => { console.warn("Earlier Wrinkle Relaxer treatments not checked:", err); wrRecent = new Map(); });
+    sheet.addEventListener("input", wrCheckSoon);   // a Treatment answer or mark placed
+  }
+
   /* ---------- Unsaved answers kept on this device ---------- */
   // Never kept: things that can't be stored safely or come back by themselves
   const NO_DRAFT = ["photo", "signature", "image", "aftercare", "consumables", "consent_status",
@@ -1422,6 +1525,17 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     const list = problems();
     showProblems(list);
     if (list.length) return;
+
+    // Wrinkle Relaxer: any area set to Treatment that was treated in the last 6 weeks
+    if (wrAreas.length) {
+      if (!wrRecent) {
+        msgEl.textContent = "Checking earlier Wrinkle Relaxer treatments…";
+        wrRecent = await loadRecentWr(patient, fields, { templateId: tid }).catch(() => new Map());
+        msgEl.textContent = "";
+      }
+      const clash = wrClashes();
+      if (clash.length && !(await wrResolve(clash, true))) return;
+    }
 
     // Only questions that are showing are saved
     const answers = {}, signatures = {};
