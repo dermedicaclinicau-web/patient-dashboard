@@ -9,7 +9,7 @@
 import { listProducts, INV_CATEGORIES, plural } from "./inventory-api.js";
 import { preparePhoto, readBillingSheet, readDocket, readPrescription, startReview, reviewBilling, saveBillingScan,
   earlierScans, findBooking, money, searchPatientsQuick, todaysScans, readAuto, smallCopy,
-  setScanJob, newScanJobId, parkScan, scanJobs, openScanJob, finishScanJob, staffList, warmPatientSearch,
+  setScanJob, newScanJobId, parkScan, scanJobs, openScanJob, finishScanJob, staffList, warmPatientSearch, listOpenPos,
   scansToCheck, updateScan} from "./scanner-api.js";
 import { queueScan, queueState, onQueueChange, resumeQueue, retryStuck, dropStuck } from "./scanner-queue.js";
 import { autoRx } from "./scanner-rx-auto.js";
@@ -233,8 +233,13 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
   }
 
   // The product list (with Shelf stock)
-  let products = [];
-  const productsReady = listProducts().then((list) => { products = list.filter((p) => p.active); })
+  // Dockets also get products made inactive since they were ordered (only ones still on an open order)
+  let products = [], docketProducts = [];
+  const productsReady = Promise.all([listProducts(), listOpenPos().catch(() => [])]).then(([list, pos]) => {
+    products = list.filter((p) => p.active);
+    const onOrder = new Set(pos.flatMap((po) => (po.lines || []).map((l) => l.productId)).filter(Boolean));
+    docketProducts = list.filter((p) => p.active || onOrder.has(p.id));
+  })
     .catch((err) => console.error("Scanner: the product list didn't load", err));
   warmUpLogin();   // wakes Apps Script while the photo is being lined up, so the first scan isn't slow
   resumeQueue(staff);   // photos left from before carry on saving
@@ -612,8 +617,12 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     if (st.mode === "docket") {   // the docket screen draws itself
       root.innerHTML = `${headHtml()}${bannerHtml()}<div data-role="docket"></div>`;
       mountDocketResult(root.querySelector('[data-role="docket"]'),
-        { photo: st.photo, photoUrl: st.photoUrl, result: st.result, products, staff, onAgain: again,
-          onSaved: () => { pendingClear(); if (st.openJob) { finishScanJob(st.openJob); st.openJob = ""; } } });
+        { photo: st.photo, photoUrl: st.photoUrl, result: st.result, products: docketProducts, staff, onAgain: again,
+          onSaved: () => {
+            const job = st.openJob;
+            st.openJob = "";
+            return Promise.all([pendingClear(), job ? finishScanJob(job) : null]);
+          } });
       return;
     }
     // A note being typed survives a redraw (e.g. after changing a quantity)
@@ -867,6 +876,8 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
       st.base64 = prep.base64;
       st.thumb = prep.thumb || "";
       st.photoUrl = URL.createObjectURL(prep.blob);
+      // Docket pages are also read one by one at full size, so batch numbers and small print stay readable
+      st.pageB64 = blobs.length > 1 ? await Promise.all(blobs.map((b) => preparePhoto(b, 1600, 0.8).then((x) => x.base64))) : [];
     } catch (err) {
       st.error = (err && err.message) || "That photo couldn't be used. Try again.";
       st.mode = "error";
@@ -906,7 +917,9 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     }
     await productsReady;
     if (!products.length) throw new Error("Couldn't load the product list. Check your connection and try again.");
-    return kind === "docket" ? readDocket(st.base64, products) : readBillingSheet(st.base64, products);
+    return kind === "docket"
+      ? readDocket(st.pageB64 && st.pageB64.length > 1 ? st.pageB64 : st.base64, docketProducts)
+      : readBillingSheet(st.base64, products);
   }
 
   // Gets that kind's result screen ready
@@ -1191,7 +1204,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     pendingClear();   // saved, or staff chose to start again
     Object.assign(st, { mode: "camera", photo: null, photoUrl: "", base64: "", thumb: "", result: null, lines: [], review: null, error: "",
       fixing: -1, camErr: "", booking: null, patient: null, pickPatient: false, shooting: false,
-      pages: [], pageUrls: [], step: 0, busyT0: 0, todayAt: 0, pq: "", phits: [], psearching: false,
+      pages: [], pageUrls: [], pageB64: [], step: 0, busyT0: 0, todayAt: 0, pq: "", phits: [], psearching: false,
       readAs: "", autoInfo: null, changing: false, prevMode: "", jobId: "", openJob: "", jobsAt: 0 });
     render();
   }

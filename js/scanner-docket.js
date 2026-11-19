@@ -110,6 +110,10 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
       else flags.push(["warn", "Extra: not on this order"]);
     } else if (!p) flags.push(["bad", "Not matched to a product"]);
     if (p && !l.skip && !l.fixed && l.conf < 0.6) flags.push(["warn", "Check this is the right product"]);
+    if (p && !l.skip && !l.fixed && l.codeClash) {
+      flags.push(["warn", `The code ${l.code} belongs to ${(byId.get(l.codeClash) || {}).name || "another product"}: check which it is`]);
+    }
+    if (!l.skip && l.qtyCheck) flags.push(["warn", `The batch quantities don't add up: ${l.qtyCheck}`]);
     if (!l.skip && !l.qty) flags.push(["warn", "None supplied (back-ordered?)"]);
     if (p && p.tracked && !l.skip && l.qty) {
       if (!String(l.batch || "").trim()) flags.push(["warn", `${batchName(p)} not read: enter it from the docket`]);
@@ -412,6 +416,7 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
         text: l.text, code: l.code, qty: l.qty, unit: l.unit,
         batch: tracked ? String(l.batch || "").trim() : "", expiry: tracked ? fullExpiry(l.expiry) : "",
         edited: l.edited === true,
+        formQty: l.formQty ?? null, toShelf: l.toShelf ?? null, toJt: l.toJt ?? null,   // Dermedica form columns
         extra: !!po && !(l.productId && on.has(l.productId)),   // came in the box, not on the order
         skip: l.skip === true,                                  // staff chose not to receive / move it
       };
@@ -456,12 +461,17 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
         docketNumber: s.review.docketNumber, supplier: s.review.supplier,
         receivedBy: w ? w.name : "", receivedByUid: s.recvUid, receivedAt: recvDate().toISOString(), note: s.note,
         lines: lines.filter((l) => !l.extra && !l.skip && l.productId && l.qty > 0)
-          .map((l) => ({ productId: l.productId, qty: l.qty, unit: l.unit, batch: l.batch, expiry: l.expiry })),
+          .map((l) => ({ productId: l.productId, qty: l.qty, unit: l.unit, batch: l.batch, expiry: l.expiry,
+            formQty: l.formQty, toShelf: l.toShelf, toJt: l.toJt })),
+        formType: s.review.formType,
         // Not on the order, but received too: the receive page shows them with Shelf | JT storage boxes
         extras: lines.filter((l) => l.extra && !l.skip && l.productId && l.qty > 0)
-          .map((l) => ({ productId: l.productId, qty: l.qty, unit: l.unit, batch: l.batch, expiry: l.expiry, text: l.text })),
+          .map((l) => ({ productId: l.productId, qty: l.qty, unit: l.unit, batch: l.batch, expiry: l.expiry, text: l.text,
+            toShelf: l.toShelf, toJt: l.toJt })),
       }));
-      if (onSaved) onSaved();   // finished: not offered again as unfinished, and off Ready to check
+      // Finished: not offered again as unfinished, and off Ready to check. Waited for (up to 3 seconds),
+      // because opening the order next can leave the page before this device has forgotten the scan.
+      if (onSaved) await Promise.race([Promise.resolve(onSaved()).catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
       showToast(`Docket saved. Opening ${po.number || "the order"} to receive it.`);
       location.hash = `#/inventory/receive/${encodeURIComponent(po.id)}`;
     } catch (err) {
@@ -522,6 +532,7 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
       await markDocketTransferred(s.scanId, res).catch((err) => console.warn("Scan not marked as transferred:", err));
       res.releases.forEach((r) => callApi({ action: "inventory", op: "notifyReleaseUpdate", releaseId: r.id })
         .catch((err) => console.warn("Release email failed:", err)));
+      if (onSaved) onSaved();   // finished: not offered again as unfinished
       const n = res.moved.reduce((a, m) => a + m.qty, 0);
       showToast(`${plural(n, "item")} moved to the Shelf${res.releases.length
         ? ` · ${res.releases.length} JT request${res.releases.length === 1 ? "" : "s"} approved`

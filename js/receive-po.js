@@ -431,32 +431,123 @@ export async function mountReceivePo(root, poId, staff) {
     }
   }
 
-  // From the Scanner: what the docket says arrived, its batches and expiries, ready to check
+  // From the Scanner: what the docket says arrived, its batches and expiries, and where it goes, ready to check
   function applyPrefill(pre) {
     fromDocket = pre;
+    const notes = [];   // things to check, shown at the top
+    const oldestFirst = (a, b) => (a.expiry || "9999").localeCompare(b.expiry || "9999");
+
+    // The Dermedica form's To Store Rm (Shelf) and To JT, in single items, once per product. A blank one takes the rest.
+    const formSplit = (list, total) => {
+      if (pre.formType !== "dermedica") return null;   // supplier dockets don't have these columns
+      const first = (k) => { const d = list.find((x) => Number.isInteger(x[k]) && x[k] >= 0); return d ? d[k] : null; };
+      let shelf = first("toShelf"), jt = first("toJt");
+      if (shelf === null && jt === null) return null;
+      if (!shelf && !jt) return null;                  // both blank or 0: nothing written, so it goes where it was ordered for
+      if (shelf === null) shelf = Math.max(0, total - jt);
+      if (jt === null) jt = Math.max(0, total - shelf);
+      return shelf + jt === total ? { shelf, jt } : { bad: true, shelf, jt };
+    };
+
+    // Each docket line in single items. A unit read off the docket decides it. Without one (or one that isn't this
+    // product's), whichever reading fits what's still to come, and it's flagged to check.
+    function stockUnitsFor(list, l, due) {
+      const pack = Math.max(1, Number(l.packSize) || 1);
+      if (pack === 1) return { units: list.map((d) => d.qty) };
+      const known = (d) => sameUnit(d.unit, l.stockUnit) || sameUnit(d.unit, l.orderUnit);
+      if (list.every(known)) return { units: list.map((d) => stockUnitsOf(d, l)) };
+      const raw = list.reduce((a, d) => a + d.qty, 0);
+      const asUnits = raw > due && raw <= due * pack;   // more boxes than are coming, but the right number of single items
+      return {
+        units: list.map((d) => (known(d) ? stockUnitsOf(d, l) : asUnits ? d.qty : d.qty * pack)),
+        guess: `the docket says ${raw} with no unit, so it's read as ${asUnits ? plural(raw, l.stockUnit)
+          : `${plural(raw, l.orderUnit)} (${plural(raw * pack, l.stockUnit)})`}. Check the box.`,
+      };
+    }
+
+    // The next n from the batches, oldest expiry first
+    const take = (queue, n) => {
+      const out = [];
+      while (n > 0 && queue.length) {
+        const b = queue[0], k = Math.min(n, b.n);
+        out.push({ batch: b.batch, expiry: b.expiry, n: k });
+        b.n -= k; n -= k;
+        if (!b.n) queue.shift();
+      }
+      return out;
+    };
+    // [{ loc, batch, expiry, n }] → rows, one per batch with its Shelf and JT boxes
+    const rowsFrom = (parts, tr) => {
+      const m = new Map();
+      parts.forEach((x) => {
+        const k = tr ? `${x.batch}|${x.expiry}` : "-";
+        const r = m.get(k) || { ...newRow(x.loc, 0), batch: tr ? x.batch : "", expiry: tr ? x.expiry : "" };
+        r.q[x.loc] = int(r.q[x.loc]) + x.n;
+        m.set(k, r);
+      });
+      return [...m.values()];
+    };
+    const queueOf = (list, units) => list.map((d, i) => ({ batch: String(d.batch || ""), expiry: fullExpiry(d.expiry), n: units[i] }))
+      .sort(oldestFirst);
+    // The form's split checked against the docket: if it adds up to the docket's number, the docket counts single items
+    const unitsAndSplit = (list, l, due, name) => {
+      const raw = list.reduce((a, d) => a + d.qty, 0);
+      const rawSplit = formSplit(list, raw);
+      const u = rawSplit && !rawSplit.bad ? { units: list.map((d) => d.qty) } : stockUnitsFor(list, l, due);
+      const total = u.units.reduce((a, n) => a + n, 0);
+      const split = rawSplit && !rawSplit.bad ? rawSplit : formSplit(list, total);
+      if (u.guess) notes.push(`${name}: ${u.guess}`);
+      if (split && split.bad) {
+        notes.push(`${name}: the form says ${split.shelf} to the Shelf and ${split.jt} to JT storage, but ${plural(total, l.stockUnit)} arrived. `
+          + "It's put where it was ordered for: check it.");
+      }
+      return { units: u.units, total, split: split && !split.bad ? split : null };
+    };
+
+    // Lines on the order
     const byProduct = new Map();
     (pre.lines || []).forEach((d) => {
       if (d.productId && d.qty > 0) byProduct.set(d.productId, [...(byProduct.get(d.productId) || []), d]);
     });
     let filled = 0;
     byProduct.forEach((list, pid) => {
-      const l = po.lines.find((x) => x.productId === pid && left(x) > 0);
-      if (!l) return;
-      const units = list.map((d) => stockUnitsOf(d, l));
-      const total = units.reduce((a, n) => a + n, 0);
-      // Order units arrived (rounded up). If the docket isn't a whole number of packs,
-      // the "put away" check shows the mismatch so it can be fixed before saving.
-      setArrived(l, Math.max(1, Math.ceil(total / l.packSize)));
-      const s = state.get(l.key);
-      s.rows = tracked(l)
-        ? list.map((d, i) => ({ ...newRow(home(l), units[i]), batch: String(d.batch || ""), expiry: fullExpiry(d.expiry) }))
-        : [newRow(home(l), total)];
-      drawSplits(l);
-      filled++;
-    });
-    
+      const lines = po.lines.filter((x) => x.productId === pid && left(x) > 0);   // can be one for the Shelf and one for JT
+      if (!lines.length) return;
+      const l0 = lines[0];
+      const { units, total, split } = unitsAndSplit(list, l0, lines.reduce((a, x) => a + left(x), 0), l0.name);
 
-    // Extra items (on the docket, not on this order): received in stock units, Shelf or JT storage
+      // How many go on each order line, and to which place
+      const want = new Map(lines.map((x) => [x.key, { shelf: 0, jt: 0 }]));
+      const room = (x) => Math.max(0, left(x) * x.packSize - want.get(x.key).shelf - want.get(x.key).jt);
+      if (split) {
+        LOCATIONS.forEach(({ key: loc }) => {
+          let n = split[loc];
+          const order = [...lines.filter((x) => home(x) === loc), ...lines.filter((x) => home(x) !== loc)];
+          order.forEach((x, i) => { const k = i === order.length - 1 ? n : Math.min(n, room(x)); want.get(x.key)[loc] += k; n -= k; });
+        });
+      } else {
+        let n = total;
+        lines.forEach((x, i) => { const k = i === lines.length - 1 ? n : Math.min(n, room(x)); want.get(x.key)[home(x)] += k; n -= k; });
+      }
+
+      // The batches: the Shelf is filled first, so it gets the oldest expiry
+      const queue = queueOf(list, units);
+      const parts = new Map(lines.map((x) => [x.key, []]));
+      LOCATIONS.forEach(({ key: loc }) => lines.forEach((x) => {
+        take(queue, want.get(x.key)[loc]).forEach((b) => parts.get(x.key).push({ ...b, loc }));
+      }));
+      lines.forEach((x) => {
+        const n = want.get(x.key).shelf + want.get(x.key).jt;
+        if (!n) return;
+        // Order units arrived (rounded up). Not a whole number of packs: the "put away" check shows it.
+        setArrived(x, Math.max(1, Math.ceil(n / x.packSize)));
+        state.get(x.key).rows = rowsFrom(parts.get(x.key), tracked(x));
+        drawSplits(x);
+        filled++;
+      });
+    });
+
+    // Extra items (on the docket, not on this order): received in single items, Shelf or JT storage
     const extraBy = new Map();
     (pre.extras || []).forEach((d) => {
       if (prod.get(d.productId) && d.qty > 0) extraBy.set(d.productId, [...(extraBy.get(d.productId) || []), d]);
@@ -469,15 +560,14 @@ export async function mountReceivePo(root, poId, staff) {
         packSize: 1, stockUnit: p.stockUnit, orderUnit: p.stockUnit, loc: p.countWhere === "jt" ? "jt" : "shelf",
         qty: 0, received: 0, dosePer: p.dosePer, doseUnit: p.doseUnit,
       };
-      const units = list.map((d) => stockUnitsOf(d, { packSize: p.packSize, stockUnit: p.stockUnit, orderUnit: p.orderUnit }));
-      const total = units.reduce((a, n) => a + n, 0);
+      const { units, total, split } = unitsAndSplit(list,
+        { packSize: p.packSize, stockUnit: p.stockUnit, orderUnit: p.orderUnit }, 0, `${p.name} (extra)`);
+      const where = split || { shelf: 0, jt: 0, [home(l)]: total };
+      const queue = queueOf(list, units);
+      const parts = [];
+      LOCATIONS.forEach(({ key: loc }) => take(queue, where[loc]).forEach((b) => parts.push({ ...b, loc })));
       extras.push(l);
-      state.set(l.key, {
-        arrived: total,
-        rows: p.tracked
-          ? list.map((d, i) => ({ ...newRow(home(l), units[i]), batch: String(d.batch || ""), expiry: fullExpiry(d.expiry) }))
-          : [newRow(home(l), total)],
-      });
+      state.set(l.key, { arrived: total, rows: rowsFrom(parts, p.tracked) });
     });
     drawExtras();
     const dn = $('[data-role="docketNo"]');
@@ -492,7 +582,8 @@ export async function mountReceivePo(root, poId, staff) {
       when && !isNaN(when) ? ` · ${esc(when.toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }))}` : ""}.
       ${filled ? `${filled} line${filled === 1 ? "" : "s"} filled in.` : "None of the docket's products are still to come on this order."}
       ${extras.length ? `${extras.length} extra item${extras.length === 1 ? "" : "s"} not on the order, below.` : ""}
-      Check the numbers, then press Receive stock.</p>`);
+      Check the numbers, then press Receive stock.</p>${notes.length
+      ? `<p class="rcv-banner is-bad">${notes.map(esc).join("<br>")}</p>` : ""}`);
   }
 
   const pre = takeDocketPrefill(po.id);

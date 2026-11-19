@@ -1164,6 +1164,22 @@ export async function receivePo(poId, receipt, staff) {
       qty: Math.max(0, parseInt(s.qty, 10) || 0),
     }))
     .filter((s) => s.qty);
+  // A batch read or typed differently ("AB 123" / "ab123") goes into the batch already saved, not a new one
+  const knownBatch = new Map();   // productId → Map(batch without spaces or capitals → batch as saved)
+  try {
+    const pre = await getDoc(poRef);
+    const ids = new Set([
+      ...((pre.exists() && Array.isArray(pre.data().lines)) ? pre.data().lines : []).map((l) => String(l.productId || "")),
+      ...(Array.isArray(receipt.extras) ? receipt.extras : []).map((x) => clip(x.productId, 60)),
+    ].filter(Boolean));
+    await Promise.all([...ids].map(async (pid) => {
+      const snap = await getDocs(query(collection(db, "inv_lots"), where("productId", "==", pid)));
+      const m = new Map();
+      snap.docs.forEach((d) => { const b = String(d.data().batch || ""); if (b && !m.has(normBatch(b))) m.set(normBatch(b), b); });
+      knownBatch.set(pid, m);
+    }));
+  } catch (err) { console.warn("Existing batches not read:", err); }
+  const sameBatch = (pid, b) => (knownBatch.get(pid) || new Map()).get(normBatch(b)) || b;
   let result = null;
 
   await runTransaction(db, async (tx) => {
@@ -1214,7 +1230,7 @@ export async function receivePo(poId, receipt, staff) {
     work.forEach((w) => {
       const p = prod.get(w.line.productId);
       if (!p) { w.splits = []; return; }                       // free-text line: ticked off, no stock
-      w.splits = w.splits.map((s) => ({ ...s, batch: p.tracked ? s.batch : "", expiry: p.tracked ? s.expiry : "" }));
+      w.splits = w.splits.map((s) => ({ ...s, batch: p.tracked ? sameBatch(p.id, s.batch) : "", expiry: p.tracked ? s.expiry : "" }));
       if (p.tracked && w.splits.some((s) => !s.batch || !s.expiry)) {
         throw new Error(`${p.name} needs a ${batchName(p).toLowerCase()} number and expiry date.`);
       }
@@ -1223,7 +1239,7 @@ export async function receivePo(poId, receipt, staff) {
       const p = prod.get(x.productId);
       x.name = p.name;
       x.unit = p.stockUnit;
-      x.splits = x.splits.map((s) => ({ ...s, batch: p.tracked ? s.batch : "", expiry: p.tracked ? s.expiry : "" }));
+      x.splits = x.splits.map((s) => ({ ...s, batch: p.tracked ? sameBatch(x.productId, s.batch) : "", expiry: p.tracked ? s.expiry : "" }));
       const put = x.splits.reduce((a, s) => a + s.qty, 0);
       if (put !== x.qty) throw new Error(`${p.name} (extra item): ${plural(x.qty, p.stockUnit)} arrived but ${put} have been put away.`);
       if (p.tracked && x.splits.some((s) => !s.batch || !s.expiry)) {
