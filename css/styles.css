@@ -13977,7 +13977,8 @@ button.fr-join:hover { text-decoration: underline; }
 }
 
 /* Scanner: camera and work panel (To check · Ready to check · Today) */
-.scan-desk { display: grid; gap: 20px; }
+.scan-desk { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+.scan-desk-main, .scan-panel { min-width: 0; }
 .scan-panel { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 12px; margin-top: 4px; }
 .scan-panel-tabs { display: flex; gap: 4px; padding: 3px; margin-bottom: 10px; background: #f1f5f9; border-radius: 10px; }
 .scan-panel-tab { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; border: 0; background: none; padding: 7px 8px;

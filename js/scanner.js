@@ -224,6 +224,8 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
   if (releaseCamera) releaseCamera();   // an earlier Scanner (the page drawn again) lets go of the camera
   const root = document.createElement("section");
   root.className = "page scan";
+  const app = !kindPicker;   // the Dermedica Scan app (scan.html): simpler screen, Auto always on
+  if (app) root.classList.add("is-app");
   container.replaceChildren(root);
   // Which kinds of scan this person can do (Staff → Roles & access)
   // With two or more, "Auto-detect" works out which one the photo is
@@ -250,14 +252,14 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
 
   const savedKind = readLocal(KIND_KEY);
   // Phones and iPads: the camera fills the screen. On in the portal unless turned off; off in the Scan app unless turned on.
-  const fullDefault = () => isMobile() && (kindPicker ? readLocal(FULL_KEY) !== "0" : readLocal(FULL_KEY) === "1");
+  const fullDefault = () => !app && isMobile() && readLocal(FULL_KEY) !== "0";
   const st = {
     mode: "camera", stream: null, track: null, starting: false, zoom: 1, hw: null, torch: false, canTorch: false, canFocus: false,
     camErr: "", photo: null, photoUrl: "", base64: "", thumb: "", result: null, lines: [], review: null, error: "", fixing: -1, busy: false,
     booking: null, patient: null, pickPatient: false, shooting: false,
     kind: KINDS.some(([k]) => k === savedKind) ? savedKind : KINDS[0][0],
     pages: [], pageUrls: [],                      // docket pages taken so far
-    auto: readLocal(AUTO_KEY) === "1",
+    auto: app || readLocal(AUTO_KEY) === "1",   // always on in the Scan app
     pendingInfo: null, readThisSession: false,    // an unfinished scan from before
     today: null, todayAt: 0, todayOpen: false,    // today's scans
     step: 0, busyT0: 0, secTimer: 0,              // progress while reading
@@ -289,6 +291,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
 
   const tipText = () => (collecting()
     ? (st.pages.length ? `Page ${st.pages.length + 1}: fit the whole page inside the frame` : "Fit the whole delivery docket inside the frame")
+    : app ? "Fit the sheet inside the corners"
     : st.kind === "auto" ? "Fit the whole billing sheet, docket or prescription inside the frame"
     : st.kind === "rx" ? "Fit the whole prescription inside the frame" : "Fit the billing sheet and the products inside the frame");
 
@@ -431,6 +434,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
   };
   // Redrawn as each list loads, keeping the scroll position
   function drawSide() {
+    drawStatus();
     const pill = root.querySelector('[data-role="fs-pill"]');
     if (pill) pill.innerHTML = pillHtml();
     const h = root.querySelector('[data-role="side"]');
@@ -490,7 +494,64 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
         </div>
       </div>`;
   };
-  const cameraHtml = () => `${headHtml()}
+  /* ---------- The Scan app: one big button, the camera filling the screen ---------- */
+  const appStatusHtml = () => {
+    const q = queueState();
+    const c = canCheck() ? (st.checks || []).length : 0;
+    const left = q.stuck
+      ? `<button type="button" class="sa-pill is-bad" data-act="q-retry">${q.stuck === 1 ? "1 scan wasn't sent" : `${q.stuck} scans weren't sent`} · Try again</button>
+         <button type="button" class="sa-pill is-quiet" data-act="q-drop">Discard</button>`
+      : `<span class="sa-pill">${esc([q.busy && `Saving ${q.busy}…`, st.today && `✓ ${st.today.length} scanned today`]
+          .filter(Boolean).join(" · ") || "Ready")}</span>`;
+    return left + (c ? `<button type="button" class="sa-pill is-warn" data-act="sa-checks">${c} to check ›</button>` : "");
+  };
+  function drawStatus() {
+    const s = root.querySelector('[data-role="sa-status"]');
+    if (s) s.innerHTML = appStatusHtml();
+    const b = root.querySelector('[data-role="sa-sheet-body"]');
+    if (b) b.innerHTML = checksBody();
+  }
+  // After each photo: a green tick over the camera for a moment, nothing to tap
+  let gotTimer = 0;
+  function gotIt() {
+    const g = root.querySelector('[data-role="got"]');
+    if (!g) return;
+    g.hidden = false;
+    g.classList.remove("is-on");
+    void g.offsetWidth;
+    g.classList.add("is-on");
+    clearTimeout(gotTimer);
+    gotTimer = setTimeout(() => { g.hidden = true; g.classList.remove("is-on"); }, 1500);
+  }
+  const appCameraHtml = () => `
+    <div data-role="pending-host">${pendingHtml()}</div>
+    ${collecting() && st.pages.length
+      ? `<button type="button" class="scan-pageback" data-act="page-back">← Back to ${plural(st.pages.length, "page")}</button>` : ""}
+    <div class="scan-vf" data-role="vf">
+      <video playsinline muted autoplay></video>
+      <div class="scan-corners" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+      <span class="scan-focus" data-role="focus" aria-hidden="true"></span>
+      <div class="scan-wait" data-role="wait" aria-live="polite">${waitHtml()}</div>
+      <p class="scan-tip" data-role="tip">${esc(tipText())}</p>
+      <div class="scan-got" data-role="got" hidden aria-live="polite">
+        <span class="scan-got-tick" aria-hidden="true">✓</span><strong>Got it</strong>
+        <p>Saving in the background.<br>Take the next one when you're ready.</p>
+      </div>
+    </div>
+    <div class="scan-bar">
+      <label class="scan-side">${I.photo}<span>Choose photo</span><input type="file" accept="image/*" data-role="file" hidden /></label>
+      <button type="button" class="scan-shoot" data-act="shoot"><span class="scan-shutter"><span></span></span>Take photo</button>
+      <button type="button" class="scan-side scan-light" data-act="torch" hidden>${I.bolt}<span>Light</span></button>
+    </div>
+    <div class="sa-status" data-role="sa-status">${appStatusHtml()}</div>
+    ${canCheck() ? `<dialog class="sa-sheet" data-role="sa-sheet" aria-label="Scans to check">
+      <div class="sa-sheet-head"><strong>To check</strong>
+        <button type="button" class="ib-tool" data-act="sa-sheet-x" aria-label="Close">×</button></div>
+      <div class="sa-sheet-body" data-role="sa-sheet-body">${checksBody()}</div>
+    </dialog>` : ""}`;
+
+  const cameraHtml = () => (app ? appCameraHtml() : deskCameraHtml());
+  const deskCameraHtml = () => `${headHtml()}
     <div class="scan-desk">
       <div class="scan-desk-main">
         <div data-role="pending-host">${pendingHtml()}</div>
@@ -699,8 +760,9 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
   function render() {
     clearInterval(st.secTimer);
     clearInterval(st.doneTimer);
-    root.classList.toggle("is-wide", st.mode === "camera");   // two columns (camera + work panel) on wide screens
-    root.classList.toggle("is-touch", isMobile());              // phones and iPads: one column, bigger camera
+    root.classList.toggle("is-cam", st.mode === "camera");
+    root.classList.toggle("is-wide", !app && st.mode === "camera");   // two columns (camera + work panel) on wide screens
+    root.classList.toggle("is-touch", !app && isMobile());              // phones and iPads: one column, bigger camera
     root.classList.toggle("is-full", st.full && st.mode === "camera");
     document.body.classList.toggle("scan-full", st.full && st.mode === "camera");
     if (st.mode === "rx") {   // the prescription screen draws itself
@@ -993,7 +1055,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     // Read and saved in the background: the camera is ready for the next one straight away
     queueScan(blob, st.kind, staff);
     st.shooting = false;
-    savedPopup();
+    if (app) gotIt(); else savedPopup();
   }
 
   // Prepares the photo (pages joined), keeps it on the device, then reads it
@@ -1385,10 +1447,16 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
   /* ===================== Auto: takes the photo when held still over a sheet ===================== */
   // Needs a movement before each photo, so it never takes the same sheet twice.
   let autoTimer = 0, lastFrame = null, stillSince = 0, armed = true, autoCanvas = null;
+  const holdHint = (on) => {
+    setHint(on ? (app ? "Hold still… taking the photo" : "Hold still…") : tipText());
+    const t = root.querySelector('[data-role="tip"]');
+    if (t) t.classList.toggle("is-hold", on);
+  };
   function autoTick() {
     const vf = root.querySelector('[data-role="vf"]');
     if (!st.auto || st.mode !== "camera" || st.shooting || !st.stream || !vf || !vf.classList.contains("is-live")
       || document.querySelector("dialog[open]")) {
+      if (stillSince) holdHint(false);
       lastFrame = null; stillSince = 0;
       return;
     }
@@ -1408,13 +1476,12 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     for (let j = 0; j < gray.length; j++) { sq += (gray[j] - mean) ** 2; diff += Math.abs(gray[j] - lastFrame[j]); }
     lastFrame = gray;
     const contrast = Math.sqrt(sq / gray.length);
-    if (diff / gray.length > 6) { armed = true; stillSince = 0; setHint(tipText()); return; }   // moving
-    if (!armed || contrast < 18) { stillSince = 0; return; }   // just taken, or nothing much in view
-    if (!stillSince) { stillSince = Date.now(); setHint("Hold still…"); return; }
-    if (Date.now() - stillSince >= 1200) { armed = false; stillSince = 0; setHint(tipText()); shoot(); }
+    if (diff / gray.length > 6) { armed = true; if (stillSince) holdHint(false); stillSince = 0; return; }   // moving
+    if (!armed || contrast < 18) { if (stillSince) holdHint(false); stillSince = 0; return; }   // just taken, or nothing in view
+    if (!stillSince) { stillSince = Date.now(); holdHint(true); return; }
+    if (Date.now() - stillSince >= 1200) { armed = false; stillSince = 0; holdHint(false); shoot(); }
   }
   autoTimer = setInterval(autoTick, 200);
-
   /* ===================== Keep the screen awake ===================== */
   let wake = null;
   async function keepAwake() {
@@ -1476,6 +1543,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
       render();
       return;
     }
+    if (e.target.matches && e.target.matches('[data-role="sa-sheet"]')) { e.target.close(); return; }   // tap outside the sheet
     const tb = e.target.closest("[data-sidetab]");
     if (tb) { st.side = tb.dataset.sidetab; drawSide(); return; }
     const ck = e.target.closest("[data-checkkind]");
@@ -1564,6 +1632,11 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     const act = b.dataset.act;
     if (act === "cam-retry") { st.camErr = ""; stopCamera(); render(); }
     else if (act === "shoot") shoot();
+    else if (act === "sa-checks") {
+      const d = root.querySelector('[data-role="sa-sheet"]');
+      if (d && !d.open) { drawStatus(); d.showModal(); loadChecks(true); }
+    }
+    else if (act === "sa-sheet-x") { const d = b.closest("dialog"); if (d) d.close(); }
     else if (act === "full") setFull(!st.full, true);   // remembered on this device
     else if (act === "lists") {   // out of full screen until the next scan, then down to the lists
       setFull(false);
@@ -1701,6 +1774,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     if (!root.isConnected) return;
     const h = root.querySelector('[data-role="queue-host"]');
     if (h) h.innerHTML = queueHtml();
+    drawStatus();
     if (type === "saved") { loadToday(true); loadChecks(true); }
     if (type === "parked") loadJobs(true);
   });
