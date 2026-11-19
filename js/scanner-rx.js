@@ -1,6 +1,6 @@
 // Scanner → Prescription: check what was read, pick the patient and products, then save to the patient.
 import { reviewRx, findRxPatient, searchPatientsQuick, rxScanExists, saveRxScan } from "./scanner-api.js";
-import { rxProductList } from "./rx-products.js";
+import { rxProductList, addRxProducts } from "./rx-products.js";
 import { dayKey } from "./inventory-api.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
@@ -8,7 +8,7 @@ import { showToast } from "./utils.js";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const TYPE_IT = "__type";   // the "Not on the list: type the name" option
 const blank = () => ({ text: "", medicine: "", product: "", custom: false, customName: "",
-  strengths: "", quantity: "", directions: "", repeats: "", conf: 1, fixed: true });
+  strengths: "", quantity: "", directions: "", repeats: "", conf: 1, fixed: true, addList: true });
 const firstLine = (s) => String(s || "").split(/\n/)[0].trim().slice(0, 150);
 
 export function mountRxResult(el, { photo, photoUrl, result, staff, onAgain }) {
@@ -52,16 +52,12 @@ export function mountRxResult(el, { photo, photoUrl, result, staff, onAgain }) {
         <button type="button" class="ib-tool is-danger" data-act="rx-remove" aria-label="Remove this item" title="Remove">×</button>
       </div>
       ${it.custom ? `<input class="fe-input rx-custom" data-rx="customName" maxlength="150" value="${esc(it.customName)}"
-          placeholder="e.g. Minomycin (minocycline) 50 mg" aria-label="Product name" />` : ""}
+          placeholder="e.g. Minomycin" aria-label="Product name" />
+        <label class="fe-check rx-addlist"><input type="checkbox" data-rx="addList"${it.addList !== false ? " checked" : ""} />
+          <span>Add to the prescription list, so it's recognised next time<small>Type the product name only, without the strength.</small></span></label>` : ""}
       ${it.text ? `<small class="muted">Written: ${esc(it.text).replace(/\n/g, " / ")}</small>` : ""}
       ${readAs ? `<small class="muted">Reads as: <strong>${esc(readAs)}</strong></small>` : ""}
       ${suggest ? `<button type="button" class="scan-pat-btn rx-use" data-act="rx-useread">Use “${esc(suggest)}”</button>` : ""}
-      <div class="rx-fields">
-        <label><span>Strengths</span><input class="fe-input" data-rx="strengths" maxlength="300" value="${esc(it.strengths)}" placeholder="e.g. 4% HQ, 2% kojic acid" /></label>
-        <label><span>Quantity</span><input class="fe-input" data-rx="quantity" maxlength="60" value="${esc(it.quantity)}" placeholder="e.g. 50g, 100" /></label>
-        <label><span>Directions</span><input class="fe-input" data-rx="directions" maxlength="300" value="${esc(it.directions)}" placeholder="e.g. Twice a day" /></label>
-        <label><span>Repeats</span><input class="fe-input" data-rx="repeats" maxlength="20" value="${esc(it.repeats)}" placeholder="0" /></label>
-      </div>
       ${fl.map(([t, m]) => `<span class="scan-flag is-${t}">${esc(m)}</span>`).join("")}
     </div>`;
   }
@@ -192,7 +188,9 @@ export function mountRxResult(el, { photo, photoUrl, result, staff, onAgain }) {
     btn.textContent = "Saving…";
     try {
       await saveRxScan({ photo, result, review, patient: st.patient, date: st.date, items, note: st.note }, staff);
-      showToast(`Saved to ${st.patient.name}'s Product Prescriptions`);
+      const toAdd = filled.filter((it) => it.custom && it.addList !== false).map((it) => it.customName.trim());
+      const added = toAdd.length ? await addRxProducts(toAdd, staff).catch((err) => { console.warn("Not added to the list:", err); return []; }) : [];
+      showToast(`Saved to ${st.patient.name}'s Product Prescriptions${added.length ? ` · ${added.join(", ")} added to the list` : ""}`);
       onAgain();
     } catch (ex) {
       console.error("Save prescription failed:", ex);
@@ -252,6 +250,7 @@ export function mountRxResult(el, { photo, photoUrl, result, staff, onAgain }) {
     const k = t.dataset.rx;
     const row = t.closest("[data-i]");
     if (!k || !row || k === "product") return;
+    if (k === "addList") { st.items[Number(row.dataset.i)].addList = t.checked; return; }
     st.items[Number(row.dataset.i)][k] = t.value;
   });
   el.addEventListener("change", (e) => {

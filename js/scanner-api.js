@@ -681,11 +681,30 @@ export async function readPrescription(base64, rxProducts) {
 const FADING_RE = /\b(hq|hydroquinone|kojic|ascorbic|dexameth\w*|dexa)\b/i;
 export function reviewRx(result, rxProducts) {
   const byLower = new Map(rxProducts.map((n) => [n.toLowerCase(), n]));
+  // Also matched from what was written: capitals, spaces and dots ignored, and "Minomycin 50mg" finds "Minomycin"
+  const rxKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const keys = rxProducts.map((n) => [rxKey(n), n]).filter(([k]) => k.length >= 4).sort((a, b) => b[0].length - a[0].length);
+  const findName = (s) => {
+    const k = rxKey(s);
+    if (!k) return "";
+    const hit = keys.find(([n]) => k === n || (n.length >= 5 && k.startsWith(n)));
+    return hit ? hit[1] : "";
+  };
+  // Also matched from what was written: capitals, spaces and dots ignored, and "Minomycin 50mg" finds "Minomycin"
+  const rxKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const keys = rxProducts.map((n) => [rxKey(n), n]).filter(([k]) => k.length >= 4).sort((a, b) => b[0].length - a[0].length);
+  const findName = (s) => {
+    const k = rxKey(s);
+    if (!k) return "";
+    const hit = keys.find(([n]) => k === n || (n.length >= 5 && k.startsWith(n)));
+    return hit ? hit[1] : "";
+  };
   const fading = byLower.get("fading cream") || "";
   const items = (result.items || []).slice(0, 20).map((it) => {
     const text = String(it.text || "").slice(0, 500);
     const strengths = String(it.strengths || "").slice(0, 300);
-    let product = byLower.get(String(it.product || "").trim().toLowerCase()) || "";
+    let product = byLower.get(String(it.product || "").trim().toLowerCase())
+      || findName(it.product) || findName(it.medicine) || findName(text.split(/\n/)[0]) || "";
     if (fading && FADING_RE.test(`${text} ${strengths}`)) product = fading;
     return {
       text, product, strengths, medicine: String(it.medicine || "").replace(/\s+/g, " ").trim().slice(0, 200),

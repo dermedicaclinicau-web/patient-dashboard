@@ -3,7 +3,7 @@
 // so a correction is one update, with the edit history kept and the first version in "original".
 import { getScan, updateScan, bookingsOn, searchPatientsQuick, money } from "./scanner-api.js";
 import { INV_CATEGORIES, dayKey } from "./inventory-api.js";
-import { rxProductList } from "./rx-products.js";
+import { rxProductList, addRxProducts } from "./rx-products.js";
 import { patientIds } from "./patients.js";
 import { can } from "./perms.js";
 import { showToast } from "./utils.js";
@@ -200,14 +200,11 @@ export async function openScanReview({ id, products = [], onChanged = () => {} }
           <option value="${TYPE_IT}"${it.custom ? " selected" : ""}>Not on the list: type the name…</option></select>
         <button type="button" class="ib-tool is-danger" data-act="item-x" aria-label="Remove this item" title="Remove">×</button>
       </div>
-      ${it.custom ? `<input class="fe-input rx-custom" data-rx="customName" maxlength="150" value="${esc(it.customName)}" placeholder="Product name" aria-label="Product name" />` : ""}
+      ${it.custom ? `<input class="fe-input rx-custom" data-rx="customName" maxlength="150" value="${esc(it.customName)}" placeholder="e.g. Minomycin" aria-label="Product name" />
+        <label class="fe-check rx-addlist"><input type="checkbox" data-rx="addList"${it.addList !== false ? " checked" : ""} />
+          <span>Add to the prescription list, so it's recognised next time<small>Type the product name only, without the strength.</small></span></label>` : ""}
       ${it.text ? `<small class="muted">Written: ${esc(it.text).replace(/\n/g, " / ")}</small>` : ""}
-      <div class="rx-fields">
-        <label><span>Strengths</span><input class="fe-input" data-rx="strengths" maxlength="300" value="${esc(it.strengths)}" /></label>
-        <label><span>Quantity</span><input class="fe-input" data-rx="quantity" maxlength="60" value="${esc(it.quantity)}" /></label>
-        <label><span>Directions</span><input class="fe-input" data-rx="directions" maxlength="300" value="${esc(it.directions)}" /></label>
-        <label><span>Repeats</span><input class="fe-input" data-rx="repeats" maxlength="20" value="${esc(it.repeats)}" /></label>
-      </div></div>`;
+      </div>`;
 
   function rxEdit() {
     return `${patientHtml()}
@@ -422,8 +419,11 @@ export async function openScanReview({ id, products = [], onChanged = () => {} }
     catch (ex) { fail(ex.message); return; }
     if (!Object.keys(res.changes).length) { fail("Nothing has changed."); return; }
     if (!st.d.reason.trim()) { fail("Add why it's being changed."); return; }
+    const toAdd = scan.kind === "rx"
+      ? st.d.items.filter((it) => it.custom && it.addList !== false && (it.customName || "").trim()).map((it) => it.customName.trim()) : [];
     await run(async () => {
       await updateScan(scan.id, res.changes, { reason: st.d.reason, summary: res.summary });
+      if (toAdd.length) addRxProducts(toAdd).catch((err) => console.warn("Not added to the list:", err));
       closeCheckTask("Checked in the Scanner");
     }, scan.status === "check" ? "Checked and saved to the patient" : "Scan updated");
   }
@@ -489,6 +489,7 @@ export async function openScanReview({ id, products = [], onChanged = () => {} }
       const tot = dlg.querySelector('[data-role="total"]');
       if (tot) tot.textContent = `Products total ${money(total())}`;
     }
+    else if (t.dataset.rx === "addList") st.d.items[i].addList = t.checked;
     else if (t.dataset.rx && t.dataset.rx !== "product") st.d.items[i][t.dataset.rx] = t.value;
   });
 

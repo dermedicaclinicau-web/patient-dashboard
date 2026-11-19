@@ -1748,7 +1748,19 @@ match /inv_count_drafts/{id} {
         && request.resource.data.deleted == true;
       allow delete: if false;
     }
-      
+    // Prescription products the Scanner recognises. Anyone who scans prescriptions can add names;
+    // only Admins can take one off or correct it.
+    match /rx_products/{id} {
+      allow read: if isStaff();
+      allow create, update: if id == 'list'
+        && request.resource.data.keys().hasOnly(['names', 'updatedAt', 'updatedBy', 'updatedByUid'])
+        && request.resource.data.names is list && request.resource.data.names.size() <= 500
+        && request.resource.data.updatedByUid == request.auth.uid
+        && (isAdmin()
+          || (can('scanner.rx') && (resource == null || request.resource.data.names.hasAll(resource.data.names))));
+      allow delete: if false;
+    }
+    
     // ===================== Safety net =====================
     // Anything not allowed by a rule above stays locked
     // (this includes staff_roles and staff_audit, which only Apps Script writes)
