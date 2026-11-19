@@ -9,6 +9,7 @@ const KINDS = {
   tx: { bg: "#f97316", bg2: "#c2410c", text: "TxR", label: "TxR" },   // orange, like the Treatment Records cards
   consent: { bg: "#7c3aed", text: "C", label: "Consent" },
   rx: { bg: "#db2777", text: "Rx", label: "Rx" },
+  calendar: { bg: "#0F766E", icon: "calendar", label: "Calendar" },   // teal, with a white calendar
 };
 
 let originals = null;    // the portal's own icon links, put back on other pages
@@ -63,6 +64,20 @@ function drawIcon(kind) {
     g.textAlign = "center";
     g.textBaseline = "middle";
     g.fillText(k.text, 32, 35);
+  } else if (k.icon === "calendar") {
+    // A white calendar: outline, top band, two rings and the days (bold shapes, so it's clear at 16px)
+    const box = new Path2D();
+    if (box.roundRect) box.roundRect(12, 15, 40, 37, 6); else box.rect(12, 15, 40, 37);
+    g.lineWidth = 5;
+    g.lineCap = "round";
+    g.lineJoin = "round";
+    g.stroke(box);
+    g.fillRect(12, 15, 40, 11);
+    g.beginPath();
+    g.moveTo(23, 9); g.lineTo(23, 19);
+    g.moveTo(41, 9); g.lineTo(41, 19);
+    g.stroke();
+    [[22, 37], [32, 37], [42, 37], [22, 46], [32, 46]].forEach(([x, y]) => g.fillRect(x - 3, y - 3, 6, 6));
   } else {
     g.save();
     g.translate(8, 6);
