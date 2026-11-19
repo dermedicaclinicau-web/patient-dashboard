@@ -12,7 +12,9 @@ import { fetchPatients, findPatientsById, patientIds } from "./patients.js";
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const num = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : r2(v));
 const conf = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? 1 : Number(v));
-const intOrNull = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : parseInt(v, 10));
+const intOrNull = (v) => (typeof v === "boolean" || v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : parseInt(v, 10));
+// A ticked box or a written "Yes"
+const yes = (v) => v === true || /^(y|yes|true|✓|✔)$/i.test(String(v ?? "").trim());
 const normName = (s) => String(s || "").toLowerCase().replace(/[^a-z]+/g, " ").trim();
 // Same order every time: the list is part of the cached prompt in Apps Script, and any change in order misses the cache
 const stableList = (list) => list.slice().sort((a, b) => (String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0));
@@ -492,6 +494,8 @@ export function reviewDocket(result, products) {
         codeMatch: !!fromCode && fromCode === (read || fromCode), codeClash: clash ? fromCode : "",
         fixed: false, count: 1,
         formQty: intOrNull(l.formQty), toShelf: intOrNull(l.toShelf), toJt: intOrNull(l.toJt),
+        // Ticked rather than numbered, and "Did this item come from Joanna's room?" (JT storage)
+        toShelfTick: yes(l.toShelf), toJtTick: yes(l.toJt), fromJt: yes(l.fromJt),
       };
     })),
   };
@@ -507,6 +511,13 @@ export function reviewDocket(result, products) {
     const sum = sums.get(`${l.productId}|${l.formQty}`);
     if (sum !== l.formQty && sum % l.formQty !== 0) l.qtyCheck = `${sum} across the batches, ${l.formQty} on the docket`;
   });
+  // The Dermedica form says on each line whether it came from Joanna's room: all of them is a transfer, some is mixed
+  const real = review.lines.filter((l) => l.qty > 0);
+  const fromJtN = real.filter((l) => l.fromJt).length;
+  if (fromJtN) {
+    review.formType = "dermedica";
+    review.transferType = fromJtN === real.length ? "transfer" : "mixed";
+  }
   return review;
 }
 
@@ -526,6 +537,9 @@ function joinDocketLines(lines) {
     if (l.expiry.length > same.expiry.length) same.expiry = l.expiry;
     if (same.toShelf === null && l.toShelf !== null) same.toShelf = l.toShelf;
     if (same.toJt === null && l.toJt !== null) same.toJt = l.toJt;
+    same.toShelfTick = same.toShelfTick || l.toShelfTick;
+    same.toJtTick = same.toJtTick || l.toJtTick;
+    same.fromJt = same.fromJt || l.fromJt;
   });
   return out;
 }

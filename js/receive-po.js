@@ -442,7 +442,12 @@ export async function mountReceivePo(root, poId, staff) {
       if (pre.formType !== "dermedica") return null;   // supplier dockets don't have these columns
       const first = (k) => { const d = list.find((x) => Number.isInteger(x[k]) && x[k] >= 0); return d ? d[k] : null; };
       let shelf = first("toShelf"), jt = first("toJt");
-      if (shelf === null && jt === null) return null;
+      if (shelf === null && jt === null) {
+        // Ticked rather than numbered: all of it goes to the one that's ticked
+        const s1 = list.some((x) => x.toShelfTick), j1 = list.some((x) => x.toJtTick);
+        if (s1 !== j1) return s1 ? { shelf: total, jt: 0 } : { shelf: 0, jt: total };
+        return null;
+      }
       if (!shelf && !jt) return null;                  // both blank or 0: nothing written, so it goes where it was ordered for
       if (shelf === null) shelf = Math.max(0, total - jt);
       if (jt === null) jt = Math.max(0, total - shelf);
@@ -497,6 +502,9 @@ export async function mountReceivePo(root, poId, staff) {
       const total = u.units.reduce((a, n) => a + n, 0);
       const split = rawSplit && !rawSplit.bad ? rawSplit : formSplit(list, total);
       if (u.guess) notes.push(`${name}: ${u.guess}`);
+      if (!split && list.some((x) => x.toShelfTick) && list.some((x) => x.toJtTick)) {
+        notes.push(`${name}: both the storeroom and Joanna's room are ticked, with no numbers. It's put where it was ordered for: split it below.`);
+      }
       if (split && split.bad) {
         notes.push(`${name}: the form says ${split.shelf} to the Shelf and ${split.jt} to JT storage, but ${plural(total, l.stockUnit)} arrived. `
           + "It's put where it was ordered for: check it.");

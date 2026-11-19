@@ -43,8 +43,12 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
   const s = { review, pos: [], ranked: [], people: [], poId: "", showAll: false,
     recvUid: myUid, recvAt: localDT(new Date()), fixing: -1, busy: false, posError: "", note: "", big: false,
     // "transfer": the Dermedica form with "Internal transfer from JT store" ticked
-    mode: review.transferType === "transfer" ? "transfer" : "delivery",
+    mode: ["transfer", "mixed"].includes(review.transferType) ? "transfer" : "delivery",
     lots: [], lotsError: "", rels: [], scanId: "" };
+  // Lines that came from Joanna's room (JT storage) are moved, never received as new stock. The rest are received.
+  const anyFromJt = review.lines.some((l) => l.fromJt);
+  const setSkips = () => review.lines.forEach((l) => { l.skip = s.mode === "delivery" ? !!l.fromJt : anyFromJt && !l.fromJt; });
+  setSkips();
 
   const selected = () => (s.ranked.find((r) => r.po.id === s.poId) || {}).po || null;
   const idsOn = (po) => new Set(((po && po.lines) || []).map((l) => l.productId).filter(Boolean));
@@ -104,7 +108,8 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
   const lineHtml = (l, i, extra = false) => {
     const p = byId.get(l.productId);
     const flags = [];
-    if (extra) {
+    if (l.skip && l.fromJt) flags.push(["info", "Came from Joanna's room: it's already in stock, so it's moved with Internal transfer, not received here"]);
+    else if (extra) {
       if (l.skip) flags.push(["info", "Not being received"]);
       else if (!p) flags.push(["bad", "Choose the product, or tap “Don't receive this”"]);
       else flags.push(["warn", "Extra: not on this order"]);
@@ -223,16 +228,21 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
     const used = new Map();
     return s.review.lines.map((l, i) => {
       const p = byId.get(l.productId) || null;
-      if (l.skip) return { i, l, p, state: "skip" };
+      if (l.skip) return { i, l, p, state: "skip",
+        msg: anyFromJt && !l.fromJt ? "Not from Joanna's room on the form: it's received as a new delivery next" : "" };
       if (!p) return { i, l, p, state: "bad", msg: "Choose the product, or tap “Don't move this”" };
       const f = findJtLot(p, s.lots, l.batch, l.expiry);
-      const lot = l.jtLot ? f.options.find((x) => x.id === l.jtLot) || null : f.match;
+      // No batch on the form (it usually has none): the only batch in JT storage is used, and flagged to check
+      const noBatch = !String(l.batch || "").trim();
+      const auto = !l.jtLot && !f.match && noBatch && p.tracked && f.options.length === 1 ? f.options[0] : null;
+      const lot = l.jtLot ? f.options.find((x) => x.id === l.jtLot) || null : f.match || auto;
       if (!l.qty) return { i, l, p, f, lot, state: "skip", msg: "Quantity is 0, so nothing moves" };
       const bn = batchName(p);
       if (!lot) {
         return { i, l, p, f, state: "bad", msg: !f.options.length ? `There's no ${p.name} in JT storage.`
           : f.sameBatch.length ? `${bn} ${l.batch} is in JT storage, but with a different expiry. Choose it below.`
-          : `${bn} ${l.batch || "(not read)"} isn't in JT storage. Choose the one that was moved.` };
+          : noBatch ? `${bn} isn't on the form, and JT storage has ${f.options.length}. Check the box and choose which one was moved.`
+          : `${bn} ${l.batch} isn't in JT storage. Choose the one that was moved.` };
       }
       const total = (used.get(lot.id) || 0) + l.qty;
       used.set(lot.id, total);
@@ -240,7 +250,7 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
         return { i, l, p, f, lot, state: "bad",
           msg: `JT storage only has ${plural(lot.qty, p.stockUnit)}${p.tracked ? ` of ${lot.batch}` : ""}. Check the quantity.` };
       }
-      return { i, l, p, f, lot, state: "ok", left: lot.qty - total, picked: !!l.jtLot };
+      return { i, l, p, f, lot, state: "ok", left: lot.qty - total, picked: !!l.jtLot, auto: !!auto && lot === auto };
     });
   }
 
@@ -263,6 +273,9 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
     else if (pl.state === "skip") flags.push(["info", pl.msg || "Not being moved"]);
     else flags.push(["ok", `JT storage → Shelf · ${pl.left} left in JT storage${p.tracked ? ` (${pl.lot.batch})` : ""}`]);
     if (pl.state === "ok" && pl.picked) flags.push(["warn", `${batchName(p)} chosen by hand`]);
+    if (pl.state === "ok" && pl.auto) {
+      flags.push(["warn", `${batchName(p)} not on the form: the only one in JT storage (${pl.lot.batch || "no number"}) is used. Check the box`]);
+    }
     const w = p && !shown.has(p.id) ? qw.get(p.id) : null;
     if (p) shown.add(p.id);
     if (w && w.form !== w.sum) flags.push(["warn", `The Qty column says ${w.form}, but the ${batchName(p).toLowerCase()} lines add up to ${w.sum}`]);
@@ -342,14 +355,15 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
   const modeHtml = () => {
     const r = s.review;
     if (r.formType !== "dermedica" && s.mode !== "transfer") return "";
-    const ticked = r.transferType === "transfer" ? "Internal transfer from JT store"
+    const ticked = r.transferType === "transfer" ? "every item came from Joanna's room (JT storage)"
+      : r.transferType === "mixed" ? "some items came from Joanna's room. They're moved first, then the rest are received here"
       : r.transferType === "delivery" ? "New delivery from Supplier" : "";
     const btn = (m, label, sub) => `<button type="button" class="dk-mode-btn${s.mode === m ? " is-on" : ""}" data-dkmode="${m}"
       aria-pressed="${s.mode === m}"><strong>${label}</strong><small>${sub}</small></button>`;
     return `<div class="dk-mode"><span class="lh-label">This form is</span>
       <div class="dk-mode-btns">${btn("delivery", "New delivery", "Received against a purchase order")}${
         btn("transfer", "Internal transfer", "JT storage → Shelf")}</div>
-      <small class="dk-muted">${ticked ? `Ticked on the form: ${esc(ticked)}. Change it here if that's wrong.`
+      <small class="dk-muted">${ticked ? `On the form: ${esc(ticked)}. Change it here if that's wrong.`
         : "Neither box looked ticked on the form. Choose one."}</small>
     </div>`;
   };
@@ -417,6 +431,7 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
         batch: tracked ? String(l.batch || "").trim() : "", expiry: tracked ? fullExpiry(l.expiry) : "",
         edited: l.edited === true,
         formQty: l.formQty ?? null, toShelf: l.toShelf ?? null, toJt: l.toJt ?? null,   // Dermedica form columns
+        toShelfTick: !!l.toShelfTick, toJtTick: !!l.toJtTick, fromJt: !!l.fromJt,
         extra: !!po && !(l.productId && on.has(l.productId)),   // came in the box, not on the order
         skip: l.skip === true,                                  // staff chose not to receive / move it
       };
@@ -462,12 +477,12 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
         receivedBy: w ? w.name : "", receivedByUid: s.recvUid, receivedAt: recvDate().toISOString(), note: s.note,
         lines: lines.filter((l) => !l.extra && !l.skip && l.productId && l.qty > 0)
           .map((l) => ({ productId: l.productId, qty: l.qty, unit: l.unit, batch: l.batch, expiry: l.expiry,
-            formQty: l.formQty, toShelf: l.toShelf, toJt: l.toJt })),
+            formQty: l.formQty, toShelf: l.toShelf, toJt: l.toJt, toShelfTick: l.toShelfTick, toJtTick: l.toJtTick })),
         formType: s.review.formType,
         // Not on the order, but received too: the receive page shows them with Shelf | JT storage boxes
         extras: lines.filter((l) => l.extra && !l.skip && l.productId && l.qty > 0)
           .map((l) => ({ productId: l.productId, qty: l.qty, unit: l.unit, batch: l.batch, expiry: l.expiry, text: l.text,
-            toShelf: l.toShelf, toJt: l.toJt })),
+            toShelf: l.toShelf, toJt: l.toJt, toShelfTick: l.toShelfTick, toJtTick: l.toJtTick })),
       }));
       // Finished: not offered again as unfinished, and off Ready to check. Waited for (up to 3 seconds),
       // because opening the order next can leave the page before this device has forgotten the scan.
@@ -534,6 +549,15 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
         .catch((err) => console.warn("Release email failed:", err)));
       if (onSaved) onSaved();   // finished: not offered again as unfinished
       const n = res.moved.reduce((a, m) => a + m.qty, 0);
+      // A mixed form: the rest weren't from Joanna's room, so they're received against an order now (the same scan)
+      if (anyFromJt && s.review.lines.some((l) => !l.fromJt && l.qty > 0)) {
+        s.mode = "delivery";
+        setSkips();
+        s.busy = false;
+        draw();
+        showToast(`${plural(n, "item")} moved to the Shelf. Now choose the order for the rest.`);
+        return;
+      }
       showToast(`${plural(n, "item")} moved to the Shelf${res.releases.length
         ? ` · ${res.releases.length} JT request${res.releases.length === 1 ? "" : "s"} approved`
         : notApproved ? " · the waiting JT requests are left for a JT approver" : ""}.`);
@@ -558,7 +582,7 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
     if (md) {
       s.mode = md.dataset.dkmode;
       s.fixing = -1;
-      s.review.lines.forEach((l) => { l.skip = false; });   // "Don't move/receive this" belongs to one mode
+      setSkips();   // which lines are moved or received depends on the mode
       draw();
       return;
     }
