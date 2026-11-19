@@ -1075,23 +1075,6 @@ export async function renderTasks(body, c) {
       await saveOrder(paths, i, j);
       return;
     }
-    if (false) {
-      const paths = [], i = 0, j = 0;   // (old code below, kept unreachable so nothing else needs moving)
-      try {
-        const b = writeBatch(db);
-        b.set(doc(db, "seo_settings", "main"), { keyPages: paths, updatedBy: uid(), updatedAt: serverTimestamp() }, { merge: true });
-        const entry = { taskId: "", path: paths[j], taskTitle: "", stepId: "", text: "", note: `moved to #${j + 1} (was #${i + 1})`,
-          action: "priority", by: uid(), byName: myName(c), role: roleOf(c), day, at: serverTimestamp() };
-        b.set(doc(collection(db, "seo_task_log")), entry);
-        await b.commit();
-        c.work.settings = { ...(c.work.settings || {}), keyPages: paths };
-        const local = { ...entry, at: new Date() };
-        S.log.unshift(local);
-        if (S.trail[npath(paths[j])]) S.trail[npath(paths[j])].unshift(local);
-        draw();
-      } catch (e2) { t0.disabled = false; toast(errMsg(e2), true); }
-      return;
-    }
 
     if (d.tCadd) {
       if (!S.canDo) { toast("Only the SEO team and admins can comment.", true); return; }

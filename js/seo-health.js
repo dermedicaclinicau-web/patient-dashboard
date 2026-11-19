@@ -1152,18 +1152,6 @@ export function viewHealth(wrap, c, ui) {
     }
     const s = E.site.c, dev = E.site.dev || {};
     const dRow = (k, l) => (dev[k] && dev[k][0] ? `<span>${l} ${chipB(bRate(dev[k]), dev[k][0])}</span>` : "");
-    const tipsOf = (hp, e) => {
-      if (!highBounce(e)) return "";
-      const out = [];
-      const mob = e.m[0] >= 10 ? bRate(e.m) : null, desk = e.d[0] >= 10 ? bRate(e.d) : null;
-      const m = metricsOf(hp.speed);
-      if (mob != null && desk != null && mob - desk >= 0.1) out.push("Check it on a phone: the top should load fast, with the Book button showing straight away.");
-      if (m && m.score != null && m.score < 50) out.push(`It's slow on phones (score ${m.score}): compress the top image.`);
-      if (e.c[2] / e.c[0] < 20) out.push("People leave within seconds: make the first screen answer what they searched for.");
-      if (hp.words && hp.words < 400) out.push(`Only about ${hp.words} words: add what people want to know (cost, downtime, results).`);
-      if (!out.length) out.push("Add a short answer near the top, and links to related treatments, so people read on.");
-      return out.slice(0, 2).join(" ");
-    };
     const rows = H.pages.map((hp) => ({ hp, e: engOf(hp.path) })).sort((a, b) => {
       const ok = (x) => (x.e && x.e.c[0] >= 20 ? 1 : 0);
       return ok(b) - ok(a) || (bRate(b.e?.c) ?? -1) - (bRate(a.e?.c) ?? -1);

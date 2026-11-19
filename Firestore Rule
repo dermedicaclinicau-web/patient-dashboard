@@ -1702,6 +1702,8 @@ match /inv_count_drafts/{id} {
     }
     // Site health → Content (Seo9.gs): content checks, duplicate pairs and the whole-site fingerprints. Apps Script only.
     match /seo_content/{id} { allow read: if can('menu.seo'); allow write: if false; }
+    // Google Business reviews (SeoGbp.gs, Apps Script only)
+    match /seo_gbp_reviews/{id} { allow read: if can('menu.seo'); allow write: if false; }
 
     // SEO Advisor: conversations (threads) and questions. Questions are answered by Seo10.gs (service account).
     match /seo_advisor/{id} {

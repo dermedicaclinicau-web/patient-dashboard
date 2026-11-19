@@ -15,6 +15,7 @@ import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriority
 import { renderAds, clearAds, loadAds, adsPageHtml, peekAds, adsTotals } from "./seo-ads.js";
 import { loadLeads, peekLeads, clearLeads, leadsPageHtml, leadsTotals, leadsByPage } from "./seo-leads.js";
 import { renderResults } from "./seo-results.js";
+import { renderGbp, clearGbp, loadGbpCount, gbpTabHtml } from "./seo-gbp.js";
 
 const TABS = [
   { id: "overview", label: "Overview" },
@@ -23,6 +24,7 @@ const TABS = [
   { id: "website", label: "Website" },
   { id: "keywords", label: "Keywords" },
   { id: "ads", label: "Ads" },
+  { id: "gbp", label: "Google Business" },
   { id: "opps", label: "Tasks" },
   { id: "health", label: "Site health" },
   { id: "audience", label: "Audience" },
@@ -659,13 +661,15 @@ export async function mountSeo(el, opts = {}) {
       const worse = (work?.tracks || []).filter((T) => T.status === "final" && T.verdict === "worse" && daysBetween(T.date, today) <= 75).length;
       rb.innerHTML = `Results${worse ? ` <span class="seo-tab-n is-bad" title="${worse} change${worse === 1 ? "" : "s"} made things worse in the last 10 weeks">${worse}</span>` : ""}`;
     }
+    const gb = el.querySelector('.seo-tabs [data-tab="gbp"]');
+    if (gb) gb.innerHTML = gbpTabHtml(isAdmin);
   }
 
   async function load(force) {
     body.innerHTML = `<div class="seo-empty">Loading…</div>`;
     try {
       [data, work] = await Promise.all([loadData(force), loadWork(force)]);
-      if (force) { W = null; wForce = true; clearAds(); clearLeads(); }
+      if (force) { W = null; wForce = true; clearAds(); clearLeads(); clearGbp(); }
       renderMeta();
       render();
       // The Ads numbers load in the background, then the Overview and Keywords show them
@@ -673,6 +677,7 @@ export async function mountSeo(el, opts = {}) {
         loadAds().then(() => { if (root.isConnected && (tab === "overview" || tab === "keywords")) render(); })
           .catch(() => { /* no Ads data: those parts just don't show */ });
       }
+      loadGbpCount().then(() => { if (root.isConnected) setTabs(); }).catch(() => { /* not connected yet */ });
       if (!peekLeads()) {
         loadLeads().then(() => {
           if (!root.isConnected) return;
@@ -712,6 +717,7 @@ export async function mountSeo(el, opts = {}) {
       ? `<div class="seo-warn">The last nightly update failed, so these numbers may be out of date: ${esc(data.run.error || "")}</div>` : "";
     if (tab === "advisor") { renderAdvisor(body, ctx()); return; }
     if (tab === "ads") { renderAds(body, ctx()); return; }
+    if (tab === "gbp") { renderGbp(body, ctx()); return; }
     if (tab === "website") { const sp = siteParam; siteParam = ""; mountSeoSite(body, { param: sp }); return; }
     if (tab === "opps") { renderTasks(body, ctx()); return; }
     if (tab === "results") { renderResults(body, ctx()); return; }
