@@ -261,6 +261,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     jobId: "", openJob: "", jobs: null, jobsAt: 0,   // Finish later: this read, a parked scan being checked, the list
     rxDone: null, doneTimer: 0,                   // a prescription just saved (or sent to be checked)
     checks: null, checksAt: 0,                    // prescriptions waiting to be checked
+    side: "", checkKind: "all",                   // the work panel: which tab, and To check's filter
   };
   // Photos are docket pages: the Docket tab, or Auto-detect after "+ Add a page"
   const collecting = () => st.kind === "docket" || (st.kind === "auto" && st.pages.length > 0);
@@ -304,73 +305,127 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     </div>`;
   };
 
-  const todayHtml = () => {
+  /* ---------- The work panel: To check · Ready to check · Today ---------- */
+  const fmtAt = (v, withDay = false) => {
+    const d = v && typeof v.toDate === "function" ? v.toDate() : null;
+    return d ? d.toLocaleString("en-AU", withDay ? { weekday: "short", hour: "numeric", minute: "2-digit" }
+      : { hour: "numeric", minute: "2-digit" }) : "";
+  };
+  const canCheck = () => can("scanner.rx") || can("scanner.billing");
+  const sideTabs = () => [
+    canCheck() && ["check", "To check", st.checks ? st.checks.length : null],
+    ["ready", "Ready to check", st.jobs ? st.jobs.length : null],
+    ["today", "Today", st.today ? st.today.length : null],
+  ].filter(Boolean);
+  // A tab someone chose stays chosen; otherwise the one most likely to need doing
+  const sideTab = () => {
+    const tabs = sideTabs();
+    if (st.side && tabs.some(([k]) => k === st.side)) return st.side;
+    if (canCheck() && (st.checks || []).length) return "check";
+    if ((st.jobs || []).length) return "ready";
+    return "today";
+  };
+  const loadingHtml = '<p class="scan-panel-empty">Loading…</p>';
+
+  // Today: one row per scan
+  const todayRow = (s) => {
+    const who = s.kind === "docket"
+      ? (s.status === "transferred" ? "Internal transfer · JT storage → Shelf"
+        : `${s.supplierName || "Delivery docket"}${s.poNumber ? ` · ${s.poNumber}` : ""}`)
+      : (s.patientName || (s.status === "check" ? `“${s.readName || "?"}” (to check)` : "Patient not read"));
+    const status = s.status === "check" ? "Needs checking"
+      : s.kind === "billing" ? (Number(s.flagCount) ? `${s.flagCount} to check` : s.editCount ? "Checked" : "All matched")
+      : s.kind === "docket" ? ({ received: "Received", linked: "Linked to an order", unlinked: "No order linked",
+          transferred: "Moved to the Shelf" }[s.status] || "")
+      : Array.isArray(s.items) ? plural(s.items.length, "item") : "";
+    return `<li><span class="scan-today-k is-${esc(s.kind)}">${esc(KIND_TAG[s.kind] || s.kind)}</span>
+      <span class="scan-today-main"><strong>${esc(who)}</strong>
+        <small>${esc([fmtAt(s.at), s.by && `by ${s.by}`, status, s.editCount && s.kind !== "billing" ? "changed" : ""].filter(Boolean).join(" · "))}</small></span>
+      <button type="button" class="scan-pat-btn" data-scanopen="${esc(s.id)}">Review</button></li>`;
+  };
+  const todayBody = () => {
     const t = st.today;
-    if (!t) return "";
-    if (!t.length) return '<div class="scan-today is-empty"><span class="muted">Nothing scanned yet today.</span></div>';
+    if (!t) return loadingHtml;
+    if (!t.length) return '<p class="scan-panel-empty">Nothing scanned yet today.</p>';
     const n = (k) => t.filter((s) => s.kind === k).length;
-    const parts = [
-      n("billing") && plural(n("billing"), "billing sheet"),
-      n("docket") && plural(n("docket"), "docket"),
-      n("rx") && plural(n("rx"), "prescription"),
-    ].filter(Boolean);
+    const parts = [n("billing") && plural(n("billing"), "billing sheet"), n("docket") && plural(n("docket"), "docket"),
+      n("rx") && plural(n("rx"), "prescription")].filter(Boolean);
     const flagged = t.filter((s) => s.kind === "billing" && Number(s.flagCount) > 0).length;
-    const row = (s) => {
-      const at = s.at && typeof s.at.toDate === "function" ? s.at.toDate() : null;
-      const time = at ? at.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }) : "";
-      const who = s.kind === "docket"
-        ? (s.status === "transferred" ? "Internal transfer · JT storage → Shelf"
-          : `${s.supplierName || "Delivery docket"}${s.poNumber ? ` · ${s.poNumber}` : ""}`)
-        : (s.patientName || (s.status === "check" ? `“${s.readName || "?"}” (to check)` : "Patient not read"));
-      const status = s.status === "check" ? "Needs checking"
-        : s.kind === "billing" ? (Number(s.flagCount) ? `${s.flagCount} to check` : s.editCount ? "Checked" : "All matched")
-        : s.kind === "docket" ? ({ received: "Received", linked: "Linked to an order", unlinked: "No order linked",
-            transferred: "Moved to the Shelf" }[s.status] || "")
-        : s.status === "check" ? "Needs checking" : Array.isArray(s.items) ? plural(s.items.length, "item") : "";
-      return `<li data-scanopen="${esc(s.id)}">
-        <span class="scan-today-k is-${esc(s.kind)}">${esc(KIND_TAG[s.kind] || s.kind)}</span>
-        <span class="scan-today-main"><strong>${esc(who)}</strong>
-          <small>${esc([time, s.by && `by ${s.by}`, status, s.editCount && s.kind !== "billing" ? "changed" : ""].filter(Boolean).join(" · "))}</small></span>
-        <button type="button" class="scan-pat-btn" data-scanopen="${esc(s.id)}">Review</button>
-      </li>`;
-    };
-    return `<details class="scan-today" data-role="today"${st.todayOpen ? " open" : ""}>
-      <summary><strong>Today</strong> ${esc(parts.join(" · "))}${flagged ? ` · <span class="scan-today-flag">${flagged} flagged</span>` : ""}</summary>
-      <ul>${t.slice(0, 40).map(row).join("")}</ul>
-    </details>`;
+    return `<p class="scan-panel-sum">${esc(parts.join(" · "))}${flagged ? ` · <span class="scan-today-flag">${flagged} flagged</span>` : ""}</p>
+      <ul class="scan-panel-list">${t.slice(0, 60).map(todayRow).join("")}</ul>`;
   };
 
-  // Scans put aside with Finish later
-  const jobsHtml = () => {
+  // Ready to check: scans put aside with Finish later
+  const jobRow = (x) => {
+    const at = x.parkedAt ? new Date(x.parkedAt).toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }) : "";
+    const k = AUTO_NAMES[x.readAs] ? x.readAs : AUTO_NAMES[x.kind] ? x.kind : "auto";
+    return `<li class="is-${esc(x.status)}">
+      <span class="scan-today-k is-${esc(k)}">${esc(KIND_TAG[k] || "Scan")}</span>
+      <span class="scan-today-main"><strong>${esc(x.label || AUTO_NAMES[k] || "Scan")}</strong>
+        <small>${esc([at, JOB_STATE[x.status] || ""].filter(Boolean).join(" · "))}</small></span>
+      ${x.status === "reading" ? "" : `<button type="button" class="scan-pat-btn" data-jobopen="${esc(x.id)}">Open</button>`}
+      <button type="button" class="scan-pat-btn" data-jobdrop="${esc(x.id)}">Discard</button></li>`;
+  };
+  const readyBody = () => {
     const j = st.jobs;
-    if (!j || !j.length) return "";
-    return `<div class="scan-jobs"><strong>Ready to check</strong><ul>${j.map((x) => {
-      const at = x.parkedAt ? new Date(x.parkedAt).toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }) : "";
-      const k = AUTO_NAMES[x.readAs] ? x.readAs : AUTO_NAMES[x.kind] ? x.kind : "auto";
-      return `<li class="is-${esc(x.status)}">
-        <span class="scan-today-k is-${esc(k)}">${esc(KIND_TAG[k] || "Scan")}</span>
-        <span class="scan-today-main"><strong>${esc(x.label || AUTO_NAMES[k] || "Scan")}</strong>
-          <small>${esc([at, JOB_STATE[x.status] || ""].filter(Boolean).join(" · "))}</small></span>
-        ${x.status === "reading" ? "" : `<button type="button" class="scan-pat-btn" data-jobopen="${esc(x.id)}">Open</button>`}
-        <button type="button" class="scan-pat-btn" data-jobdrop="${esc(x.id)}">Discard</button>
-      </li>`;
-    }).join("")}</ul></div>`;
+    if (!j) return loadingHtml;
+    if (!j.length) return '<p class="scan-panel-empty">Nothing put aside. If a scan takes a while, tap Finish later and it waits here.</p>';
+    return `<ul class="scan-panel-list">${j.map(jobRow).join("")}</ul>`;
   };
 
-  // Scans the scanner wasn't sure about
-  const checksHtml = () => {
-    const c = st.checks;
-    if (!c || !c.length) return "";
-    return `<div class="scan-jobs scan-checks"><strong>To check <small>${c.length}</small></strong><ul>${c.slice(0, 30).map((s) => {
-      const at = s.at && typeof s.at.toDate === "function"
-        ? s.at.toDate().toLocaleString("en-AU", { weekday: "short", hour: "numeric", minute: "2-digit" }) : "";
-      const who = s.patientName || (s.suggested && s.suggested.name) || s.readName || "Patient not read";
-      return `<li><span class="scan-today-k is-${esc(s.kind)}">${esc(KIND_TAG[s.kind] || "Scan")}</span>
-        <span class="scan-today-main"><strong>${esc(who)}</strong>
-          <small>${esc([at, s.by && `by ${s.by}`, (s.checkReasons || []).join(" · ")].filter(Boolean).join(" · "))}</small></span>
-        <button type="button" class="scan-pat-btn" data-scanopen="${esc(s.id)}">Check</button></li>`;
-    }).join("")}</ul></div>`;
+  // To check: grouped by patient (oldest first). Check opens the oldest of the group.
+  const checkWho = (s) => s.patientName || (s.suggested && s.suggested.name) || s.readName || "";
+  const checkGroups = () => {
+    const by = new Map();
+    (st.checks || []).filter((s) => st.checkKind === "all" || s.kind === st.checkKind).forEach((s) => {
+      const who = checkWho(s).trim().toLowerCase();
+      const k = who ? `${s.kind}|${who}` : `id|${s.id}`;
+      if (!by.has(k)) by.set(k, []);
+      by.get(k).push(s);
+    });
+    return [...by.values()];
   };
+  const checkRow = (g) => {
+    const s = g[0];
+    const reasons = [...new Set(g.flatMap((x) => x.checkReasons || []))];
+    const why = reasons.length ? reasons[0] + (reasons.length > 1 ? ` · ${reasons.length - 1} more` : "") : "";
+    return `<li><span class="scan-today-k is-${esc(s.kind)}">${esc(KIND_TAG[s.kind] || "Scan")}</span>
+      <span class="scan-today-main"><strong>${esc(checkWho(s) || "Patient not read")}${
+        g.length > 1 ? ` <span class="scan-n">· ${g.length} ${s.kind === "rx" ? "prescriptions" : "sheets"}</span>` : ""}</strong>
+        <small>${esc([fmtAt(s.at, true), s.by && `by ${s.by}`, why].filter(Boolean).join(" · "))}</small></span>
+      <button type="button" class="scan-pat-btn" data-scanopen="${esc(s.id)}">Check</button></li>`;
+  };
+  const checksBody = () => {
+    const c = st.checks;
+    if (!c) return loadingHtml;
+    if (!c.length) return '<p class="scan-panel-empty">Nothing to check. Scans the scanner isn\'t sure about wait here.</p>';
+    const nb = c.filter((s) => s.kind === "billing").length, nr = c.filter((s) => s.kind === "rx").length;
+    if (!(nb && nr)) st.checkKind = "all";   // only one kind left: the chips are gone, so no filter either
+    const chip = (k, label, n) => `<button type="button" class="scan-chip-f${st.checkKind === k ? " is-on" : ""}" data-checkkind="${k}">${label} ${n}</button>`;
+    const groups = checkGroups();
+    return `${nb && nr ? `<div class="scan-panel-chips">${chip("all", "All", c.length)}${chip("billing", "Billing", nb)}${
+        chip("rx", "Prescriptions", nr)}<small>Oldest first</small></div>` : ""}
+      ${groups.length ? `<ul class="scan-panel-list">${groups.map(checkRow).join("")}</ul>`
+        : '<p class="scan-panel-empty">None of this kind.</p>'}`;
+  };
+
+  const panelHtml = () => {
+    const on = sideTab();
+    return `<div class="scan-panel-tabs" role="tablist" aria-label="Scans">${sideTabs().map(([k, label, n]) =>
+        `<button type="button" class="scan-panel-tab${k === on ? " is-on" : ""}" role="tab" aria-selected="${k === on}" data-sidetab="${k}">${
+          esc(label)}${n === null ? "" : ` <span>${n}</span>`}</button>`).join("")}</div>
+      <div class="scan-panel-body">${on === "check" ? checksBody() : on === "ready" ? readyBody() : todayBody()}</div>`;
+  };
+  // Redrawn as each list loads, keeping the scroll position
+  function drawSide() {
+    const h = root.querySelector('[data-role="side"]');
+    if (!h) return;
+    const old = h.querySelector(".scan-panel-body");
+    const top = old ? old.scrollTop : 0;
+    h.innerHTML = panelHtml();
+    const b = h.querySelector(".scan-panel-body");
+    if (b) b.scrollTop = top;
+  }
 
   // Photos being read and saved in the background
   const queueHtml = () => {
@@ -408,32 +463,37 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
       </div>`;
   };
   const cameraHtml = () => `${headHtml()}
-    <div data-role="pending-host">${pendingHtml()}</div>
-    ${collecting() && st.pages.length
-      ? `<button type="button" class="scan-pageback" data-act="page-back">← Back to ${plural(st.pages.length, "page")}</button>` : ""}
-    <div class="scan-vf" data-role="vf">
-      <video playsinline muted autoplay></video>
-      <div class="scan-frame" aria-hidden="true"></div>
-      <span class="scan-focus" data-role="focus" aria-hidden="true"></span>
-      <div class="scan-wait" data-role="wait" aria-live="polite">${waitHtml()}</div>
-      <p class="scan-tip" data-role="tip">${esc(tipText())}</p>
-      <button type="button" class="scan-auto${st.auto ? " is-on" : ""}" data-act="auto" aria-pressed="${st.auto}"
-        title="Takes the photo by itself when the device is held still over a sheet">Auto</button>
-      <div class="scan-zoom" role="group" aria-label="Zoom">${[1, 1.5, 2].map((z) =>
-        `<button type="button" data-zoom="${z}" class="${z === st.zoom ? "is-on" : ""}">${z}×</button>`).join("")}</div>
-      <button type="button" class="scan-torch" data-act="torch" aria-label="Torch" hidden>${I.bolt}</button>
-    </div>
-    <div class="scan-bar">
-      <label class="scan-side">${I.photo}<span>Upload</span><input type="file" accept="image/*" data-role="file" hidden /></label>
-      <button type="button" class="scan-shutter" data-act="shoot" aria-label="Take the photo"><span></span></button>
-      <label class="scan-side">${I.camera}<span>Camera app</span><input type="file" accept="image/*" capture="environment" data-role="file" hidden /></label>
-    </div>
-    <div data-role="queue-host">${queueHtml()}</div>
-    ${isMobile() ? "" : '<p class="scan-keys">Tip: press Space to take the photo.</p>'}
-    <div data-role="check-host">${checksHtml()}</div>
-    <div data-role="jobs-host">${jobsHtml()}</div>
-    <div data-role="today-host">${todayHtml()}</div>`;
-
+    <div class="scan-desk">
+      <div class="scan-desk-main">
+        <div data-role="pending-host">${pendingHtml()}</div>
+        ${collecting() && st.pages.length
+          ? `<button type="button" class="scan-pageback" data-act="page-back">← Back to ${plural(st.pages.length, "page")}</button>` : ""}
+        <div class="scan-vf" data-role="vf">
+          <video playsinline muted autoplay></video>
+          <div class="scan-frame" aria-hidden="true"></div>
+          <span class="scan-focus" data-role="focus" aria-hidden="true"></span>
+          <div class="scan-wait" data-role="wait" aria-live="polite">${waitHtml()}</div>
+          <p class="scan-tip" data-role="tip">${esc(tipText())}</p>
+          <button type="button" class="scan-auto${st.auto ? " is-on" : ""}" data-act="auto" aria-pressed="${st.auto}"
+            title="Takes the photo by itself when the device is held still over a sheet">Auto</button>
+          <div class="scan-zoom" role="group" aria-label="Zoom">${[1, 1.5, 2].map((z) =>
+            `<button type="button" data-zoom="${z}" class="${z === st.zoom ? "is-on" : ""}">${z}×</button>`).join("")}</div>
+          <button type="button" class="scan-torch" data-act="torch" aria-label="Torch" hidden>${I.bolt}</button>
+        </div>
+        <div class="scan-bar">
+          <label class="scan-side">${I.photo}<span>Upload</span><input type="file" accept="image/*" data-role="file" hidden /></label>
+          <button type="button" class="scan-shutter" data-act="shoot" aria-label="Take the photo"><span></span></button>
+          <label class="scan-side">${I.camera}<span>Camera app</span><input type="file" accept="image/*" capture="environment" data-role="file" hidden /></label>
+        </div>
+        ${isMobile() ? "" : `<label class="scan-drop" data-role="drop">${I.photo}
+          <strong>Drop photos here</strong>
+          <small>or choose files · JPG or PNG · several at once${collecting() ? ` (up to ${MAX_PAGES} pages)` : ""}</small>
+          <input type="file" accept="image/jpeg,image/png,image/webp" multiple data-role="files" hidden /></label>`}
+        <div data-role="queue-host">${queueHtml()}</div>
+        ${isMobile() ? "" : '<p class="scan-keys">Tip: press Space to take the photo.</p>'}
+      </div>
+      <aside class="scan-panel" data-role="side">${panelHtml()}</aside>
+    </div>`;
   const stepNames = () => {
     const k = st.kind === "auto" ? st.readAs : st.kind;
     return [
@@ -608,6 +668,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
   function render() {
     clearInterval(st.secTimer);
     clearInterval(st.doneTimer);
+    root.classList.toggle("is-wide", st.mode === "camera");   // two columns (camera + work panel) on wide screens
     if (st.mode === "rx") {   // the prescription screen draws itself
       root.innerHTML = `${headHtml()}${bannerHtml()}<div data-role="rx"></div>`;
       mountRxResult(root.querySelector('[data-role="rx"]'),
@@ -820,6 +881,51 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     const blob = await new Promise((res) => c.toBlob(res, "image/jpeg", 0.92));
     if (blob) handlePhoto(blob); else st.shooting = false;
   }
+
+  /* ===================== Photos dropped or chosen on a computer (several at once) ===================== */
+  // Docket tab: they become pages. Otherwise each goes into the background queue, like a camera photo.
+  function dropFiles(list) {
+    const all = [...(list || [])];
+    const files = all.filter((f) => /^image\/(jpeg|png|webp)$/i.test(f.type));
+    const skipped = all.length - files.length;
+    if (skipped) showToast(`${plural(skipped, "file")} left out: only JPG or PNG photos can be read here.`);
+    if (!files.length || st.mode !== "camera") return;
+    if (collecting()) {
+      const room = MAX_PAGES - st.pages.length;
+      files.slice(0, room).forEach((f) => { st.pages.push(f); st.pageUrls.push(URL.createObjectURL(f)); });
+      if (files.length > room) showToast(`Up to ${MAX_PAGES} pages: the rest were left out.`);
+      st.mode = "pages";
+      render();
+      return;
+    }
+    files.forEach((f) => queueScan(f, st.kind, staff));
+    showToast(files.length === 1 ? "Added. Saving in the background." : `${files.length} photos added. Saving in the background.`);
+  }
+  // A photo dropped anywhere on the Scanner is used. Anywhere else on the page, the browser
+  // is stopped from opening it (which would leave the portal and lose an unfinished scan).
+  const hasFiles = (e) => !!(e.dataTransfer && [...(e.dataTransfer.types || [])].includes("Files"));
+  const dropBox = () => root.querySelector('[data-role="drop"]');
+  const onWinDrag = (e) => { if (hasFiles(e)) e.preventDefault(); };
+  window.addEventListener("dragover", onWinDrag);
+  window.addEventListener("drop", onWinDrag);
+  root.addEventListener("dragover", (e) => {
+    if (!hasFiles(e) || st.mode !== "camera") return;
+    e.preventDefault();
+    const z = dropBox();
+    if (z) z.classList.add("is-over");
+  });
+  root.addEventListener("dragleave", (e) => {
+    if (root.contains(e.relatedTarget)) return;
+    const z = dropBox();
+    if (z) z.classList.remove("is-over");
+  });
+  root.addEventListener("drop", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    const z = dropBox();
+    if (z) z.classList.remove("is-over");
+    if (st.mode === "camera") dropFiles(e.dataTransfer.files);
+  });
 
   /* ===================== A photo taken or uploaded ===================== */
   async function handlePhoto(blob) {
@@ -1034,17 +1140,16 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     st.jobsAt = Date.now();
     scanJobs()
       .then((list) => { st.jobs = list; })
-      .catch((err) => { console.warn("Ready to check didn't load:", err); st.jobsAt = 0; })
+      .catch((err) => { console.warn("Ready to check didn't load:", err); st.jobsAt = 0; st.jobs = st.jobs || []; })
       .finally(() => {
-        const h = root.querySelector('[data-role="jobs-host"]');
-        if (h) h.innerHTML = jobsHtml();
+        drawSide();
         clearTimeout(jobsTimer);
         if (root.isConnected && st.mode === "camera" && (st.jobs || []).some((x) => x.status === "reading")) {
           jobsTimer = setTimeout(() => loadJobs(true), 8000);   // check again until it's read
         }
       });
   }
-
+  
   async function openJob(id, btn) {
     if (st.busy) return;
     if (btn) { btn.disabled = true; btn.textContent = "Opening…"; }
@@ -1115,24 +1220,18 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     st.todayAt = Date.now();
     todaysScans()
       .then((list) => { st.today = list.filter((s) => REAL.some(([k]) => k === s.kind)); })
-      .catch((err) => { console.warn("Today's scans didn't load:", err); st.todayAt = 0; })
-      .finally(() => {
-        const h = root.querySelector('[data-role="today-host"]');
-        if (h) h.innerHTML = todayHtml();
-      });
+      .catch((err) => { console.warn("Today's scans didn't load:", err); st.todayAt = 0; st.today = st.today || []; })
+      .finally(drawSide);
   }
     /* ===================== Prescriptions: To check, the done screen, Undo ===================== */
   function loadChecks(force = false) {
-    if (!can("scanner.rx") && !can("scanner.billing")) return;
+    if (!canCheck()) return;
     if (!force && st.checksAt && Date.now() - st.checksAt < 30000) return;
     st.checksAt = Date.now();
     scansToCheck()
       .then((list) => { st.checks = list.filter((s) => can(`scanner.${s.kind}`)); })
-      .catch((err) => { console.warn("To check didn't load:", err); st.checksAt = 0; })
-      .finally(() => {
-        const h = root.querySelector('[data-role="check-host"]');
-        if (h) h.innerHTML = checksHtml();
-      });
+      .catch((err) => { console.warn("To check didn't load:", err); st.checksAt = 0; st.checks = st.checks || []; })
+      .finally(drawSide);
   }
 
   function startDoneCountdown() {
@@ -1343,6 +1442,10 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
       render();
       return;
     }
+    const tb = e.target.closest("[data-sidetab]");
+    if (tb) { st.side = tb.dataset.sidetab; drawSide(); return; }
+    const ck = e.target.closest("[data-checkkind]");
+    if (ck) { st.checkKind = ck.dataset.checkkind; drawSide(); return; }
     const so = e.target.closest("[data-scanopen]");
     if (so) {
       if (reviewing) return;
@@ -1515,6 +1618,12 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
 
   root.addEventListener("change", (e) => {
     const t = e.target;
+    if (t.dataset.role === "files") {   // the drop box's "choose files" (several at once)
+      const list = [...(t.files || [])];
+      t.value = "";
+      dropFiles(list);
+      return;
+    }
     if (t.dataset.role === "file") {
       const f = t.files && t.files[0];
       t.value = "";
@@ -1567,6 +1676,8 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     window.removeEventListener("pagehide", stopCamera);
     if (releaseCamera === cleanup) releaseCamera = null;
     clearTimeout(jobsTimer);
+    window.removeEventListener("dragover", onWinDrag);
+    window.removeEventListener("drop", onWinDrag);
   };
   const onVis = () => {
     if (!root.isConnected) { cleanup(); return; }

@@ -13975,3 +13975,41 @@ button.fr-join:hover { text-decoration: underline; }
   .pt-chip { flex: none; }
   .pt-clear { margin-left: 0; }
 }
+
+/* Scanner: camera and work panel (To check · Ready to check · Today) */
+.scan-desk { display: grid; gap: 20px; }
+.scan-panel { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 12px; margin-top: 4px; }
+.scan-panel-tabs { display: flex; gap: 4px; padding: 3px; margin-bottom: 10px; background: #f1f5f9; border-radius: 10px; }
+.scan-panel-tab { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; border: 0; background: none; padding: 7px 8px;
+  border-radius: 8px; font: inherit; font-size: 13px; color: #475569; cursor: pointer; white-space: nowrap; }
+.scan-panel-tab span { display: inline-block; min-width: 18px; margin-left: 4px; padding: 0 6px; border-radius: 9px;
+  background: #e2e8f0; color: #334155; font-size: 12px; }
+.scan-panel-tab.is-on { background: #0f766e; color: #fff; }
+.scan-panel-tab.is-on span { background: rgba(255, 255, 255, 0.25); color: #fff; }
+.scan-panel-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 6px; }
+.scan-chip-f { border: 1px solid #e2e8f0; background: #fff; border-radius: 999px; padding: 3px 10px; font: inherit;
+  font-size: 12px; color: #475569; cursor: pointer; }
+.scan-chip-f.is-on { border-color: #0f766e; background: #f0fdfa; color: #0f766e; }
+.scan-panel-chips small { margin-left: auto; color: #64748b; }
+.scan-panel-sum { margin: 0 0 6px; font-size: 13px; color: #475569; }
+.scan-panel-list { list-style: none; margin: 0; padding: 0; }
+.scan-panel-list li { display: flex; align-items: center; gap: 10px; padding: 9px 2px; border-top: 1px solid #f1f5f9; }
+.scan-panel-list li:first-child { border-top: 0; }
+.scan-panel-list .scan-today-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.scan-panel-list .scan-today-main small { color: #64748b; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.scan-panel-list .scan-n { color: #64748b; font-weight: 400; }
+.scan-panel-empty { margin: 18px 0; text-align: center; color: #64748b; font-size: 13px; }
+.scan-drop { display: flex; flex-direction: column; align-items: center; gap: 2px; margin-top: 12px; padding: 14px;
+  border: 1.5px dashed #cbd5e1; border-radius: 14px; text-align: center; color: #475569; cursor: pointer; }
+.scan-drop svg { width: 22px; height: 22px; color: #0f766e; }
+.scan-drop strong { color: #0f172a; }
+.scan-drop small { color: #64748b; }
+.scan-drop.is-over { border-color: #0f766e; background: #f0fdfa; }
+
+@media (min-width: 1100px) {
+  .page.scan.is-wide { max-width: 1180px; }
+  .scan-desk { grid-template-columns: minmax(360px, 460px) minmax(0, 1fr); align-items: start; }
+  .scan-panel { position: sticky; top: calc(var(--topbar-h) + var(--recbar-h, 0px) + 12px);
+    max-height: calc(100vh - var(--topbar-h) - var(--recbar-h, 0px) - 24px); display: flex; flex-direction: column; margin-top: 0; }
+  .scan-panel-body { overflow-y: auto; min-height: 0; }
+}
