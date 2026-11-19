@@ -146,7 +146,9 @@ export async function mountFormEditor(container, { templateId, staff }) {
   let palTab = (() => { try { return localStorage.getItem("fe-paltab") === "outline" ? "outline" : "add"; } catch { return "add"; } })();
   const ctx = (live) => ({ live, fields, consentForms, prescriptionForms, letterhead, calcValues: null, aftercare: aftercareMap, emailTemplates, products, markSets, specialities });
   const current = () => fields.find((f) => f.id === sel) || null;
-  const signature = () => JSON.stringify(formSnapshot({ name, fields, settings }));
+  // The treatment group saves and applies straight away, so it isn't counted as an unpublished change
+  const pubSig = (n, f, s) => JSON.stringify(formSnapshot({ name: n, fields: f, settings: { ...(s || {}), group: "" } }));
+  const signature = () => pubSig(name, fields, settings);
 
   root.innerHTML = `
     ${back}
@@ -156,6 +158,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
         <input class="fe-name" data-role="name" maxlength="120" aria-label="Form name" value="${esc(name)}" />
         <div class="fe-sub">
           <span data-role="cat">${esc(categoryLabel(tpl.category))}</span>
+          <span data-role="grp"></span>
           <span class="fb-pill" data-role="pill"></span>
           <span class="fe-state" data-role="state">All changes saved</span>
         </div>
@@ -372,6 +375,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       disc.hidden = publishing || !(version > 0 && publishedSig && signature() !== publishedSig);
       disc.title = `Put the form back to version ${version}, exactly as staff see it`;
     }
+    renderGroupPick();
   }
 
   // What would stop this question working for staff, or null
@@ -560,8 +564,9 @@ export async function mountFormEditor(container, { templateId, staff }) {
       name = v.name;
       nameInput.value = name;
       fields.splice(0, fields.length, ...v.fields.map(normaliseField).filter(Boolean));
+      const keepGroup = settings.group;   // set straight away, not part of what's being discarded
       Object.keys(settings).forEach((k) => delete settings[k]);
-      Object.assign(settings, { showLetterhead: true, ...(v.settings || {}) });
+      Object.assign(settings, { showLetterhead: true, ...(v.settings || {}), group: keepGroup });
       sel = FORM;
       dirty = false;
       await saveFormTemplate(templateId, { name, fields, settings }, staff);
@@ -871,7 +876,8 @@ export async function mountFormEditor(container, { templateId, staff }) {
           ${CATEGORIES.map((c) => `<option value="${c.key}"${settings.group === c.key ? " selected" : ""}>${esc(c.title)}</option>`).join("")}
           <option value="other"${settings.group === "other" ? " selected" : ""}>Other</option>
         </select>
-        <small class="fe-note">Where saved forms appear on the patient's page, and which Create Consent / Create Tx buttons offer this form.</small>
+        <small class="fe-note">Where saved forms appear on the patient's page, and which Create Consent / Create Tx buttons offer this form.
+          Also at the top, next to the category. Changes straight away, without publishing again. Forms already saved keep their group.</small>
       </label>` : ""}
       ${tpl.category === "prescription" ? `
       <label class="fe-insp-field"><span class="fe-insp-label">Prescription type</span>
@@ -1089,6 +1095,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       if (dirty) flush(); // an edit made just before was waiting to autosave
       const catEl = $('[data-role="cat"]');
       if (catEl) catEl.textContent = categoryLabel(next);
+      renderGroupPick();
       renderInspector();
       showToast(`Moved to ${categoryLabel(next)}.`);
     } catch (err) {
@@ -1977,6 +1984,47 @@ export async function mountFormEditor(container, { templateId, staff }) {
     measure();
   }
 
+  /* ---------- Treatment group, next to the category at the top ---------- */
+  const GROUP_OPTS = [...CATEGORIES, { key: "other", title: "Other", color: "#94a3b8" }];
+  function renderGroupPick() {
+    const host = $('[data-role="grp"]');
+    if (!host) return;
+    if (!["consent", "treatment"].includes(tpl.category)) { host.innerHTML = ""; return; }
+    const old = host.querySelector("[data-hgroup]");
+    if (old && document.activeElement === old) return;   // being chosen right now
+    const cur = GROUP_OPTS.some((c) => c.key === settings.group) ? settings.group : "";
+    const auto = GROUP_OPTS.find((c) => c.key === categorize(name)) || GROUP_OPTS[GROUP_OPTS.length - 1];
+    const look = GROUP_OPTS.find((c) => c.key === cur) || auto;
+    host.innerHTML = `<span class="fe-grp-pick" title="Which treatment this form is for: where saved forms are listed on the patient's page, and which Create Consent / Create Tx buttons offer it">
+      <i style="background:${look.color}" aria-hidden="true"></i>
+      <select data-hgroup aria-label="Treatment group">
+        <option value="">Automatic (${esc(auto.title)})</option>
+        ${GROUP_OPTS.map((c) => `<option value="${c.key}"${cur === c.key ? " selected" : ""}>${esc(c.title)}</option>`).join("")}
+      </select></span>`;
+  }
+  // Patients filling the form in online: their saved forms follow the group too
+  function syncOnlineGroup() {
+    if (!tpl.online) return;
+    const o = { ...tpl.online, group: formGroup({ name, settings }) };
+    tpl.online = o;
+    onlineSaving = onlineSaving.then(() => saveFormOnline(templateId, o, staff))
+      .catch((err) => console.warn("Online form group not saved:", err));
+  }
+  root.addEventListener("change", (e) => {
+    const g = e.target.closest("[data-hgroup]");
+    if (!g) return;
+    settings.group = g.value;
+    changed("s:group");
+    flush();   // saved now: Create Consent / Create Tx use it straight away
+    syncOnlineGroup();
+    g.blur();
+    renderGroupPick();
+    renderStage();
+    if (sel === FORM) renderInspector();
+    const t = GROUP_OPTS.find((c) => c.key === formGroup({ name, settings }));
+    showToast(`Treatment group: ${t ? t.title : "Other"}. It applies straight away.`);
+  });
+
   /* ---------- Events ---------- */
   root.addEventListener("click", (e) => {
     const m = e.target.closest("[data-mode]");
@@ -2089,6 +2137,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     if (el.dataset.s) {
       settings[el.dataset.s] = el.type === "checkbox" ? el.checked : el.value;
       changed(`s:${el.dataset.s}`);
+      if (el.dataset.s === "group") { flush(); syncOnlineGroup(); }
       renderStage();
       return;
     }
@@ -2553,7 +2602,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   // The published copy, to tell whether there are unpublished changes
   if (version > 0) {
     getFormVersion(templateId, version)
-      .then((v) => { publishedSig = v ? JSON.stringify(formSnapshot(v)) : ""; })
+      .then((v) => { publishedSig = v ? pubSig(v.name, v.fields, v.settings) : ""; })
       .catch((err) => { console.warn("Couldn't load the published version:", err); publishedSig = ""; })
       .finally(() => { if (root.isConnected) renderPublish(); });
   }

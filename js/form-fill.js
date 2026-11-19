@@ -1479,7 +1479,9 @@ export async function mountFormFill(container, param, { staff, embedded = null }
         templateId: tid,
         templateName: ver.name,
         category: tpl.category,
-        group: formGroup({ name: ver.name, settings: ver.settings }),
+        // The treatment group as it's set now (it changes without publishing), otherwise as published
+        group: formGroup({ name: ver.name, settings: { ...(ver.settings || {}),
+          ...(tpl.settings && typeof tpl.settings.group === "string" ? { group: tpl.settings.group } : {}) } }),
         version: ver.version,
         patientId: patient.id,
         patientPttId: patient.pttId || "",

@@ -14064,3 +14064,11 @@ body.scan-full { overflow: hidden; }
 .ff-saved-next { display: grid; gap: .5rem; margin: .25rem 0 .75rem; }
 .ff-saved-next-h { margin: 0; font-size: .85rem; color: #64748b; }
 .ff-saved-next .ff-btn { justify-content: center; width: 100%; }
+
+/* Form Builder: the treatment group next to the category */
+.fe-grp-pick { display: inline-flex; align-items: center; gap: .4rem; padding: .05rem .15rem .05rem .55rem;
+  border: 1px solid #cbd5e1; border-radius: 999px; background: #fff; }
+.fe-grp-pick i { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.fe-grp-pick select { border: 0; background: transparent; font: inherit; font-size: .85rem; color: #0f172a;
+  padding: .15rem .3rem; cursor: pointer; max-width: 22rem; }
+.fe-grp-pick:focus-within { border-color: #0f766e; box-shadow: 0 0 0 3px rgba(15, 118, 110, .15); }
