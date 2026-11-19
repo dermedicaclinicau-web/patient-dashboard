@@ -690,15 +690,6 @@ export function reviewRx(result, rxProducts) {
     const hit = keys.find(([n]) => k === n || (n.length >= 5 && k.startsWith(n)));
     return hit ? hit[1] : "";
   };
-  // Also matched from what was written: capitals, spaces and dots ignored, and "Minomycin 50mg" finds "Minomycin"
-  const rxKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
-  const keys = rxProducts.map((n) => [rxKey(n), n]).filter(([k]) => k.length >= 4).sort((a, b) => b[0].length - a[0].length);
-  const findName = (s) => {
-    const k = rxKey(s);
-    if (!k) return "";
-    const hit = keys.find(([n]) => k === n || (n.length >= 5 && k.startsWith(n)));
-    return hit ? hit[1] : "";
-  };
   const fading = byLower.get("fading cream") || "";
   const items = (result.items || []).slice(0, 20).map((it) => {
     const text = String(it.text || "").slice(0, 500);
