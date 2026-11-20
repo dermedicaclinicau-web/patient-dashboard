@@ -10,6 +10,7 @@ const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 const I = {
   pen: ic('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'),
   dot: ic('<line x1="7.5" y1="16.5" x2="17" y2="7"/><polyline points="10 6 18 6 18 14"/><circle cx="6" cy="18" r="2.6" fill="currentColor"/>'),
+  line: ic('<line x1="7.5" y1="16.5" x2="18" y2="6"/><circle cx="6" cy="18" r="2.6" fill="currentColor"/>'),
   mark: ic('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3" fill="currentColor"/>'),
   erase: ic('<path d="M20 20H8l-4.3-4.3a2 2 0 0 1 0-2.8L13.2 3.4a2 2 0 0 1 2.8 0l4.6 4.6a2 2 0 0 1 0 2.8L11 20"/><line x1="7.5" y1="9.5" x2="14.5" y2="16.5"/>'),
   undo: ic('<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>'),
@@ -57,6 +58,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   const toolBtns = `${marking ? `<button type="button" class="an-btn is-on" data-tool="mark" aria-pressed="true"${compact ? " hidden" : ""}>${I.mark}<span>Mark</span></button>` : ""}
       <button type="button" class="an-btn${marking ? "" : " is-on"}" data-tool="pen" aria-pressed="${!marking}" title="Draw">${I.pen}<span>Draw</span></button>
       <button type="button" class="an-btn" data-tool="dot" aria-pressed="false" title="Tap where it starts (A), then where it goes (B), for an arrow from A to B">${I.dot}<span>Dot</span></button>
+      <button type="button" class="an-btn" data-tool="line" aria-pressed="false" title="Tap where it starts (A), then where it ends (B), for a straight line from A to B">${I.line}<span>Line</span></button>
       <button type="button" class="an-btn" data-tool="erase" aria-pressed="false" title="Tap one mark, dot or line to remove it">${I.erase}<span>Erase</span></button>`;
   const styleBtns = `<div class="an-colours"${marking ? " hidden" : ""}>${COLOURS.map(([c, l], i) =>
       `<button type="button" class="an-swatch${i === 0 ? " is-on" : ""}" data-colour="${c}" style="--c:${c}" aria-label="${l}" aria-pressed="${i === 0}"></button>`).join("")}</div>
@@ -111,8 +113,11 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   const penWidth = () => (size === "thick" ? 7 : 3) * scale();
   const dotRadius = () => (size === "thick" ? 12 : 7) * scale();
   const linkWidth = () => (size === "thick" ? 5 : 3) * scale();
-  const dotHint = () => (pending ? "Now tap point B, where the arrow goes."
-    : "Tap point A, where it starts, then point B, where it goes. An arrow joins them.");
+  const dotHint = () => (tool === "line"
+    ? (pending ? "Now tap point B, where the line ends."
+      : "Tap point A, where it starts, then point B, where it ends. A straight line joins them.")
+    : pending ? "Now tap point B, where the arrow goes."
+      : "Tap point A, where it starts, then point B, where it goes. An arrow joins them.");
   // n screen pixels, in drawing pixels (the picture may be shown smaller or bigger than it's drawn)
   const px = (n) => n * W / (canvas.getBoundingClientRect().width || W);
   // Marks are about 13px on screen, whatever size the picture is shown at
@@ -223,7 +228,17 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     if (op.type === "link") {   // Dot: an arrow from point A (a dot) to point B (the arrowhead)
       const [ax, ay] = op.a;
       const end = op.b || (op === pending ? hover : null);
-      if (end) {
+      if (end && op.plain) {   // Line: straight from A to B, no arrowhead
+        const [bx, by] = end;
+        g.lineWidth = op.width;
+        g.lineCap = "round";
+        if (!op.b) g.setLineDash([op.width * 2, op.width * 2]);   // the guide line while choosing point B
+        g.beginPath();
+        g.moveTo(ax, ay);
+        g.lineTo(bx, by);
+        g.stroke();
+        g.setLineDash([]);
+      } else if (end) {
         const [bx, by] = end;
         const dist = Math.hypot(bx - ax, by - ay);
         const ang = Math.atan2(by - ay, bx - ax);
@@ -331,7 +346,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
         : `${x.name}: ${fmt(x.total)}${x.unit ? ` ${x.unit}` : ""}`));
       totalEl.innerHTML = `<span>${tool === "erase"
         ? "Tap a mark, dot or line to remove it · Undo brings it back"
-        : tool === "dot" ? dotHint()
+        : tool === "dot" || tool === "line" ? dotHint()
         : "Tap the picture to place the chosen value · tap it again to remove it · Erase removes dots and lines"}</span>${
         others.map((o) => `<span><b>${esc(o)}</b></span>`).join("")}`;
       return;
@@ -341,7 +356,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       ? "Tap a mark, dot or line to remove it. Undo brings it back."
       : tool === "mark"
         ? `Placing <b>${esc(placingText())}</b>. Tap the picture to add it, or tap a mark again to remove it.`
-        : tool === "dot" ? dotHint()
+        : tool === "dot" || tool === "line" ? dotHint()
         : "Draw on the picture. Choose a value above to place marks again."}</span>`;
   }
 
@@ -365,7 +380,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     }
     else if (h.joined) {   // point B goes; point A waits again
       h.joined.b = null;
-      if (ops.includes(h.joined) && tool === "dot") pending = h.joined;
+      if (ops.includes(h.joined) && tool === (h.joined.plain ? "line" : "dot")) pending = h.joined;
     }
     else if (h.removed) ops.splice(Math.min(h.at, ops.length), 0, h.removed);
     else if (h.replaced) { const i = ops.indexOf(h.by); if (i >= 0) ops[i] = h.replaced; }
@@ -438,14 +453,14 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       changed();
       return;
     }
-    if (tool === "dot") {
+    if (tool === "dot" || tool === "line") {
       if (pending && ops.includes(pending)) {   // point B: join it to point A
         pending.b = [x, y];
         history.push({ joined: pending });
         pending = null;
         hover = null;
       } else {                                  // point A
-        pending = { type: "link", colour, r: dotRadius(), width: linkWidth(), a: [x, y], b: null };
+        pending = { type: "link", plain: tool === "line", colour, r: dotRadius(), width: linkWidth(), a: [x, y], b: null };
         ops.push(pending);
         history.push({ add: pending });
       }
@@ -459,7 +474,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     redraw();
   });
   canvas.addEventListener("pointermove", (e) => {
-    if (pending && tool === "dot" && e.pointerType === "mouse") { hover = pos(e); redraw(); return; }
+    if (pending && (tool === "dot" || tool === "line") && e.pointerType === "mouse") { hover = pos(e); redraw(); return; }
     if (!current) return;
     current.points.push(pos(e));
     redraw();
@@ -479,14 +494,16 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     box.querySelectorAll("[data-setrow]").forEach((r) => r.classList.toggle("is-active", Number(r.dataset.setrow) === si));
   };
   const setTool = (t) => {
+    const was = tool;
     tool = t;
     pickOne(box.querySelectorAll("[data-tool]"), box.querySelector(`[data-tool="${t}"]`));
-    const plain = t === "pen" || t === "dot";   // colour and size only matter for drawing
+    if (t !== was) { pending = null; hover = null; }   // a lone point A stays as a single dot
+    const plain = t === "pen" || t === "dot" || t === "line";   // colour and size only matter for drawing
     box.querySelector(".an-colours").hidden = !plain;
     box.querySelector('[data-role="sizes"]').hidden = !plain;
     if (marksRow) marksRow.classList.toggle("is-idle", t !== "mark");
     stage.classList.toggle("is-erasing", t === "erase");
-    if (t !== "dot") { pending = null; hover = null; }   // a lone point A stays as a single dot
+    if (t !== "dot" && t !== "line") { pending = null; hover = null; }
     redraw();
   };
 
