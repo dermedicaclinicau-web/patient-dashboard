@@ -436,7 +436,7 @@ function render() {
       ${rulesHtml(d)}
 
       <details class="sp-raw">
-        <summary>${ICONS.chev}${ICONS.lines}<span>${pasted ? "Pasted text" : "Raw transcript"}</span></summary>
+
         <div class="sp-raw-body">${transcriptHtml(d["Full Raw Transcript"], escapeHtml)}</div>
       </details>
 
