@@ -3814,7 +3814,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       return `<tr>
         <td><strong>${esc(it.name)}</strong>${it.productId ? "" : ' <span class="rq2-tag is-purple">Not on the product list</span>'}${
           onPo ? ` <a class="inv-flag is-info" href="#/inventory/po/${esc(onPo.id)}">On ${esc(onPo.number)} · ${esc(PO_STATUS[onPo.status])}</a>` : ""}</td>
-        <td>${esc(plural(it.qty, it.unit))}</td>
+        <td>${esc(plural(it.qty, it.unit))}${(it.added || []).length
+          ? `<br><small class="muted">incl. ${esc(it.added.map((a) => `${a.qty} from ${a.by}`).join(", "))}</small>` : ""}</td>
         <td>${p ? chip(p, "shelf") : "—"}</td><td>${p ? chip(p, "jt") : "—"}</td>
         <td class="muted">${esc(sup || "—")}</td>
         ${isOpen ? `<td>${step(x)}</td>` : ""}</tr>`;

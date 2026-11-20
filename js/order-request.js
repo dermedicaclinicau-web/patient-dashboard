@@ -61,6 +61,9 @@ export async function mountOrderRequest(container, { param = "", staff = null } 
     return `on ${day(d)}`;
   };
   const sameText = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
+  // Still waiting: open and not on a purchase order yet. These can be added to, so they're never requested twice.
+  const isWaiting = (q) => q.status === "open" && !(q.poIds || []).length && !(q.poNumbers || []).length;
+  const whose = (q) => (q.requestedByUid === myUid() ? "your" : `${q.requestedBy || "their"}'s`);
   const nameOf = (r) => { const p = byId.get(r.productId); return p ? p.name : r.name.trim(); };
   // Requests already asking for what's on this row (a product, or the same typed name)
   const dupsFor = (r) => {
@@ -142,19 +145,32 @@ export async function mountOrderRequest(container, { param = "", staff = null } 
       ? `<option value="order"${r.unitKind === "order" ? " selected" : ""}>${esc(p.packSize > 1 ? `${unitPlural(p.orderUnit)} (${p.packSize} each)` : unitPlural(p.orderUnit))}</option>${
           p.packSize > 1 ? `<option value="stock"${r.unitKind === "stock" ? " selected" : ""}>${esc(unitPlural(p.stockUnit))}</option>` : ""}`
       : '<option value="order">units</option>';
+    const waiting = dups.find((d) => isWaiting(d.q));
+    const unit = p ? (r.unitKind === "stock" ? p.stockUnit : p.orderUnit) : "";
+    const more = p ? plural(r.qty || 1, unit) : `${r.qty || 1} more`;
     const dupHtml = !dups.length ? ""
+      : waiting ? `<div class="or-dup-box is-block" role="status">
+          <div class="or-dup-t">Already waiting in ${esc(whose(waiting.q))} request</div>
+          <p>${esc(who(waiting.q))} asked for ${esc(plural(waiting.it.qty, waiting.it.unit))} ${esc(whenShort(waiting.q.createdAt))}
+            (${esc(reqNumber(waiting.q))}). To keep it to one request, add what you need to it.</p>
+          <div class="or-dup-acts">
+            <button type="button" class="ff-btn is-primary" data-r="addto">Add ${esc(more)} to ${esc(whose(waiting.q))} request</button>
+            <button type="button" class="ff-btn" data-r="remove">Remove it from mine</button>
+          </div>
+        </div>`
       : r.dupOk ? '<small class="or-dup-ok">Keeping it. The ordering team will see it was already asked for.</small>'
       : `<div class="or-dup-box" role="status">
-          <div class="or-dup-t">⚠ Already requested</div>
+          <div class="or-dup-t">⚠ Already being ordered</div>
           <ul>${dups.slice(0, 3).map((d) => `<li><b>${esc(who(d.q))}</b> asked for ${esc(plural(d.it.qty, d.it.unit))} ${esc(whenShort(d.q.createdAt))}
-            · ${esc(reqState(d.q)[0])} <small>(${esc(reqNumber(d.q))})</small></li>`).join("")}
-            ${dups.length > 3 ? `<li>and ${dups.length - 3} more</li>` : ""}</ul>
+            · ${esc(reqState(d.q)[0])} <small>(${esc(reqNumber(d.q))})</small></li>`).join("")}</ul>
+          <p>It's too late to add to that. If you still need more, keep it on yours.</p>
           <div class="or-dup-acts">
             <button type="button" class="ff-btn is-primary" data-r="remove">Remove it from mine</button>
             <button type="button" class="ff-btn" data-r="keep">Keep it, I need more</button>
           </div>
         </div>`;
-    return `
+        
+      return `
       <div class="or-row" data-i="${i}">
         <div class="or-line">
           <div class="or-product or-pick">
@@ -285,6 +301,36 @@ export async function mountOrderRequest(container, { param = "", staff = null } 
       : '<p class="tb-none">Nothing is waiting to be ordered. 👍</p>';
   }
 
+  // Adds this row's amount to the request it's already waiting in (through Apps Script), then takes it off this list
+  async function addToWaiting(i, btn) {
+    const r = st.rows[i];
+    const d = r && dupsFor(r).find((x) => isWaiting(x.q));
+    if (!d) return;
+    if (!(r.qty >= 1)) { msgEl.textContent = "Enter how many more you need first."; return; }
+    const p = byId.get(r.productId);
+    const pack = p ? Math.max(1, p.packSize) : 1;
+    const qtyStock = p ? (r.unitKind === "stock" ? r.qty : r.qty * pack) : r.qty;
+    const qtyOrder = p ? (r.unitKind === "stock" ? Math.ceil(r.qty / pack) : r.qty) : r.qty;
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Adding…";
+    try {
+      const res = await callApi({ action: "invRequestAdd", requestId: d.q.id, productId: p ? p.id : "", name: p ? "" : r.name.trim(),
+        qtyStock, qtyOrder, note: $('[data-role="note"]').value.trim() });
+      if (!res || res.ok === false || res.problem) throw new Error((res && (res.problem || res.error)) || "No answer came back");
+      st.rows.splice(i, 1);
+      if (!st.rows.length) st.rows.push(blankRow());
+      msgEl.textContent = "";
+      showToast(`Added to ${whose(d.q)} request (${reqNumber(d.q)}). It's now ${plural(res.qty, res.unit)}.`);
+      await reload();
+    } catch (err) {
+      console.error("Add to request failed:", err);
+      msgEl.textContent = `Couldn't add it: ${err.message || err}`;
+      if (btn.isConnected) { btn.disabled = false; btn.textContent = label; }
+      reload();
+    }
+  }
+
   async function reload() {
     try { requests = await listRequests({ max: 200 }); } catch (err) { console.warn("Requests reload failed:", err); }
     if (root.isConnected) { renderRows(); renderMine(); renderPending(); }
@@ -325,6 +371,8 @@ export async function mountOrderRequest(container, { param = "", staff = null } 
       if (inp) inp.focus();
       return;
     }
+    const at = e.target.closest('[data-r="addto"]');
+    if (at) { addToWaiting(Number(at.closest("[data-i]").dataset.i), at); return; }
     const kp = e.target.closest('[data-r="keep"]');
     if (kp) { st.rows[Number(kp.closest("[data-i]").dataset.i)].dupOk = true; renderRows(); return; }
     const rm = e.target.closest('[data-r="remove"]');
@@ -431,6 +479,15 @@ export async function mountOrderRequest(container, { param = "", staff = null } 
 
     // Already asked for: confirm anything still flagged, and tell the ordering team either way
     const filled = st.rows.filter((r) => byId.get(r.productId) || (r.isNew && r.name.trim()));
+    const blocked = filled.filter((r) => dupsFor(r).some((d) => isWaiting(d.q)));
+    if (blocked.length) {
+      const one = blocked.length === 1;
+      msgEl.textContent = `${blocked.map(nameOf).join(", ")} ${one ? "is" : "are"} already waiting in another request. `
+        + `Add ${one ? "it" : "them"} to that request, or remove ${one ? "it" : "them"} from yours.`;
+      const box = rowsEl.querySelector(".or-dup-box.is-block");
+      if (box) box.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
     const flagged = filled.filter((r) => !r.dupOk && dupsFor(r).length);
     st.busy = true;
     if (flagged.length) {
@@ -496,6 +553,8 @@ const CSS = `
 .or-dup-box ul{margin:0 0 8px;padding-left:18px;line-height:1.5}
 .or-dup-acts{display:flex;flex-wrap:wrap;gap:6px}
 .or-dup-ok{display:block;margin-top:4px;color:#92400e}
+.or-dup-box p{margin:0 0 8px;line-height:1.45}
+.or-dup-box.is-block{border-color:#fdba74;background:#fff7ed;color:#7c2d12}
 .or-pend-lead{margin:0 0 8px;font-size:13px}
 .or-pend{list-style:none;margin:0 0 6px;padding:0;display:flex;flex-direction:column;gap:8px}
 .or-pend li{padding:10px 12px;border:1px solid #e5e7eb;border-radius:10px;background:#fff}
