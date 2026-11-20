@@ -16,6 +16,7 @@ import { renderAds, clearAds, loadAds, adsPageHtml, peekAds, adsTotals } from ".
 import { loadLeads, peekLeads, clearLeads, leadsPageHtml, leadsTotals, leadsByPage } from "./seo-leads.js";
 import { renderResults } from "./seo-results.js";
 import { renderGbp, clearGbp, loadGbp, peekGbp, gbpTotals, gbpTabHtml } from "./seo-gbp.js";
+import { renderSocial } from "./seo-social.js";
 
 const TABS = [
   { id: "overview", label: "Overview" },
@@ -25,6 +26,7 @@ const TABS = [
   { id: "keywords", label: "Keywords" },
   { id: "ads", label: "Ads" },
   { id: "gbp", label: "Google Business" },
+  { id: "social", label: "Social" },
   { id: "opps", label: "Tasks" },
   { id: "health", label: "Site health" },
   { id: "audience", label: "Audience" },
@@ -536,10 +538,13 @@ export async function mountSeo(el, opts = {}) {
 
   const can = makeCan(opts);
   const isAdmin = opts.isAdmin === true || /^admin$/i.test(String(opts.staff?.role || opts.staff?.staffRole || ""));
-  const tabs = TABS.filter((t) => !t.manage || can("seo.manage"));
+  const seoAll = can("menu.seo");
+  const socialOk = can("social.plan") || can("social.approve");
+  const tabs = (seoAll ? TABS.filter((t) => !t.manage || can("seo.manage")) : TABS.filter((t) => t.id === "social"))
+    .filter((t) => t.id !== "social" || socialOk);
   let work = null;
   const [param0, ...paramRest] = String(param || "").split("/");
-  let tab = tabs.some((t) => t.id === param0) ? param0 : "overview";
+  let tab = tabs.some((t) => t.id === param0) ? param0 : seoAll ? "overview" : "social";
   let siteParam = tab === "website" ? paramRest.join("/") : "";   // which page the Website tab opens
   const ui = { preset: "28", from: "", to: "", compare: "prev", gran: "auto", metric: "clicks",
     sortKey: "clicks", sortDir: -1, filter: "", hideZero: true, limit: 100, pview: "table", kpi: "", drtab: "", drOpen: "" };
@@ -638,7 +643,7 @@ export async function mountSeo(el, opts = {}) {
   el.innerHTML = `
     <div class="seo">
       <div class="seo-head">
-        <h1>SEO</h1>
+        <h1>${seoAll ? "SEO" : "Social"}</h1>
         <div class="seo-meta" data-meta></div>
         <button class="seo-btn" data-reload>Refresh</button>
       </div>
@@ -666,6 +671,7 @@ export async function mountSeo(el, opts = {}) {
   }
 
   async function load(force) {
+    if (!seoAll) { render(); return; }
     body.innerHTML = `<div class="seo-empty">Loading…</div>`;
     try {
       [data, work] = await Promise.all([loadData(force), loadWork(force)]);
@@ -717,6 +723,11 @@ export async function mountSeo(el, opts = {}) {
 
   function render() {
     setTabs();
+    if (tab === "social") {
+      renderSocial(body, { can, isAdmin, staff: opts.staff, work,
+        setTab: (id) => { tab = id; history.replaceState(null, "", "#/seo/" + id); render(); } });
+      return;
+    }
     const warn = data.run && data.run.ok === false
       ? `<div class="seo-warn">The last nightly update failed, so these numbers may be out of date: ${esc(data.run.error || "")}</div>` : "";
     if (tab === "advisor") { renderAdvisor(body, ctx()); return; }

@@ -139,5 +139,17 @@ service firebase.storage {
       allow update, delete: if false;
     }
 
+    // SEO › Social: pictures uploaded for posts
+    match /social_media/{postId}/{file} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null
+        && request.auth.token.staffRole is string
+        && (request.auth.token.staffRole.lower() == 'admin'
+          || (request.auth.token.perms is list
+            && ('social.plan' in request.auth.token.perms || 'social.approve' in request.auth.token.perms)))
+        && request.resource.size < 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
   }
 }

@@ -1620,7 +1620,7 @@ match /inv_count_drafts/{id} {
     // Settings. Topics, brand words, advertising wording and areas: SEO settings access.
     // Priority pages and the daily task count: Admins only. 'wp' (the WordPress page list) is Apps Script only.
     match /seo_settings/{id} {
-      allow read: if can('menu.seo');
+      allow read: if can('menu.seo') || socialPlan();
       allow create: if can('seo.manage') && id == 'main'
         && (isAdmin() || !request.resource.data.keys().hasAny(['keyPages', 'priorityInfo', 'tasksPerDay', 'tasks']));
       allow update: if can('seo.manage') && id == 'main'
@@ -1702,6 +1702,100 @@ match /inv_count_drafts/{id} {
     }
     // Site health → Content (Seo9.gs): content checks, duplicate pairs and the whole-site fingerprints. Apps Script only.
     match /seo_content/{id} { allow read: if can('menu.seo'); allow write: if false; }
+    // ===================== Social (SEO › Social) =====================
+    function socialPlan() { return can('social.plan') || can('social.approve'); }
+    function socialApprove() { return can('social.approve'); }
+    function okSocialPost(d) {
+      return d.keys().hasOnly(['status', 'channels', 'caption', 'captions', 'hashtags', 'link', 'gbpButton', 'pictures',
+             'when', 'day', 'topic', 'ideaId',
+             'createdBy', 'createdByName', 'createdAt', 'updatedBy', 'updatedByName', 'updatedAt',
+             'approvedBy', 'approvedByName', 'approvedAt', 'approvedSig', 'reviewNote', 'history',
+             'published', 'results', 'error', 'commentCount', 'lastCommentAt', 'lastCommentBy', 'lastCommentTo'])
+        && d.status in ['draft', 'waiting', 'scheduled', 'publishing', 'posted', 'failed', 'rejected', 'deleted']
+        && d.channels is list && d.channels.size() <= 3
+        && d.caption is string && d.caption.size() <= 5000
+        && d.captions is map
+        && d.hashtags is list && d.hashtags.size() <= 40
+        && d.pictures is list && d.pictures.size() <= 10
+        && d.when is string && d.when.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}$')
+        && d.day is string && d.when.split('T')[0] == d.day
+        && d.get('history', []) is list && d.get('history', []).size() <= 100;
+    }
+    // Posts. Only approvers can schedule. A planner changing an approved post sends it back for approval.
+    // Posting itself (and 'publishing', 'failed', results) is Apps Script only.
+    match /social_posts/{id} {
+      allow read: if socialPlan();
+      allow create: if socialPlan() && okSocialPost(request.resource.data)
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.published == {}
+        && request.resource.data.commentCount == 0
+        && ((request.resource.data.status in ['draft', 'waiting'] && request.resource.data.approvedBy == '')
+          || (socialApprove() && request.resource.data.status == 'scheduled' && request.resource.data.approvedBy == request.auth.uid));
+      allow update: if okSocialPost(request.resource.data)
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.get('results', null) == resource.data.get('results', null)
+        && (
+          // Approvers: anything not yet posted. Scheduling stamps them as the approver (moving keeps the approval).
+          (socialApprove() && !(resource.data.status in ['posted', 'publishing'])
+            && request.resource.data.updatedBy == request.auth.uid
+            && request.resource.data.status in ['draft', 'waiting', 'scheduled', 'rejected', 'deleted']
+            && request.resource.data.get('published', {}) == resource.data.get('published', {})
+            && (request.resource.data.status != 'scheduled'
+              || request.resource.data.approvedBy == request.auth.uid
+              || request.resource.data.approvedSig == resource.data.get('approvedSig', '')))
+          ||
+          // Planners: drafts and approval requests, never the approval itself
+          (socialPlan() && !(resource.data.status in ['posted', 'publishing'])
+            && request.resource.data.updatedBy == request.auth.uid
+            && request.resource.data.status in ['draft', 'waiting', 'deleted']
+            && (request.resource.data.status != 'deleted' || resource.data.createdBy == request.auth.uid)
+            && request.resource.data.get('approvedBy', '') == resource.data.get('approvedBy', '')
+            && request.resource.data.get('approvedSig', '') == resource.data.get('approvedSig', '')
+            && request.resource.data.get('reviewNote', '') == resource.data.get('reviewNote', '')
+            && request.resource.data.get('published', {}) == resource.data.get('published', {}))
+          ||
+          // Posted by hand, for channels not connected yet
+          (socialPlan() && resource.data.status == 'scheduled'
+            && request.resource.data.status in ['scheduled', 'posted']
+            && request.resource.data.updatedBy == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['published', 'status', 'history', 'updatedBy', 'updatedByName', 'updatedAt']))
+          ||
+          // A new comment (any post, any stage)
+          (socialPlan() && request.resource.data.lastCommentBy == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['commentCount', 'lastCommentAt', 'lastCommentBy', 'lastCommentTo']))
+        );
+      allow delete: if false;
+
+      // Comments: added, never changed or deleted
+      match /comments/{cid} {
+        allow read: if socialPlan();
+        allow create: if socialPlan()
+          && request.resource.data.keys().hasOnly(['text', 'by', 'byName', 'to', 'toName', 'at'])
+          && request.resource.data.by == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0 && request.resource.data.text.size() <= 2000
+          && request.resource.data.at == request.time;
+        allow update, delete: if false;
+      }
+    }
+    match /social_ideas/{id} {
+      allow read: if socialPlan();
+      allow create: if socialPlan()
+        && request.resource.data.keys().hasOnly(['title', 'note', 'link', 'picture', 'by', 'byName', 'at', 'used', 'postId', 'archived'])
+        && request.resource.data.by == request.auth.uid
+        && request.resource.data.title is string && request.resource.data.title.size() > 0 && request.resource.data.title.size() <= 150
+        && request.resource.data.note is string && request.resource.data.note.size() <= 2000;
+      allow update: if socialPlan()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'note', 'link', 'picture', 'used', 'postId', 'archived']);
+      allow delete: if false;
+    }
+    // main: the usual time and hashtag sets (approvers). connect: which channels post themselves (Apps Script).
+    match /social_settings/{id} {
+      allow read: if socialPlan();
+      allow write: if socialApprove() && id == 'main';
+    }
+
     // Google Business reviews (SeoGbp.gs, Apps Script only)
     match /seo_gbp_reviews/{id} { allow read: if can('menu.seo'); allow write: if false; }
 

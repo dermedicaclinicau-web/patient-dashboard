@@ -423,6 +423,7 @@ const PAGE_PERM = {
 // Email flow builders who aren't Admins can open System configuration, but only its Email flows
 const pageAllowed = (p, param = "") => {
   if (p === "recall") return can("recall.work") || can("recall.manage");
+  if (p === "seo") return can("menu.seo") || can("social.plan") || can("social.approve");
   if (p === "settings" && String(param).split("/")[0] === "recall") return can("recall.manage");
   if (p === "settings" && can("flows.build") && (!param || String(param).split("/")[0] === "flows")) return true;
   const need = PAGE_PERM[p];
