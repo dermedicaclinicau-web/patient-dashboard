@@ -37,7 +37,7 @@ import "./menu-search.js";
 import "./mobile-nav.js";
 import "./force-refresh.js";   // first, so it can see recordings start
 import { freshReload } from "./fresh-reload.js";
-import { resetTabIcon, clearTabTitle, labelFormRecordTab, setMenuTab } from "./tab-icon.js";
+import { resetTabIcon, clearTabTitle, labelFormRecordTab, setMenuTab, setTabTitle } from "./tab-icon.js";
 const APP_TITLE = document.title;   // the usual tab title, put back on every page change
 import { startNudges } from "./nudges.js";
 
@@ -436,9 +436,24 @@ const currentParam = () => { try { return decodeURIComponent(location.hash.split
 
 // Menu pages take the sidebar's icon and name for the browser tab.
 // These open from a menu but are something else (a patient, notes, a form…), and set their own tab.
-const OWN_TAB = ["patient", "fill", "form-record", "ssp", "consult", "notes", "email",
+const OWN_TAB = ["fill", "form-record", "ssp", "consult", "notes", "email",
   "image-bank", "aftercare-bank", "ssp-products", "specialist-bank"];
-function menuTab(page, navKey) {
+
+// A patient's dashboard: the Patient List icon, and the patient's name once it's loaded
+function patientTab(param) {
+  const a = document.querySelector('.nav-item[data-page="patients"]');
+  setMenuTab("patients", a && a.querySelector("svg"), "Patient");
+  const id = String(param || "").split("/")[0];
+  if (!id) return;
+  const seq = routeSeq;   // moved on before the name arrives: leave the tab alone
+  import("./patients.js")
+    .then((m) => m.getPatient(id))
+    .then((p) => { if (seq === routeSeq && p && p.name) setTabTitle(p.name); })
+    .catch((err) => console.warn("Patient tab name not set:", err));
+}
+
+function menuTab(page, navKey, param) {
+  if (page === "patient") { patientTab(param); return; }
   if (OWN_TAB.includes(page)) return;
   const a = document.querySelector(`.nav-item[data-page="${navKey}"]`);
   if (!a) return;
@@ -487,7 +502,7 @@ function router() {
   resetTabIcon();
   clearTabTitle(APP_TITLE);
   routeSeq++;
-  menuTab(page, navKey);            // before the page, so a page with its own icon or title still wins
+  menuTab(page, navKey, param);     // before the page, so a page with its own icon or title still wins
   PAGES[page](els.content, param);
   if (page === "form-record") labelFormRecordTab(param);
 }
