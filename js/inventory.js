@@ -134,6 +134,37 @@ const REQ_CSS = `
 .rq2-stock.is-out{background:#fee2e2;color:#b91c1c}
 .rq2-acts{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px}
 .rq2-acts .inv-pd-more{right:0;left:auto}
+.pow-dlg{width:min(760px,96vw)}
+.pow-steps{display:flex;gap:6px;list-style:none;margin:0 0 16px;padding:0}
+.pow-steps li{flex:1;display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:10px;background:#f1f5f9;color:#64748b;font-size:13px}
+.pow-steps b{display:grid;place-items:center;width:24px;height:24px;border-radius:50%;background:#fff;color:#64748b;font-size:12px;flex:none}
+.pow-steps li.is-on{background:#f0fdfa;color:#0f766e;font-weight:600;box-shadow:inset 0 0 0 1.5px #0f766e}
+.pow-steps li.is-on b{background:#0f766e;color:#fff}
+.pow-steps li.is-done{color:#0f766e}
+.pow-steps li.is-done b{background:#ccfbf1;color:#0f766e}
+.pow-lead{margin:0 0 10px;color:#334155;font-size:14px}
+.pow-list{display:flex;flex-direction:column;gap:8px}
+.pow-item{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid #e5e7eb;border-radius:12px;background:#fff}
+.pow-item.is-sug{background:#f8fafc;border-style:dashed}
+.pow-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.pow-main small{color:#64748b}
+.pow-who{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.pow-chip{border:1px solid #cbd5e1;background:#fff;border-radius:999px;padding:2px 10px;font:inherit;font-size:12px;cursor:pointer;color:#475569}
+.pow-chip.is-on{border-color:#0f766e;background:#f0fdfa;color:#0f766e;font-weight:600}
+.pow-note{color:#92400e !important}
+.pow-sec{margin-top:16px}
+.pow-sec h4{margin:0 0 2px;font-size:14px}
+.pow-sec > p{margin:0 0 8px}
+.pow-sup{min-width:240px}
+.pow-card{border:1px solid #e5e7eb;border-radius:12px;padding:12px 14px;margin-bottom:10px;background:#fff}
+.pow-card-h{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;margin-bottom:4px}
+.pow-card-h small{color:#64748b}
+.pow-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-top:1px solid #f1f5f9}
+.pow-qty{display:flex;align-items:center;gap:6px;font-size:13px;color:#475569}
+.pow-qty .inv-num{width:80px}
+.pow-total{margin-top:6px;text-align:right;font-weight:600;color:#0f172a}
+.pow-done{display:flex;flex-direction:column;gap:8px}
+@media (max-width:640px){.pow-steps span{display:none}.pow-item{flex-wrap:wrap}.pow-sup{min-width:0;width:100%}}
 @media (max-width:800px){.rq2-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.rq2-body{padding-left:14px}}
 `;
 function injectReqCss() {
@@ -3730,7 +3761,9 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     [...st.reqSel].forEach((id) => { if (!ids.has(id)) st.reqSel.delete(id); });
     return `<div class="rq2-list">
       ${pick ? `<div class="rq2-bar"><label class="fe-check"><input type="checkbox" data-rqall /> <span data-role="rqselcount">Select all</span></label>
-        <span class="inv-spacer"></span><button type="button" class="lh-btn is-primary" data-act="rq-bulk" hidden>Mark as ordered</button></div>` : ""}
+        <span class="inv-spacer"></span>
+        <button type="button" class="lh-btn" data-act="rq-bulk" hidden>Mark as ordered</button>
+        <button type="button" class="lh-btn is-primary" data-act="rq-bulk-po" hidden>Make a purchase order</button></div>` : ""}
       ${rows.map((r) => reqRow(r, pick)).join("")}</div>`;
   }
 
@@ -3806,7 +3839,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       ${fillable && needOrder ? '<p class="inv-hint">JT storage has some of this. Fill what it has, and order the rest.</p>' : ""}
       ${isOpen && (canMove || mine) ? `<div class="rq2-acts">
         ${fillable ? `<button type="button" class="lh-btn is-primary" data-rqfill="${esc(r.id)}">${allJt ? "Fill from JT storage" : "Fill what JT storage has…"}</button>` : ""}
-        ${canMove && needOrder ? `<button type="button" class="lh-btn${fillable ? "" : " is-primary"}" data-act="rq-tosup">Make a purchase order…</button>` : ""}
+        ${canMove && needOrder ? `<button type="button" class="lh-btn${fillable ? "" : " is-primary"}" data-rqpo="${esc(r.id)}">Make a purchase order…</button>` : ""}
         <span class="inv-spacer"></span>
         <span class="inv-pd-morewrap"><button type="button" class="lh-btn" data-rqmore aria-expanded="false" aria-label="More actions">⋯</button>
           <span class="inv-pd-more" role="menu" hidden>${more.join("")}</span></span>
@@ -3880,6 +3913,220 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       }
     });
   }
+  /* ---------- Make a purchase order from requests: step by step ---------- */
+  // 1 What to order (only these requests, the same product added together, with other requests for the same supplier
+  // offered) · 2 Who from (skipped when there's nothing to choose) · 3 Check the amounts and create the draft(s).
+  function poWizard(reqIds) {
+    const chosen = new Set(reqIds);
+    const lines = new Map();
+    st.requests.filter((r) => r.status === "open").forEach((r) => jtPlan(r).forEach((x) => {
+      if (x.state === "done" || itemOnPo(r.id, x.i, st.pos)) return;
+      const key = `${x.p ? x.p.id : `free:${x.it.name.toLowerCase()}`}|${r.loc}`;
+      const l = lines.get(key) || { key, p: x.p, name: x.p ? x.p.name : x.it.name, loc: r.loc,
+        unit: x.p ? x.p.stockUnit : x.it.unit, sources: [], sid: x.p ? x.p.supplierId || "" : x.it.supplierId || "", qty: null };
+      l.sources.push({ r: r.id, i: x.i, who: r.requestedBy || "Someone", need: x.need, urgent: r.urgency === "urgent", on: chosen.has(r.id) });
+      lines.set(key, l);
+    }));
+    const all = [...lines.values()];
+    if (!all.some((l) => l.sources.some((s) => s.on))) {
+      showToast("Everything on this is already on a purchase order, or filled from JT storage.");
+      return;
+    }
+
+    const picked = (l) => l.sources.filter((s) => s.on);
+    const need = (l) => picked(l).reduce((a, s) => a + s.need, 0);
+    const supName = (id) => (supplierOf(id) || {}).name || "No supplier yet";
+    const options = (l) => {
+      const o = l.p ? productSuppliers(l.p).map((t) => t.supplierId).filter((id) => supplierOf(id)) : [];
+      return o.length ? o : st.suppliers.filter((s) => s.active).map((s) => s.id);
+    };
+    const terms = (l) => (l.p ? supplierTerms(l.p, l.sid) : null);
+    const pack = (l) => (l.p ? Math.max(1, (terms(l) && terms(l).packSize) || l.p.packSize || 1) : 1);
+    const orderUnit = (l) => (l.p ? (terms(l) && terms(l).orderUnit) || l.p.orderUnit : l.unit);
+    const qtyOf = (l) => (l.qty !== null ? l.qty : l.p ? Math.max(1, Math.ceil(need(l) / pack(l))) : Math.max(1, need(l)));
+    const onList = () => all.filter((l) => picked(l).length);
+    const groups = () => {
+      const m = new Map();
+      onList().forEach((l) => { if (l.sid) m.set(l.sid, [...(m.get(l.sid) || []), l]); });
+      return m;
+    };
+    const needsChoice = () => onList().some((l) => !l.sid || !supplierOf(l.sid) || options(l).length > 1);
+    const first = st.requests.find((r) => r.id === reqIds[0]);
+    const title = reqIds.length === 1 && first ? `Purchase order for ${reqNumber(first)}` : `Purchase order for ${reqIds.length} requests`;
+    const w = { step: 1, err: "", busy: false, done: null, failed: [] };
+
+    const dlg = openDialog("inv-dlg pow-dlg", '<div class="lh-form" data-role="pw"></div>');
+    const box = dlg.querySelector('[data-role="pw"]');
+    dlg.addEventListener("cancel", (e) => { if (w.busy) e.preventDefault(); });
+
+    const stepper = () => `<ol class="pow-steps">${["What to order", "Who from", "Check and create"].map((t, i) => {
+      const n = i + 1;
+      const skipped = n === 2 && w.step === 3 && !needsChoice();
+      return `<li class="${n === w.step ? "is-on" : n < w.step ? "is-done" : ""}"><b>${n < w.step ? "✓" : n}</b><span>${
+        skipped ? "Usual supplier" : t}</span></li>`;
+    }).join("")}</ol>`;
+
+    const itemHtml = (l) => `<div class="pow-item">
+      <div class="pow-main"><strong>${esc(l.name)}</strong>${picked(l).some((s) => s.urgent) ? ' <span class="inv-flag is-bad">Urgent</span>' : ""}
+        <small>${esc(plural(need(l), l.unit))} needed${l.loc === "jt" ? " · for JT storage" : ""}</small>
+        <div class="pow-who">${l.sources.map((s, k) => `<button type="button" class="pow-chip${s.on ? " is-on" : ""}" data-pw-src="${esc(l.key)}" data-k="${k}"
+          aria-pressed="${s.on}">${s.on ? "✓" : "+"} ${esc(s.who)} · ${s.need}</button>`).join("")}</div>
+        ${l.p && l.loc === "shelf" && l.p.stock.jt > 0
+          ? `<small class="pow-note">JT storage has ${l.p.stock.jt}. You could fill it from JT storage instead of ordering.</small>` : ""}
+      </div>
+      <button type="button" class="lh-btn is-quiet" data-pw-rm="${esc(l.key)}">Remove</button></div>`;
+    const offerHtml = (l) => `<div class="pow-item is-sug">
+      <div class="pow-main"><strong>${esc(l.name)}</strong>
+        <small>${esc(plural(l.sources.reduce((a, s) => a + s.need, 0), l.unit))} · ${esc(l.sources.map((s) => s.who).join(", "))}</small></div>
+      <button type="button" class="lh-btn" data-pw-add="${esc(l.key)}">+ Add</button></div>`;
+
+    function step1() {
+      const list = onList();
+      const sids = new Set(list.map((l) => l.sid).filter(Boolean));
+      const left = all.filter((l) => !picked(l).length && l.sources.some((s) => chosen.has(s.r)));
+      const same = all.filter((l) => !picked(l).length && !left.includes(l) && l.sid && sids.has(l.sid));
+      return `<p class="pow-lead">This goes on the order. Tap a name to add or leave out their part, or remove an item you don't need to order now.</p>
+        <div class="pow-list">${list.map(itemHtml).join("") || '<p class="tb-none">Nothing on the order yet. Add something below.</p>'}</div>
+        ${left.length ? `<div class="pow-sec"><h4>Left out</h4><div class="pow-list">${left.map(offerHtml).join("")}</div></div>` : ""}
+        ${same.length ? `<div class="pow-sec"><h4>Also waiting from ${esc([...new Set(same.map((l) => supName(l.sid)))].join(", "))}</h4>
+          <p class="muted">Other requests for the same supplier. Add them so it all goes on one order.</p>
+          <div class="pow-list">${same.map(offerHtml).join("")}</div></div>` : ""}`;
+    }
+
+    function step2() {
+      const g = groups();
+      return `<p class="pow-lead">Who each item is ordered from. The usual supplier is already picked.</p>
+        <div class="pow-list">${onList().map((l) => {
+          const opts = options(l);
+          return `<div class="pow-item"><div class="pow-main"><strong>${esc(l.name)}</strong><small>${esc(plural(need(l), l.unit))} needed</small></div>
+            <select class="fb-select pow-sup" data-pw-sup="${esc(l.key)}" aria-label="${esc(`Order ${l.name} from`)}">
+              ${l.sid && opts.includes(l.sid) ? "" : '<option value="">Choose a supplier…</option>'}
+              ${opts.map((id) => {
+                const t = l.p ? supplierTerms(l.p, id) : null;
+                return `<option value="${esc(id)}"${id === l.sid ? " selected" : ""}>${esc(supName(id))}${
+                  t && t.cost !== null && t.cost !== undefined ? ` · ${money(t.cost)}/${t.orderUnit}` : ""}${t && t.main ? " (usual)" : ""}</option>`;
+              }).join("")}
+            </select></div>`;
+        }).join("")}</div>
+        ${g.size ? `<p class="inv-hint">This makes ${g.size === 1 ? "1 purchase order" : `${g.size} purchase orders`}: ${
+          esc([...g].map(([id, ls]) => `${supName(id)} (${plural(ls.length, "item")})`).join(", "))}.</p>` : ""}`;
+    }
+
+    function step3() {
+      return `<p class="pow-lead">Check the amounts. It's saved as a draft, so you can still change it before it's sent.</p>
+        ${[...groups()].map(([id, ls]) => {
+          const s = supplierOf(id) || {};
+          let total = 0, missing = false;
+          ls.forEach((l) => {
+            const t = terms(l);
+            const c = t && t.cost !== null && t.cost !== undefined ? t.cost : l.p ? l.p.cost : null;
+            if (c === null || c === undefined) missing = true; else total += c * qtyOf(l);
+          });
+          return `<section class="pow-card">
+            <div class="pow-card-h"><strong>${esc(supName(id))}</strong><small>${esc(s.email || "No order email yet: add one in Suppliers")}</small></div>
+            ${ls.map((l) => `<div class="pow-row">
+              <span class="pow-main"><strong>${esc(l.name)}</strong>
+                <small>${esc(plural(need(l), l.unit))} needed${l.p && pack(l) > 1
+                  ? ` · ${esc(orderUnit(l))} of ${pack(l)} → ${esc(plural(qtyOf(l) * pack(l), l.unit))}` : ""}</small></span>
+              <label class="pow-qty"><input class="fe-input inv-num" type="number" min="1" step="1" inputmode="numeric" data-pw-qty="${esc(l.key)}"
+                value="${qtyOf(l)}" aria-label="${esc(`${l.name}: how many`)}" /><span>${esc(unitPlural(orderUnit(l)))}</span></label></div>`).join("")}
+            ${total ? `<div class="pow-total">About ${money(total)} before GST${missing ? " (some prices missing)" : ""}</div>` : ""}
+          </section>`;
+        }).join("")}`;
+    }
+
+    function draw() {
+      if (w.done) {
+        box.innerHTML = `<div class="lh-dialog-head"><h3>Draft orders created</h3>
+            <p>Open each one, check it, and send it to the supplier.</p></div>
+          <div class="pow-done">${w.done.map((d) => `<div class="pow-item"><div class="pow-main"><strong>${esc(d.name)}</strong>
+            <small>${esc(plural(d.lines, "item"))}</small></div>
+            <a class="lh-btn is-primary" href="#/inventory/po/${encodeURIComponent(d.id)}" data-pw="go">Open and send</a></div>`).join("")}</div>
+          ${w.failed.length ? `<p class="lh-error" role="alert">Couldn't create: ${esc(w.failed.join(", "))}. Try those again.</p>` : ""}
+          <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-pw="close">Close</button></div>`;
+        return;
+      }
+      const g = groups();
+      box.innerHTML = `<div class="lh-dialog-head"><h3>${esc(title)}</h3></div>
+        ${stepper()}
+        ${w.step === 1 ? step1() : w.step === 2 ? step2() : step3()}
+        ${w.err ? `<p class="lh-error" role="alert">${esc(w.err)}</p>` : ""}
+        <div class="lh-actions">
+          ${w.step === 1 ? '<button type="button" class="lh-btn is-quiet" data-pw="close">Cancel</button>'
+            : `<button type="button" class="lh-btn is-quiet" data-pw="back"${w.busy ? " disabled" : ""}>← Back</button>`}
+          ${w.step < 3 ? '<button type="button" class="lh-btn is-primary" data-pw="next">Next →</button>'
+            : `<button type="button" class="lh-btn is-primary" data-pw="create"${w.busy ? " disabled" : ""}>${
+              w.busy ? "Creating…" : g.size > 1 ? `Create ${g.size} draft orders` : "Create draft order"}</button>`}
+        </div>`;
+    }
+
+    async function create() {
+      const g = groups();
+      if (!g.size) return;
+      w.busy = true; w.err = ""; draw();
+      const made = [];
+      w.failed = [];
+      for (const [sid, ls] of g) {
+        const s = supplierOf(sid);
+        try {
+          const poLines = ls.map((l) => {
+            const sources = picked(l).map((x) => ({ r: x.r, i: x.i }));
+            return l.p ? lineFromProduct(l.p, qtyOf(l), l.loc, sources, sid)
+              : cleanPoLine({ name: l.name, qty: qtyOf(l), orderUnit: l.unit, loc: l.loc, sources });
+          });
+          const id = await createPo({ supplier: s, lines: poLines }, staff);
+          made.push({ id, name: s.name, lines: poLines.length });
+        } catch (ex) {
+          console.error("Create PO failed:", ex);
+          w.failed.push(s ? s.name : "a supplier");
+        }
+      }
+      w.busy = false;
+      st.reqSel.clear();
+      if (made.length === 1 && !w.failed.length) {
+        dlg.close();
+        showToast("Draft purchase order created. Check it, then send it to the supplier.");
+        location.hash = `#/inventory/po/${encodeURIComponent(made[0].id)}`;
+        return;
+      }
+      if (!made.length) { w.err = `Couldn't create the order${w.failed.length > 1 ? "s" : ""}. Try again.`; draw(); return; }
+      w.done = made;
+      draw();
+      load();
+    }
+
+    box.addEventListener("click", (e) => {
+      const b = e.target.closest("button, a");
+      if (!b || w.busy) return;
+      const find = (k) => all.find((l) => l.key === k);
+      w.err = "";
+      if (b.dataset.pwSrc) { const l = find(b.dataset.pwSrc); const s = l && l.sources[Number(b.dataset.k)]; if (s) { s.on = !s.on; l.qty = null; } draw(); return; }
+      if (b.dataset.pwRm) { const l = find(b.dataset.pwRm); if (l) { l.sources.forEach((s) => { s.on = false; }); l.qty = null; } draw(); return; }
+      if (b.dataset.pwAdd) { const l = find(b.dataset.pwAdd); if (l) { l.sources.forEach((s) => { s.on = true; }); l.qty = null; } draw(); return; }
+      const act = b.dataset.pw;
+      if (act === "close") { dlg.close(); return; }
+      if (act === "go") { dlg.close(); return; }   // the link opens the order
+      if (act === "back") { w.step = w.step === 3 && !needsChoice() ? 1 : w.step - 1; draw(); return; }
+      if (act === "next") {
+        if (!onList().length) { w.err = "Add at least one item to the order."; draw(); return; }
+        if (w.step === 2 && onList().some((l) => !l.sid || !supplierOf(l.sid))) { w.err = "Choose a supplier for each item."; draw(); return; }
+        w.step = w.step === 1 && !needsChoice() ? 3 : w.step + 1;
+        draw();
+        return;
+      }
+      if (act === "create") create();
+    });
+    box.addEventListener("change", (e) => {
+      const t = e.target;
+      const l = all.find((x) => x.key === (t.dataset.pwSup || t.dataset.pwQty));
+      if (!l) return;
+      if (t.dataset.pwSup !== undefined) { l.sid = t.value; l.qty = null; }
+      else l.qty = Math.max(1, parseInt(t.value, 10) || 1);
+      draw();
+    });
+    draw();
+  }
+
   // Ticks, the "Select all" box and the bulk button
   function syncReqSel() {
     const boxes = [...body.querySelectorAll("[data-rqpick]")];
@@ -3894,6 +4141,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (lbl) lbl.textContent = n ? `${n} selected` : "Select all";
     const btn = body.querySelector('[data-act="rq-bulk"]');
     if (btn) { btn.hidden = !n; btn.textContent = `Mark ${n} as ordered`; }
+    const po = body.querySelector('[data-act="rq-bulk-po"]');
+    if (po) po.hidden = !n;
   }
 
   function toggleReq(id) {
@@ -4250,6 +4499,9 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       return;
     }
     if (e.target.closest('[data-act="rq-bulk"]')) { bulkOrdered(); return; }
+    const rqPo = e.target.closest("[data-rqpo]");
+    if (rqPo) { poWizard([rqPo.dataset.rqpo]); return; }
+    if (e.target.closest('[data-act="rq-bulk-po"]')) { poWizard([...st.reqSel]); return; }
     const rqFill = e.target.closest("[data-rqfill]");
     if (rqFill) { const r = st.requests.find((x) => x.id === rqFill.dataset.rqfill); if (r) fillFromJtDialog(r); return; }
     if (e.target.closest('[data-act="rq-tosup"]')) { st.reqView = "supplier"; renderRequests(); return; }
