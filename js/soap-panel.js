@@ -15,6 +15,7 @@ import {
 
 import { callApi } from "./appointments.js";
 import { confirmDialog } from "./dialog.js";
+import { openFixTranscript } from "./fix-transcript.js";
 import { escapeHtml, showToast, toDateKey } from "./utils.js";
 import { openPlanReview } from "./master-plan-review.js";
 import { setTabTitle } from "./tab-icon.js";
@@ -46,6 +47,7 @@ const ICONS = {
   minimise: svg('<polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/>'),
   close: svg('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
   trash: svg('<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>'),
+  scissors: svg('<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/>'),
   regen: svg('<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>'),
 };
 
@@ -430,6 +432,7 @@ function render() {
         ? `<p class="sp-banner info">These notes combine ${d["Merged From"].length + 1} recordings of this consultation${
             d["Merged By"] ? ` (merged: ${escapeHtml(String(d["Merged By"]))})` : ""}. The raw transcript below contains all of them.</p>`
         : ""}
+      ${fixBannerHtml(d)}
       ${rulesHtml(d)}
 
       <details class="sp-raw">
@@ -465,6 +468,7 @@ function render() {
     <div class="sp-foot">
       ${reviewed ? "" : `<button type="button" class="sp-del" data-sp="delete" title="Delete this recording">${ICONS.trash}Delete</button>`}
       ${reviewed ? "" : `<button type="button" class="sp-regen" data-sp="regenerate" title="Write the notes again from the transcript">${ICONS.regen}Regenerate</button>`}
+      ${canFixTranscript(d) ? `<button type="button" class="sp-regen" data-sp="fix-transcript" title="Move part of the recording to another patient, or leave out lines that aren't needed">${ICONS.scissors}Fix transcript</button>` : ""}
       <span class="sp-save-state">${saveStateText()}</span>
       <button type="button" class="btn-ghost" data-sp="save-draft">Save as Draft</button>
       <button type="button" class="btn-primary" data-sp="save-reviewed">Save as Reviewed</button>
@@ -597,6 +601,8 @@ async function onClick(e) {
   else if (action === "save-reviewed") save("Reviewed", btn);
   else if (action === "save-note") saveNote(btn);
   else if (action === "regenerate") regenerate();
+  else if (action === "fix-transcript") fixTranscript();
+  else if (action === "open-split") { if (btn.dataset.id) showSoapPanel(btn.dataset.id, { mode: "open" }); }
   else if (action === "undo-regen") undoRegenerate();
   else if (action === "email-draft") draftEmail();
   else if (action === "email-from-plan") emailFromPlan(btn);
@@ -1233,6 +1239,8 @@ async function regenerate() {
       REVIEWED: "Reviewed notes can't be regenerated. Save as Draft first if you really need to.",
       NO_TRANSCRIPT: "There's no transcript saved for this record, so it can't be regenerated.",
       BUSY: "These notes are already being regenerated. Please wait a moment.",
+      MERGED: "These notes were joined to another set of notes. Open those notes and regenerate them there.",
+      FORBIDDEN: "You don't have access to regenerate notes.",
       GEMINI_FAILED: "Gemini couldn't write the notes just now. Please try again in a minute.",
       NOT_FOUND: "This record no longer exists.",
       UNAUTHORIZED: "Your session has expired. Please log in again.",
@@ -1274,7 +1282,91 @@ async function undoRegenerate() {
       : "Couldn't restore. Please try again.");
   }
 }
+/* ===================== Fix transcript ===================== */
+// Move part of a recording to another patient, or leave out lines that aren't needed (fix-transcript.js).
+// Apps Script checks who's allowed as well. The button only shows when it would work.
 
+function canFixTranscript(d) {
+  if (/^reviewed$/i.test(String(d.Status || "")) || String(d.Source || "") !== "Dashboard recording") return false;
+  if (d["Merged Into"] || /^merged$|processing/i.test(String(d.Status || ""))) return false;
+  if (!String(d["Full Raw Transcript"] || "").trim()) return false;
+  const uid = auth.currentUser ? auth.currentUser.uid : "";
+  if (uid && (d["Staff Uid"] === uid || d["Created By Uid"] === uid)) return true;
+  const role = String((staff && (staff.role || staff.staffRole)) || "");
+  const perms = staff && Array.isArray(staff.perms) ? staff.perms : [];
+  return /^admin$/i.test(role) || perms.includes("consult.delete");
+}
+
+// What was done to this transcript, and where moved notes came from
+function fixBannerHtml(d) {
+  const out = [];
+  const fixes = Array.isArray(d["Transcript Fixes"]) ? d["Transcript Fixes"] : [];
+  const f = fixes[fixes.length - 1];
+  if (f) {
+    const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+    const bits = [
+      f.moved ? `${plural(f.moved, "line")} moved to ${f.toPatientName || "another patient"}` : "",
+      f.dropped ? `${plural(f.dropped, "line")} left out as not needed` : "",
+    ].filter(Boolean).join(", ");
+    const reason = String(f.reason || "").replace(/[.\s]+$/, "");
+    out.push(`<p class="sp-banner info">Transcript fixed${f.at ? ` ${escapeHtml(stamp(new Date(f.at)))}` : ""}${
+      f.by ? ` by ${escapeHtml(f.by)}` : ""}${bits ? `: ${escapeHtml(bits)}` : ""}.${reason ? ` Reason: ${escapeHtml(reason)}.` : ""}${
+      f.moved && f.toRecordId ? ` <button type="button" class="sp-link" data-sp="open-split" data-id="${escapeHtml(f.toRecordId)}">Open ${
+        escapeHtml(f.toPatientName || "their")}'s notes</button>` : ""}</p>`);
+  }
+  if (d["Split From"]) {
+    out.push(`<p class="sp-banner info">These notes came from part of ${escapeHtml(d["Split From Patient"] || "another patient")}'s recording${
+      d["Split By"] ? `, moved by ${escapeHtml(d["Split By"])}` : ""}. The audio stays with that recording.</p>`);
+  }
+  return out.join("");
+}
+
+// callApi throws on ok:false. The Fix transcript window wants a reply with a plain message instead.
+const FIX_ERRORS = {
+  UNAUTHORIZED: "Your session has expired. Please log in again.",
+  FORBIDDEN: "You don't have access to fix transcripts.",
+  BAD_REQUEST: "This record can't be fixed here.",
+};
+async function fixApi(action, body) {
+  try { return await callApi({ action, ...body }); }
+  catch (err) {
+    console.error("Fix transcript call failed:", err.code || "(no code)", err);
+    if (FIX_ERRORS[err.code]) return { ok: false, problem: FIX_ERRORS[err.code] };
+    return { ok: false, problem: body && body.op === "save"
+      ? "No reply from the server. Close this, reopen the notes and check whether they changed before trying again."
+      : "Couldn't reach the server. Try again." };
+  }
+}
+
+async function fixTranscript() {
+  if (!current || !current.data) return;
+  if (hasUnsavedNotes() && !(await confirmDialog({
+    title: "Discard unsaved changes?",
+    message: "Fixing the transcript writes the notes again, so your unsaved edits will be lost.",
+    confirmLabel: "Discard and continue",
+    tone: "warning",
+  }))) return;
+  const id = current.id;
+  openFixTranscript({
+    recordId: id,
+    api: fixApi,
+    onDone: async (res) => {
+      if (!current || current.id !== id) return;
+      current.dirty = false;
+      await load(id);
+      updateTab();
+      showToast(res.moved ? `Transcript split. ${res.toPatientName}'s notes are written.` : "Transcript fixed. The notes were written again.");
+      try {
+        const ch = new BroadcastChannel("dm-notes");
+        ch.postMessage({ type: "notes-saved", id, status: "draft" });
+        ch.close();
+      } catch { /* the badge updates on the next reload */ }
+      // The patient page shows the new notes for both patients
+      if (location.hash.startsWith("#/patient/")) window.dispatchEvent(new HashChangeEvent("hashchange"));
+    },
+    onOpenRecord: (rid) => showSoapPanel(rid, { mode: "open" }),
+  });
+}
 /* ===================== Update email from plan ===================== */
 
 async function emailFromPlan(btn) {

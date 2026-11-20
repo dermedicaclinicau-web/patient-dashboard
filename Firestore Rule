@@ -1513,6 +1513,11 @@ match /inv_count_drafts/{id} {
       }
     }
 
+    match /transcript_fixes/{id} {
+      allow read: if request.auth != null && request.auth.token.staffRole == 'Admin';
+      allow write: if false;
+    }
+
       match /wr_treatment_record/{id} {
         allow read: if isStaff();
         allow write: if false;   // still written by the old app
