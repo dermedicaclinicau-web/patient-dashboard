@@ -327,7 +327,8 @@ export function renderSocial(body, c) {
   const usualTime = () => (/^\d{2}:\d{2}$/.test(S.settings.time || "") ? S.settings.time : DEFAULT_TIME);
   const defaultDay = () => { const n = perthNow(); return n.time < usualTime() ? n.day : addDays(n.day, 1); };
   // Stories are always posted by hand, whatever's connected
-  const handLeft = (p) => (p.channels || []).filter((k) => !(p.published || {})[k] && (p.type === "story" || !S.connect[k]));
+  const handLeft = (p) => (p.channels || []).filter((k) => !(p.published || {})[k]
+    && (p.type === "story" || !S.connect[k] || (k === "gbp" && p.type === "reel")));
   const canDrag = (p) => !["posted", "publishing", "deleted"].includes(p.status)
     && (canApprove || ["draft", "waiting", "rejected"].includes(p.status));
   const shown = (p) => p.status !== "deleted" && (!UI.ch || (p.channels || []).includes(UI.ch)) && (!UI.mine || p.createdBy === me.uid);
@@ -469,7 +470,8 @@ export function renderSocial(body, c) {
       </div>
       ${canApprove && nWait ? `<button type="button" class="sc-wait" data-sc-waiting>◐ ${nWait} post${nWait === 1 ? "" : "s"} waiting for your approval ›</button>` : ""}
       ${manual.length ? `<p class="seo-note sc-handnote">${manual.map((k) => CH[k].label).join(", ")} ${manual.length === 1 ? "isn't" : "aren't"} connected yet,
-        so approved posts are posted by hand: at the time, the card says <b>Post by hand</b>.</p>` : ""}
+        so approved posts are posted by hand: at the time, the card says <b>Post by hand</b>.${
+        S.connect.gbp ? " Google posts itself (pictures and text). Reels and Stories are still posted by hand." : ""}</p>` : ""}
       <div class="sc-body${UI.ideas ? " has-ideas" : ""}">
         <div class="sc-main">${UI.view === "list" ? listHtml() : calHtml()}</div>
         ${UI.ideas ? ideasHtml() : ""}
@@ -592,7 +594,12 @@ export function renderSocial(body, c) {
       <label class="sc-lab">Usual posting time (Perth) <input class="seo-input" type="time" name="time" value="${esc(usualTime())}" step="300"></label>
       <label class="sc-lab">Saved hashtag sets <small>One per line, like: Skin: #perthskin #skinclinic</small>
         <textarea class="seo-input" name="sets" rows="6">${esc(sets)}</textarea></label>
-      <div class="sc-conn">${CH_ORDER.map((k) => `<div>${chIcon(k)} ${CH[k].label}: ${S.connect[k] ? '<b class="sc-good">connected</b>' : "not connected yet (posted by hand)"}</div>`).join("")}</div>
+      <div class="sc-conn">
+        <label class="seo-check"><input type="checkbox" name="gbp"${S.connect.gbp ? " checked" : ""}> ${chIcon("gbp")} <b>Google posts itself</b></label>
+        <p class="seo-note">Approved picture and text posts go on Google at their time. Reels and Stories are still posted by hand.
+          If Google refuses one, approvers and the writer get a “Didn't post” email.</p>
+        ${["fb", "ig"].map((k) => `<div>${chIcon(k)} ${CH[k].label}: ${S.connect[k] ? '<b class="sc-good">connected</b>' : "not connected yet (posted by hand)"}</div>`).join("")}
+      </div>
       <p class="seo-note">The advertising word list is in SEO › Settings › Brand and wording.</p>
       <p class="lh-error" role="alert" hidden></p>
       <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-x>Cancel</button><button type="submit" class="lh-btn is-primary">Save</button></div>
@@ -612,8 +619,15 @@ export function renderSocial(body, c) {
         await setDoc(doc(db, "social_settings", "main"), { time: /^\d{2}:\d{2}$/.test(time) ? time : DEFAULT_TIME, hashtagSets,
           updatedBy: me.uid, updatedByName: me.name, updatedAt: serverTimestamp() }, { merge: true });
         S.settings = { ...S.settings, time, hashtagSets };
+        const wantGbp = fd.get("gbp") === "on";
+        if (wantGbp !== !!S.connect.gbp) {
+          const r = await callApi({ action: "seoSocial", op: "connect", gbp: wantGbp });
+          if (!r || r.ok === false || r.problem) throw new Error((r && (r.problem || r.error)) || "The Google setting didn't save.");
+          S.connect = { ...S.connect, gbp: wantGbp };
+        }
         dlg.close();
         toast("Saved");
+        if (wrap.isConnected) draw();
       } catch (err) {
         const el = dlg.querySelector(".lh-error");
         el.textContent = errText(err);
@@ -666,7 +680,8 @@ export function renderSocial(body, c) {
     const maxMedia = () => (TYPES[E.type] || TYPES.post).max;
     const videos = () => E.pictures.filter((x) => x.kind === "video");
     const mainVideo = () => videos()[0] || null;
-    const isHand = (k) => E.type === "story" || !S.connect[k];
+    // Google only posts pictures and text by itself: Reels go on Google by hand
+    const isHand = (k) => E.type === "story" || !S.connect[k] || (k === "gbp" && E.type === "reel");
     // What gets posted by hand: a Reel's video (and its Google clip), otherwise every picture and video in order
     const mediaForPosting = () => (E.type === "reel"
       ? [mainVideo(), ((p && p.channels) || E.channels).includes("gbp") && E.gbpClip ? { ...E.gbpClip, kind: "video", label: "Google clip" } : null]
