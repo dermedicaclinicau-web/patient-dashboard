@@ -436,7 +436,9 @@ function render() {
       ${rulesHtml(d)}
 
       <details class="sp-raw">
-
+        <summary>${ICONS.chev}${ICONS.lines}<span>${pasted ? "Pasted text" : "Raw transcript"}</span>${
+          canFixTranscript(d) ? `<button type="button" class="sp-secbtn" data-sp="fix-transcript" style="margin-left:auto"
+            title="Move part of the recording to another patient, or leave out lines that aren't needed">Fix transcript</button>` : ""}</summary>
         <div class="sp-raw-body">${transcriptHtml(d["Full Raw Transcript"], escapeHtml)}</div>
       </details>
 
@@ -601,7 +603,7 @@ async function onClick(e) {
   else if (action === "save-reviewed") save("Reviewed", btn);
   else if (action === "save-note") saveNote(btn);
   else if (action === "regenerate") regenerate();
-  else if (action === "fix-transcript") fixTranscript();
+  else if (action === "fix-transcript") { e.preventDefault(); fixTranscript(); }
   else if (action === "open-split") { if (btn.dataset.id) showSoapPanel(btn.dataset.id, { mode: "open" }); }
   else if (action === "undo-regen") undoRegenerate();
   else if (action === "email-draft") draftEmail();
