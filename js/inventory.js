@@ -83,6 +83,59 @@ const seg = (name, items, cur) => `<div class="fe-seg">${items.map(([v, l, n]) =
     n === undefined ? "" : `<em class="seg-n${n ? "" : " is-zero"}">${n}</em>`}</span></label>`).join("")}</div>`;
 const lowAt = (p, loc) => p.reorder[loc] !== null && p.reorder[loc] !== undefined && p.stock[loc] <= p.reorder[loc];
 
+// Requests: "today 11:11 am", "yesterday 5:24 pm", or the date
+const whenShort = (d) => {
+  if (!d) return "";
+  const t = d.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" });
+  if (dayKey(d) === dayKey()) return `today ${t}`;
+  if (dayKey(d) === dayKey(new Date(Date.now() - 864e5))) return `yesterday ${t}`;
+  return when(d);
+};
+const REQ_WAIT_DAYS = 2;   // amber "waiting" tag from this many days
+const REQ_CSS = `
+.rq2-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:0 0 14px}
+.rq2-stat{padding:10px 14px;border-radius:12px;background:#f8fafc;border:1px solid #e5e7eb}
+.rq2-stat span{display:block;font-size:12.5px;color:#64748b}
+.rq2-stat b{font-size:22px;font-weight:700;color:#0f172a}
+.rq2-stat.is-bad{background:#fef2f2;border-color:#fecaca}.rq2-stat.is-bad span,.rq2-stat.is-bad b{color:#b91c1c}
+.rq2-stat.is-warn{background:#fffbeb;border-color:#fde68a}.rq2-stat.is-warn span,.rq2-stat.is-warn b{color:#92400e}
+.rq2-list{border:1px solid #e5e7eb;border-radius:14px;background:#fff;overflow:visible}
+.rq2-bar{display:flex;align-items:center;gap:10px;padding:8px 14px;background:#f8fafc;border-bottom:1px solid #e5e7eb;border-radius:14px 14px 0 0;font-size:13px}
+.rq2-row{border-bottom:1px solid #eef0f3}
+.rq2-row:last-child{border-bottom:0}
+.rq2-row.is-urgent{box-shadow:inset 3px 0 0 #dc2626}
+.rq2-row.is-open{background:#fcfcfd}
+.rq2-row.is-picked{background:#f0fdfa}
+.rq2-head{display:flex;align-items:center;gap:12px;padding:11px 14px;cursor:pointer}
+.rq2-head:hover{background:#f8fafc}
+.rq2-head:focus-visible{outline:2px solid #0f766e;outline-offset:-2px}
+.rq2-pick{width:18px;height:18px;flex:none}
+.rq2-main{flex:1;min-width:0}
+.rq2-top{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px}
+.rq2-top strong{font-size:14.5px}
+.rq2-top small{font-size:12px}
+.rq2-sum{margin-top:2px;font-size:13px;color:#475569;display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.rq2-tag{display:inline-block;padding:1px 8px;border-radius:999px;background:#f1f5f9;color:#475569;font-size:11.5px}
+.rq2-tag.is-purple{background:#ede9fe;color:#5b21b6}
+.rq2-tag.is-info{background:#dbeafe;color:#1d4ed8}
+.rq2-chev{color:#94a3b8;font-size:14px}
+.rq2-body{padding:0 14px 14px 44px}
+.rq2-table th,.rq2-table td{text-align:left}
+.rq2-stock{display:inline-block;min-width:22px;padding:1px 7px;border-radius:999px;text-align:center;font-size:12px;background:#f1f5f9;color:#334155}
+.rq2-stock.is-low{background:#fef3c7;color:#92400e}
+.rq2-stock.is-out{background:#fee2e2;color:#b91c1c}
+.rq2-acts{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px}
+.rq2-acts .inv-pd-more{right:0;left:auto}
+@media (max-width:800px){.rq2-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.rq2-body{padding-left:14px}}
+`;
+function injectReqCss() {
+  if (document.getElementById("inv-req-css")) return;
+  const s = document.createElement("style");
+  s.id = "inv-req-css";
+  s.textContent = REQ_CSS;
+  document.head.appendChild(s);
+}
+
 // Who is using Inventory, for admin-editable wording in its windows
 let uiStaff = null;
 const isAdminStaff = (s) => /^admin$/i.test(String((s && s.role) || ""));
@@ -331,6 +384,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   const st = {
     products: [], suppliers: [], lots: [], requests: [], q: "", cat: "", view: "all", flagged: false, showInactive: false,
     reqFilter: "open", reqView: "list", pos: [], poFilter: "sent", lineSup: {},
+    reqOpen: null, reqSel: new Set(),   // Requests: which are opened up, and which are ticked
     sel: new Set(), pq: "", pcat: "", psup: "",  pcount: "",
     counts: [], invs: [], lastCounts: new Map(), open: [], bases: new Map(),
     quick: false, qv: new Map(),   // Stock → Update digital count: on/off, and what's been typed ("productId|loc" → "12")
@@ -3574,7 +3628,10 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   }
 
   /* ---------- Requests ---------- */
+  const reqAge = (r) => (r.createdAt ? Math.floor((Date.now() - r.createdAt.getTime()) / 864e5) : 0);
+
   function renderRequests() {
+    injectReqCss();
     const n = (fn) => st.requests.filter(fn).length;
     const counts = {
       open: n((r) => r.status === "open"),
@@ -3582,12 +3639,28 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       received: n((r) => r.status === "received"),
       closed: n((r) => r.status === "declined" || r.status === "cancelled"),
     };
+    const open = st.requests.filter((r) => r.status === "open");
+    const urgent = open.filter((r) => r.urgency === "urgent").length;
+    const waiting = open.filter((r) => reqAge(r) >= REQ_WAIT_DAYS).length;
+    const out = new Set();
+    open.forEach((r) => r.items.forEach((it) => {
+      const p = st.products.find((x) => x.id === it.productId);
+      if (p && p.stock.shelf <= 0) out.add(p.id);
+    }));
+    if (st.reqOpen === null) st.reqOpen = new Set(open.filter((r) => r.urgency === "urgent").map((r) => r.id));
+
     const segF = (name, items, cur, key) => seg(name, items, cur).replace(new RegExp(`name="${name}"`, "g"), `name="${name}" data-f="${key}"`);
     body.innerHTML = `
+      <div class="rq2-stats">
+        <div class="rq2-stat"><span>To order</span><b>${open.length}</b></div>
+        <div class="rq2-stat${urgent ? " is-bad" : ""}"><span>Urgent</span><b>${urgent}</b></div>
+        <div class="rq2-stat${waiting ? " is-warn" : ""}"><span>Waiting ${REQ_WAIT_DAYS}+ days</span><b>${waiting}</b></div>
+        <div class="rq2-stat"><span>Asked for, none on the Shelf</span><b>${out.size}</b></div>
+      </div>
       <div class="inv-tools">
         ${segF("rq-f", [["open", "Open", counts.open], ["ordered", "Ordered", counts.ordered], ["received", "Received", counts.received],
           ["closed", "Declined & cancelled"], ["all", "All"]], st.reqFilter, "reqFilter")}
-        ${st.reqFilter === "open" ? segF("rq-v", [["list", "List"], ["supplier", "By supplier"]], st.reqView, "reqView") : ""}
+        ${st.reqFilter === "open" ? segF("rq-v", [["list", "By request"], ["supplier", "By supplier"]], st.reqView, "reqView") : ""}
         <span class="inv-spacer"></span>
         ${canManage ? '<a class="ff-btn" href="#/inventory/notifications">Email notifications</a>' : ""}
         ${canRequest ? '<a class="ff-btn is-primary" href="#/tasks/order">+ Request order</a>' : ""}
@@ -3596,47 +3669,166 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const box = body.querySelector('[data-role="reqs"]');
     const f = st.reqFilter;
     const rows = st.requests.filter((r) => f === "all" || (f === "closed" ? ["declined", "cancelled"].includes(r.status) : r.status === f));
+    // Open: urgent first, then the ones waiting longest. Others: newest first (as loaded).
+    if (f === "open") {
+      rows.sort((a, b) => (b.urgency === "urgent") - (a.urgency === "urgent")
+        || (a.createdAt ? a.createdAt.getTime() : 0) - (b.createdAt ? b.createdAt.getTime() : 0));
+    }
     if (!rows.length) {
       box.innerHTML = `<div class="tm-empty">${f === "open" ? "No open requests. Nice." : "Nothing here yet."}</div>`;
       return;
     }
     box.innerHTML = f === "open" && st.reqView === "supplier"
       ? bySupplierHtml(rows)
-      : `<div class="rq-list">${rows.map(reqCard).join("")}</div>`;
+      : reqListHtml(rows, f === "open" && canMove);
+    syncReqSel();
   }
 
-  function reqCard(r) {
-    const mine = r.requestedByUid === myUid();
-    const items = r.items.map((it, i) => {
-      const p = st.products.find((x) => x.id === it.productId);
-      const onPo = itemOnPo(r.id, i, st.pos);
-      return `<li><strong>${esc(it.name)}</strong> × ${esc(plural(it.qty, it.unit))}${
-        p ? ` <small>· now Shelf ${p.stock.shelf}, JT ${p.stock.jt}</small>`
-          : it.productId ? "" : ' <span class="inv-flag is-info">Not on the product list</span>'}${
-        onPo ? ` <a class="inv-flag is-info" href="#/inventory/po/${esc(onPo.id)}">On ${esc(onPo.number)} · ${esc(PO_STATUS[onPo.status])}</a>` : ""}</li>`;
-    }).join("");
-    const handled = r.status === "ordered" || r.status === "declined";
+  function reqListHtml(rows, pick) {
+    const ids = new Set(rows.map((r) => r.id));
+    [...st.reqSel].forEach((id) => { if (!ids.has(id)) st.reqSel.delete(id); });
+    return `<div class="rq2-list">
+      ${pick ? `<div class="rq2-bar"><label class="fe-check"><input type="checkbox" data-rqall /> <span data-role="rqselcount">Select all</span></label>
+        <span class="inv-spacer"></span><button type="button" class="lh-btn is-primary" data-act="rq-bulk" hidden>Mark as ordered</button></div>` : ""}
+      ${rows.map((r) => reqRow(r, pick)).join("")}</div>`;
+  }
+
+  // One request: a single line, opened up to show its items and actions
+  function reqRow(r, pick) {
+    const opened = st.reqOpen.has(r.id);
+    const isOpen = r.status === "open";
+    const urgent = isOpen && r.urgency === "urgent";
+    const age = isOpen ? reqAge(r) : 0;
+    const names = r.items.map((it) => it.name);
+    const notListed = r.items.filter((it) => !it.productId).length;
+    const onPo = r.items.some((_, i) => itemOnPo(r.id, i, st.pos));
     return `
-      <article class="rq-card${r.urgency === "urgent" && r.status === "open" ? " is-urgent" : ""}">
-        <div class="rq-head">
-          <strong>${esc(reqNumber(r))}</strong>
-          <span class="rq-status is-${r.status}">${esc(REQ_STATUS[r.status])}</span>
-          ${r.urgency === "urgent" ? '<span class="inv-flag is-bad">Urgent</span>' : ""}
-          <span class="rq-meta">For ${esc(locLabel(r.loc))} · ${esc(r.requestedBy || "")} · ${esc(when(r.createdAt))}</span>
+      <article class="rq2-row${urgent ? " is-urgent" : ""}${opened ? " is-open" : ""}">
+        <div class="rq2-head" data-rqtoggle="${esc(r.id)}" role="button" tabindex="0" aria-expanded="${opened}">
+          ${pick ? `<input type="checkbox" class="rq2-pick" data-rqpick="${esc(r.id)}"${st.reqSel.has(r.id) ? " checked" : ""} aria-label="Select ${esc(reqNumber(r))}" />` : ""}
+          <div class="rq2-main">
+            <div class="rq2-top"><strong>${esc(r.requestedBy || "Someone")}</strong>
+              ${urgent ? '<span class="inv-flag is-bad">Urgent</span>' : ""}
+              ${age >= REQ_WAIT_DAYS ? `<span class="inv-flag is-warn">${age} days</span>` : ""}
+              ${isOpen ? "" : `<span class="rq-status is-${r.status}">${esc(REQ_STATUS[r.status])}</span>`}
+              <small class="muted">${esc(reqNumber(r))} · For ${esc(locLabel(r.loc))} · ${esc(whenShort(r.createdAt))}</small></div>
+            <div class="rq2-sum">${esc(plural(r.items.length, "item"))} · ${esc(names.slice(0, 3).join(", "))}${names.length > 3 ? ` +${names.length - 3}` : ""}
+              ${notListed ? `<span class="rq2-tag is-purple">${notListed} not on the product list</span>` : ""}
+              ${r.note ? '<span class="rq2-tag">Has a note</span>' : ""}
+              ${onPo ? '<span class="rq2-tag is-info">On a purchase order</span>' : ""}</div>
+          </div>
+          <span class="rq2-chev" aria-hidden="true">${opened ? "▴" : "▾"}</span>
         </div>
-        <ul class="rq-items">${items}</ul>
-        ${r.note ? `<p class="rq-note">“${esc(r.note)}”</p>` : ""}
-        ${handled ? `<p class="rq-resp"><strong>${esc(REQ_STATUS[r.status])}${r.handledBy ? ` by ${esc(r.handledBy)}` : ""}${
-          r.handledAt ? `, ${esc(when(r.handledAt))}` : ""}</strong>${r.response ? `: ${esc(r.response)}` : ""}</p>` : ""}
-        ${r.status === "open" && (canMove || mine) ? `<div class="rq-acts">
-          ${canMove ? `<button type="button" class="lh-btn is-primary" data-req="ordered" data-id="${esc(r.id)}">Mark as ordered</button>
-            <button type="button" class="lh-btn" data-req="declined" data-id="${esc(r.id)}">Decline</button>` : ""}
-          <button type="button" class="lh-btn" data-req="email" data-id="${esc(r.id)}">Email it again</button>
-          ${mine ? `<button type="button" class="lh-btn is-quiet" data-req="cancel" data-id="${esc(r.id)}">Cancel request</button>` : ""}
-        </div>` : ""}
+        ${opened ? reqDetail(r) : ""}
       </article>`;
   }
 
+  function reqDetail(r) {
+    const mine = r.requestedByUid === myUid();
+    const isOpen = r.status === "open";
+    const handled = r.status === "ordered" || r.status === "declined";
+    const chip = (p, loc) => `<span class="rq2-stock${p.stock[loc] <= 0 ? " is-out" : lowAt(p, loc) ? " is-low" : ""}">${p.stock[loc]}</span>`;
+    const rows = r.items.map((it, i) => {
+      const p = st.products.find((x) => x.id === it.productId);
+      const onPo = itemOnPo(r.id, i, st.pos);
+      const sup = p ? (supplierOf(p.supplierId) || {}).name || "" : "";
+      return `<tr>
+        <td><strong>${esc(it.name)}</strong>${it.productId ? "" : ' <span class="rq2-tag is-purple">Not on the product list</span>'}${
+          onPo ? ` <a class="inv-flag is-info" href="#/inventory/po/${esc(onPo.id)}">On ${esc(onPo.number)} · ${esc(PO_STATUS[onPo.status])}</a>` : ""}</td>
+        <td>${esc(plural(it.qty, it.unit))}</td>
+        <td>${p ? chip(p, "shelf") : "—"}</td><td>${p ? chip(p, "jt") : "—"}</td>
+        <td class="muted">${esc(sup || "—")}</td></tr>`;
+    }).join("");
+    const item = (attr, label) => `<button type="button" role="menuitem" class="pt-pop-item" ${attr} data-id="${esc(r.id)}">${label}</button>`;
+    const more = [
+      canMove && item('data-req="declined"', "Decline…"),
+      item('data-req="email"', "Email it again"),
+      mine && item('data-req="cancel"', "Cancel request"),
+    ].filter(Boolean);
+    return `<div class="rq2-body">
+      <table class="inv-table rq2-table"><thead><tr><th>Product</th><th>Qty</th><th>Shelf</th><th>JT</th><th>Supplier</th></tr></thead>
+        <tbody>${rows}</tbody></table>
+      ${r.note ? `<p class="rq-note">“${esc(r.note)}”</p>` : ""}
+      ${handled ? `<p class="rq-resp"><strong>${esc(REQ_STATUS[r.status])}${r.handledBy ? ` by ${esc(r.handledBy)}` : ""}${
+        r.handledAt ? `, ${esc(when(r.handledAt))}` : ""}</strong>${r.response ? `: ${esc(r.response)}` : ""}</p>` : ""}
+      ${isOpen && (canMove || mine) ? `<div class="rq2-acts">
+        ${canMove ? `<button type="button" class="lh-btn is-primary" data-req="ordered" data-id="${esc(r.id)}">Mark as ordered</button>
+          <button type="button" class="lh-btn" data-act="rq-tosup">Make a purchase order…</button>` : ""}
+        <span class="inv-spacer"></span>
+        <span class="inv-pd-morewrap"><button type="button" class="lh-btn" data-rqmore aria-expanded="false" aria-label="More actions">⋯</button>
+          <span class="inv-pd-more" role="menu" hidden>${more.join("")}</span></span>
+      </div>` : ""}
+    </div>`;
+  }
+
+  // Ticks, the "Select all" box and the bulk button
+  function syncReqSel() {
+    const boxes = [...body.querySelectorAll("[data-rqpick]")];
+    boxes.forEach((cb) => {
+      cb.checked = st.reqSel.has(cb.dataset.rqpick);
+      cb.closest(".rq2-row").classList.toggle("is-picked", cb.checked);
+    });
+    const n = boxes.filter((cb) => cb.checked).length;
+    const all = body.querySelector("[data-rqall]");
+    if (all) { all.checked = n > 0 && n === boxes.length; all.indeterminate = n > 0 && n < boxes.length; }
+    const lbl = body.querySelector('[data-role="rqselcount"]');
+    if (lbl) lbl.textContent = n ? `${n} selected` : "Select all";
+    const btn = body.querySelector('[data-act="rq-bulk"]');
+    if (btn) { btn.hidden = !n; btn.textContent = `Mark ${n} as ordered`; }
+  }
+
+  function toggleReq(id) {
+    if (st.reqOpen.has(id)) st.reqOpen.delete(id); else st.reqOpen.add(id);
+    renderRequests();
+    const head = body.querySelector(`[data-rqtoggle="${CSS.escape(id)}"]`);
+    if (head) head.focus();
+  }
+
+  // Several requests ordered together (e.g. one supplier order covers them)
+  function bulkOrdered() {
+    const list = st.requests.filter((r) => st.reqSel.has(r.id) && r.status === "open");
+    if (!list.length) return;
+    const many = list.length === 1 ? "1 request" : `${list.length} requests`;
+    const dlg = openDialog("inv-dlg", `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>Mark ${many} as ordered</h3>
+          <p>${esc(list.map(reqNumber).join(", "))}. Everyone who asked is emailed that it's been ordered.</p></div>
+        <label class="lh-field"><span class="lh-label">Note (optional)</span>
+          <textarea name="note" rows="3" maxlength="1000" placeholder="e.g. Ordered from Merz by phone, arriving Friday"></textarea></label>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">Mark as ordered</button>
+        </div>
+      </form>`);
+    const form = dlg.querySelector("form");
+    let busy = false;
+    dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => { if (!busy) dlg.close(); });
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      busy = true;
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      const note = form.elements.note.value.trim();
+      const failed = [];
+      let done = 0;
+      for (const r of list) {
+        try {
+          await setRequestStatus(r.id, "ordered", note, staff);
+          callApi({ action: "inventory", op: "notifyUpdate", requestId: r.id }).catch((ex) => console.warn("Update email failed:", ex));
+        } catch (ex) { console.error("Request not marked:", r.id, ex); failed.push(reqNumber(r)); }
+        btn.textContent = `Saving ${++done} of ${list.length}…`;
+      }
+      busy = false;
+      dlg.close();
+      showToast(failed.length ? `Marked ${list.length - failed.length}. Couldn't save: ${failed.join(", ")}. Try those again.`
+        : `${many} marked as ordered`);
+      st.reqSel.clear();
+      load();
+    });
+    form.elements.note.focus();
+  }
   // Open items not on a purchase order yet, added up per product + storage, then placed under the supplier
   // they'll be ordered from: the one chosen here, otherwise the main supplier. Quantities are in that supplier's units.
   function openItemsBySupplier(rows) {
@@ -3918,6 +4110,19 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const mk = e.target.closest("[data-mkpo]");
     if (mk) { makePoFrom(mk.dataset.mkpo); return; }
     if (e.target.closest('[data-act="new-po"]')) { newPo(); return; }
+    // Requests: the ⋯ menu (any other click closes it), bulk, "Make a purchase order…", and opening a request up
+    const rqMore = e.target.closest("[data-rqmore]");
+    body.querySelectorAll(".rq2-acts .inv-pd-more").forEach((m) => { if (!rqMore || m !== rqMore.nextElementSibling) m.hidden = true; });
+    if (rqMore) {
+      const m = rqMore.nextElementSibling;
+      m.hidden = !m.hidden;
+      rqMore.setAttribute("aria-expanded", String(!m.hidden));
+      return;
+    }
+    if (e.target.closest('[data-act="rq-bulk"]')) { bulkOrdered(); return; }
+    if (e.target.closest('[data-act="rq-tosup"]')) { st.reqView = "supplier"; renderRequests(); return; }
+    const rqHead = e.target.closest("[data-rqtoggle]");
+    if (rqHead && !e.target.closest("input,a,button")) { toggleReq(rqHead.dataset.rqtoggle); return; }
     const rq = e.target.closest("[data-req]");
     if (rq) { handleReq(rq.dataset.id, rq.dataset.req); return; }
     if (e.target.closest('[data-act="req-settings"]')) { reqSettings(); return; }
@@ -3965,6 +4170,16 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       syncPick();
       return;
     }
+    if (t.dataset.rqpick) {
+      if (t.checked) st.reqSel.add(t.dataset.rqpick); else st.reqSel.delete(t.dataset.rqpick);
+      syncReqSel();
+      return;
+    }
+    if (t.dataset.rqall !== undefined) {
+      body.querySelectorAll("[data-rqpick]").forEach((cb) => { if (t.checked) st.reqSel.add(cb.dataset.rqpick); else st.reqSel.delete(cb.dataset.rqpick); });
+      syncReqSel();
+      return;
+    }
     if (t.dataset.linesup) { st.lineSup[t.dataset.linesup] = t.value; renderRequests(); return; }
     const k = t.dataset.f;
     if (!k) return;
@@ -3975,6 +4190,13 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (["showInactive", "pq", "pcat", "psup", "pcount"].includes(k)) drawProductList(); else renderStockList();
   });
 
+  // Requests: Enter or Space opens a request up, from the keyboard
+  root.addEventListener("keydown", (e) => {
+    const head = e.target.closest && e.target.closest("[data-rqtoggle]");
+    if (!head || e.target !== head || (e.key !== "Enter" && e.key !== " ")) return;
+    e.preventDefault();
+    toggleReq(head.dataset.rqtoggle);
+  });
   body.addEventListener("keydown", (e) => {
     if (tab === "receive" || e.key !== "Enter" || e.target.dataset.qc === undefined) return;
     e.preventDefault();
