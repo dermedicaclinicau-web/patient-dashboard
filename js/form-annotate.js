@@ -10,7 +10,7 @@ const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 const I = {
   pen: ic('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'),
   dot: ic('<line x1="7.5" y1="16.5" x2="17" y2="7"/><polyline points="10 6 18 6 18 14"/><circle cx="6" cy="18" r="2.6" fill="currentColor"/>'),
-  line: ic('<line x1="7.5" y1="16.5" x2="18" y2="6"/><circle cx="6" cy="18" r="2.6" fill="currentColor"/>'),
+  line: ic('<line x1="5" y1="19" x2="19" y2="5"/>'),
   mark: ic('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3" fill="currentColor"/>'),
   erase: ic('<path d="M20 20H8l-4.3-4.3a2 2 0 0 1 0-2.8L13.2 3.4a2 2 0 0 1 2.8 0l4.6 4.6a2 2 0 0 1 0 2.8L11 20"/><line x1="7.5" y1="9.5" x2="14.5" y2="16.5"/>'),
   undo: ic('<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>'),
@@ -264,9 +264,11 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
         g.fill();
         g.stroke();
       }
-      g.beginPath();   // point A
-      g.arc(ax, ay, op.r, 0, Math.PI * 2);
-      g.fill();
+      if (!op.plain || !op.b) {   // point A (a finished Line has none)
+        g.beginPath();
+        g.arc(ax, ay, op.r, 0, Math.PI * 2);
+        g.fill();
+      }
       if (op === pending) {   // a faint ring: point A is waiting for point B
         g.save();
         g.globalAlpha = 0.35;
