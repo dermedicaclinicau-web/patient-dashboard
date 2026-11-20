@@ -5055,7 +5055,7 @@ export function findJtLot(product, lots, batch, expiry) {
 // requests for these products that the move fully covers (oldest first) are approved.
 // scanId gives each product a fixed activity id, so the same docket can only move once.
 // Returns { moved: [{ productId, name, qty, unit }], releases: [{ id, productName, qty, requestedBy }] }
-export async function transferFromJt(lines, { scanId = "", note = "", approve = true } = {}, staff) {
+export async function transferFromJt(lines, { scanId = "", note = "", approve = true, label = "Delivery docket form (internal transfer)" } = {}, staff) {
   const me = uid();
   const by = who(staff);
   const want = new Map();
@@ -5136,7 +5136,7 @@ export async function transferFromJt(lines, { scanId = "", note = "", approve = 
       tx.update(prods.get(pid).ref, { stock, stockAt: serverTimestamp() });
       tx.set(moves.get(pid).ref, {
         type: "move", productId: pid, productName: String(pd.name || ""), unit, lines: mLines,
-        reason: "JT storage → Shelf", note: ["Delivery docket form (internal transfer)", clip(note, 300)].filter(Boolean).join(" · "),
+        reason: "JT storage → Shelf", note: [clip(label, 120), clip(note, 300)].filter(Boolean).join(" · "),
         ref: clip(scanId, 40), by, byUid: me, at: serverTimestamp(),
       });
       out.push({ productId: pid, name: String(pd.name || ""), qty: list.reduce((a, w) => a + w.qty, 0), unit });
@@ -6250,4 +6250,45 @@ export async function undoCorrection(move, reason, staff) {
       note: why, ref: "", by, byUid: me, at: serverTimestamp(),
     });
   });
+}
+
+/* ===================== Order requests filled from JT storage ===================== */
+// Instead of ordering: the stock moves JT storage → Shelf (oldest expiry first), logged like any move.
+// picks: [{ i (item index), productId, qty (stock units) }]. complete: every item is now covered, so it's marked Received.
+// What each item has had from JT storage is kept in jtFilled, so By supplier only orders what's left.
+export async function fillRequestFromJt(request, picks, { complete = false, note = "" } = {}, staff) {
+  const want = (picks || []).map((p) => ({ i: parseInt(p.i, 10), productId: clip(p.productId, 60), qty: parseInt(p.qty, 10) }))
+    .filter((p) => p.i >= 0 && p.productId && p.qty >= 1);
+  if (!want.length) throw new Error("Enter how many to move.");
+  const lines = [];
+  for (const w of want) {
+    const jt = (await listLotsForProduct(w.productId)).filter((l) => l.loc === "jt" && l.qty > 0);   // oldest expiry first
+    let left = w.qty;
+    for (const l of jt) {
+      if (!left) break;
+      const n = Math.min(l.qty, left);
+      lines.push({ productId: w.productId, batch: l.batch, expiry: l.expiry, qty: n });
+      left -= n;
+    }
+    if (left) throw new Error("JT storage doesn't have that many any more. Reload and try again.");
+  }
+  const res = await transferFromJt(lines, {
+    scanId: `req-${request.id}-${Date.now()}`, note: `For order request ${reqNumber(request)}`,
+    approve: false, label: "Order request filled from JT storage",
+  }, staff);
+
+  const by = who(staff);
+  const filled = { ...(request.jtFilled || {}) };
+  want.forEach((w) => { filled[w.i] = (Number(filled[w.i]) || 0) + w.qty; });
+  const text = res.moved.map((m) => `${plural(m.qty, m.unit)} × ${m.name}`).join(", ");
+  await updateDoc(doc(db, "inv_requests", request.id), {
+    jtFilled: filled, updatedAt: serverTimestamp(),
+    ...(complete ? {
+      status: "received", response: clip(`Filled from JT storage: ${text}${note ? ` · ${note}` : ""}`, 1000),
+      handledBy: by, handledByUid: uid(), handledAt: serverTimestamp(),
+    } : {}),
+    events: arrayUnion({ at: new Date().toISOString(), by, action: complete ? "Filled from JT storage" : "Part filled from JT storage",
+      note: clip([text, note].filter(Boolean).join(" · "), 300) }),
+  });
+  return { ...res, complete };
 }

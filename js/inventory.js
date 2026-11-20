@@ -13,7 +13,7 @@ import {
   rebuildPlan, applyRebuild, listCountsOn, getInvoiceSettings, saveInvoiceSettings,
   listBaseCounts, saveBaseCount, planFromBases, productLedger, suggestInvoiceLinks, invoiceNameKey,
   removeBaseCount, canUndoCorrection, undoCorrection, productSales, settlePendingSales, settleShortSales,
-  settleInvoiceFixes, countFixPlan, fixCountDifference, closeCountLines,
+  settleInvoiceFixes, countFixPlan, fixCountDifference, closeCountLines, fillRequestFromJt,
 } from "./inventory-api.js";
 import { searchPatients } from "./task-runner.js";
 import { openSetKitDialog, openKitFromShelfDialog } from "./kit-admin.js";
@@ -118,6 +118,9 @@ const REQ_CSS = `
 .rq2-tag{display:inline-block;padding:1px 8px;border-radius:999px;background:#f1f5f9;color:#475569;font-size:11.5px}
 .rq2-tag.is-purple{background:#ede9fe;color:#5b21b6}
 .rq2-tag.is-info{background:#dbeafe;color:#1d4ed8}
+.rq2-tag.is-green{background:#dcfce7;color:#166534}
+.rq2-tag.is-amber{background:#fef3c7;color:#92400e}
+.rq2-stat.is-good{background:#f0fdfa;border-color:#99f6e4}.rq2-stat.is-good span,.rq2-stat.is-good b{color:#0f766e}
 .rq2-chev{color:#94a3b8;font-size:14px}
 .rq2-body{padding:0 14px 14px 44px}
 .rq2-table th,.rq2-table td{text-align:left}
@@ -3629,6 +3632,28 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
   /* ---------- Requests ---------- */
   const reqAge = (r) => (r.createdAt ? Math.floor((Date.now() - r.createdAt.getTime()) / 864e5) : 0);
+  // Filling a request from JT storage: Manage inventory, or JT approvers who also order
+  const canFill = canMove && (canManage || canJt);
+  const stockNeed = (it, p) => (it.unitKind === "stock" ? it.qty : it.qty * Math.max(1, p.packSize));
+  const filledOf = (r, i) => Number((r.jtFilled || {})[i]) || 0;
+  // Each item's next step: done (filled from JT) · jt (JT has enough) · part (JT has some) · order
+  function jtPlan(r) {
+    return r.items.map((it, i) => {
+      const p = st.products.find((x) => x.id === it.productId) || null;
+      if (!p) return { i, it, p: null, need: it.qty, jt: 0, state: "order" };
+      const need = Math.max(0, stockNeed(it, p) - filledOf(r, i));
+      const jt = p.stock.jt;
+      const state = need <= 0 ? "done" : r.loc !== "shelf" ? "order" : jt >= need ? "jt" : jt > 0 ? "part" : "order";
+      return { i, it, p, need, jt, state };
+    });
+  }
+  const jtTag = (r) => {
+    const left = jtPlan(r).filter((x) => x.state !== "done");
+    if (!left.length) return "";
+    if (left.every((x) => x.state === "jt")) return '<span class="rq2-tag is-green">JT storage has it all</span>';
+    if (left.some((x) => x.state === "jt" || x.state === "part")) return '<span class="rq2-tag is-amber">JT storage has some</span>';
+    return "";
+  };
 
   function renderRequests() {
     injectReqCss();
@@ -3642,11 +3667,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const open = st.requests.filter((r) => r.status === "open");
     const urgent = open.filter((r) => r.urgency === "urgent").length;
     const waiting = open.filter((r) => reqAge(r) >= REQ_WAIT_DAYS).length;
-    const out = new Set();
-    open.forEach((r) => r.items.forEach((it) => {
-      const p = st.products.find((x) => x.id === it.productId);
-      if (p && p.stock.shelf <= 0) out.add(p.id);
-    }));
+    const fromJt = open.filter((r) => jtPlan(r).some((x) => x.state === "jt" || x.state === "part")).length;
     if (st.reqOpen === null) st.reqOpen = new Set(open.filter((r) => r.urgency === "urgent").map((r) => r.id));
 
     const segF = (name, items, cur, key) => seg(name, items, cur).replace(new RegExp(`name="${name}"`, "g"), `name="${name}" data-f="${key}"`);
@@ -3655,7 +3676,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         <div class="rq2-stat"><span>To order</span><b>${open.length}</b></div>
         <div class="rq2-stat${urgent ? " is-bad" : ""}"><span>Urgent</span><b>${urgent}</b></div>
         <div class="rq2-stat${waiting ? " is-warn" : ""}"><span>Waiting ${REQ_WAIT_DAYS}+ days</span><b>${waiting}</b></div>
-        <div class="rq2-stat"><span>Asked for, none on the Shelf</span><b>${out.size}</b></div>
+        <div class="rq2-stat${fromJt ? " is-good" : ""}"><span>Can come from JT storage</span><b>${fromJt}</b></div>
       </div>
       <div class="inv-tools">
         ${segF("rq-f", [["open", "Open", counts.open], ["ordered", "Ordered", counts.ordered], ["received", "Received", counts.received],
@@ -3715,7 +3736,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             <div class="rq2-sum">${esc(plural(r.items.length, "item"))} · ${esc(names.slice(0, 3).join(", "))}${names.length > 3 ? ` +${names.length - 3}` : ""}
               ${notListed ? `<span class="rq2-tag is-purple">${notListed} not on the product list</span>` : ""}
               ${r.note ? '<span class="rq2-tag">Has a note</span>' : ""}
-              ${onPo ? '<span class="rq2-tag is-info">On a purchase order</span>' : ""}</div>
+              ${onPo ? '<span class="rq2-tag is-info">On a purchase order</span>' : ""}
+              ${isOpen ? jtTag(r) : ""}</div>
           </div>
           <span class="rq2-chev" aria-hidden="true">${opened ? "▴" : "▾"}</span>
         </div>
@@ -3726,34 +3748,45 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   function reqDetail(r) {
     const mine = r.requestedByUid === myUid();
     const isOpen = r.status === "open";
-    const handled = r.status === "ordered" || r.status === "declined";
+    const handled = ["ordered", "declined", "received"].includes(r.status) && (r.response || r.handledBy);
+    const plan = jtPlan(r);
     const chip = (p, loc) => `<span class="rq2-stock${p.stock[loc] <= 0 ? " is-out" : lowAt(p, loc) ? " is-low" : ""}">${p.stock[loc]}</span>`;
-    const rows = r.items.map((it, i) => {
-      const p = st.products.find((x) => x.id === it.productId);
-      const onPo = itemOnPo(r.id, i, st.pos);
+    const step = (x) => (x.state === "done" ? '<span class="rq2-tag is-green">Filled from JT ✓</span>'
+      : x.state === "jt" ? '<span class="rq2-tag is-green">JT storage has enough</span>'
+      : x.state === "part" ? `<span class="rq2-tag is-amber">JT has ${x.jt} of ${x.need}</span>`
+      : '<span class="rq2-tag">Needs ordering</span>');
+    const rows = plan.map((x) => {
+      const it = x.it, p = x.p;
+      const onPo = itemOnPo(r.id, x.i, st.pos);
       const sup = p ? (supplierOf(p.supplierId) || {}).name || "" : "";
       return `<tr>
         <td><strong>${esc(it.name)}</strong>${it.productId ? "" : ' <span class="rq2-tag is-purple">Not on the product list</span>'}${
           onPo ? ` <a class="inv-flag is-info" href="#/inventory/po/${esc(onPo.id)}">On ${esc(onPo.number)} · ${esc(PO_STATUS[onPo.status])}</a>` : ""}</td>
         <td>${esc(plural(it.qty, it.unit))}</td>
         <td>${p ? chip(p, "shelf") : "—"}</td><td>${p ? chip(p, "jt") : "—"}</td>
-        <td class="muted">${esc(sup || "—")}</td></tr>`;
+        <td class="muted">${esc(sup || "—")}</td>
+        ${isOpen ? `<td>${step(x)}</td>` : ""}</tr>`;
     }).join("");
+    const fillable = canFill && isOpen && plan.some((x) => x.state === "jt" || x.state === "part");
+    const allJt = plan.every((x) => x.state === "done" || x.state === "jt");
+    const needOrder = plan.some((x) => x.state === "order" || x.state === "part");
     const item = (attr, label) => `<button type="button" role="menuitem" class="pt-pop-item" ${attr} data-id="${esc(r.id)}">${label}</button>`;
     const more = [
+      canMove && item('data-req="ordered"', "Already ordered (phone, website)…"),
       canMove && item('data-req="declined"', "Decline…"),
       item('data-req="email"', "Email it again"),
       mine && item('data-req="cancel"', "Cancel request"),
     ].filter(Boolean);
     return `<div class="rq2-body">
-      <table class="inv-table rq2-table"><thead><tr><th>Product</th><th>Qty</th><th>Shelf</th><th>JT</th><th>Supplier</th></tr></thead>
-        <tbody>${rows}</tbody></table>
+      <table class="inv-table rq2-table"><thead><tr><th>Product</th><th>Qty</th><th>Shelf</th><th>JT</th><th>Supplier</th>${
+        isOpen ? "<th>Next step</th>" : ""}</tr></thead><tbody>${rows}</tbody></table>
       ${r.note ? `<p class="rq-note">“${esc(r.note)}”</p>` : ""}
       ${handled ? `<p class="rq-resp"><strong>${esc(REQ_STATUS[r.status])}${r.handledBy ? ` by ${esc(r.handledBy)}` : ""}${
         r.handledAt ? `, ${esc(when(r.handledAt))}` : ""}</strong>${r.response ? `: ${esc(r.response)}` : ""}</p>` : ""}
+      ${fillable && needOrder ? '<p class="inv-hint">JT storage has some of this. Fill what it has, and order the rest.</p>' : ""}
       ${isOpen && (canMove || mine) ? `<div class="rq2-acts">
-        ${canMove ? `<button type="button" class="lh-btn is-primary" data-req="ordered" data-id="${esc(r.id)}">Mark as ordered</button>
-          <button type="button" class="lh-btn" data-act="rq-tosup">Make a purchase order…</button>` : ""}
+        ${fillable ? `<button type="button" class="lh-btn is-primary" data-rqfill="${esc(r.id)}">${allJt ? "Fill from JT storage" : "Fill what JT storage has…"}</button>` : ""}
+        ${canMove && needOrder ? `<button type="button" class="lh-btn${fillable ? "" : " is-primary"}" data-act="rq-tosup">Make a purchase order…</button>` : ""}
         <span class="inv-spacer"></span>
         <span class="inv-pd-morewrap"><button type="button" class="lh-btn" data-rqmore aria-expanded="false" aria-label="More actions">⋯</button>
           <span class="inv-pd-more" role="menu" hidden>${more.join("")}</span></span>
@@ -3761,6 +3794,72 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     </div>`;
   }
 
+  // Fill a request from JT storage: each item's amount can be lowered (e.g. to keep some in JT)
+  function fillFromJtDialog(r) {
+    const plan = jtPlan(r);
+    const can = plan.filter((x) => x.state === "jt" || x.state === "part");
+    if (!can.length) { showToast("JT storage doesn't have any of these now."); return; }
+    const restLeft = plan.some((x) => x.state === "order" || x.state === "part");
+    const dlg = openDialog("inv-dlg", `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>Fill ${esc(reqNumber(r))} from JT storage</h3>
+          <p>For ${esc(r.requestedBy || "the requester")}. It moves from JT storage to the Shelf now, oldest expiry first, and is logged in Activity.</p></div>
+        <table class="inv-table rq2-table"><thead><tr><th>Product</th><th>Still needed</th><th>JT has</th><th>Move now</th></tr></thead><tbody>
+          ${can.map((x) => {
+            const max = Math.min(x.need, x.jt);
+            return `<tr><td><strong>${esc(x.p.name)}</strong></td><td>${esc(plural(x.need, x.p.stockUnit))}</td><td>${x.jt}</td>
+              <td><input class="fe-input inv-num" type="number" min="0" max="${max}" step="1" inputmode="numeric" data-fill="${x.i}" value="${max}"
+                aria-label="${esc(`${x.p.name}: how many to move`)}" /></td></tr>`;
+          }).join("")}
+        </tbody></table>
+        ${restLeft ? '<p class="inv-hint">Anything JT storage can\'t cover stays open to order. By supplier only shows what\'s still needed.</p>' : ""}
+        <label class="lh-field"><span class="lh-label">Note (optional)</span>
+          <input name="note" maxlength="300" placeholder="e.g. Kept 2 in JT for Friday" /></label>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">Move to the Shelf</button>
+        </div>
+      </form>`);
+    const form = dlg.querySelector("form");
+    const err = dlg.querySelector(".lh-error");
+    let busy = false;
+    dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => { if (!busy) dlg.close(); });
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      const picks = [...form.querySelectorAll("[data-fill]")].map((el) => {
+        const x = plan.find((y) => y.i === Number(el.dataset.fill));
+        return { i: x.i, productId: x.p.id, name: x.p.name, qty: Number(el.value), max: Math.min(x.need, x.jt) };
+      });
+      const bad = picks.find((p) => !Number.isInteger(p.qty) || p.qty < 0 || p.qty > p.max);
+      if (bad) { err.textContent = `${bad.name}: enter 0 to ${bad.max}.`; err.hidden = false; return; }
+      const go = picks.filter((p) => p.qty > 0);
+      if (!go.length) { err.textContent = "Enter how many to move."; err.hidden = false; return; }
+      const complete = plan.every((x) => x.state === "done" || ((go.find((p) => p.i === x.i) || {}).qty || 0) >= x.need);
+      busy = true;
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      btn.textContent = "Moving…";
+      try {
+        await fillRequestFromJt(r, go, { complete, note: form.elements.note.value.trim() }, staff);
+        if (complete) callApi({ action: "inventory", op: "notifyUpdate", requestId: r.id }).catch((ex) => console.warn("Update email failed:", ex));
+        busy = false;
+        dlg.close();
+        showToast(complete ? `${reqNumber(r)} filled from JT storage and marked Received`
+          : "Moved to the Shelf. The rest is still open to order.");
+        load();
+      } catch (ex) {
+        console.error("Fill from JT failed:", ex);
+        busy = false;
+        err.textContent = errText(ex, "Couldn't move it. Try again.");
+        err.hidden = false;
+        btn.disabled = false;
+        btn.textContent = "Move to the Shelf";
+      }
+    });
+  }
   // Ticks, the "Select all" box and the bulk button
   function syncReqSel() {
     const boxes = [...body.querySelectorAll("[data-rqpick]")];
@@ -3836,10 +3935,12 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     rows.forEach((r) => r.items.forEach((it, i) => {
       if (itemOnPo(r.id, i, st.pos)) return;
       const p = st.products.find((x) => x.id === it.productId) || null;
+      const need = p ? stockNeed(it, p) - filledOf(r, i) : it.qty;   // less anything already filled from JT storage
+      if (p && need <= 0) return;
       const key = `${it.productId || it.name.toLowerCase()}|${r.loc}`;
       const line = lines.get(key) || { key, p, name: it.name, rawUnit: it.unit, rawQty: 0, stockQty: 0, loc: r.loc,
         reqs: [], urgent: false, sources: [], fallbackSid: it.supplierId || "" };
-      if (p) line.stockQty += it.unitKind === "stock" ? it.qty : it.qty * Math.max(1, p.packSize);
+      if (p) line.stockQty += need;
       else line.rawQty += it.qty;
       line.reqs.push(reqNumber(r));
       line.urgent = line.urgent || r.urgency === "urgent";
@@ -4120,6 +4221,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       return;
     }
     if (e.target.closest('[data-act="rq-bulk"]')) { bulkOrdered(); return; }
+    const rqFill = e.target.closest("[data-rqfill]");
+    if (rqFill) { const r = st.requests.find((x) => x.id === rqFill.dataset.rqfill); if (r) fillFromJtDialog(r); return; }
     if (e.target.closest('[data-act="rq-tosup"]')) { st.reqView = "supplier"; renderRequests(); return; }
     const rqHead = e.target.closest("[data-rqtoggle]");
     if (rqHead && !e.target.closest("input,a,button")) { toggleReq(rqHead.dataset.rqtoggle); return; }
