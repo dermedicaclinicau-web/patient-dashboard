@@ -6,31 +6,30 @@ let loaded = null;     // the version this page started with
 let lastCheck = 0;
 let banner = null;
 let autoReload = () => false;
-let seen = { version: "", at: 0 };   // a newer version, and when this tab first saw it
+let seen = { version: "", at: 0 };
 let waitTimer = null;
+let started = false;   // so logging in and out doesn't start extra timers
 
-// When it was deployed: "20261028-083123" from deploy.ps1 (Perth time), or 0
 function deployedAt(v) {
   const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/.exec(String((v && v.version) || ""));
   return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) - 8 * 3600000 : 0;
 }
 
 async function fetchVersion() {
-  const res = await fetch(`./version.json?t=${Date.now()}`, { cache: "no-store" });
-  if (!res.ok) return null;
+  // Changes once a minute (not every request), so the browser doesn't keep a long list of them
+  const res = await fetch(`./version.json?m=${Math.floor(Date.now() / 60000)}`, { cache: "no-store" });
+  if (!res.ok) return null;   // 429 or an error: just try again next time
   return res.json();
 }
 
-// Fetches every file fresh (so nothing old comes from the browser's cache), then reloads
-async function refreshNow(v) {
+async function refreshNow(v, auto = false) {
   if (banner) {
     const btn = banner.querySelector('[data-act="refresh"]');
     if (btn) { btn.disabled = true; btn.textContent = "Updating…"; }
   }
-  // The files deploy.ps1 listed, then every file this tab has loaded (freshReload reloads the page when done)
   const files = Array.isArray(v && v.files) ? v.files : [];
-  await Promise.allSettled(files.map((f) => fetch(f, { cache: "reload" })));
-  await freshReload();
+  // Automatic refreshes wait up to 2 minutes at random, so the clinic's computers don't all go at once
+  await freshReload(files, { jitterMs: auto ? 120000 : 0 });
 }
 
 function showBanner(v) {
@@ -55,6 +54,7 @@ function showBanner(v) {
 
 async function check(force = false) {
   if (!force && Date.now() - lastCheck < 60000) return; // at most once a minute
+  if (document.hidden && !force) return;
   lastCheck = Date.now();
   let v = null;
   try { v = await fetchVersion(); } catch { return; }
@@ -62,10 +62,9 @@ async function check(force = false) {
   if (!loaded) { loaded = v.version; return; }
   if (v.version === loaded || banner) return;
 
-  // Wait until GitHub Pages is handing out the new files, so a refresh really gets them
   if (seen.version !== v.version) seen = { version: v.version, at: Date.now() };
   const d = deployedAt(v);
-  const since = d && d <= seen.at && seen.at - d < 2 * 3600000 ? d : seen.at;   // the deploy time, if it looks right
+  const since = d && d <= seen.at && seen.at - d < 2 * 3600000 ? d : seen.at;
   const wait = since + CDN_WAIT - Date.now();
   if (wait > 0) {
     clearTimeout(waitTimer);
@@ -73,13 +72,15 @@ async function check(force = false) {
     return;
   }
 
-  if (autoReload()) { refreshNow(v); return; }  // e.g. on the login screen: nothing to lose
+  if (autoReload()) { refreshNow(v, true); return; }  // e.g. on the login screen: nothing to lose
   showBanner(v);
 }
 
 // canAutoReload: returns true when it's safe to refresh without asking
 export function initUpdateCheck({ canAutoReload } = {}) {
   if (typeof canAutoReload === "function") autoReload = canAutoReload;
+  if (started) return;          // already running: only the rule above changes
+  started = true;
   check(true);
   setInterval(() => check(true), CHECK_EVERY);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) check(); });

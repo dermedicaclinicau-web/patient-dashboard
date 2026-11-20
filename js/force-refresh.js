@@ -4,6 +4,7 @@
 import { db, auth } from "./firebase-config.js";
 import { doc, onSnapshot, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { freshReload } from "./fresh-reload.js";
 
 const COUNTDOWN = 15;                 // seconds
 const SNOOZE = 5 * 60 * 1000;
@@ -110,17 +111,12 @@ async function hardReload() {
   if (reloading) return;
   reloading = true;
   if (bar) bar.innerHTML = "<span>Refreshing…</span>";
-  const own = performance.getEntriesByType("resource").map((e) => e.name)
-    .filter((u) => u.startsWith(location.origin) && /\.(js|css|json|html)(\?|$)/i.test(u));
-  const urls = [...new Set([location.origin + location.pathname, ...own])];
-  await Promise.race([
-    Promise.allSettled(urls.map((u) => fetch(u, { cache: "reload", credentials: "same-origin" }))),
-    new Promise((r) => setTimeout(r, 8000)),                    // never wait more than 8 seconds
-  ]);
-  location.reload();
+  // Nobody looking at this tab: wait up to a minute at random, so the whole clinic doesn't refresh at once
+  await freshReload([], { jitterMs: document.hidden ? 60000 : 0 });
   // Still here (e.g. "Leave site?" was cancelled): try again in 5 minutes
   setTimeout(() => { reloading = false; countdown = null; snoozeUntil = Date.now() + SNOOZE; hideBar(); }, 3000);
 }
+
 
 /* ---------- Listening for the request ---------- */
 let unsub = null;
