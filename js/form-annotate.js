@@ -3,7 +3,7 @@
 // then tap the picture. Number sets add up; label sets (e.g. SD, PO) are counted.
 // Erase removes one mark, dot or line. Undo steps back through every change (including Erase and Clear).
 // The markings are kept separately from the picture, so the Image Bank picture never changes.
-import { bankImage } from "./image-bank-api.js";
+import { bankImageTry as loadBankImage, bankGone as isGone } from "./image-bank-api.js";
 import { traceShape, valueSvg, valueText, SHAPE_TEXT, textSize, shapeBottom, belowSize, belowColour } from "./marking-sets.js";
 
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -628,21 +628,6 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   };
 }
 
-// A picture that really has been deleted, rather than one that didn't load this time
-const isGone = (e) => /not.?found|missing|no such|deleted|404/i.test(String((e && (e.code || e.message)) || e || ""));
-
-// The Image Bank picture, tried a few times: a slow connection or a busy moment shouldn't stop staff marking it
-async function loadBankImage(id, tries = 3) {
-  let last;
-  for (let i = 0; i < tries; i++) {
-    try { return await bankImage(id); } catch (e) {
-      last = e;
-      if (isGone(e)) break;
-      await new Promise((r) => setTimeout(r, 800 * (i + 1)));
-    }
-  }
-  throw last;
-}
 
 // Sets up drawing (and marks) on every drawable picture on a page. Returns { fieldId: annotator }.
 export function attachAnnotators(root, fields, { markSets = [], initial = null, onInitial = null } = {}) {

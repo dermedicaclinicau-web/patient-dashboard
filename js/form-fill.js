@@ -21,7 +21,7 @@ import { highlightRecord, openDeleteRecordDialog } from "./records-view.js";
 import { formTitleHtml } from "./form-fields.js";
 import { hydrateBankImages } from "./image-bank-api.js";
 import { attachAnnotators } from "./form-annotate.js";
-import { bankImage } from "./image-bank-api.js";
+import { bankImageTry, bankFailHtml } from "./image-bank-api.js";
 import { mountAftercareField } from "./aftercare-field.js";
 import { mountPhotoField } from "./photo-field.js";
 import { mountConsumablesField, consumablesViewHtml } from "./consumables-field.js";
@@ -437,7 +437,7 @@ function showSavedViews(sheet, fields, sub, staff) {
             if (box.isConnected) box.innerHTML = `<span class="an-view"><img src="${esc(src)}" alt="" />${
               PNG_RE.test(saved.drawing || "") ? `<img class="an-over" src="${esc(saved.drawing)}" alt="Markings" />` : ""}</span>`;
           })
-          .catch(() => { if (box.isConnected) box.innerHTML = '<span class="fe-img-missing">This picture is missing from the Image Bank</span>'; });
+          .catch((err) => { if (box.isConnected) box.innerHTML = bankFailHtml(err); });
       }
       return;
     }
@@ -1871,7 +1871,7 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
               if (box.isConnected) box.innerHTML = `<span class="an-view"><img src="${esc(src)}" alt="" />${
                 drawing ? `<img class="an-over" src="${esc(drawing)}" alt="Markings" />` : ""}</span>`;
             })
-            .catch(() => { if (box.isConnected) box.innerHTML = '<span class="fe-img-missing">This picture is missing from the Image Bank</span>'; });
+            .catch((err) => { if (box.isConnected) box.innerHTML = bankFailHtml(err); });
         }
       }
       return;

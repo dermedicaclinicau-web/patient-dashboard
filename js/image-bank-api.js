@@ -198,6 +198,8 @@ function openDb() {
       req.onupgradeneeded = () => req.result.createObjectStore(STORE);
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
+      req.onblocked = () => resolve(null);
+      setTimeout(() => resolve(null), 3000);   // iPads: the store sometimes never answers
     });
   }
   return dbPromise;
@@ -206,11 +208,12 @@ async function idbGet(key) {
   const d = await openDb();
   if (!d) return null;
   return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(null), 1500);   // a stuck store never holds up a picture
     try {
       const r = d.transaction(STORE).objectStore(STORE).get(key);
-      r.onsuccess = () => resolve(r.result || null);
-      r.onerror = () => resolve(null);
-    } catch { resolve(null); }
+      r.onsuccess = () => { clearTimeout(t); resolve(r.result || null); };
+      r.onerror = () => { clearTimeout(t); resolve(null); };
+    } catch { clearTimeout(t); resolve(null); }
   });
 }
 async function idbPut(key, value) {
@@ -275,7 +278,7 @@ const imageCache = new Map(); // id -> Promise<data URL>
 export function bankImage(id) {
   if (!imageCache.has(id)) {
     const job = (async () => {
-      const meta = await findMeta(id).catch(() => null);
+      const meta = await findMeta(id);   // a failed lookup is retried, not sent to Google Drive
       if (meta && meta.fullPath) {
         const key = `full:${meta.id}`; // pictures never change, so they can be kept
         const saved = await idbGet(key);
@@ -285,13 +288,36 @@ export function bankImage(id) {
         return url;
       }
       // Not moved yet: still in Google Drive
-      const r = await driveApi("get", { fileId: id });
+      const r = await driveApi("get", { fileId: (meta && meta.driveId) || id });
       return `data:${r.mime};base64,${r.data}`;
     })();
     imageCache.set(id, job);
     job.catch(() => imageCache.delete(id));
   }
   return imageCache.get(id);
+}
+
+// A picture that really has been deleted, rather than one that didn't load this time
+export const bankGone = (e) => /not.?found|missing|no such|deleted|404/i.test(String((e && (e.code || e.message)) || e || ""));
+
+// The picture, tried a few times: a weak connection or a busy moment shouldn't stop staff using it
+export async function bankImageTry(id, tries = 3) {
+  let last;
+  for (let i = 0; i < tries; i++) {
+    try { return await bankImage(id); } catch (e) {
+      last = e;
+      if (bankGone(e)) break;
+      await new Promise((r) => setTimeout(r, 800 * (i + 1)));
+    }
+  }
+  throw last;
+}
+
+// What to show when it still won't load. retry: a Try again button (data-bank-retry)
+export function bankFailHtml(err, retry = false) {
+  if (bankGone(err)) return '<span class="fe-img-missing">This picture is missing from the Image Bank. Ask an Admin to choose it again in Form Builder.</span>';
+  return `<span class="fe-img-missing" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">The picture didn't load.${
+    retry ? ' <button type="button" class="lh-btn" data-bank-retry>Try again</button>' : " Reload the page to try again."}</span>`;
 }
 
 /* ---------- Uploading ---------- */
@@ -476,12 +502,17 @@ export function hydrateBankImages(root) {
   if (!root) return;
   root.querySelectorAll("[data-bank-img]:not([data-ready])").forEach((el) => {
     el.setAttribute("data-ready", "1");
-    bankImage(el.dataset.bankImg)
+    const start = () => bankImageTry(el.dataset.bankImg)
       .then((src) => {
         if (el.isConnected) el.innerHTML = `<img src="${escAttr(src)}" alt="${escAttr(el.dataset.alt || "")}" />`;
       })
-      .catch(() => {
-        if (el.isConnected) el.innerHTML = '<span class="fe-img-missing">This picture is missing from the Image Bank</span>';
+      .catch((err) => {
+        if (!el.isConnected) return;
+        console.warn("Picture not loaded:", el.dataset.bankImg, err);
+        el.innerHTML = bankFailHtml(err, true);
+        const b = el.querySelector("[data-bank-retry]");
+        if (b) b.addEventListener("click", () => { el.innerHTML = ""; start(); }, { once: true });
       });
+    start();
   });
 }
