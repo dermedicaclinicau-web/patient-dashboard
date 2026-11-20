@@ -946,9 +946,11 @@ export function renderSocial(body, c) {
       dlg.innerHTML = `<div class="sc-bank-h"><strong>Image Bank</strong>
           <input class="seo-input" type="search" placeholder="Search pictures" data-bq aria-label="Search pictures">
           <button class="seo-btn" type="button" data-bx>Close</button></div>
-        <div class="sc-bank-path" data-bp></div><div class="sc-bank-grid" data-bg></div>`;
+        <div class="sc-bank-path" data-bp></div><p class="sc-bank-msg" data-bm hidden></p><div class="sc-bank-grid" data-bg></div>`;
       const grid = dlg.querySelector("[data-bg]"), pathEl = dlg.querySelector("[data-bp]");
+      const say = function (t) { const el = dlg.querySelector("[data-bm]"); el.textContent = t || ""; el.hidden = !t; };
       async function show() {
+        say("");
         grid.innerHTML = `<p class="seo-note">Loading…</p>`;
         try {
           const searching = q.trim().length >= 2;
@@ -973,13 +975,14 @@ export function renderSocial(body, c) {
         if (b.dataset.bi) {
           const m = imgs.get(b.dataset.bi);
           if (!m) return;
-          if (!m.fullPath) { toast("That picture is still in Google Drive. Move the Image Bank across first.", true); return; }
+          if (!m.fullPath) { say("That picture is still in the old Google Drive Image Bank, so it can't be posted. Upload it instead, or move it to the new Image Bank first."); return; }
+          say("");
           b.disabled = true;
           try {
             const url = await getDownloadURL(sref(storage, m.fullPath));
             result = { url, path: m.fullPath, alt: m.name.replace(/\.[a-z0-9]+$/i, "").replace(/[-_]+/g, " "), w: m.width || 0, h: m.height || 0, from: "bank" };
             dlg.close();
-          } catch (err) { b.disabled = false; toast("Couldn't use that picture. " + errText(err), true); }
+          } catch (err) { b.disabled = false; say("Couldn't use that picture. " + errText(err)); }
         }
       });
       dlg.addEventListener("input", (e) => {
@@ -1134,12 +1137,17 @@ body.sc-ed-open{overflow:hidden}
 .sc-hist ul{margin:6px 0 0;padding-left:18px;line-height:1.5}
 .sc-set .seo-input{min-width:0;width:100%;box-sizing:border-box}
 .sc-conn{margin:10px 0;font-size:13px;line-height:1.8}
-.sc-bank{width:min(900px,95vw);max-height:85vh;padding:0;border:0;border-radius:14px}
+.sc-bank{position:fixed;inset:0;margin:auto;width:min(900px,95vw);height:min(720px,88vh);max-height:88vh;padding:0;border:0;border-radius:14px;
+  box-shadow:0 24px 60px rgba(15,23,42,.25);overflow:hidden}
+.sc-bank[open]{display:flex;flex-direction:column}
+.sc-bank-msg{margin:0 14px 8px;padding:8px 12px;border-radius:8px;background:#fef2f2;border:1px solid #fecaca;color:#7f1d1d;font-size:13px}
+.sc-bank-msg[hidden]{display:none}
 .sc-bank::backdrop{background:rgba(15,23,42,.45)}
 .sc-bank-h{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid #e5e7eb}
 .sc-bank-h .seo-input{flex:1;min-width:0}
 .sc-bank-path{padding:8px 14px;font-size:13px}
-.sc-bank-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;padding:0 14px 14px;max-height:60vh;overflow:auto}
+.sc-bank-grid{flex:1;min-height:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));grid-auto-rows:max-content;
+  gap:8px;padding:0 14px 14px;overflow:auto}
 .sc-bf{padding:12px;border:1px solid #e5e7eb;border-radius:10px;background:#f8fafc;font:inherit;font-size:13px;text-align:left;cursor:pointer}
 .sc-bi{display:flex;flex-direction:column;gap:4px;padding:6px;border:1px solid #e5e7eb;border-radius:10px;background:#fff;font:inherit;font-size:11.5px;cursor:pointer;text-align:left}
 .sc-bi img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px;background:#f1f5f9}
