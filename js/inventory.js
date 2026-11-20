@@ -3762,8 +3762,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     return `<div class="rq2-list">
       ${pick ? `<div class="rq2-bar"><label class="fe-check"><input type="checkbox" data-rqall /> <span data-role="rqselcount">Select all</span></label>
         <span class="inv-spacer"></span>
-        <button type="button" class="lh-btn" data-act="rq-bulk" hidden>Mark as ordered</button>
-        <button type="button" class="lh-btn is-primary" data-act="rq-bulk-po" hidden>Make a purchase order</button></div>` : ""}
+        <button type="button" class="lh-btn" data-act="rq-bulk" hidden>Mark as ordered</button></div>` : ""}
       ${rows.map((r) => reqRow(r, pick)).join("")}</div>`;
   }
 
@@ -4141,8 +4140,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (lbl) lbl.textContent = n ? `${n} selected` : "Select all";
     const btn = body.querySelector('[data-act="rq-bulk"]');
     if (btn) { btn.hidden = !n; btn.textContent = `Mark ${n} as ordered`; }
-    const po = body.querySelector('[data-act="rq-bulk-po"]');
-    if (po) po.hidden = !n;
+
   }
 
   function toggleReq(id) {
@@ -4501,7 +4499,6 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (e.target.closest('[data-act="rq-bulk"]')) { bulkOrdered(); return; }
     const rqPo = e.target.closest("[data-rqpo]");
     if (rqPo) { poWizard([rqPo.dataset.rqpo]); return; }
-    if (e.target.closest('[data-act="rq-bulk-po"]')) { poWizard([...st.reqSel]); return; }
     const rqFill = e.target.closest("[data-rqfill]");
     if (rqFill) { const r = st.requests.find((x) => x.id === rqFill.dataset.rqfill); if (r) fillFromJtDialog(r); return; }
     if (e.target.closest('[data-act="rq-tosup"]')) { st.reqView = "supplier"; renderRequests(); return; }
