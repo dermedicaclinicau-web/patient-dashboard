@@ -95,6 +95,109 @@ function drawIcon(kind) {
   return url;
 }
 
+/* ---------- Menu pages: the sidebar's own icon ---------- */
+// The sidebar icon's shapes are redrawn white on a teal rounded square. It's drawn straight away, with no waiting
+// for an image to load, so a page that sets its own icon a moment later always wins.
+
+function roundSquare(g, fill) {
+  const r = 14;
+  g.beginPath();
+  g.moveTo(r, 0); g.lineTo(64 - r, 0); g.quadraticCurveTo(64, 0, 64, r);
+  g.lineTo(64, 64 - r); g.quadraticCurveTo(64, 64, 64 - r, 64);
+  g.lineTo(r, 64); g.quadraticCurveTo(0, 64, 0, 64 - r);
+  g.lineTo(0, r); g.quadraticCurveTo(0, 0, r, 0);
+  g.closePath();
+  g.fillStyle = fill;
+  g.fill();
+}
+
+// An attribute set on the shape itself or on anything around it inside the icon (fill="none" is usually on the <svg>)
+function attrUp(el, svg, name) {
+  for (let n = el; n; n = n.parentElement) {
+    const v = n.getAttribute(name);
+    if (v != null) return v;
+    if (n === svg) break;
+  }
+  return null;
+}
+
+function drawSvgIcon(svg) {
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const g = c.getContext("2d");
+  roundSquare(g, "#0F766E");
+
+  let vb = String(svg.getAttribute("viewBox") || "0 0 24 24").trim().split(/[\s,]+/).map(Number);
+  if (vb.length !== 4 || !vb.every(Number.isFinite) || vb[2] <= 0 || vb[3] <= 0) vb = [0, 0, 24, 24];
+  const [vx, vy, vw, vh] = vb;
+  const s = 38 / Math.max(vw, vh);            // the icon fills about 60% of the square
+  g.save();
+  g.translate((64 - vw * s) / 2 - vx * s, (64 - vh * s) / 2 - vy * s);
+  g.scale(s, s);
+  g.fillStyle = "#fff";
+  g.strokeStyle = "#fff";
+  g.lineCap = "round";
+  g.lineJoin = "round";
+
+  const num = (el, k) => parseFloat(el.getAttribute(k)) || 0;
+  svg.querySelectorAll("path, rect, circle, ellipse, line, polyline, polygon").forEach((el) => {
+    const t = el.tagName.toLowerCase();
+    let p;
+    if (t === "path") {
+      const d = el.getAttribute("d");
+      if (!d) return;
+      p = new Path2D(d);
+    } else {
+      p = new Path2D();
+      if (t === "rect") {
+        const r = num(el, "rx") || num(el, "ry");
+        if (r && p.roundRect) p.roundRect(num(el, "x"), num(el, "y"), num(el, "width"), num(el, "height"), r);
+        else p.rect(num(el, "x"), num(el, "y"), num(el, "width"), num(el, "height"));
+      } else if (t === "circle") {
+        p.arc(num(el, "cx"), num(el, "cy"), num(el, "r"), 0, Math.PI * 2);
+      } else if (t === "ellipse") {
+        p.ellipse(num(el, "cx"), num(el, "cy"), num(el, "rx"), num(el, "ry"), 0, 0, Math.PI * 2);
+      } else if (t === "line") {
+        p.moveTo(num(el, "x1"), num(el, "y1"));
+        p.lineTo(num(el, "x2"), num(el, "y2"));
+      } else {
+        const pts = String(el.getAttribute("points") || "").trim().split(/[\s,]+/).map(Number);
+        for (let i = 0; i + 1 < pts.length; i += 2) {
+          if (i === 0) p.moveTo(pts[i], pts[i + 1]); else p.lineTo(pts[i], pts[i + 1]);
+        }
+        if (t === "polygon") p.closePath();
+      }
+    }
+    const fill = attrUp(el, svg, "fill");
+    const stroke = attrUp(el, svg, "stroke");
+    if (fill == null || fill !== "none") g.fill(p);   // SVG fills by default unless told "none"
+    if (stroke && stroke !== "none") {
+      // A touch bolder than the sidebar, so the icon is still clear at 16px
+      g.lineWidth = Math.max(parseFloat(attrUp(el, svg, "stroke-width")) || 2, 2.25);
+      g.stroke(p);
+    }
+  });
+  g.restore();
+  return c.toDataURL("image/png");
+}
+
+// A menu page's tab: the sidebar icon, and the menu name as the title
+export function setMenuTab(key, svg, label) {
+  if (label) setTabTitle(label);
+  if (!key || !svg) return;
+  const kind = `menu:${key}`;
+  try {
+    if (!urls.has(kind)) urls.set(kind, drawSvgIcon(svg));
+    if (shown === kind) return;
+    shown = kind;
+    putIcon(urls.get(kind));
+    keep();
+  } catch (err) {
+    shown = "";
+    console.warn("Menu tab icon not set:", err);
+  }
+}
+
 /* ---------- Putting the icon in ---------- */
 
 const iconLinks = () => [...document.querySelectorAll('link[rel~="icon"]')];

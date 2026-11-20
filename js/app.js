@@ -37,7 +37,7 @@ import "./menu-search.js";
 import "./mobile-nav.js";
 import "./force-refresh.js";   // first, so it can see recordings start
 import { freshReload } from "./fresh-reload.js";
-import { resetTabIcon, clearTabTitle, labelFormRecordTab, setTabIcon, setTabTitle } from "./tab-icon.js";
+import { resetTabIcon, clearTabTitle, labelFormRecordTab, setMenuTab } from "./tab-icon.js";
 const APP_TITLE = document.title;   // the usual tab title, put back on every page change
 import { startNudges } from "./nudges.js";
 
@@ -434,6 +434,18 @@ const firstAllowedPage = () => ["calendar", "patients", "tasks", "recall", "pros
 const currentPage = () => location.hash.split("/")[1] || "";
 const currentParam = () => { try { return decodeURIComponent(location.hash.split("/").slice(2).join("/")); } catch { return ""; } };
 
+// Menu pages take the sidebar's icon and name for the browser tab.
+// These open from a menu but are something else (a patient, notes, a form…), and set their own tab.
+const OWN_TAB = ["patient", "fill", "form-record", "ssp", "consult", "notes", "email",
+  "image-bank", "aftercare-bank", "ssp-products", "specialist-bank"];
+function menuTab(page, navKey) {
+  if (OWN_TAB.includes(page)) return;
+  const a = document.querySelector(`.nav-item[data-page="${navKey}"]`);
+  if (!a) return;
+  const label = ((a.querySelector(".nav-label") || a).textContent || "").trim();
+  setMenuTab(navKey, a.querySelector("svg"), label);
+}
+
 function applyNav() {
   els.navItems.forEach((a) => { a.hidden = !pageAllowed(a.dataset.page); });
 }
@@ -475,9 +487,9 @@ function router() {
   resetTabIcon();
   clearTabTitle(APP_TITLE);
   routeSeq++;
+  menuTab(page, navKey);            // before the page, so a page with its own icon or title still wins
   PAGES[page](els.content, param);
   if (page === "form-record") labelFormRecordTab(param);
-  if (page === "calendar") { setTabIcon("calendar"); setTabTitle("Calendar"); }
 }
 
 // Count in-app page changes so "Back" returns to wherever you came from
@@ -580,6 +592,8 @@ watchAuth((staff) => {
     closeFormPicker();
     if (els.profileDialog.open) els.profileDialog.close();
     if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+    resetTabIcon();                   // the login screen shows the usual icon and name
+    clearTabTitle(APP_TITLE);
     resetLogin();
     showView("login");
     warmUpLogin(); // start Apps Script while the PIN is being typed
