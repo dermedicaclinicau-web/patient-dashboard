@@ -161,11 +161,8 @@ export async function mountOrderRequest(container, { param = "", staff = null } 
     const opts = list.map((p, k) => {
       const head = !ws.length && p.category !== lastCat ? `<div class="or-pick-cat">${esc(catLabel(p) || "Other")}</div>` : "";
       lastCat = p.category;
-      const low = lowAt(p, "shelf") || lowAt(p, "jt");
       return `${head}<button type="button" class="or-opt${k === hi ? " is-on" : ""}" role="option" aria-selected="${k === hi}" data-pick="${esc(p.id)}" tabindex="-1">
-        <span class="or-opt-n">${esc(p.name)}</span>
-        <small>${ws.length && catLabel(p) ? `${esc(catLabel(p))} · ` : ""}Shelf ${p.stock.shelf} · JT ${p.stock.jt}${
-          low ? ' · <b class="or-opt-low">Low</b>' : ""}${taken.has(p.id) ? " · already on this request" : ""}</small></button>`;
+        <span class="or-opt-n">${esc(p.name)}</span></button>`;
     }).join("");
     const last = picks.length - 1;
     const typed = String(q || "").trim();
