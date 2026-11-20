@@ -628,6 +628,22 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   };
 }
 
+// A picture that really has been deleted, rather than one that didn't load this time
+const isGone = (e) => /not.?found|missing|no such|deleted|404/i.test(String((e && (e.code || e.message)) || e || ""));
+
+// The Image Bank picture, tried a few times: a slow connection or a busy moment shouldn't stop staff marking it
+async function loadBankImage(id, tries = 3) {
+  let last;
+  for (let i = 0; i < tries; i++) {
+    try { return await bankImage(id); } catch (e) {
+      last = e;
+      if (isGone(e)) break;
+      await new Promise((r) => setTimeout(r, 800 * (i + 1)));
+    }
+  }
+  throw last;
+}
+
 // Sets up drawing (and marks) on every drawable picture on a page. Returns { fieldId: annotator }.
 export function attachAnnotators(root, fields, { markSets = [], initial = null, onInitial = null } = {}) {
   const map = {};
@@ -638,7 +654,9 @@ export function attachAnnotators(root, fields, { markSets = [], initial = null, 
     const wantsMarks = f.markMode === "marks";
     const ids = Array.isArray(f.markSetIds) && f.markSetIds.length ? f.markSetIds : f.markSetId ? [f.markSetId] : [];
     const sets = wantsMarks ? ids.map((id) => (markSets || []).find((s) => s.id === id)).filter(Boolean) : [];
-    bankImage(f.fileId)
+    const start = () => {
+      box.innerHTML = '<span class="fe-help">Loading the picture…</span>';
+      loadBankImage(f.fileId)
       .then((src) => {
         if (!box.isConnected) return;
         const chart = f.chartLayout === "header";
@@ -656,9 +674,22 @@ export function attachAnnotators(root, fields, { markSets = [], initial = null, 
             : "This picture's marking sets have been deleted, so only drawing is available."} Choose sets again in Form Builder.</p>`);
         }
       })
-      .catch(() => {
-        if (box.isConnected) box.innerHTML = '<span class="fe-img-missing">This picture is missing from the Image Bank</span>';
+      .catch((err) => {
+        if (!box.isConnected) return;
+        console.warn("Picture not loaded:", f.fileId, err);
+        if (isGone(err)) {
+          box.innerHTML = '<span class="fe-img-missing">This picture is missing from the Image Bank. Ask an Admin to choose it again in Form Builder.</span>';
+          return;
+        }
+        box.innerHTML = `<span class="fe-img-missing" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          The picture didn't load. The rest of the form still works.
+          <button type="button" class="lh-btn" data-annot-retry>Try again</button></span>`;
+        box.querySelector("[data-annot-retry]").addEventListener("click", start, { once: true });
+        // Lost connection: load it again as soon as it's back
+        window.addEventListener("online", () => { if (box.isConnected && !map[f.id]) start(); }, { once: true });
       });
+    };
+    start();
   });
   return map;
 }
