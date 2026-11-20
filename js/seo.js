@@ -15,7 +15,7 @@ import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriority
 import { renderAds, clearAds, loadAds, adsPageHtml, peekAds, adsTotals } from "./seo-ads.js";
 import { loadLeads, peekLeads, clearLeads, leadsPageHtml, leadsTotals, leadsByPage } from "./seo-leads.js";
 import { renderResults } from "./seo-results.js";
-import { renderGbp, clearGbp, loadGbpCount, gbpTabHtml } from "./seo-gbp.js";
+import { renderGbp, clearGbp, loadGbp, peekGbp, gbpTotals, gbpTabHtml } from "./seo-gbp.js";
 
 const TABS = [
   { id: "overview", label: "Overview" },
@@ -677,7 +677,11 @@ export async function mountSeo(el, opts = {}) {
         loadAds().then(() => { if (root.isConnected && (tab === "overview" || tab === "keywords")) render(); })
           .catch(() => { /* no Ads data: those parts just don't show */ });
       }
-      loadGbpCount().then(() => { if (root.isConnected) setTabs(); }).catch(() => { /* not connected yet */ });
+      loadGbp().then(() => {
+        if (!root.isConnected) return;
+        setTabs();
+        if (tab === "overview" && peekGbp()) render();
+      }).catch(() => { /* not connected yet */ });
       if (!peekLeads()) {
         loadLeads().then(() => {
           if (!root.isConnected) return;
@@ -1012,6 +1016,20 @@ export async function mountSeo(el, opts = {}) {
           ld.top ? ` · most from ${esc(ld.top.path)} (${fmtInt(ld.top.n)})` : ""}`]);
       }
 
+      // 5d. Google Business Profile in the same dates (once its numbers are loaded)
+      const gb = gbpTotals(r.from, r.to);
+      if (gb && (gb.views || gb.actions)) {
+        const off = daysBetween(cmp.from, r.from);
+        const gw = cmp.from >= gb.first ? gbpTotals(cmp.from, addDays(gb.to, -off)) : null;
+        const pv = gw ? pct(gb.views, gw.views) : null, pa = gw ? pct(gb.actions, gw.actions) : null;
+        const chg = (p) => (p != null && Math.abs(p) >= 10 ? ` (${p > 0 ? "+" : "−"}${Math.abs(p)}%)` : "");
+        lines.push([pa == null ? "flat" : pa >= 10 ? "up" : pa <= -10 ? "down" : "flat",
+          `Google Business profile: ${fmtInt(gb.views)} views${chg(pv)}, ${fmtInt(gb.actions)} actions${chg(pa)} (${fmtInt(gb.calls)} calls, ${
+            fmtInt(gb.website)} website clicks, ${fmtInt(gb.directions)} directions)${
+            gb.reviews ? `, ${fmtInt(gb.reviews)} new review${gb.reviews === 1 ? "" : "s"}` : ""}${
+            gb.to < r.to ? `. Google's numbers run to ${esc(fmtDate(gb.to, false))}` : ""}. <button class="seo-w-link" type="button" data-tab="gbp">Open Google Business</button>`]);
+      }
+
       // 6. Changes logged in these dates (including tasks the website check finished)
       const logged = (work?.log || []).filter((e) => e.date >= r.from && e.date <= r.to);
       if (logged.length) {
@@ -1023,7 +1041,7 @@ export async function mountSeo(el, opts = {}) {
       return `<div class="seo-card seo-wc">
         <div class="seo-row" style="margin:0 0 4px"><h3 style="margin:0">What changed</h3>
           <span class="seo-note">${esc(fmtDate(r.from, false))} – ${esc(fmtDate(r.to))} vs ${esc(cmp.name.toLowerCase())}</span></div>
-        <ul class="seo-wc-list">${lines.slice(0, 8).map(([d, t]) => `<li class="is-${d}">${t}</li>`).join("")}</ul>
+        <ul class="seo-wc-list">${lines.slice(0, 9).map(([d, t]) => `<li class="is-${d}">${t}</li>`).join("")}</ul>
         ${fresh ? `<p class="seo-note" style="margin:6px 0 0">The last ${fresh} day${fresh === 1 ? "" : "s"} may still change while Search Console settles.</p>` : ""}
       </div>`;
     })();

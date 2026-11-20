@@ -3,6 +3,7 @@
 
 import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { peekGbp, loadGbp } from "./seo-gbp.js";
 
 const DOCS = ["geo", "months", "tech", "areas", "patients"];
 // Same as SEO4_AREAS_ in Seo4.gs (used until areas are saved)
@@ -89,6 +90,27 @@ export function viewAudience(wrap, c, ui) {
   const areas = A.areas || [];
   const canManage = c.can("seo.manage");
 
+  // Google Business: last month's searches that showed the profile and mention the area
+  let GB = peekGbp();
+  if (!GB) loadGbp().then((x) => { if (x && !x.none && wrap.isConnected) { GB = x; draw(); } }).catch(() => { /* not connected */ });
+  const wre = (wd) => new RegExp(`(^|[^a-z0-9])${String(wd).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z0-9]|$)`, "i");
+  function gbpOf(a) {
+    const m = GB?.kw?.[0];
+    if (!m) return null;
+    const res = (a.words || []).map(wre);
+    const rows = (Array.isArray(m[1]) ? m[1] : []).filter((r) => res.some((re) => re.test(String(r[0]))));
+    return { month: m[0], rows, views: rows.reduce((t, r) => t + (Number(r[1]) || 0), 0), under: rows.some((r) => r[2]) };
+  }
+  function gbpDetail(a) {
+    const g = gbpOf(a);
+    if (!g) return `<p class="seo-note">Shows once Google Business is connected.</p>`;
+    if (!g.rows.length) return `<p class="seo-note">No profile searches mentioning this area in ${h.esc(monthLabel(g.month))}.</p>`;
+    return `<p class="seo-note">${h.esc(monthLabel(g.month))}. Google only gives a range for small numbers.</p>
+      <table class="seo-w-mini"><thead><tr><th>Search</th><th>Views</th></tr></thead><tbody>${g.rows.slice(0, 15).map((r) =>
+        `<tr><td>${h.esc(r[0])}</td><td>${r[2] ? `under ${h.fmtInt(r[1])}` : h.fmtInt(r[1])}</td></tr>`).join("")}</tbody></table>
+      ${g.rows.length > 15 ? `<p class="seo-note">and ${g.rows.length - 15} more</p>` : ""}`;
+  }
+
   /* ----- tables ----- */
 
   function table(title, list, limit, opts = {}) {
@@ -111,11 +133,13 @@ export function viewAudience(wrap, c, ui) {
   function areaRow(a) {
     const s = a.search, v = a.visitors, p = a.patients;
     const imp = (s?.weeks || []).map((w) => w[1]);
+    const g = gbpOf(a);
     return `<tr data-a-area="${h.esc(a.name)}" class="${ui.aarea === a.name ? "is-on" : ""}">
       <td><strong>${h.esc(a.name)}</strong></td>
       <td>${s ? `${h.fmtInt(s.cur.c)} ${h.delta(s.cur.c, s.prev.c)}` : "—"}</td>
       <td>${s ? `${h.fmtInt(s.cur.i)} ${h.delta(s.cur.i, s.prev.i)}` : "—"}</td>
       <td>${s ? h.fmtPos(s.cur.pos) : "—"}</td>
+      <td>${!g ? "—" : g.rows.length ? `${g.under ? "~" : ""}${h.fmtInt(g.views)}` : "0"}</td>
       <td>${v && v.cities.length ? `${h.fmtInt(v.cur[0])} ${h.delta(v.cur[0], v.prev[0])}` : `<span class="seo-note">not separate</span>`}</td>
       <td>${p ? h.fmtInt(p.active) : "—"}</td>
       <td>${p ? h.fmtInt(p.new12) : "—"}</td>
@@ -142,6 +166,8 @@ export function viewAudience(wrap, c, ui) {
             ${qrows ? `<table class="seo-w-mini"><thead><tr><th>Search</th><th>Clicks</th><th>Impr.</th><th>Pos.</th><th>Page</th></tr></thead>
               <tbody>${qrows}</tbody></table>` : `<p class="seo-note">No searches mentioning this area in the last 28 days.</p>`}`
             : `<p class="seo-note">${h.esc(a.searchError || "No search data.")}</p>`}
+          <h4 class="seo-a-h" style="margin-top:14px">Google Maps and profile searches</h4>
+          ${gbpDetail(a)}
         </div>
         <div>
           <h4 class="seo-a-h">Visitors (Google Analytics)</h4>
@@ -186,10 +212,11 @@ export function viewAudience(wrap, c, ui) {
     return `
       ${ui.aedit ? editor() : ""}
       <div class="seo-table-wrap" style="max-height:none"><table class="seo-table">
-        <thead><tr><th>Area</th><th>Search clicks</th><th>Impressions</th><th>Avg position</th><th>Visitors</th>
+        <thead><tr><th>Area</th><th>Search clicks</th><th>Impressions</th><th>Avg position</th><th>Profile searches</th><th>Visitors</th>
           <th>Active patients</th><th>New patients (12m)</th><th>Search trend</th></tr></thead>
         <tbody>${areas.map(areaRow).join("")}</tbody></table></div>
       <p class="seo-note" style="margin:8px 0 14px">Click an area for its searches, visitors and patients.
+        Profile searches: last month's Google Search and Maps searches that showed your Google Business Profile and mention the area.
         Search clicks and impressions are only searches that include the area's words (e.g. “skin clinic subiaco”).
         ${pt ? `Patients: ${h.fmtInt(pt.wa)} with a WA postcode, ${h.fmtInt(pt.other)} with another address, ${h.fmtInt(pt.unknown)} with no address on file.` : ""}</p>
       ${sel ? areaDetail(sel) : ""}`;

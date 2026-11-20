@@ -15,6 +15,7 @@ import { npath, pageStory, priorityOf, prioritySettings, titleOf, complianceWord
   clusterOfMain, linkState, redirectState }   from "./seo-work.js";
 import { contentIssues, contentClick, altBody, issueFixHtml, altIssueId, fixApi, fixErr, askConfirm, injectCss as fxCss }
   from "./seo-content.js";
+import { loadGbpProfile } from "./seo-gbp.js";
 
 const GROUPS = {
   basics:  { order: 0, factor: 1,   title: () => "Fix what's holding it back" },
@@ -266,7 +267,7 @@ function planTasks(c, path) {
 
   /* Off the site */
   const term = main ? titleCase(main.replace(/\bperth\b/gi, "").replace(/\s+/g, " ").trim()) || titleCase(main) : titleOf(w, c.data, path);
-  add("off", "gbp", `Add “${term}” as a service on Google Business Profile, with a link to this page`, "Quick", { k: "manual" });
+  add("off", "gbp", `Add “${term}” as a service on Google Business Profile, with a link to this page`, "Quick", { k: "manual", gbp: term });
 
   return Object.entries(g).map(([k, steps]) => ({
     id: tid(path, k), path, group: k, title: GROUPS[k].title(main, rTitle, cl), main,
@@ -438,6 +439,46 @@ export async function renderTasks(body, c) {
 
   const day = todayPerth();
   const pageId = (path) => pageOf(c.data, path)?.id || "";
+
+  // Google Business Profile services (SeoGbp.gs, read each morning), for the "add it as a service" steps
+  let GBP = null;
+  try { GBP = await loadGbpProfile(); } catch { GBP = null; }
+  const gbpTerm = (s) => s.check?.gbp || (/^Add “(.+)” as a service on Google Business Profile/.exec(s.text || "") || [])[1] || "";
+  // The service it matches, "" if none, null if the profile can't be checked
+  const gbpFound = (s) => {
+    const term = gbpTerm(s);
+    if (!term || !GBP || !Array.isArray(GBP.services)) return null;
+    const core = words(term).filter((x) => !/^(treatments?|clinics?|services?)$/.test(x));
+    if (!core.length) return null;
+    return GBP.services.find((sv) => { const t = String(sv).toLowerCase(); return core.every((x) => t.includes(x.replace(/s$/, ""))); }) || "";
+  };
+  const gbpLine = (s) => {
+    if (!gbpTerm(s) || s.status === "done" || s.status === "confirmed") return "";
+    const hit = gbpFound(s);
+    if (hit === null) return "";
+    return hit ? `<div class="seo-note">✓ On your Google Business Profile as “${esc(hit)}”.</div>`
+      : `<div class="seo-note">Not on your Google Business Profile yet. Once it's added there, this step is marked done the morning after.</div>`;
+  };
+  // Steps whose service is now on the profile: marked done (and logged)
+  async function gbpAutoDone() {
+    if (!S.canDo || !GBP) return 0;
+    let n = 0;
+    for (const t of S.tasks.values()) {
+      if (t.status === "done" || t.status === "dismissed") continue;
+      for (const s of stepsOf(t)) {
+        if (s.status && s.status !== "todo") continue;
+        const hit = gbpFound(s);
+        if (!hit) continue;
+        const P = `steps.${s.id}.`;
+        try {
+          await act(c, S, t, { [P + "status"]: "done", [P + "by"]: uid(), [P + "byName"]: myName(c), [P + "at"]: new Date().toISOString() },
+            { action: "done", stepId: s.id, text: s.text, note: `Found on the Google Business Profile: “${hit}”` });
+          n++;
+        } catch (e) { console.warn("Google profile step not marked done:", e); return n; }
+      }
+    }
+    return n;
+  }
   const canFix = typeof c.can === "function" ? c.can("seo.pages") : S.canDo;
   // One-click changes on a step: titles and descriptions, alt text, spelling, grammar and wording.
   // The same tools as Site health. A change made here ticks the step, and tonight's website check confirms it.
@@ -646,9 +687,10 @@ export async function renderTasks(body, c) {
         <div>${esc(s.text)} <span class="seo-w-eff is-${String(s.effort || "quick").toLowerCase()}">${esc(s.effort || "Quick")}</span></div>
         ${s.detail ? `<div class="seo-note">${esc(s.detail)}</div>` : ""}
         ${who ? `<div class="seo-note">${who}</div>` : ""}
+        ${gbpLine(s)}
         ${applyHtml(t, s)}
       </div>
-      <span class="seo-note seo-t-chk" title="What tonight's website check looks at">${esc(CHECK[s.check?.k] || "")}</span>
+      <span class="seo-note seo-t-chk" title="What tonight's website check looks at">${esc(gbpTerm(s) ? "Google profile" : CHECK[s.check?.k] || "")}</span>
     </div>`;
   }
 
@@ -922,7 +964,7 @@ export async function renderTasks(body, c) {
   async function openPage(p) {
     const k = npath(p);
     ui.page = ui.page === k ? "" : k;
-    ui.trailAll = false;
+    ui.allActs = false;
     draw();
     if (!ui.page) return;
     markSeen(k);
@@ -1238,6 +1280,10 @@ export async function renderTasks(body, c) {
   wrap.addEventListener("keydown", (e) => {   // open a page with the keyboard too
     const ph = e.target.closest?.("[data-t-page]");
     if (ph && e.target === ph && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openPage(ph.dataset.tPage); }
+  });
+
+  gbpAutoDone().then((n) => {
+    if (n && wrap.isConnected) { toast(`${plural(n, "step")} found on the Google Business Profile ✓`); draw(); }
   });
   
   draw();

@@ -69,9 +69,9 @@ function sumDays(days, from, to) {
 /* ---------- data (cached for the session; Refresh reloads) ---------- */
 
 const cache = { v: null, pending: null };
-let countV = null, countP = null;
+let countV = null, countP = null, profP = null;
 
-export function clearGbp() { cache.v = null; countV = null; }
+export function clearGbp() { cache.v = null; countV = null; profP = null; }
 
 export async function loadGbp(force) {
   if (cache.v && !force) return cache.v;
@@ -113,6 +113,31 @@ export function gbpTabHtml(admin) {
   const n = !admin ? 0 : cache.v && !cache.v.none ? cache.v.reviews.filter((r) => !r.replied).length : countV || 0;
   return `Google Business${n ? ` <span class="seo-tab-n" title="${n} review${n === 1 ? "" : "s"} without a reply">${n}</span>` : ""}`;
 }
+// For the Overview, Audience and Results: what's loaded (null when not connected or not loaded yet)
+export const peekGbp = () => (cache.v && !cache.v.none ? cache.v : null);
+
+const perthDay = (iso) => { const d = new Date(iso || ""); return isNaN(d) ? "" : d.toLocaleDateString("en-CA", { timeZone: "Australia/Perth" }); };
+
+// Totals over [from, to], cut at the last day Google has given. null when there's nothing in those dates.
+export function gbpTotals(from, to) {
+  const G = peekGbp();
+  if (!G || !G.days.length) return null;
+  const first = G.days[0].date, last = G.days[G.days.length - 1].date;
+  const end = to > last ? last : to;
+  if (end < from) return null;
+  const s = sumDays(G.days, from, end);
+  const reviews = G.reviews.filter((r) => { const d = perthDay(r.createdAt); return d >= from && d <= to; }).length;
+  return { ...s, actions: s.calls + s.website + s.directions + s.bookings + s.messages, from, to: end, first, last, reviews };
+}
+
+// Just the profile (services, categories…), for Tasks. Doesn't read the reviews.
+export function loadGbpProfile() {
+  if (cache.v) return Promise.resolve(cache.v.none ? null : cache.v.profile);
+  return (profP ||= getDoc(doc(db, "seo_state", "gbp_profile"))
+    .then((s) => (s.exists() ? s.data().summary || null : null))
+    .catch(() => { profP = null; return null; }));
+}
+
 function syncTab(admin) {
   const b = document.querySelector('.seo-tabs [data-tab="gbp"]');
   if (b) b.innerHTML = gbpTabHtml(admin);

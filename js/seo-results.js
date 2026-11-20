@@ -2,6 +2,7 @@
 // Seo13.gs measures every change in the Change log each morning (seo_fix_tracks): the 28 days before vs 7, 14 and 28 days
 // after, allowing for the season (the rest of the site) and the page's own ups and downs. This tab shows the verdicts, and why.
 import { pageOf, titleOf, npath, prioritySettings, VERDICT, KIND_LABEL, trackChip } from "./seo-work.js";
+import { peekGbp, loadGbp, gbpTotals } from "./seo-gbp.js";
 
 const FILTERS = [["", "All"], ["helped", "Helped"], ["flat", "No clear change"], ["worse", "Worse"],
   ["thin", "Not enough visits"], ["measuring", "Still measuring"], ["undone", "Changed back"]];
@@ -41,7 +42,10 @@ export function renderResults(body, c) {
       ? "Results can't be read yet: publish the Firestore rule for seo_fix_tracks." : h.esc(w.errors.tracks)}</div>`;
     return;
   }
-  const tracks = (w.tracks || []).slice().sort((a, b) => b.date.localeCompare(a.date) || String(a.id).localeCompare(String(b.id)));
+  // Google Business posts and profile changes are measured on the profile below, not as page changes
+  const gbpOnly = (T) => Array.isArray(T.logs) && T.logs.length > 0 && T.logs.every((l) => l && l.source === "gbp");
+  const tracks = (w.tracks || []).filter((T) => !gbpOnly(T))
+    .sort((a, b) => b.date.localeCompare(a.date) || String(a.id).localeCompare(String(b.id)));
   if (!tracks.length) {
     wrap.innerHTML = `<div class="seo-empty">Nothing measured yet. In Apps Script, run <code>runSeoFixTracker</code> once:
       it measures every change in the Change log from the last 4 months. After that it runs each morning at 11am.</div>`;
@@ -51,6 +55,52 @@ export function renderResults(body, c) {
   const days = c.kit.daysBetween;
   const pri = new Set(prioritySettings(w).paths.map(npath));
   const byId = new Map(tracks.map((T) => [T.id, T]));
+
+  /* ----- Google Business: posts and profile changes, on the profile's own numbers ----- */
+  const gbLogs = (w.log || []).filter((e) => e.source === "gbp" && e.date).sort((a, b) => b.date.localeCompare(a.date));
+  let gbNone = false;
+  if (gbLogs.length && !peekGbp()) {
+    loadGbp().then((x) => { if (!x || x.none) gbNone = true; if (wrap.isConnected) draw(); })
+      .catch(() => { gbNone = true; if (wrap.isConnected) draw(); });
+  }
+  function gbpHtml() {
+    if (!gbLogs.length || gbNone) return "";
+    if (!peekGbp()) return `<div class="seo-card"><h3>Google Business changes</h3><p class="seo-note">Loading…</p></div>`;
+    const wk = (x, k) => (x && x.n ? (x[k] / x.n) * 7 : null);
+    const arrow = (p, q) => (p == null ? "—" : `${h.fmtInt(p)} → <strong>${q == null ? "—" : h.fmtInt(q)}</strong>`);
+    const rows = gbLogs.slice(0, 20).map((e) => {
+      const b = gbpTotals(h.addDays(e.date, -28), h.addDays(e.date, -1));
+      const a = gbpTotals(h.addDays(e.date, 1), h.addDays(e.date, 28));
+      const n = a ? a.n : 0;
+      const bv = wk(b, "views"), av = wk(a, "views"), ba = wk(b, "actions"), aa = wk(a, "actions");
+      let chip;
+      if (!b || b.n < 21) chip = `<span class="seo-vx is-grey">Not enough before</span>`;
+      else if (n < 7) chip = `<span class="seo-vx is-blue">Measuring · day ${n}</span>`;
+      else {
+        const useA = ba >= 5, x = useA ? aa : av, y = useA ? ba : bv;
+        const p = y ? Math.round(((x - y) / y) * 100) : null;
+        const [l, tone] = p == null ? ["No clear change", "grey"] : p >= 15 ? [`Up ${p}%`, "green"] : p <= -15 ? [`Down ${-p}%`, "red"] : ["No clear change", "grey"];
+        chip = `<span class="seo-vx is-${n >= 28 ? tone : "blue"}" title="${useA ? "Actions" : "Views"} a week: 28 days before vs ${n} days after">${
+          n >= 28 ? l : `So far: ${l.toLowerCase()}`}</span>`;
+      }
+      const near = gbLogs.filter((o) => o !== e && Math.abs(days(o.date, e.date)) <= 28).length;
+      const isPost = String(e.id || "").startsWith("gbp_post_");
+      return `<tr><td>${h.fmtDate(e.date)}</td>
+        <td style="text-align:left;white-space:normal;min-width:220px"><span class="seo-w-pill is-grey">${isPost ? "Post" : "Profile"}</span>
+          ${h.esc(String(e.title || "").replace(/^Google (Business: |post: )/, ""))}
+          ${near ? `<div class="seo-note">${near} other Google Business change${near === 1 ? "" : "s"} within 4 weeks share this result</div>` : ""}</td>
+        <td>${arrow(bv, av)}</td><td>${arrow(ba, aa)}</td><td>${chip}</td></tr>`;
+    }).join("");
+    return `<div class="seo-card">
+      <div class="seo-row" style="margin:0 0 6px"><h3 style="margin:0">Google Business changes</h3><span class="seo-sp"></span>
+        <button class="seo-btn" type="button" data-tab="gbp">Open Google Business</button></div>
+      <div class="seo-table-wrap" style="max-height:none"><table class="seo-table">
+        <thead><tr><th>Date</th><th>Change</th><th>Profile views a week</th><th>Actions a week</th><th>Result</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>
+      <p class="seo-note" style="margin-top:6px">Posts and profile changes, measured on the profile's own numbers: the 28 days before vs up to 28 days after.
+        Actions are calls, website clicks, directions, bookings and messages. This is a simple before and after: it doesn't allow for the season,
+        and changes close together share their result. Google's numbers are a few days behind.</p></div>`;
+  }
 
   /* ----- the summary ----- */
 
@@ -240,7 +290,7 @@ export function renderResults(body, c) {
   function draw() {
     const counts = {};
     tracks.forEach((T) => { const g = groupOf(T); counts[g] = (counts[g] || 0) + 1; });
-    wrap.innerHTML = `${summaryHtml()}
+    wrap.innerHTML = `${summaryHtml()}${gbpHtml()}
       <div class="seo-card">
         <div class="seo-row" style="margin:0 0 8px"><h3 style="margin:0">Changes</h3><span class="seo-sp"></span>
           <select class="seo-input seo-select" data-rs-kind aria-label="Kind of change"><option value="">Every kind</option>
