@@ -1756,7 +1756,8 @@ body.sc-ed-open{overflow:hidden}
 .sc-pv-nav button:disabled{opacity:.35;cursor:default}
 .sc-pv-wait{color:#94a3b8;font-size:12px}
 .sc-dl{display:flex;flex-direction:column;align-items:flex-start;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid #e5e7eb}
-.sc-pop{width:min(440px,92vw);padding:0;border:0;border-radius:14px;box-shadow:0 24px 60px rgba(15,23,42,.25)}
+.sc-pop{position:fixed;inset:0;margin:auto;width:min(440px,92vw);height:fit-content;max-height:90vh;overflow:auto;
+  padding:0;border:0;border-radius:14px;background:#fff;box-shadow:0 24px 60px rgba(15,23,42,.25)}
 .sc-pop[open]{animation:scPop .15s ease-out}
 @keyframes scPop{from{opacity:0;transform:translateY(6px)}}
 .sc-pop::backdrop{background:rgba(15,23,42,.45)}
