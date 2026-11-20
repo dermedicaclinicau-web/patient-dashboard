@@ -7,7 +7,7 @@ import {
   collection, doc, getDoc, getDocs, setDoc, updateDoc, addDoc, query, where, orderBy, onSnapshot,
   serverTimestamp, arrayUnion, increment,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { ref as sref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+import { ref as sref, uploadBytes, uploadBytesResumable, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 import { callApi } from "./appointments.js";
 import { complianceWords } from "./seo-work.js";
 import { bankList, bankSearch, thumbFor } from "./image-bank-api.js";
@@ -27,6 +27,18 @@ const STATUS = {
 };
 const BTN = { LEARN_MORE: "Learn more", BOOK: "Book", CALL: "Call now", "": "No button" };
 const MAX_PICS = 10;
+const TYPES = {
+  post: { label: "Post", icon: "▦", max: 10 },
+  reel: { label: "Reel / video", icon: "▶", max: 1 },
+  story: { label: "Story", icon: "◯", max: 20 },
+};
+const MAX_VIDEO = 1024 * 1024 * 1024;   // 1 GB
+const GBP_VIDEO_SECS = 30;
+const GBP_VIDEO_BYTES = 75 * 1024 * 1024;
+const STORY_SECS = 60;
+const IG_CAROUSEL_SECS = 60;
+const REEL_MAX_SECS = 15 * 60;
+const CLIP_TYPES = ["video/mp4;codecs=avc1.42E01E,mp4a.40.2", "video/mp4", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
 const DEFAULT_TIME = "10:00";
 const RISKY = [
   [/\bbefore\b[\s\S]{0,80}\bafter\b/i, "Before-and-after: check AHPRA's rules, and that you have the patient's written consent."],
@@ -107,6 +119,142 @@ async function shrinkImg(file, max = 2048) {
   } finally { URL.revokeObjectURL(url); }
 }
 
+/* ---------- videos ---------- */
+
+const fmtDur = (s) => { s = Math.round(Number(s) || 0); const m = Math.floor(s / 60), r = s % 60; return m ? `${m} min${r ? ` ${r} sec` : ""}` : `${r} sec`; };
+const fmtMb = (b) => `${Math.max(1, Math.round((b || 0) / 1048576))} MB`;
+const withTimeout = (p, ms, why) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(why)), ms))]);
+// A hidden video on the page (iPads won't play or seek one that isn't on the page)
+function hiddenVideo(url) {
+  const v = document.createElement("video");
+  v.playsInline = true; v.preload = "auto";
+  v.setAttribute("playsinline", "");
+  v.style.cssText = "position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none";
+  document.body.appendChild(v);
+  v.src = url;
+  return v;
+}
+
+// Length and size of a video on this device: { dur, w, h }
+function videoMeta(file) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file);
+    const v = document.createElement("video");
+    let over = false;
+    const done = (fn, x) => { if (over) return; over = true; URL.revokeObjectURL(url); v.removeAttribute("src"); fn(x); };
+    v.preload = "metadata"; v.muted = true; v.playsInline = true;
+    v.onloadedmetadata = () => done(res, { dur: isFinite(v.duration) ? v.duration : 0, w: v.videoWidth, h: v.videoHeight });
+    v.onerror = () => done(rej, new Error("That video can't be read on this device."));
+    setTimeout(() => done(rej, new Error("The video took too long to open.")), 20000);
+    v.src = url;
+  });
+}
+
+// One frame of a video on this device, as a JPEG (for covers)
+async function frameJpeg(file, t) {
+  const url = URL.createObjectURL(file);
+  const v = hiddenVideo(url);
+  v.muted = true;
+  try {
+    await withTimeout(new Promise((res, rej) => { v.onloadeddata = res; v.onerror = () => rej(new Error("That video can't be read on this device.")); }), 15000, "the video didn't open");
+    await withTimeout(new Promise((res) => { v.onseeked = res; v.currentTime = Math.max(0, Math.min(t, (v.duration || t + 1) - 0.1)); }), 15000, "the frame didn't load");
+    const k = Math.min(1, 1280 / Math.max(v.videoWidth || 1280, v.videoHeight || 720));
+    const cv = document.createElement("canvas");
+    cv.width = Math.max(2, Math.round((v.videoWidth || 1280) * k));
+    cv.height = Math.max(2, Math.round((v.videoHeight || 720) * k));
+    cv.getContext("2d").drawImage(v, 0, 0, cv.width, cv.height);
+    const blob = await new Promise((r) => cv.toBlob(r, "image/jpeg", 0.85));
+    if (!blob) throw new Error("the frame came out empty");
+    return { blob, w: cv.width, h: cv.height };
+  } finally { v.remove(); URL.revokeObjectURL(url); }
+}
+
+// Records part of a video on this device (for Google's 30-second limit). Call it straight from a click, so sound is allowed.
+// It plays the part once, so it takes as long as the clip. → { blob, mime, ext, dur }
+async function makeClip(file, start, secs, onProg) {
+  const mime = typeof MediaRecorder !== "undefined" && HTMLCanvasElement.prototype.captureStream
+    ? CLIP_TYPES.find((t) => MediaRecorder.isTypeSupported(t)) : "";
+  if (!mime) throw new Error("this device can't record video clips");
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ac = AC ? new AC() : null;
+  const url = URL.createObjectURL(file);
+  const v = hiddenVideo(url);
+  let dest = null;
+  if (ac) { try { const src = ac.createMediaElementSource(v); dest = ac.createMediaStreamDestination(); src.connect(dest); } catch { dest = null; } }
+  if (!dest) v.muted = true;
+  const first = v.play();
+  try {
+    if (ac && ac.state === "suspended") ac.resume().catch(() => {});
+    await withTimeout(first, 20000, "the video didn't start");
+    v.pause();
+    await withTimeout(new Promise((r) => { v.onseeked = r; v.currentTime = start; }), 20000, "the video didn't move to the start");
+    const k = Math.min(1, 1280 / Math.max(v.videoWidth || 1280, v.videoHeight || 720));
+    const cv = document.createElement("canvas");
+    cv.width = Math.max(2, Math.round((v.videoWidth || 1280) * k / 2) * 2);
+    cv.height = Math.max(2, Math.round((v.videoHeight || 720) * k / 2) * 2);
+    const g = cv.getContext("2d");
+    g.drawImage(v, 0, 0, cv.width, cv.height);
+    const stream = cv.captureStream(30);
+    if (dest) dest.stream.getAudioTracks().forEach((t) => stream.addTrack(t));
+    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 3000000 });
+    const chunks = [];
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    const stopped = new Promise((r) => { rec.onstop = r; });
+    const end = Math.min(start + secs, v.duration || start + secs);
+    let raf = 0, over = false;
+    const finish = () => { if (over) return; over = true; cancelAnimationFrame(raf); v.pause(); if (rec.state !== "inactive") rec.stop(); };
+    const tick = () => {
+      if (over) return;
+      g.drawImage(v, 0, 0, cv.width, cv.height);
+      if (onProg) onProg(Math.max(0, Math.min(100, Math.round(((v.currentTime - start) / (end - start)) * 100))));
+      if (v.currentTime >= end || v.ended) { finish(); return; }
+      raf = requestAnimationFrame(tick);
+    };
+    v.ontimeupdate = () => { if (v.currentTime >= end) finish(); };
+    v.onended = finish;
+    rec.start(1000);
+    await v.play();
+    raf = requestAnimationFrame(tick);
+    const guard = setTimeout(finish, (end - start) * 3000 + 15000);
+    await stopped;
+    clearTimeout(guard);
+    stream.getTracks().forEach((t) => t.stop());
+    const type = mime.split(";")[0];
+    const blob = new Blob(chunks, { type });
+    if (blob.size < 10000) throw new Error("the clip came out empty");
+    return { blob, mime: type, ext: type === "video/mp4" ? "mp4" : "webm", dur: Math.round((end - start) * 10) / 10 };
+  } finally {
+    v.pause(); v.remove(); URL.revokeObjectURL(url);
+    if (ac) ac.close().catch(() => {});
+  }
+}
+
+// Pictures and videos to this device, in order: the Share sheet where there is one (iPad: Save puts them in Photos), otherwise downloads
+async function saveFiles(items) {
+  const files = [];
+  for (const [i, x] of items.entries()) {
+    try {
+      const r = await fetch(x.url);
+      if (!r.ok) throw new Error(String(r.status));
+      const b = await r.blob();
+      const t = b.type || x.mime || "";
+      const ext = x.kind === "video" ? (/webm/.test(t) ? "webm" : /quicktime/.test(t) ? "mov" : "mp4") : /png/.test(t) ? "png" : "jpg";
+      files.push(new File([b], `dermedica-${pad(i + 1)}.${ext}`, { type: t }));
+    } catch (e) { console.warn("Not downloaded:", x.url, e); return { ok: false }; }
+  }
+  if (navigator.canShare && navigator.canShare({ files })) {
+    try { await navigator.share({ files }); return { ok: true, shared: true }; }
+    catch (e) { if (e && e.name === "AbortError") return { ok: true, cancel: true }; }
+  }
+  files.forEach((f, i) => setTimeout(() => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(f); a.download = f.name;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
+  }, i * 400));
+  return { ok: true };
+}
+
 /* ---------- screen state (kept while the portal is open) ---------- */
 
 const UI = { view: "month", month: "", week: "", ch: "", mine: false, ideas: false, lstatus: "" };
@@ -131,7 +279,8 @@ export function renderSocial(body, c) {
   const S = { posts: new Map(), waiting: [], ideas: [], settings: {}, connect: {}, banned: [], staff: [] };
   const usualTime = () => (/^\d{2}:\d{2}$/.test(S.settings.time || "") ? S.settings.time : DEFAULT_TIME);
   const defaultDay = () => { const n = perthNow(); return n.time < usualTime() ? n.day : addDays(n.day, 1); };
-  const handLeft = (p) => (p.channels || []).filter((k) => !(p.published || {})[k] && !S.connect[k]);
+  // Stories are always posted by hand, whatever's connected
+  const handLeft = (p) => (p.channels || []).filter((k) => !(p.published || {})[k] && (p.type === "story" || !S.connect[k]));
   const canDrag = (p) => !["posted", "publishing", "deleted"].includes(p.status)
     && (canApprove || ["draft", "waiting", "rejected"].includes(p.status));
   const shown = (p) => p.status !== "deleted" && (!UI.ch || (p.channels || []).includes(UI.ch)) && (!UI.mine || p.createdBy === me.uid);
@@ -185,10 +334,14 @@ export function renderSocial(body, c) {
     const hand = p.status === "scheduled" && whenMs(p.when) <= Date.now() && handLeft(p).length;
     const cap = String(p.caption || Object.values(p.captions || {})[0] || p.topic || "Untitled").replace(/\s+/g, " ");
     const pic = (p.pictures || [])[0];
+    const thumb = pic ? (pic.kind === "video" ? (pic.cover && pic.cover.url) || "" : pic.url) : "";
+    const n = (p.pictures || []).length;
+    const tyTag = p.type === "reel" ? "▶ Reel" : p.type === "story" ? "◯ Story" : n > 1 ? `▦ ${n}` : "";
     return `<div class="sc-card is-${hand ? "hand" : st.tone}" role="button" tabindex="0" data-sc-open="${esc(p.id)}"${
       canDrag(p) ? ` draggable="true" data-sc-drag="${esc(p.id)}"` : ""}>
-      <span class="sc-ctop">${(p.channels || []).map(chIcon).join("")}<b>${esc(niceTime(timeOf(p)))}</b></span>
-      ${pic ? `<img class="sc-cimg" src="${esc(pic.url)}" alt="" loading="lazy" draggable="false">` : ""}
+      <span class="sc-ctop">${(p.channels || []).map(chIcon).join("")}${tyTag ? `<i class="sc-cty">${tyTag}</i>` : ""}<b>${esc(niceTime(timeOf(p)))}</b></span>
+      ${thumb ? `<img class="sc-cimg" src="${esc(thumb)}" alt="" loading="lazy" draggable="false">`
+        : pic && pic.kind === "video" ? `<span class="sc-cimg sc-cvid">▶</span>` : ""}
       <span class="sc-ccap">${esc(cap.slice(0, 80))}</span>
       <span class="sc-cst">${hand ? "☝ Post by hand" : `${st.icon} ${esc(st.label)}`}${p.commentCount ? ` <i class="sc-cm${fresh ? " is-new" : ""}">💬 ${p.commentCount}${forMe ? " · for you" : ""}</i>` : ""}</span>
     </div>`;
@@ -439,6 +592,7 @@ export function renderSocial(body, c) {
     const idea = opts.idea || null;
     const E = {
       id: p ? p.id : doc(collection(db, "social_posts")).id, isNew: !p, status: p ? p.status : "draft",
+      type: p && TYPES[p.type] ? p.type : "post",
       channels: p ? [...(p.channels || [])] : ["fb", "ig"],
       caption: p ? p.caption || "" : idea ? idea.note || "" : "",
       captions: { ...(p?.captions || {}) },
@@ -450,15 +604,26 @@ export function renderSocial(body, c) {
       topic: p ? p.topic || "" : idea ? idea.title : "",
       ideaId: p ? p.ideaId || "" : idea ? idea.id : "",
       prev: "", busy: "", err: "", comments: [], cTo: "", cDraft: "",
+      gbpClip: p && p.gbpClip ? { ...p.gbpClip } : null, stickers: p ? p.stickers || "" : "",
+      files: new Map(), pvi: 0, clipStart: 0, clipPct: 0, coverFor: -1,
     };
     E.prev = E.channels[0] || "fb";
-    const sigOf = () => JSON.stringify([E.channels, E.caption, E.captions, E.hashtags, E.link, E.gbpButton,
-      E.pictures.map((x) => [x.url, x.alt || ""]), E.day, E.time, E.topic]);
+    const sigOf = () => JSON.stringify([E.type, E.channels, E.caption, E.captions, E.hashtags, E.link, E.gbpButton,
+      E.pictures.map((x) => [x.url, x.alt || "", (x.cover && x.cover.url) || ""]), (E.gbpClip && E.gbpClip.url) || "",
+      E.stickers, E.day, E.time, E.topic]);
     let base = sigOf();
     const dirty = () => sigOf() !== base;
     const readOnly = () => ["posted", "publishing", "deleted"].includes(E.status);
     const capFor = (k) => (k in E.captions ? String(E.captions[k] || "") : E.caption);
     const tagText = (k) => (k === "gbp" || !E.hashtags.length ? "" : "\n\n" + E.hashtags.map((x) => "#" + x).join(" "));
+    const maxMedia = () => (TYPES[E.type] || TYPES.post).max;
+    const videos = () => E.pictures.filter((x) => x.kind === "video");
+    const mainVideo = () => videos()[0] || null;
+    const isHand = (k) => E.type === "story" || !S.connect[k];
+    // What gets posted by hand: a Reel's video (and its Google clip), otherwise every picture and video in order
+    const mediaForPosting = () => (E.type === "reel"
+      ? [mainVideo(), ((p && p.channels) || E.channels).includes("gbp") && E.gbpClip ? { ...E.gbpClip, kind: "video", label: "Google clip" } : null]
+      : E.pictures).filter((x) => x && x.url);
     let unsub = null;
 
     const ov = document.createElement("div");
@@ -474,26 +639,69 @@ export function renderSocial(body, c) {
     function checks() {
       const out = [];
       const add = (tone, msg) => out.push({ tone, msg });
+      const story = E.type === "story", reel = E.type === "reel";
+      const vids = videos();
+      const pics = E.pictures.filter((x) => x.kind !== "video");
       if (!E.channels.length) add("stop", "Choose at least one channel.");
-      if (!E.channels.some((k) => capFor(k).trim())) add("stop", "Write the caption.");
-      if (E.channels.includes("ig")) {
-        if (!E.pictures.length) add("stop", "Instagram needs at least 1 picture.");
-        const n = capFor("ig").length + tagText("ig").length;
-        if (n > LIMIT.ig) add("stop", `The Instagram caption is ${n.toLocaleString("en-AU")} characters. 2,200 at most.`);
-        if (E.hashtags.length > 30) add("stop", "Instagram allows 30 hashtags at most.");
-        if (/https?:\/\/|www\./i.test(capFor("ig"))) add("warn", "Links in Instagram captions can't be tapped. Say “link in bio” instead.");
+      if (E.pictures.some((x) => x.uploading)) add("stop", "Wait for the upload to finish.");
+      if (E.busy === "clip") add("stop", "Wait for the Google clip to finish.");
+      if (reel) {
+        if (!vids.length) add("stop", "Add the video.");
+        if (pics.length) add("stop", "A Reel is one video. Use Post for pictures.");
       }
-      if (E.channels.includes("gbp")) {
+      if (story && !E.pictures.length) add("stop", "Add at least one picture or video.");
+      if (E.pictures.length > maxMedia()) add("stop", `${TYPES[E.type].label} takes ${maxMedia()} at most.`);
+      if (!story && !E.channels.some((k) => capFor(k).trim())) add("stop", "Write the caption.");
+      if (E.channels.includes("ig")) {
+        if (!story) {
+          if (!E.pictures.length) add("stop", "Instagram needs at least 1 picture or video.");
+          const n = capFor("ig").length + tagText("ig").length;
+          if (n > LIMIT.ig) add("stop", `The Instagram caption is ${n.toLocaleString("en-AU")} characters. 2,200 at most.`);
+          if (E.hashtags.length > 30) add("stop", "Instagram allows 30 hashtags at most.");
+          if (/https?:\/\/|www\./i.test(capFor("ig"))) add("warn", "Links in Instagram captions can't be tapped. Say “link in bio” instead.");
+        }
+        if (E.type === "post" && E.pictures.length > 1 && vids.some((x) => (x.dur || 0) > IG_CAROUSEL_SECS)) {
+          add("stop", "Videos in an Instagram carousel can be 60 seconds at most. Post a longer video as a Reel.");
+        }
+        const v = reel ? vids[0] : null;
+        if (v && v.dur) {
+          if (v.dur < 3) add("stop", "A Reel needs to be at least 3 seconds long.");
+          else if (v.dur > REEL_MAX_SECS) add("stop", "A Reel can be 15 minutes at most.");
+          else add("ok", `Length is fine for a Reel (${fmtDur(v.dur)}).`);
+        }
+        if (v && v.w && v.h) {
+          if (v.h >= v.w * 1.5) add("ok", "Portrait shape suits Reels.");
+          else add("warn", `Reels look best in portrait (9:16). This video is ${v.w > v.h ? "landscape" : "close to square"}.`);
+        }
+      }
+      if (E.channels.includes("gbp") && !story) {
         if (capFor("gbp").length > LIMIT.gbp) add("stop", `The Google post is ${capFor("gbp").length.toLocaleString("en-AU")} characters. 1,500 at most.`);
         if (["BOOK", "LEARN_MORE"].includes(E.gbpButton) && !E.link.trim()) add("stop", "Add the link the Google button opens, or choose No button.");
+        if (reel) {
+          const v = vids[0];
+          if (v && !v.uploading) {
+            if ((v.dur || 0) > GBP_VIDEO_SECS && !E.gbpClip) add("stop", "Google takes videos up to 30 seconds. Make the 30-second clip, upload a short version, or untick Google.");
+            else if (E.gbpClip) add("ok", `Google gets a ${fmtDur(E.gbpClip.dur)} clip.`);
+            else if ((v.size || 0) > GBP_VIDEO_BYTES) add("warn", "Google takes videos up to 75 MB. If it's refused, upload a smaller short version.");
+          }
+          if (E.gbpClip && /webm/.test(E.gbpClip.mime || "")) add("warn", "This device made the clip as WebM. If Google won't take it, upload a short MP4 instead.");
+        } else if (E.pictures.length && !pics.length) add("stop", "Google posts need a picture. Add one, or untick Google.");
+        else if (E.pictures.length > 1) add("ok", "Google shows the first picture only.");
         if (E.hashtags.length) add("ok", "Hashtags are left off the Google post.");
       }
-      if (E.channels.includes("fb") && capFor("fb").length + tagText("fb").length > LIMIT.fb) add("stop", "The Facebook caption is too long.");
-      if (E.pictures.length) {
-        if (E.pictures.some((x) => !String(x.alt || "").trim())) add("warn", "Add a description (alt text) to every picture.");
+      if (E.channels.includes("fb") && !story && capFor("fb").length + tagText("fb").length > LIMIT.fb) add("stop", "The Facebook caption is too long.");
+      if (vids.some((x) => !x.uploading && !x.dur)) add("warn", "This device couldn't read a video's length, so its length checks are skipped.");
+      if (vids.some((x) => !x.uploading && !(x.cover && x.cover.url))) add("warn", "Choose a cover for each video.");
+      if (pics.length) {
+        if (pics.some((x) => !String(x.alt || "").trim())) add("warn", "Add a description (alt text) to every picture.");
         else add("ok", "Every picture has a description.");
       }
-      const text = [...new Set(E.channels.map(capFor))].join("\n") + " " + E.hashtags.join(" ") + " " + E.pictures.map((x) => x.alt || "").join(" ");
+      if (story) {
+        if (vids.some((x) => (x.dur || 0) > STORY_SECS)) add("ok", "Videos longer than 60 seconds are split into parts by Instagram and Facebook when you post them.");
+        add("ok", "Stories are posted by hand, so stickers, music and links are added in the app.");
+      }
+      const text = (story ? E.stickers : [...new Set(E.channels.map(capFor))].join("\n") + " " + E.hashtags.join(" "))
+        + " " + pics.map((x) => x.alt || "").join(" ");
       const hits = S.banned.filter((w) => w && new RegExp(`(^|[^a-z0-9])${escRe(w)}([^a-z0-9]|$)`, "i").test(text));
       if (hits.length) add("bad", `Advertising rules: “${hits.slice(0, 4).join("”, “")}” can't be used.`);
       else add("ok", "No words from your advertising list.");
@@ -502,6 +710,7 @@ export function renderSocial(body, c) {
       const rank = { stop: 0, bad: 1, warn: 2, ok: 3 };
       return out.sort((a, b) => rank[a.tone] - rank[b.tone]);
     }
+    
     function ready(label) {
       const list = checks();
       const stop = list.filter((x) => x.tone === "stop");
@@ -511,26 +720,57 @@ export function renderSocial(body, c) {
     }
 
     /* --- the preview --- */
+    function mediaHtml(x, cls) {
+      if (!x) return "";
+      const c = cls ? ` class="${cls}"` : "";
+      if (x.kind === "video") {
+        return x.url ? `<video${c} src="${esc(x.url)}"${x.cover && x.cover.url ? ` poster="${esc(x.cover.url)}"` : ""} controls playsinline preload="metadata"></video>`
+          : `<span class="sc-pv-wait">Uploading…</span>`;
+      }
+      return `<img${c} src="${esc(x.url)}" alt="${esc(x.alt || "")}">`;
+    }
+    function navHtml() {
+      const n = E.pictures.length;
+      if (n < 2) return "";
+      return `<div class="sc-pv-nav"><button type="button" data-e-pvi="-1" aria-label="Previous"${E.pvi ? "" : " disabled"}>‹</button>${
+        E.pictures.map((_, i) => `<i class="${i === E.pvi ? "on" : ""}"></i>`).join("")}<button type="button" data-e-pvi="1" aria-label="Next"${E.pvi < n - 1 ? "" : " disabled"}>›</button></div>`;
+    }
     function previewHtml(k) {
+      const n = E.pictures.length;
+      E.pvi = Math.max(0, Math.min(E.pvi, n - 1));
+      const cur = E.pictures[E.pvi] || null;
       const cap = capFor(k);
       const text = cap + tagText(k);
-      const pics = E.pictures;
-      const pic = pics[0];
-      const img = pic ? `<img src="${esc(pic.url)}" alt="${esc(pic.alt || "")}">` : "";
+      const v = mainVideo();
+      if (E.type === "story") {
+        return `<div class="sc-pv sc-pv-tall"><div class="sc-pv-bars">${E.pictures.map((_, i) => `<i class="${i <= E.pvi ? "on" : ""}"></i>`).join("")}</div>
+          <div class="sc-pv-sh"><span class="sc-av">D</span><b>${k === "fb" ? "Dermedica" : "dermedica_perth"}</b></div>
+          ${cur ? mediaHtml(cur, "sc-pv-fill") : "<span>Add a picture or video</span>"}
+          ${E.stickers.trim() ? `<span class="sc-pv-stk">Add in the app: ${esc(E.stickers.trim().slice(0, 140))}</span>` : ""}</div>${navHtml()}`;
+      }
       if (k === "ig") {
+        if (E.type === "reel") {
+          return `<div class="sc-pv sc-pv-tall">${v ? mediaHtml(v, "sc-pv-fill") : "<span>Add the video</span>"}
+            <p class="sc-pv-over"><b>dermedica_perth</b> ${esc(text.slice(0, 90))}${text.length > 90 ? "…" : ""}</p></div>`;
+        }
         const short = text.length > 125;
         return `<div class="sc-pv sc-pv-ig"><div class="sc-pv-h"><span class="sc-av">D</span><b>dermedica_perth</b></div>
-          <div class="sc-pv-sq">${img || "<span>Instagram needs a picture</span>"}${pics.length > 1 ? `<span class="sc-pv-n">1/${pics.length}</span>` : ""}</div>
+          <div class="sc-pv-sq">${cur ? mediaHtml(cur) : "<span>Instagram needs a picture or video</span>"}</div>${navHtml()}
           <div class="sc-pv-act">♡ &nbsp;💬 &nbsp;➤</div>
           <p class="sc-pv-t"><b>dermedica_perth</b> ${esc(short ? text.slice(0, 125) : text)}${short ? ' <span class="sc-more">… more</span>' : ""}</p></div>`;
       }
       if (k === "fb") {
+        const item = E.type === "reel" ? v : cur;
         const host = (/^https?:\/\/([^/]+)/i.exec(E.link) || [])[1] || (E.link.trim() ? "dermedica.com.au" : "");
         return `<div class="sc-pv sc-pv-fb"><div class="sc-pv-h"><span class="sc-av">D</span><div><b>Dermedica</b><small>${esc(niceDay(E.day, { day: "numeric", month: "long" }))} · ${esc(niceTime(E.time))}</small></div></div>
-          <p class="sc-pv-t">${esc(text.length > 480 ? text.slice(0, 480) + "… See more" : text)}</p>${img ? `<div class="sc-pv-wide">${img}</div>` : ""}
+          <p class="sc-pv-t">${esc(text.length > 480 ? text.slice(0, 480) + "… See more" : text)}</p>${item ? `<div class="sc-pv-wide">${mediaHtml(item)}</div>` : ""}${E.type === "reel" ? "" : navHtml()}
           ${host ? `<div class="sc-pv-link">${esc(host.toUpperCase())}</div>` : ""}</div>`;
       }
-      return `<div class="sc-pv sc-pv-g">${img ? `<div class="sc-pv-wide">${img}</div>` : ""}
+      const item = E.type === "reel"
+        ? (E.gbpClip ? { ...E.gbpClip, kind: "video", cover: v && v.cover } : v && (v.dur || 0) <= GBP_VIDEO_SECS ? v : null)
+        : E.pictures.find((x) => x.kind !== "video");
+      return `<div class="sc-pv sc-pv-g">${item ? `<div class="sc-pv-wide">${mediaHtml(item)}</div>`
+          : E.type === "reel" ? `<p class="sc-pv-t seo-note">The Google clip shows here once it's made.</p>` : ""}
         <p class="sc-pv-t">${esc(cap.length > 300 ? cap.slice(0, 300) + "…" : cap)}</p>
         ${E.gbpButton ? `<span class="sc-pv-btn">${esc(BTN[E.gbpButton] || "")}</span>` : ""}<small class="seo-note">Dermedica · on Google</small></div>`;
     }
@@ -575,17 +815,30 @@ export function renderSocial(body, c) {
     function publishedHtml() {
       const pub = (p && p.published) || {};
       const due = whenMs(`${E.day}T${E.time}`) <= Date.now();
-      return `<section class="sc-sec sc-pub"><h4>Posting</h4>${(p?.channels || E.channels).map((k) => {
-        const x = pub[k];
-        if (x) return `<div>${chIcon(k)} <b>Posted on ${CH[k].label}</b> <span class="seo-note">${esc(x.by || "")}${x.at ? " · " + esc(when(x.at)) : ""}${x.manual ? " · by hand" : ""}</span>${
-          x.link ? ` <a class="sc-link" href="${esc(x.link)}" target="_blank" rel="noopener">View ↗</a>` : ""}</div>`;
-        if (S.connect[k]) return `<div>${chIcon(k)} ${CH[k].label}: ${E.status === "failed" ? `<span class="sc-bad">didn't post${p?.error ? ": " + esc(p.error) : ""}</span>` : "posts itself at the time"}</div>`;
-        return `<div>${chIcon(k)} ${CH[k].label}: ${due ? "<b>post it by hand now</b>" : "post it by hand at the time"}
-          <button class="seo-btn" type="button" data-e-copy="${k}">Copy caption</button>
-          ${E.status === "scheduled" ? `<button class="seo-btn" type="button" data-e-mark="${k}">Mark posted</button>` : ""}</div>`;
-      }).join("")}</section>`;
+      const chans = (p && p.channels) || E.channels;
+      const story = E.type === "story";
+      const media = mediaForPosting();
+      const handToDo = chans.some((k) => !pub[k] && isHand(k));
+      return `<section class="sc-sec sc-pub"><h4>Posting</h4>
+        ${story ? `<p class="seo-note">Stories are always posted by hand, so stickers, music and links can be added in the app.</p>` : ""}
+        ${chans.map((k) => {
+          const x = pub[k];
+          if (x) return `<div>${chIcon(k)} <b>Posted on ${CH[k].label}</b> <span class="seo-note">${esc(x.by || "")}${x.at ? " · " + esc(when(x.at)) : ""}${x.manual ? " · by hand" : ""}</span>${
+            x.link ? ` <a class="sc-link" href="${esc(x.link)}" target="_blank" rel="noopener">View ↗</a>` : ""}</div>`;
+          if (!isHand(k)) return `<div>${chIcon(k)} ${CH[k].label}: ${E.status === "failed" ? `<span class="sc-bad">didn't post${p && p.error ? ": " + esc(p.error) : ""}</span>` : "posts itself at the time"}</div>`;
+          const what = story ? "the Story" : E.type === "reel" && k === "gbp" ? "the Google clip" : "it";
+          return `<div>${chIcon(k)} ${CH[k].label}: ${due ? `<b>post ${what} by hand now</b>` : `post ${what} by hand at the time`}
+            ${story ? "" : `<button class="seo-btn" type="button" data-e-copy="${k}">Copy caption</button>`}
+            ${E.status === "scheduled" ? `<button class="seo-btn" type="button" data-e-mark="${k}">Mark posted</button>` : ""}</div>`;
+        }).join("")}
+        ${handToDo && media.length ? `<div class="sc-dl"><button class="sc-b" type="button" data-e="dl"${E.busy ? " disabled" : ""}>${
+            E.busy === "dl" ? "Getting them ready…" : media.length > 1 ? `⬇ Download all ${media.length}, in order` : "⬇ Download"}</button>
+          <span class="seo-note">Or open them one at a time: ${media.map((x, i) => `<a class="sc-link" href="${esc(x.url)}" target="_blank" rel="noopener">${
+            esc(x.label || `${x.kind === "video" ? "Video" : "Picture"} ${i + 1}`)}</a>`).join(" · ")}</span></div>` : ""}
+        ${story && E.stickers.trim() ? `<div class="sc-review"><b>Add in the app:</b> ${esc(E.stickers.trim())}</div>` : ""}
+      </section>`;
     }
-
+    
     function actsHtml() {
       if (readOnly()) return "";
       const b = E.busy ? " disabled" : "";
@@ -614,29 +867,92 @@ export function renderSocial(body, c) {
       return out.join("");
     }
 
+    function tileHtml(x, i, ro) {
+      const n = E.pictures.length;
+      const thumb = x.kind === "video"
+        ? `<div class="sc-vt">${x.cover && x.cover.url ? `<img src="${esc(x.cover.url)}" alt="">` : ""}<span>▶${x.dur ? " " + esc(fmtDur(x.dur)) : ""}</span></div>`
+        : `<img src="${esc(x.url)}" alt="">`;
+      let info;
+      if (x.uploading) {
+        info = `<div data-e-up="${esc(x.path)}"><div class="sc-prog"><i style="width:${x.pct || 0}%"></i></div>
+          <small class="seo-note">Uploading ${x.pct || 0}%. Keep this page open.</small></div>`;
+      } else if (x.kind === "video") {
+        info = `<small class="seo-note">${esc([x.dur ? fmtDur(x.dur) : "", x.w ? `${x.w}×${x.h}` : "", x.size ? fmtMb(x.size) : ""].filter(Boolean).join(" · "))}</small>
+          ${ro ? "" : `<button class="seo-btn sc-sm" type="button" data-e-cvf="${i}">Cover: choose a frame</button>
+            <button class="seo-btn sc-sm" type="button" data-e-cvu="${i}">Upload a cover</button>`}`;
+      } else {
+        info = `<input class="seo-input" data-e-alt="${i}" value="${esc(x.alt || "")}" placeholder="Describe it (alt text)" maxlength="300"${ro}>`;
+      }
+      const arrows = ro || x.uploading ? "" : `<div class="sc-picb"><button type="button" data-e-pl="${i}" aria-label="Earlier"${i ? "" : " disabled"}>←</button>
+        <button type="button" data-e-pr="${i}" aria-label="Later"${i < n - 1 ? "" : " disabled"}>→</button>
+        <button type="button" data-e-px="${i}" aria-label="Remove">×</button></div>`;
+      return `<div class="sc-pic">${thumb}${info}${arrows}</div>`;
+    }
+
+    function mediaSecHtml(ro) {
+      const max = maxMedia();
+      const reel = E.type === "reel";
+      const word = reel ? "Video" : E.type === "story" ? "Story frames" : "Pictures and videos";
+      const full = E.pictures.length >= max;
+      const hasVid = reel || E.pictures.some((x) => x.kind === "video");
+      return `<section class="sc-sec"><h4>${word} <small>${reel ? "" : `${E.pictures.length} of ${max}`}</small></h4>
+        <div class="sc-pics">${E.pictures.map((x, i) => tileHtml(x, i, ro)).join("")}</div>
+        ${ro || full ? "" : `<div class="sc-row">${reel ? "" : `<button class="seo-btn" type="button" data-e="bank"${E.busy ? " disabled" : ""}>+ Image Bank</button>`}
+          <button class="seo-btn" type="button" data-e="upload"${E.busy ? " disabled" : ""}>${E.busy === "upload" ? "Uploading…" : reel ? "+ Upload the video" : "+ Upload"}</button>
+          <input type="file" accept="${reel ? "video/*" : "image/*,video/*"}"${reel ? "" : " multiple"} hidden data-e-file></div>`}
+        <input type="file" accept="image/*" hidden data-e-cfile><input type="file" accept="video/*" hidden data-e-refile>
+        <p class="seo-note">${hasVid ? "Videos up to 1 GB. Filming at 1080p keeps them smaller and posts more reliably. " : ""}Before-and-after photos and patients' faces: check you have written consent, and AHPRA's rules.</p></section>`;
+    }
+
+    function gclipHtml(ro) {
+      const v = mainVideo();
+      const latest = Math.max(0, Math.floor((v.dur || 0) - GBP_VIDEO_SECS));
+      let inner;
+      if (E.gbpClip) {
+        inner = `<p>Google gets a ${esc(fmtDur(E.gbpClip.dur))} ${E.gbpClip.from === "upload" ? "short version you uploaded" : `clip, starting at ${esc(fmtDur(E.gbpClip.start || 0))}`}.</p>
+          <video class="sc-gvid" src="${esc(E.gbpClip.url)}" controls playsinline preload="metadata"></video>
+          ${ro ? "" : `<div class="sc-row"><button class="seo-btn" type="button" data-e="gclipx"${E.busy ? " disabled" : ""}>Make a different one</button></div>`}`;
+      } else if (E.busy === "clip") {
+        inner = `<div data-e-clipprog><div class="sc-prog"><i style="width:${E.clipPct}%"></i></div><small class="seo-note">Making the clip: ${E.clipPct}%</small></div>
+          <p class="seo-note">It plays the video once to record it, so it takes about 30 seconds. Keep this page open and on screen.</p>`;
+      } else {
+        inner = `<p class="seo-note">Google takes videos up to 30 seconds. The first 30 seconds are used unless you choose a later start.</p>
+          ${ro ? "" : `<div class="sc-row"><button class="sc-b is-go" type="button" data-e="gclip"${E.busy ? " disabled" : ""}>Make the 30-second clip</button>
+            <label class="sc-inl">Start at <input class="seo-input sc-num" type="number" min="0" max="${latest}" step="1" data-e-cstart value="${esc(String(E.clipStart || 0))}"> sec</label></div>
+            <div class="sc-row"><button class="seo-btn" type="button" data-e="gclipup"${E.busy ? " disabled" : ""}>Upload a short version</button>
+            <button class="seo-btn" type="button" data-e="gbpoff">Leave Google out</button></div>`}`;
+      }
+      return `<section class="sc-sec sc-gclip"><h4>Short version for Google</h4>${inner}<input type="file" accept="video/*" hidden data-e-gfile></section>`;
+    }
+
     function formHtml() {
       const ro = readOnly() ? " disabled" : "";
       const sets = S.settings.hashtagSets || [];
+      const story = E.type === "story";
+      const v = mainVideo();
       return `
         ${E.err ? `<div class="sc-err" role="alert">⚠ ${esc(E.err)}</div>` : ""}
         ${p && p.reviewNote && ["draft", "rejected"].includes(E.status) ? `<div class="sc-review"><b>${E.status === "rejected" ? "Rejected" : "Changes requested"}:</b> ${esc(p.reviewNote)}</div>` : ""}
         ${["scheduled", "posted", "failed", "publishing"].includes(E.status) ? publishedHtml() : ""}
-        <section class="sc-sec"><h4>Channels</h4><div class="sc-chs">${CH_ORDER.map((k) =>
-          `<button type="button" class="sc-chb${E.channels.includes(k) ? " is-on" : ""}" data-e-ch="${k}" aria-pressed="${E.channels.includes(k)}"${ro}>${chIcon(k)} ${CH[k].label}</button>`).join("")}</div></section>
-        <section class="sc-sec"><h4>Pictures <small>${E.pictures.length} of ${MAX_PICS}</small></h4>
-          <div class="sc-pics">${E.pictures.map((x, i) => `<div class="sc-pic"><img src="${esc(x.url)}" alt="">
-            <input class="seo-input" data-e-alt="${i}" value="${esc(x.alt || "")}" placeholder="Describe it (alt text)" maxlength="300"${ro}>
-            ${ro ? "" : `<div class="sc-picb"><button type="button" data-e-pl="${i}" aria-label="Earlier"${i ? "" : " disabled"}>←</button>
-              <button type="button" data-e-pr="${i}" aria-label="Later"${i < E.pictures.length - 1 ? "" : " disabled"}>→</button>
-              <button type="button" data-e-px="${i}" aria-label="Remove">×</button></div>`}</div>`).join("")}</div>
-          ${ro || E.pictures.length >= MAX_PICS ? "" : `<div class="sc-row"><button class="seo-btn" type="button" data-e="bank">+ Image Bank</button>
-            <button class="seo-btn" type="button" data-e="upload"${E.busy === "upload" ? " disabled" : ""}>${E.busy === "upload" ? "Uploading…" : "+ Upload"}</button>
-            <input type="file" accept="image/*" multiple hidden data-e-file></div>`}
-          <p class="seo-note">Before-and-after photos and patients' faces: check you have written consent, and AHPRA's rules.</p></section>
-        <section class="sc-sec"><h4>What's it about?</h4><div class="sc-row">
+        <section class="sc-sec"><h4>Post type</h4><div class="seo-seg sc-types">${Object.entries(TYPES).map(([k, t]) =>
+          `<button type="button" class="${E.type === k ? "on" : ""}" data-e-type="${k}" aria-pressed="${E.type === k}"${ro}>${t.icon} ${t.label}</button>`).join("")}</div>
+          <p class="seo-note">${E.type === "reel" ? "One video. Instagram shows it as a Reel."
+            : story ? "Pictures and videos shown for 24 hours, on Instagram and Facebook. Always posted by hand."
+            : "One picture, or a carousel of up to 10 pictures and videos."}</p></section>
+        <section class="sc-sec"><h4>Channels</h4><div class="sc-chs">${CH_ORDER.map((k) => {
+          const off = story && k === "gbp";
+          return `<button type="button" class="sc-chb${E.channels.includes(k) ? " is-on" : ""}" data-e-ch="${k}" aria-pressed="${E.channels.includes(k)}"${
+            ro || (off ? " disabled" : "")}${off ? ' title="Google has no Stories"' : ""}>${chIcon(k)} ${CH[k].label}</button>`;
+        }).join("")}</div></section>
+        ${mediaSecHtml(ro)}
+        ${E.type === "reel" && E.channels.includes("gbp") && v && !v.uploading && (v.dur || 0) > GBP_VIDEO_SECS ? gclipHtml(ro) : ""}
+        ${story ? `<section class="sc-sec"><h4>Stickers and extras <small>added in the app when you post</small></h4>
+          <textarea class="seo-input sc-ta" data-e-stk rows="3" maxlength="1000" placeholder="Link sticker to /book-online/ · Poll: Have you tried skin needling? · Music: something calm"${ro}>${esc(E.stickers)}</textarea>
+          <p class="seo-note">Stories have no caption. Anything people need to read goes on the picture or video itself.</p></section>` : ""}
+        <section class="sc-sec"><h4>What's it about?${story ? " <small>shown on the calendar</small>" : ""}</h4><div class="sc-row">
           <input class="seo-input sc-grow" data-e-topic value="${esc(E.topic)}" maxlength="300" placeholder="e.g. Melasma in summer"${ro}>
-          ${ro ? "" : `<button class="seo-btn" type="button" data-e="draftai"${E.busy ? " disabled" : ""}>${E.busy === "draft" ? "Writing… (about 15 seconds)" : "✨ Draft it"}</button>`}</div></section>
-        <section class="sc-sec"><h4>Caption <small data-e-count></small></h4>
+          ${ro || story ? "" : `<button class="seo-btn" type="button" data-e="draftai"${E.busy ? " disabled" : ""}>${E.busy === "draft" ? "Writing… (about 15 seconds)" : "✨ Draft it"}</button>`}</div></section>
+        ${story ? "" : `<section class="sc-sec"><h4>Caption <small data-e-count></small></h4>
           <textarea class="seo-input sc-ta" data-e-cap rows="7" maxlength="5000" placeholder="Write the caption…"${ro}>${esc(E.caption)}</textarea>
           ${E.channels.map((k) => (k in E.captions
             ? `<div class="sc-lab">${chIcon(k)} ${CH[k].label} only ${ro ? "" : `<button type="button" class="sc-link" data-e-unsplit="${k}">Use the main caption</button>`}
@@ -651,7 +967,7 @@ export function renderSocial(body, c) {
         ${E.channels.includes("fb") || E.channels.includes("gbp") ? `<section class="sc-sec"><h4>Link <small>Facebook and Google</small></h4>
           <input class="seo-input sc-grow" data-e-link value="${esc(E.link)}" placeholder="/melasma-treatment-perth/ or a full address" maxlength="300"${ro}>
           ${E.channels.includes("gbp") ? `<label class="sc-lab">Google button <select class="seo-input seo-select" data-e-btn${ro}>${
-            Object.entries(BTN).map(([k, l]) => `<option value="${k}"${E.gbpButton === k ? " selected" : ""}>${l}</option>`).join("")}</select></label>` : ""}</section>` : ""}
+            Object.entries(BTN).map(([k, l]) => `<option value="${k}"${E.gbpButton === k ? " selected" : ""}>${l}</option>`).join("")}</select></label>` : ""}</section>` : ""}`}
         <section class="sc-sec"><h4>When <small>Perth time</small></h4><div class="sc-row">
           <input class="seo-input" type="date" data-e-day value="${esc(E.day)}" min="${today()}"${ro}>
           <input class="seo-input" type="time" data-e-time value="${esc(E.time)}" step="300"${ro}></div></section>`;
@@ -670,7 +986,11 @@ export function renderSocial(body, c) {
     function drawSide() {
       if (!E.channels.includes(E.prev)) E.prev = E.channels[0] || "";
       const pv = ov.querySelector("[data-e-preview]");
-      if (pv) pv.innerHTML = E.prev ? previewHtml(E.prev) : `<p class="seo-note">Choose a channel to see a preview.</p>`;
+      if (pv) {
+        const old = new Map([...pv.querySelectorAll("video")].map((x) => [x.getAttribute("src"), x]));
+        pv.innerHTML = E.prev ? previewHtml(E.prev) : `<p class="seo-note">Choose a channel to see a preview.</p>`;
+        pv.querySelectorAll("video").forEach((x) => { const o = old.get(x.getAttribute("src")); if (o) x.replaceWith(o); });
+      }
       const ck = ov.querySelector("[data-e-checks]");
       if (ck) ck.innerHTML = checks().map((x) => `<li class="is-${x.tone}">${esc(x.msg)}</li>`).join("");
       const ct = ov.querySelector("[data-e-count]");
@@ -707,7 +1027,14 @@ export function renderSocial(body, c) {
         status, channels: E.channels, caption: E.caption.trim(),
         captions: Object.fromEntries(Object.entries(E.captions).filter(([k]) => E.channels.includes(k)).map(([k, v]) => [k, String(v || "").trim()])),
         hashtags: E.hashtags, link: E.link.trim(), gbpButton: E.gbpButton,
-        pictures: E.pictures.map((x) => ({ url: x.url, path: x.path || "", alt: String(x.alt || "").trim().slice(0, 300), w: x.w || 0, h: x.h || 0, from: x.from || "" })),
+        type: E.type,
+        stickers: E.type === "story" ? E.stickers.trim().slice(0, 1000) : "",
+        gbpClip: E.type === "reel" && E.channels.includes("gbp") && E.gbpClip ? E.gbpClip : null,
+        pictures: E.pictures.filter((x) => !x.uploading && x.url).map((x) => ({
+          url: x.url, path: x.path || "", alt: String(x.alt || "").trim().slice(0, 300), w: x.w || 0, h: x.h || 0, from: x.from || "",
+          kind: x.kind === "video" ? "video" : "image",
+          ...(x.kind === "video" ? { dur: Math.round((x.dur || 0) * 10) / 10, size: x.size || 0, mime: x.mime || "", cover: x.cover || null } : {}),
+        })),
         when: `${E.day}T${E.time}`, day: E.day, topic: E.topic.trim().slice(0, 300), ideaId: E.ideaId || "",
         updatedBy: me.uid, updatedByName: me.name, updatedAt: serverTimestamp(),
         history: arrayUnion({ at: new Date().toISOString(), by: me.name, what, note: String(note || "").slice(0, 500) }),
@@ -750,6 +1077,8 @@ export function renderSocial(body, c) {
       return true;
     };
     function close(force) {
+      if (!force && (E.busy === "upload" || E.busy === "clip")
+        && !confirm("A video is still uploading, or the Google clip is still being made. Close anyway? It'll be lost.")) return;
       if (!force && !readOnly() && dirty() && !confirm("Close without saving your changes?")) return;
       if (unsub) unsub();
       ov.remove();
@@ -762,7 +1091,25 @@ export function renderSocial(body, c) {
 
     async function doAction(a) {
       if (a === "close") { close(); return; }
-      if (a === "bank") { const pic = await pickFromBank(); if (pic) { E.pictures.push(pic); drawEd(); } return; }
+      if (a === "bank") {
+        if (E.type === "reel" || E.pictures.length >= maxMedia()) return;
+        const pic = await pickFromBank();
+        if (pic) { E.pictures.push({ ...pic, kind: "image" }); drawEd(); }
+        return;
+      }
+      if (a === "gclip") { makeGoogleClip(); return; }   // straight from the click, so the browser allows the sound
+      if (a === "gclipup") { ov.querySelector("[data-e-gfile]")?.click(); return; }
+      if (a === "gclipx") { E.gbpClip = null; drawEd(); return; }
+      if (a === "gbpoff") { E.channels = E.channels.filter((k) => k !== "gbp"); E.gbpClip = null; drawEd(); return; }
+      if (a === "dl") {
+        E.busy = "dl"; drawEd();
+        try {
+          const r = await saveFiles(mediaForPosting());
+          if (!r.ok) toast("They couldn't be downloaded here. Use the links next to the button to open each one, then save it.", true);
+          else if (!r.cancel) toast(r.shared ? "Choose Save to keep them on this device" : "Downloading");
+        } finally { E.busy = ""; drawEd(); }
+        return;
+      }
       if (a === "upload") { ov.querySelector("[data-e-file]")?.click(); return; }
       if (a === "draftai") { draftAi(); return; }
       if (a === "comment") {
@@ -863,19 +1210,172 @@ export function renderSocial(body, c) {
     }
 
     async function upload(files) {
-      const list = [...files].filter((f) => /^image\//.test(f.type)).slice(0, MAX_PICS - E.pictures.length);
-      if (!list.length) return;
-      E.busy = "upload"; E.err = ""; drawEd();
+      const all = [...(files || [])];
+      if (!all.length) return;
+      const reel = E.type === "reel";
+      const isVid = (f) => /^video\//.test(f.type) || /\.(mov|mp4|m4v|webm)$/i.test(f.name);
+      const ok = all.filter((f) => isVid(f) || (!reel && /^image\//.test(f.type)));
+      const list = ok.slice(0, Math.max(0, maxMedia() - E.pictures.length));
+      E.err = ok.length < all.length ? (reel ? "A Reel takes one video. Pictures go in a Post." : "Only pictures and videos can be added.")
+        : ok.length > list.length ? `${TYPES[E.type].label} takes ${maxMedia()} at most, so the rest weren't added.` : "";
+      if (!list.length) { drawEd(); return; }
+      E.busy = "upload"; drawEd();
       try {
         for (const f of list) {
+          if (isVid(f)) { await uploadVideo(f); continue; }
           const sh = await shrinkImg(f);
           const path = `social_media/${E.id}/${Date.now()}_${Math.random().toString(36).slice(2, 7)}.${sh.ext}`;
           const r = sref(storage, path);
           await uploadBytes(r, sh.blob, { contentType: sh.type, cacheControl: "public, max-age=31536000" });
-          E.pictures.push({ url: await getDownloadURL(r), path, alt: "", w: sh.w, h: sh.h, from: "upload" });
+          E.pictures.push({ url: await getDownloadURL(r), path, alt: "", w: sh.w, h: sh.h, from: "upload", kind: "image" });
         }
-      } catch (err) { console.error("Upload failed:", err); E.err = "A picture didn't upload. " + errText(err); }
+      } catch (err) {
+        console.error("Upload failed:", err);
+        E.err = "Something didn't upload. " + errText(err);
+        E.pictures = E.pictures.filter((x) => !x.uploading);
+      } finally { E.busy = ""; drawEd(); }
+    }
+
+    async function uploadVideo(f) {
+      if (f.size > MAX_VIDEO) throw new Error(`${f.name} is ${fmtMb(f.size)}. Videos can be 1 GB at most: film at 1080p, or trim it first.`);
+      const meta = await videoMeta(f).catch(() => ({ dur: 0, w: 0, h: 0 }));
+      const ext = ((/\.([a-z0-9]{2,4})$/i.exec(f.name) || [])[1] || "mp4").toLowerCase();
+      const mime = f.type || (ext === "mov" ? "video/quicktime" : "video/mp4");
+      const path = `social_media/${E.id}/${Date.now()}_${Math.random().toString(36).slice(2, 7)}.${ext}`;
+      const x = { kind: "video", url: "", path, alt: "", w: meta.w, h: meta.h, dur: meta.dur, size: f.size, mime, from: "upload", cover: null, uploading: true, pct: 0 };
+      E.pictures.push(x);
+      E.files.set(path, f);
+      drawEd();
+      const task = uploadBytesResumable(sref(storage, path), f, { contentType: mime, cacheControl: "public, max-age=31536000" });
+      await new Promise((res, rej) => task.on("state_changed", (s) => {
+        const pct = s.totalBytes ? Math.floor((s.bytesTransferred / s.totalBytes) * 100) : 0;
+        if (pct !== x.pct) { x.pct = pct; updProg(x); }
+      }, rej, res));
+      x.url = await getDownloadURL(task.snapshot.ref);
+      x.uploading = false;
+      try { x.cover = await uploadCover(f, Math.min(1, (meta.dur || 2) / 2)); }
+      catch (e) { console.warn("Cover not made:", e); }   // the checks ask for one
+      drawEd();
+    }
+
+    function updProg(x) {
+      const el = [...ov.querySelectorAll("[data-e-up]")].find((n) => n.dataset.eUp === x.path);
+      if (!el) return;
+      el.querySelector("i").style.width = x.pct + "%";
+      el.querySelector("small").textContent = `Uploading ${x.pct}%. Keep this page open.`;
+    }
+
+    async function uploadCover(f, t) {
+      const fr = await frameJpeg(f, t);
+      const path = `social_media/${E.id}/cover_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.jpg`;
+      const r = sref(storage, path);
+      await uploadBytes(r, fr.blob, { contentType: "image/jpeg", cacheControl: "public, max-age=31536000" });
+      return { url: await getDownloadURL(r), path };
+    }
+
+    async function coverFromFrame(i) {
+      const x = E.pictures[i];
+      const f = x && E.files.get(x.path);
+      if (!f) {
+        E.err = "Choosing a frame needs the video on this device. Choose the video again (it isn't uploaded twice), or use Upload a cover.";
+        drawEd();
+        ov.querySelector("[data-e-refile]")?.click();
+        return;
+      }
+      const s = prompt(`Which second should the cover come from? (0 to ${Math.floor(x.dur || 0)})`, "1");
+      if (s === null) return;
+      E.busy = "upload"; E.err = ""; drawEd();
+      try { x.cover = await uploadCover(f, Math.max(0, Number(s) || 0)); }
+      catch (err) { E.err = "The cover wasn't made on this device. Use Upload a cover instead. " + (err.message || ""); }
       finally { E.busy = ""; drawEd(); }
+    }
+
+    async function uploadCoverFile(f) {
+      const x = E.pictures[E.coverFor];
+      if (!f || !x) return;
+      E.busy = "upload"; E.err = ""; drawEd();
+      try {
+        const sh = await shrinkImg(f);
+        const path = `social_media/${E.id}/cover_${Date.now()}.${sh.ext}`;
+        const r = sref(storage, path);
+        await uploadBytes(r, sh.blob, { contentType: sh.type, cacheControl: "public, max-age=31536000" });
+        x.cover = { url: await getDownloadURL(r), path };
+      } catch (err) { E.err = "The cover didn't upload. " + errText(err); }
+      finally { E.busy = ""; drawEd(); }
+    }
+
+    // The same video chosen again (for frames and the Google clip, after the page was reopened)
+    function refile(f) {
+      const v = E.pictures.find((x) => x.kind === "video" && !E.files.has(x.path));
+      if (!f || !v) return;
+      if (v.size && f.size !== v.size) { E.err = "That isn't the same video. Choose the one in this post."; drawEd(); return; }
+      E.files.set(v.path, f);
+      E.err = "";
+      drawEd();
+      toast("Ready. Press the button again.");
+    }
+
+    function clipProg(pct) {
+      E.clipPct = pct;
+      const el = ov.querySelector("[data-e-clipprog]");
+      if (!el) return;
+      el.querySelector("i").style.width = pct + "%";
+      el.querySelector("small").textContent = `Making the clip: ${pct}%`;
+    }
+
+    function makeGoogleClip() {
+      const v = mainVideo();
+      const f = v && E.files.get(v.path);
+      if (!f) {
+        E.err = "To make the clip, choose the video again from this device (it isn't uploaded twice). Then press Make the 30-second clip.";
+        drawEd();
+        ov.querySelector("[data-e-refile]")?.click();
+        return;
+      }
+      const start = Math.max(0, Math.min(Number(E.clipStart) || 0, Math.max(0, (v.dur || 0) - GBP_VIDEO_SECS)));
+      const job = makeClip(f, start, GBP_VIDEO_SECS, clipProg);   // starts now, inside the click
+      E.busy = "clip"; E.clipPct = 0; E.err = ""; drawEd();
+      job.then(async (c) => {
+        const path = `social_media/${E.id}/gclip_${Date.now()}.${c.ext}`;
+        const r = sref(storage, path);
+        await uploadBytes(r, c.blob, { contentType: c.mime, cacheControl: "public, max-age=31536000" });
+        E.gbpClip = { url: await getDownloadURL(r), path, dur: c.dur, mime: c.mime, start, from: "clip" };
+      }).catch((err) => {
+        console.error("Google clip failed:", err);
+        E.err = `The clip couldn't be made on this device (${err.message || err}). Upload a short version instead.`;
+      }).finally(() => { E.busy = ""; drawEd(); });
+    }
+
+    async function uploadGoogleShort(f) {
+      if (!f) return;
+      if (!/^video\//.test(f.type) && !/\.(mov|mp4|m4v|webm)$/i.test(f.name)) { E.err = "Choose a video."; drawEd(); return; }
+      if (f.size > GBP_VIDEO_BYTES) { E.err = `That video is ${fmtMb(f.size)}. Google takes up to 75 MB.`; drawEd(); return; }
+      const meta = await videoMeta(f).catch(() => ({ dur: 0 }));
+      if (meta.dur > GBP_VIDEO_SECS + 0.5) { E.err = `That video is ${fmtDur(meta.dur)}. Google takes 30 seconds at most.`; drawEd(); return; }
+      E.busy = "upload"; E.err = ""; drawEd();
+      try {
+        const ext = ((/\.([a-z0-9]{2,4})$/i.exec(f.name) || [])[1] || "mp4").toLowerCase();
+        const mime = f.type || (ext === "mov" ? "video/quicktime" : "video/mp4");
+        const path = `social_media/${E.id}/gshort_${Date.now()}.${ext}`;
+        const r = sref(storage, path);
+        await uploadBytes(r, f, { contentType: mime, cacheControl: "public, max-age=31536000" });
+        E.gbpClip = { url: await getDownloadURL(r), path, dur: Math.round((meta.dur || 0) * 10) / 10, mime, start: 0, from: "upload" };
+      } catch (err) { E.err = "The short version didn't upload. " + errText(err); }
+      finally { E.busy = ""; drawEd(); }
+    }
+
+    function switchType(t) {
+      if (t === E.type || !TYPES[t]) return;
+      let keep = t === "reel" ? E.pictures.filter((x) => x.kind === "video").slice(0, 1) : E.pictures;
+      keep = keep.slice(0, TYPES[t].max);
+      const lose = E.pictures.length - keep.length;
+      if (lose && !confirm(`${TYPES[t].label} takes ${t === "reel" ? "one video" : TYPES[t].max + " at most"}, so ${lose} ${lose === 1 ? "item is" : "items are"} taken off. Carry on?`)) return;
+      E.type = t;
+      E.pictures = keep;
+      E.pvi = 0;
+      if (t === "story") E.channels = E.channels.filter((k) => k !== "gbp");
+      if (t !== "reel") E.gbpClip = null;
+      drawEd();
     }
 
     /* --- events --- */
@@ -885,19 +1385,28 @@ export function renderSocial(body, c) {
       const d = b.dataset;
       if (d.e) { doAction(d.e); return; }
       if (d.ePv) { E.prev = d.ePv; drawSide(); return; }
+      if (d.ePvi) { E.pvi += Number(d.ePvi); drawSide(); return; }
       if (d.eCopy) {
         copyText(capFor(d.eCopy) + tagText(d.eCopy)).then((ok) => toast(ok ? `${CH[d.eCopy].label} caption copied` : "Couldn't copy", !ok));
         return;
       }
       if (d.eMark) { markPosted(d.eMark); return; }
       if (readOnly()) return;
+      if (d.eType) { switchType(d.eType); return; }
+      if (d.eCvf !== undefined) { coverFromFrame(+d.eCvf); return; }
+      if (d.eCvu !== undefined) { E.coverFor = +d.eCvu; ov.querySelector("[data-e-cfile]")?.click(); return; }
       if (d.eCh) {
+        if (E.type === "story" && d.eCh === "gbp") return;
         E.channels = E.channels.includes(d.eCh) ? E.channels.filter((k) => k !== d.eCh) : CH_ORDER.filter((k) => k === d.eCh || E.channels.includes(k));
         drawEd(); return;
       }
       if (d.eSplit) { E.captions[d.eSplit] = E.caption; drawEd(); ov.querySelector(`[data-e-capk="${d.eSplit}"]`)?.focus(); return; }
       if (d.eUnsplit) { delete E.captions[d.eUnsplit]; drawEd(); return; }
-      if (d.ePx !== undefined) { E.pictures.splice(+d.ePx, 1); drawEd(); return; }
+      if (d.ePx !== undefined) {
+        const [gone] = E.pictures.splice(+d.ePx, 1);
+        if (gone && gone.kind === "video" && E.type === "reel") E.gbpClip = null;
+        drawEd(); return;
+      }
       if (d.ePl !== undefined) { const i = +d.ePl; [E.pictures[i - 1], E.pictures[i]] = [E.pictures[i], E.pictures[i - 1]]; drawEd(); return; }
       if (d.ePr !== undefined) { const i = +d.ePr; [E.pictures[i + 1], E.pictures[i]] = [E.pictures[i], E.pictures[i + 1]]; drawEd(); return; }
       if (d.eTx !== undefined) { E.hashtags.splice(+d.eTx, 1); drawEd(); }
@@ -911,12 +1420,17 @@ export function renderSocial(body, c) {
       else if (d.eAlt !== undefined) { const x = E.pictures[+d.eAlt]; if (x) x.alt = t.value; drawSide(); }
       else if (d.eDay !== undefined) { E.day = t.value; drawSide(); }
       else if (d.eTime !== undefined) { E.time = t.value; drawSide(); }
+      else if (d.eStk !== undefined) { E.stickers = t.value; drawSide(); }
+      else if (d.eCstart !== undefined) E.clipStart = Number(t.value) || 0;
     });
     ov.addEventListener("change", (e) => {
       const t = e.target, d = t.dataset;
       if (d.eBtn !== undefined) { E.gbpButton = t.value; drawSide(); }
       else if (d.eTset !== undefined && t.value !== "") { ((S.settings.hashtagSets || [])[+t.value]?.tags || []).forEach(addTag); drawEd(); }
-      else if (d.eFile !== undefined) { upload(t.files); }
+      else if (d.eFile !== undefined) { upload(t.files); t.value = ""; }
+      else if (d.eCfile !== undefined) { uploadCoverFile(t.files[0]); t.value = ""; }
+      else if (d.eGfile !== undefined) { uploadGoogleShort(t.files[0]); t.value = ""; }
+      else if (d.eRefile !== undefined) { refile(t.files[0]); t.value = ""; }
       else if (d.eCto !== undefined) E.cTo = t.value;
     });
     ov.addEventListener("keydown", (e) => {
@@ -1153,6 +1667,36 @@ body.sc-ed-open{overflow:hidden}
 .sc-bi img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px;background:#f1f5f9}
 .sc-bi span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sc-bi:hover,.sc-bf:hover{border-color:#0f766e}
+.sc-types{display:flex;flex-wrap:wrap}
+.sc-cty{margin-left:3px;font-style:normal;font-size:11px;font-weight:600;color:#475569}
+.sc-cvid{display:grid;place-items:center;background:#0f172a;color:#fff;font-size:18px}
+.sc-vt{position:relative;display:grid;place-items:center;width:100%;aspect-ratio:1;border-radius:8px;border:1px solid #e5e7eb;background:#0f172a;overflow:hidden}
+.sc-vt img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border:0;border-radius:0;aspect-ratio:auto}
+.sc-vt span{position:relative;padding:2px 8px;border-radius:999px;background:rgba(15,23,42,.7);color:#fff;font-size:12px}
+.sc-prog{height:6px;border-radius:3px;background:#e5e7eb;overflow:hidden}
+.sc-prog i{display:block;height:100%;background:#0f766e;transition:width .3s}
+.sc-sm{font-size:12px;padding:4px 8px}
+.sc-gclip{border-color:#fde68a;background:#fffbeb}
+.sc-gvid{display:block;width:100%;max-height:260px;margin:6px 0;border-radius:8px;background:#000}
+.sc-num{width:80px}
+.sc-inl{display:inline-flex;align-items:center;gap:6px;font-size:13px}
+.sc-pv-sq video{width:100%;height:100%;object-fit:cover;background:#000}
+.sc-pv-wide video{display:block;width:100%;max-height:300px;object-fit:contain;background:#000}
+.sc-pv-tall{position:relative;display:grid;place-items:center;aspect-ratio:9/16;max-width:270px;margin:0 auto;background:#0f172a;color:#cbd5e1}
+.sc-pv-tall .sc-pv-fill{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.sc-pv-over{position:absolute;left:0;right:0;bottom:0;z-index:1;margin:0;padding:10px;background:linear-gradient(transparent,rgba(0,0,0,.65));color:#fff;font-size:12px;line-height:1.4}
+.sc-pv-bars{position:absolute;top:8px;left:8px;right:8px;z-index:2;display:flex;gap:3px}
+.sc-pv-bars i{flex:1;height:3px;border-radius:2px;background:rgba(255,255,255,.4)}
+.sc-pv-bars i.on{background:#fff}
+.sc-pv-sh{position:absolute;top:18px;left:10px;z-index:2;display:flex;align-items:center;gap:6px;color:#fff;font-size:12px}
+.sc-pv-stk{position:absolute;left:10px;right:10px;bottom:56px;z-index:2;padding:6px 10px;border-radius:10px;background:rgba(255,255,255,.9);color:#0f172a;font-size:11.5px}
+.sc-pv-nav{display:flex;align-items:center;justify-content:center;gap:5px;padding:6px}
+.sc-pv-nav i{width:6px;height:6px;border-radius:50%;background:#cbd5e1}
+.sc-pv-nav i.on{background:#0f766e}
+.sc-pv-nav button{width:24px;height:24px;border:1px solid #e5e7eb;border-radius:50%;background:#fff;cursor:pointer}
+.sc-pv-nav button:disabled{opacity:.35;cursor:default}
+.sc-pv-wait{color:#94a3b8;font-size:12px}
+.sc-dl{display:flex;flex-direction:column;align-items:flex-start;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid #e5e7eb}
 @media (max-width:1000px){.sc-body.has-ideas{grid-template-columns:1fr}.sc-ed-grid{grid-template-columns:1fr}.sc-ed-side{position:static;max-height:none}}
 @media (max-width:700px){.sc-day{min-height:84px;padding:4px}.sc-cimg{display:none}.sc-ccap{-webkit-line-clamp:1}}
 `;

@@ -1707,6 +1707,7 @@ match /inv_count_drafts/{id} {
     function socialApprove() { return can('social.approve'); }
     function okSocialPost(d) {
       return d.keys().hasOnly(['status', 'channels', 'caption', 'captions', 'hashtags', 'link', 'gbpButton', 'pictures',
+             'type', 'gbpClip', 'stickers',
              'when', 'day', 'topic', 'ideaId',
              'createdBy', 'createdByName', 'createdAt', 'updatedBy', 'updatedByName', 'updatedAt',
              'approvedBy', 'approvedByName', 'approvedAt', 'approvedSig', 'reviewNote', 'history',
@@ -1716,7 +1717,11 @@ match /inv_count_drafts/{id} {
         && d.caption is string && d.caption.size() <= 5000
         && d.captions is map
         && d.hashtags is list && d.hashtags.size() <= 40
-        && d.pictures is list && d.pictures.size() <= 10
+        && d.pictures is list && d.pictures.size() <= 20
+        && d.get('type', 'post') in ['post', 'reel', 'story']
+        && (d.get('type', 'post') != 'story' || !('gbp' in d.channels))
+        && d.get('stickers', '') is string && d.get('stickers', '').size() <= 1000
+        && (d.get('gbpClip', null) == null || d.gbpClip is map)
         && d.when is string && d.when.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}$')
         && d.day is string && d.when.split('T')[0] == d.day
         && d.get('history', []) is list && d.get('history', []).size() <= 100;

@@ -139,16 +139,21 @@ service firebase.storage {
       allow update, delete: if false;
     }
 
-    // SEO › Social: pictures uploaded for posts
+    // SEO › Social: pictures, covers and videos for posts. Videos up to 1 GB, pictures 10 MB.
+    // Files are added, never changed or deleted from a browser (each upload has its own name).
     match /social_media/{postId}/{file} {
+      function socialStaff() {
+        return request.auth != null && request.auth.token.staffRole is string
+          && (request.auth.token.staffRole.lower() == 'admin'
+            || (request.auth.token.perms is list
+              && ('social.plan' in request.auth.token.perms || 'social.approve' in request.auth.token.perms)));
+      }
       allow read: if request.auth != null;
-      allow write: if request.auth != null
-        && request.auth.token.staffRole is string
-        && (request.auth.token.staffRole.lower() == 'admin'
-          || (request.auth.token.perms is list
-            && ('social.plan' in request.auth.token.perms || 'social.approve' in request.auth.token.perms)))
-        && request.resource.size < 10 * 1024 * 1024
-        && request.resource.contentType.matches('image/.*');
+      allow create: if socialStaff() && (
+          (request.resource.contentType.matches('image/.*') && request.resource.size < 10 * 1024 * 1024)
+          || (request.resource.contentType.matches('video/(mp4|quicktime|webm|x-m4v|3gpp)')
+              && request.resource.size < 1024 * 1024 * 1024));
+      allow update, delete: if false;
     }
 
   }
