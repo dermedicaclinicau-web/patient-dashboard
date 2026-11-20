@@ -94,7 +94,12 @@ const whenShort = (d) => {
 const REQ_WAIT_DAYS = 2;   // amber "waiting" tag from this many days
 const REQ_CSS = `
 .rq2-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:0 0 14px}
-.rq2-stat{padding:10px 14px;border-radius:12px;background:#f8fafc;border:1px solid #e5e7eb}
+.rq2-stat{display:block;width:100%;padding:10px 14px;border-radius:12px;background:#f8fafc;border:1px solid #e5e7eb;
+  font:inherit;text-align:left;cursor:pointer;transition:border-color .12s,box-shadow .12s}
+.rq2-stat:hover{border-color:#94a3b8}
+.rq2-stat:focus-visible{outline:2px solid #0f766e;outline-offset:2px}
+.rq2-stat.is-on{border-color:#0f766e;box-shadow:0 0 0 2px #0f766e}
+.rq2-quick{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 10px;font-size:13px;color:#475569}
 .rq2-stat span{display:block;font-size:12.5px;color:#64748b}
 .rq2-stat b{font-size:22px;font-weight:700;color:#0f172a}
 .rq2-stat.is-bad{background:#fef2f2;border-color:#fecaca}.rq2-stat.is-bad span,.rq2-stat.is-bad b{color:#b91c1c}
@@ -388,6 +393,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     products: [], suppliers: [], lots: [], requests: [], q: "", cat: "", view: "all", flagged: false, showInactive: false,
     reqFilter: "open", reqView: "list", pos: [], poFilter: "sent", lineSup: {},
     reqOpen: null, reqSel: new Set(),   // Requests: which are opened up, and which are ticked
+    reqQuick: "",                       // Requests: a summary card used as a filter ("", urgent, waiting, jt)
     sel: new Set(), pq: "", pcat: "", psup: "",  pcount: "",
     counts: [], invs: [], lastCounts: new Map(), open: [], bases: new Map(),
     quick: false, qv: new Map(),   // Stock → Update digital count: on/off, and what's been typed ("productId|loc" → "12")
@@ -3673,10 +3679,13 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const segF = (name, items, cur, key) => seg(name, items, cur).replace(new RegExp(`name="${name}"`, "g"), `name="${name}" data-f="${key}"`);
     body.innerHTML = `
       <div class="rq2-stats">
-        <div class="rq2-stat"><span>To order</span><b>${open.length}</b></div>
-        <div class="rq2-stat${urgent ? " is-bad" : ""}"><span>Urgent</span><b>${urgent}</b></div>
-        <div class="rq2-stat${waiting ? " is-warn" : ""}"><span>Waiting ${REQ_WAIT_DAYS}+ days</span><b>${waiting}</b></div>
-        <div class="rq2-stat${fromJt ? " is-good" : ""}"><span>Can come from JT storage</span><b>${fromJt}</b></div>
+        ${[["", "To order", open.length, ""], ["urgent", "Urgent", urgent, urgent ? "is-bad" : ""],
+          ["waiting", `Waiting ${REQ_WAIT_DAYS}+ days`, waiting, waiting ? "is-warn" : ""],
+          ["jt", "Can come from JT storage", fromJt, fromJt ? "is-good" : ""]].map(([k, label, num, tone]) => {
+          const on = st.reqFilter === "open" && st.reqQuick === k;
+          return `<button type="button" class="rq2-stat ${tone}${on ? " is-on" : ""}" data-rqquick="${k}" aria-pressed="${on}">
+            <span>${esc(label)}</span><b>${num}</b></button>`;
+        }).join("")}
       </div>
       <div class="inv-tools">
         ${segF("rq-f", [["open", "Open", counts.open], ["ordered", "Ordered", counts.ordered], ["received", "Received", counts.received],
@@ -3689,14 +3698,25 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       <div data-role="reqs"></div>`;
     const box = body.querySelector('[data-role="reqs"]');
     const f = st.reqFilter;
-    const rows = st.requests.filter((r) => f === "all" || (f === "closed" ? ["declined", "cancelled"].includes(r.status) : r.status === f));
+    const QUICK = { urgent: "Urgent", waiting: `Waiting ${REQ_WAIT_DAYS}+ days`, jt: "Can come from JT storage" };
+    const quick = f === "open" && QUICK[st.reqQuick] ? st.reqQuick : "";
+    const quickOk = (r) => !quick || (quick === "urgent" ? r.urgency === "urgent"
+      : quick === "waiting" ? reqAge(r) >= REQ_WAIT_DAYS
+      : jtPlan(r).some((x) => x.state === "jt" || x.state === "part"));
+    const rows = st.requests.filter((r) => (f === "all" || (f === "closed" ? ["declined", "cancelled"].includes(r.status) : r.status === f))
+      && quickOk(r));
+    if (quick) {
+      box.insertAdjacentHTML("beforebegin", `<div class="rq2-quick">Showing <b>${esc(QUICK[quick])}</b> only ·
+        <button type="button" class="rc-link" data-rqquick="">Show all open</button></div>`);
+    }
     // Open: urgent first, then the ones waiting longest. Others: newest first (as loaded).
     if (f === "open") {
       rows.sort((a, b) => (b.urgency === "urgent") - (a.urgency === "urgent")
         || (a.createdAt ? a.createdAt.getTime() : 0) - (b.createdAt ? b.createdAt.getTime() : 0));
     }
     if (!rows.length) {
-      box.innerHTML = `<div class="tm-empty">${f === "open" ? "No open requests. Nice." : "Nothing here yet."}</div>`;
+      box.innerHTML = `<div class="tm-empty">${quick ? "No open requests match."
+        : f === "open" ? "No open requests. Nice." : "Nothing here yet."}</div>`;
       return;
     }
     box.innerHTML = f === "open" && st.reqView === "supplier"
@@ -4220,6 +4240,15 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       rqMore.setAttribute("aria-expanded", String(!m.hidden));
       return;
     }
+    const rqQuick = e.target.closest("[data-rqquick]");
+    if (rqQuick) {
+      const k = rqQuick.dataset.rqquick;
+      st.reqQuick = st.reqFilter === "open" && st.reqQuick === k ? "" : k;   // the chosen card again clears it
+      st.reqFilter = "open";
+      st.reqView = "list";
+      renderRequests();
+      return;
+    }
     if (e.target.closest('[data-act="rq-bulk"]')) { bulkOrdered(); return; }
     const rqFill = e.target.closest("[data-rqfill]");
     if (rqFill) { const r = st.requests.find((x) => x.id === rqFill.dataset.rqfill); if (r) fillFromJtDialog(r); return; }
@@ -4286,7 +4315,12 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (t.dataset.linesup) { st.lineSup[t.dataset.linesup] = t.value; renderRequests(); return; }
     const k = t.dataset.f;
     if (!k) return;
-    if (k === "reqFilter" || k === "reqView") { st[k] = t.value; renderRequests(); return; }
+    if (k === "reqFilter" || k === "reqView") {
+      if (k === "reqFilter") st.reqQuick = "";   // another tab: the card filter is cleared
+      st[k] = t.value;
+      renderRequests();
+      return;
+    }
     if (k === "poFilter") { st.poFilter = t.value; renderOrders(); return; }
     if (k === "flagged" || k === "showInactive") st[k] = t.checked;
     else st[k] = t.value;
