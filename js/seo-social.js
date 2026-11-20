@@ -97,6 +97,53 @@ async function copyText(txt) {
   ta.remove();
   return ok;
 }
+/* ---------- pop-ups (in place of the browser's own boxes) ---------- */
+// Yes/no: resolves true or false. With `input`: resolves the text typed, or null if cancelled.
+function popup({ title, text = "", list = [], ok = "OK", cancel = "Cancel", danger = false, input = null }) {
+  return new Promise((resolve) => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "sc-pop";
+    const fieldHtml = !input ? ""
+      : input.rows ? `<textarea class="seo-input" rows="${input.rows}" maxlength="${input.max || 500}" placeholder="${esc(input.placeholder || "")}">${esc(input.value || "")}</textarea>`
+      : `<input class="seo-input" type="${input.type || "text"}" value="${esc(input.value || "")}" placeholder="${esc(input.placeholder || "")}"${
+          input.lo !== undefined ? ` min="${input.lo}"` : ""}${input.hi !== undefined ? ` max="${input.hi}"` : ""}${input.type === "number" ? ' step="1"' : ` maxlength="${input.max || 500}"`}>`;
+    dlg.innerHTML = `<form class="sc-pop-f">
+      <h3>${esc(title)}</h3>
+      ${text ? `<p>${esc(text)}</p>` : ""}
+      ${list.length ? `<ul class="sc-pop-l">${list.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
+      ${fieldHtml}
+      <p class="sc-pop-err" role="alert" hidden></p>
+      <div class="sc-pop-b">${cancel ? `<button type="button" class="seo-btn" data-x>${esc(cancel)}</button>` : ""}
+        <button type="submit" class="sc-b ${danger ? "is-red" : "is-go"}">${esc(ok)}</button></div>
+    </form>`;
+    let result = input ? null : false;
+    const field = dlg.querySelector("input,textarea");
+    dlg.querySelector("[data-x]")?.addEventListener("click", () => dlg.close());
+    dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });   // outside the box
+    dlg.querySelector("form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      if (input) {
+        const v = field.value.trim();
+        if (input.minLen && v.length < input.minLen) {
+          const er = dlg.querySelector(".sc-pop-err");
+          er.textContent = input.minMsg || "Please fill this in.";
+          er.hidden = false;
+          field.focus();
+          return;
+        }
+        result = v;
+      } else result = true;
+      dlg.close();
+    });
+    dlg.addEventListener("close", () => { dlg.remove(); resolve(result); });
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    (field || dlg.querySelector("[type=submit]")).focus();
+  });
+}
+const askYes = (title, text, o = {}) => popup({ title, text, ...o });
+const askText = (title, text, input, o = {}) => popup({ title, text, input, ...o });
+
 // Comments seen on this device
 const seenKey = () => "dm.social.seen." + uid();
 const seenMap = () => { try { return JSON.parse(localStorage.getItem(seenKey()) || "{}") || {}; } catch { return {}; } };
@@ -711,12 +758,13 @@ export function renderSocial(body, c) {
       return out.sort((a, b) => rank[a.tone] - rank[b.tone]);
     }
     
-    function ready(label) {
+    async function ready(label) {
       const list = checks();
       const stop = list.filter((x) => x.tone === "stop");
       if (stop.length) { E.err = stop.map((x) => x.msg).join(" "); drawEd(); return false; }
       const worry = list.filter((x) => x.tone === "bad");
-      return !worry.length || confirm(`${label}?\n\nStill to look at:\n• ${worry.map((x) => x.msg).join("\n• ")}`);
+      if (!worry.length) return true;
+      return askYes(`${label}?`, "These still need a look:", { list: worry.map((x) => x.msg), ok: label, cancel: "Go back" });
     }
 
     /* --- the preview --- */
@@ -1067,19 +1115,21 @@ export function renderSocial(body, c) {
       finally { E.busy = ""; drawEd(); }
     }
     const approval = () => ({ approvedBy: me.uid, approvedByName: me.name, approvedAt: serverTimestamp(), approvedSig: hash(sigOf()), reviewNote: "" });
-    const soonIfPast = () => {
+    const soonIfPast = async () => {
       if (whenMs(`${E.day}T${E.time}`) > Date.now()) return true;
-      if (!confirm("The time has passed. Make it due in 10 minutes?")) return false;
+      if (!(await askYes("The time has passed", "Make it due in 10 minutes instead?", { ok: "Yes, in 10 minutes" }))) return false;
       const d = new Date(Date.now() + 10 * 60e3 + 8 * 3600e3);
       d.setUTCMinutes(Math.ceil(d.getUTCMinutes() / 5) * 5, 0, 0);
       const iso = d.toISOString();
       E.day = iso.slice(0, 10); E.time = iso.slice(11, 16);
       return true;
     };
-    function close(force) {
+    async function close(force) {
       if (!force && (E.busy === "upload" || E.busy === "clip")
-        && !confirm("A video is still uploading, or the Google clip is still being made. Close anyway? It'll be lost.")) return;
-      if (!force && !readOnly() && dirty() && !confirm("Close without saving your changes?")) return;
+        && !(await askYes("Close anyway?", "A video is still uploading, or the Google clip is still being made. If you close now, it's lost.",
+          { ok: "Close", cancel: "Stay", danger: true }))) return;
+      if (!force && !readOnly() && dirty()
+        && !(await askYes("Close without saving?", "Your changes to this post haven't been saved.", { ok: "Close without saving", cancel: "Stay", danger: true }))) return;
       if (unsub) unsub();
       ov.remove();
       document.body.classList.remove("sc-ed-open");
@@ -1129,8 +1179,10 @@ export function renderSocial(body, c) {
         return;
       }
       if (a === "send") {
-        if (!ready("Send for approval")) return;
-        if (E.status === "scheduled" && !confirm("This post is approved. Changing it sends it back for approval, and it won't be due until it's approved again. Carry on?")) return;
+        if (!(await ready("Send for approval"))) return;
+        if (E.status === "scheduled" && !(await askYes("Send it back for approval?",
+          "This post is approved. Changing it sends it back for approval, and it won't be posted until it's approved again.",
+          { ok: "Send for approval" }))) return;
         const again = E.status === "scheduled";
         await run(async () => {
           await write(payload("waiting", again ? "Changed after approval: sent for approval again" : "Sent for approval"));
@@ -1141,7 +1193,7 @@ export function renderSocial(body, c) {
         return;
       }
       if (a === "approve") {
-        if (!ready("Approve and schedule") || !soonIfPast()) return;
+        if (!(await ready("Approve and schedule")) || !(await soonIfPast())) return;
         const again = E.status === "scheduled";
         await run(async () => {
           await write(payload("scheduled", again ? "Changed and approved again" : "Approved and scheduled", "", approval()));
@@ -1151,9 +1203,12 @@ export function renderSocial(body, c) {
         return;
       }
       if (a === "changes" || a === "reject") {
-        const why = prompt(a === "reject" ? "Why is it rejected? The reason goes in the comments." : "What needs changing? It goes in the comments, for the person who wrote it.", "");
+        const why = await askText(
+          a === "reject" ? "Reject this post?" : "Request changes",
+          a === "reject" ? "Say why. It goes in the comments." : "Say what needs changing. It goes in the comments, for the person who wrote it.",
+          { rows: 4, max: 500, minLen: 3, minMsg: "Add a short reason.", placeholder: a === "reject" ? "e.g. We're not promoting this treatment this month" : "e.g. Use a brighter photo, and shorten the first line" },
+          { ok: a === "reject" ? "Reject" : "Send back", danger: a === "reject" });
         if (why === null) return;
-        if (why.trim().length < 3) { E.err = "Add a short reason."; drawEd(); return; }
         await run(async () => {
           await write(payload(a === "reject" ? "rejected" : "draft", a === "reject" ? "Rejected" : "Changes requested", why.trim(), { reviewNote: why.trim().slice(0, 500) }));
           await addComment(`${a === "reject" ? "Rejected" : "Changes requested"}: ${why.trim()}`, p?.createdBy !== me.uid ? p?.createdByName || "" : "");
@@ -1165,19 +1220,20 @@ export function renderSocial(body, c) {
       if (a === "unsend") { await run(async () => { await write(payload("draft", "Taken back to draft")); toast("Back to draft"); }); return; }
       if (a === "unschedule") { await run(async () => { await write(payload("draft", "Taken off the schedule")); toast("Taken off the schedule"); }); return; }
       if (a === "delete") {
-        if (!confirm("Delete this post? It's taken off the calendar.")) return;
+        if (!(await askYes("Delete this post?", "It's taken off the calendar.", { ok: "Delete", danger: true }))) return;
         await run(async () => { await write(payload("deleted", "Deleted")); toast("Deleted"); close(true); });
         return;
       }
       if (a === "retry") {
         E.day = perthNow().day; E.time = perthNow().time;
-        if (!soonIfPast()) return;
+        if (!(await soonIfPast())) return;
         await run(async () => { await write(payload("scheduled", "Trying again", "", { ...approval(), error: "" })); toast("It'll try again in a few minutes"); });
       }
     }
 
     async function markPosted(k) {
-      const link = prompt(`Posted on ${CH[k].label}? Paste the post's link if you have it (optional).`, "");
+      const link = await askText(`Posted on ${CH[k].label}?`, "Paste the post's link if you have it. You can leave it empty.",
+        { placeholder: "https://…", max: 500 }, { ok: "Mark posted" });
       if (link === null) return;
       const pub = { ...((p && p.published) || {}), [k]: { at: new Date().toISOString(), by: me.name, link: /^https:\/\/\S+$/.test(link.trim()) ? link.trim().slice(0, 500) : "", manual: true } };
       const done = (p.channels || []).every((ch) => pub[ch]);
@@ -1282,7 +1338,8 @@ export function renderSocial(body, c) {
         ov.querySelector("[data-e-refile]")?.click();
         return;
       }
-      const s = prompt(`Which second should the cover come from? (0 to ${Math.floor(x.dur || 0)})`, "1");
+      const s = await askText("Choose the cover frame", `Which second of the video should the cover come from? (0 to ${Math.floor(x.dur || 0)})`,
+        { type: "number", value: "1", lo: 0, hi: Math.floor(x.dur || 0) }, { ok: "Use this second" });
       if (s === null) return;
       E.busy = "upload"; E.err = ""; drawEd();
       try { x.cover = await uploadCover(f, Math.max(0, Number(s) || 0)); }
@@ -1364,12 +1421,14 @@ export function renderSocial(body, c) {
       finally { E.busy = ""; drawEd(); }
     }
 
-    function switchType(t) {
+    async function switchType(t) {
       if (t === E.type || !TYPES[t]) return;
       let keep = t === "reel" ? E.pictures.filter((x) => x.kind === "video").slice(0, 1) : E.pictures;
       keep = keep.slice(0, TYPES[t].max);
       const lose = E.pictures.length - keep.length;
-      if (lose && !confirm(`${TYPES[t].label} takes ${t === "reel" ? "one video" : TYPES[t].max + " at most"}, so ${lose} ${lose === 1 ? "item is" : "items are"} taken off. Carry on?`)) return;
+      if (lose && !(await askYes(`Change to ${TYPES[t].label}?`,
+        `${TYPES[t].label} takes ${t === "reel" ? "one video" : TYPES[t].max + " at most"}, so ${lose} ${lose === 1 ? "item is" : "items are"} taken off.`,
+        { ok: "Change it", danger: true }))) return;
       E.type = t;
       E.pictures = keep;
       E.pvi = 0;
@@ -1697,6 +1756,19 @@ body.sc-ed-open{overflow:hidden}
 .sc-pv-nav button:disabled{opacity:.35;cursor:default}
 .sc-pv-wait{color:#94a3b8;font-size:12px}
 .sc-dl{display:flex;flex-direction:column;align-items:flex-start;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid #e5e7eb}
+.sc-pop{width:min(440px,92vw);padding:0;border:0;border-radius:14px;box-shadow:0 24px 60px rgba(15,23,42,.25)}
+.sc-pop[open]{animation:scPop .15s ease-out}
+@keyframes scPop{from{opacity:0;transform:translateY(6px)}}
+.sc-pop::backdrop{background:rgba(15,23,42,.45)}
+.sc-pop-f{display:flex;flex-direction:column;gap:10px;padding:18px 20px}
+.sc-pop h3{margin:0;font-size:16px;color:#0f172a}
+.sc-pop p{margin:0;font-size:14px;line-height:1.5;color:#334155}
+.sc-pop-l{margin:0;padding-left:18px;font-size:13.5px;line-height:1.5;color:#7f1d1d}
+.sc-pop .seo-input{width:100%;min-width:0;box-sizing:border-box;resize:vertical}
+.sc-pop-err{color:#b91c1c !important;font-size:13px !important}
+.sc-pop-err[hidden]{display:none}
+.sc-pop-b{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
+.sc-b.is-red{background:#b91c1c;border-color:#b91c1c;color:#fff}
 @media (max-width:1000px){.sc-body.has-ideas{grid-template-columns:1fr}.sc-ed-grid{grid-template-columns:1fr}.sc-ed-side{position:static;max-height:none}}
 @media (max-width:700px){.sc-day{min-height:84px;padding:4px}.sc-cimg{display:none}.sc-ccap{-webkit-line-clamp:1}}
 `;
