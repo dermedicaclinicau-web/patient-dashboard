@@ -1,7 +1,7 @@
 // Inventory (#/inventory/<tab>): stock on the Shelf and in JT storage, products, suppliers and the activity log.
 import {
   INV_CATEGORIES, LOCATIONS, qtyText, packText, batchName, batchText, WEEKDAYS, WRITEOFF_REASONS, ADD_REASONS, MOVE_TYPES, REQ_STATUS, PO_STATUS, catLabel, locLabel, plural, unitPlural,
-  expiryState, fefo, reqNumber, myUid, suggestOrder, listProducts, saveProduct, listSuppliers, saveSupplier, listAllLots, listMoves,
+  expiryState, fefo, reqNumber, myUid, awaitingApproval, suggestOrder, listProducts, saveProduct, listSuppliers, saveSupplier, listAllLots, listMoves,
   applyStock, listRequests, setRequestStatus, cancelRequest, getRequestSettings, saveRequestSettings,
   listPos, createPo, poTotals, itemOnPo, lineFromProduct, cleanPoLine,
   productSuppliers, supplierTerms, suppliesProduct, suggestOrderFor,
@@ -93,7 +93,9 @@ const whenShort = (d) => {
 };
 const REQ_WAIT_DAYS = 2;   // amber "waiting" tag from this many days
 const REQ_CSS = `
-.rq2-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:0 0 14px}
+.rq2-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:0 0 14px}
+.rq2-stat.is-appr{background:#f5f3ff;border-color:#ddd6fe}.rq2-stat.is-appr span,.rq2-stat.is-appr b{color:#6d28d9}
+.rq2-wait{margin:10px 0 0}
 .rq2-stat{display:block;width:100%;padding:10px 14px;border-radius:12px;background:#f8fafc;border:1px solid #e5e7eb;
   font:inherit;text-align:left;cursor:pointer;transition:border-color .12s,box-shadow .12s}
 .rq2-stat:hover{border-color:#94a3b8}
@@ -424,7 +426,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     products: [], suppliers: [], lots: [], requests: [], q: "", cat: "", view: "all", flagged: false, showInactive: false,
     reqFilter: "open", reqView: "list", pos: [], poFilter: "sent", lineSup: {},
     reqOpen: null, reqSel: new Set(),   // Requests: which are opened up, and which are ticked
-    reqQuick: "",                       // Requests: a summary card used as a filter ("", urgent, waiting, jt)
+    reqQuick: "",                       // Requests: a summary card used as a filter ("", approval, urgent, waiting, jt)
+    reqCfg: { notifyIds: [], urgentOnly: false, approverId: "", approverName: "" },   // who approves order requests
     sel: new Set(), pq: "", pcat: "", psup: "",  pcount: "",
     counts: [], invs: [], lastCounts: new Map(), open: [], bases: new Map(),
     quick: false, qv: new Map(),   // Stock → Update digital count: on/off, and what's been typed ("productId|loc" → "12")
@@ -470,12 +473,13 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
   async function load() {
     try {
-      [st.products, st.suppliers, st.lots, st.requests, st.pos, st.counts, st.invs, st.open, st.bases] = await Promise.all([
+      [st.products, st.suppliers, st.lots, st.requests, st.pos, st.counts, st.invs, st.open, st.bases, st.reqCfg] = await Promise.all([
         listProducts(), listSuppliers(), listAllLots(), listRequests({ max: 300 }).catch(() => []), listPos().catch(() => []),
         listCounts({ from: dayKey(new Date(Date.now() - 120 * 864e5)) }).catch(() => []),
         listInvestigations({ open: true }).catch(() => []),
         listOpenContainers().catch(() => []),
         listBaseCounts().catch((err) => { console.warn("Base counts not loaded:", err); return new Map(); }),
+        getRequestSettings().catch(() => st.reqCfg),
       ]);
       if (!root.isConnected) return;
       st.lastCounts = lastCountsOf(st.counts);
@@ -3669,6 +3673,33 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
   /* ---------- Requests ---------- */
   const reqAge = (r) => (r.createdAt ? Math.floor((Date.now() - r.createdAt.getTime()) / 864e5) : 0);
+  // The order approver (Requests → Order approver). "Joanna" from "Dr Joanna Teh".
+  const isApprover = () => !!st.reqCfg.approverId && st.reqCfg.approverId === myUid();
+  const apName = () => st.reqCfg.approverName || "the approver";
+  const apShort = () => String(st.reqCfg.approverName || "").replace(/^dr\.?\s+/i, "").split(/\s+/)[0] || "approval";
+  const apPoss = () => (st.reqCfg.approverName ? `${apShort()}'s` : "the approver's");
+
+  // A request waiting for the approver: their buttons, or for everyone else, who it's waiting for
+  function waitActs(r, mine) {
+    const id = esc(r.id);
+    if (isApprover()) {
+      return `<div class="rq2-acts">
+          <button type="button" class="lh-btn is-primary" data-rqappr="approve" data-id="${id}">Approve as asked</button>
+          <button type="button" class="lh-btn" data-rqappr="review" data-id="${id}">Review and change…</button>
+          <span class="inv-spacer"></span>
+          <button type="button" class="lh-btn is-quiet" data-rqappr="cancel" data-id="${id}">Cancel request</button></div>
+        <p class="inv-hint rq2-wait">Approve as asked sends everything to the ordering team. To take some from JT storage,
+          change an amount or remove an item, use Review and change.</p>`;
+    }
+    const more = [
+      (canMove || mine) && `<button type="button" role="menuitem" class="pt-pop-item" data-req="email" data-id="${id}">Email it again</button>`,
+      mine && `<button type="button" role="menuitem" class="pt-pop-item" data-req="cancel" data-id="${id}">Cancel request</button>`,
+    ].filter(Boolean);
+    return `<p class="inv-hint rq2-wait">Waiting for ${esc(apPoss())} approval. The ordering team can order it once it's approved.</p>
+      ${more.length ? `<div class="rq2-acts"><span class="inv-spacer"></span>
+        <span class="inv-pd-morewrap"><button type="button" class="lh-btn" data-rqmore aria-expanded="false" aria-label="More actions">⋯</button>
+          <span class="inv-pd-more" role="menu" hidden>${more.join("")}</span></span></div>` : ""}`;
+  }
   // Filling a request from JT storage: Manage inventory, or JT approvers who also order
   const canFill = canMove && (canManage || canJt);
   const stockNeed = (it, p) => (it.unitKind === "stock" ? it.qty : it.qty * Math.max(1, p.packSize));
@@ -3702,15 +3733,20 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       closed: n((r) => r.status === "declined" || r.status === "cancelled"),
     };
     const open = st.requests.filter((r) => r.status === "open");
-    const urgent = open.filter((r) => r.urgency === "urgent").length;
-    const waiting = open.filter((r) => reqAge(r) >= REQ_WAIT_DAYS).length;
-    const fromJt = open.filter((r) => jtPlan(r).some((x) => x.state === "jt" || x.state === "part")).length;
-    if (st.reqOpen === null) st.reqOpen = new Set(open.filter((r) => r.urgency === "urgent").map((r) => r.id));
+    const appr = open.filter(awaitingApproval);              // waiting for the approver: the ordering team can't act yet
+    const ready = open.filter((r) => !awaitingApproval(r));
+    const urgent = ready.filter((r) => r.urgency === "urgent").length;
+    const waiting = ready.filter((r) => reqAge(r) >= REQ_WAIT_DAYS).length;
+    const fromJt = ready.filter((r) => jtPlan(r).some((x) => x.state === "jt" || x.state === "part")).length;
+    if (st.reqOpen === null) {
+      st.reqOpen = new Set(open.filter((r) => r.urgency === "urgent" || (isApprover() && awaitingApproval(r))).map((r) => r.id));
+    }
 
     const segF = (name, items, cur, key) => seg(name, items, cur).replace(new RegExp(`name="${name}"`, "g"), `name="${name}" data-f="${key}"`);
     body.innerHTML = `
       <div class="rq2-stats">
-        ${[["", "To order", open.length, ""], ["urgent", "Urgent", urgent, urgent ? "is-bad" : ""],
+        ${[...(st.reqCfg.approverId || appr.length ? [["approval", `Waiting for ${apShort()}`, appr.length, appr.length ? "is-appr" : ""]] : []),
+          ["", "To order", ready.length, ""], ["urgent", "Urgent", urgent, urgent ? "is-bad" : ""],
           ["waiting", `Waiting ${REQ_WAIT_DAYS}+ days`, waiting, waiting ? "is-warn" : ""],
           ["jt", "Can come from JT storage", fromJt, fromJt ? "is-good" : ""]].map(([k, label, num, tone]) => {
           const on = st.reqFilter === "open" && st.reqQuick === k;
@@ -3723,15 +3759,18 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           ["closed", "Declined & cancelled"], ["all", "All"]], st.reqFilter, "reqFilter")}
         ${st.reqFilter === "open" ? segF("rq-v", [["list", "By request"], ["supplier", "By supplier"]], st.reqView, "reqView") : ""}
         <span class="inv-spacer"></span>
-        ${canManage ? '<a class="ff-btn" href="#/inventory/notifications">Email notifications</a>' : ""}
+        ${canManage ? `<button type="button" class="ff-btn" data-act="approver">Order approver: ${esc(st.reqCfg.approverName || "nobody")}</button>
+          <a class="ff-btn" href="#/inventory/notifications">Email notifications</a>` : ""}
         ${canRequest ? '<a class="ff-btn is-primary" href="#/tasks/order">+ Request order</a>' : ""}
       </div>
       <div data-role="reqs"></div>`;
     const box = body.querySelector('[data-role="reqs"]');
     const f = st.reqFilter;
-    const QUICK = { urgent: "Urgent", waiting: `Waiting ${REQ_WAIT_DAYS}+ days`, jt: "Can come from JT storage" };
+    const QUICK = { approval: `Waiting for ${apShort()}`, urgent: "Urgent", waiting: `Waiting ${REQ_WAIT_DAYS}+ days`, jt: "Can come from JT storage" };
     const quick = f === "open" && QUICK[st.reqQuick] ? st.reqQuick : "";
-    const quickOk = (r) => !quick || (quick === "urgent" ? r.urgency === "urgent"
+    const quickOk = (r) => !quick || (quick === "approval" ? awaitingApproval(r)
+      : awaitingApproval(r) ? false
+      : quick === "urgent" ? r.urgency === "urgent"
       : quick === "waiting" ? reqAge(r) >= REQ_WAIT_DAYS
       : jtPlan(r).some((x) => x.state === "jt" || x.state === "part"));
     const rows = st.requests.filter((r) => (f === "all" || (f === "closed" ? ["declined", "cancelled"].includes(r.status) : r.status === f))
@@ -3742,7 +3781,9 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     }
     // Open: urgent first, then the ones waiting longest. Others: newest first (as loaded).
     if (f === "open") {
-      rows.sort((a, b) => (b.urgency === "urgent") - (a.urgency === "urgent")
+      const apFirst = isApprover() ? 1 : -1;
+      rows.sort((a, b) => apFirst * (awaitingApproval(b) - awaitingApproval(a))
+        || (b.urgency === "urgent") - (a.urgency === "urgent")
         || (a.createdAt ? a.createdAt.getTime() : 0) - (b.createdAt ? b.createdAt.getTime() : 0));
     }
     if (!rows.length) {
@@ -3751,7 +3792,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       return;
     }
     box.innerHTML = f === "open" && st.reqView === "supplier"
-      ? bySupplierHtml(rows)
+      ? bySupplierHtml(rows.filter((r) => !awaitingApproval(r)))
       : reqListHtml(rows, f === "open" && canMove);
     syncReqSel();
   }
@@ -3778,10 +3819,12 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     return `
       <article class="rq2-row${urgent ? " is-urgent" : ""}${opened ? " is-open" : ""}">
         <div class="rq2-head" data-rqtoggle="${esc(r.id)}" role="button" tabindex="0" aria-expanded="${opened}">
-          ${pick ? `<input type="checkbox" class="rq2-pick" data-rqpick="${esc(r.id)}"${st.reqSel.has(r.id) ? " checked" : ""} aria-label="Select ${esc(reqNumber(r))}" />` : ""}
+          ${pick && !awaitingApproval(r) ? `<input type="checkbox" class="rq2-pick" data-rqpick="${esc(r.id)}"${st.reqSel.has(r.id) ? " checked" : ""} aria-label="Select ${esc(reqNumber(r))}" />`
+            : pick ? '<span class="rq2-pick" aria-hidden="true"></span>' : ""}
           <div class="rq2-main">
             <div class="rq2-top"><strong>${esc(r.requestedBy || "Someone")}</strong>
               ${urgent ? '<span class="inv-flag is-bad">Urgent</span>' : ""}
+              ${awaitingApproval(r) ? `<span class="rq2-tag is-purple">Waiting for ${esc(apShort())}</span>` : ""}
               ${age >= REQ_WAIT_DAYS ? `<span class="inv-flag is-warn">${age} days</span>` : ""}
               ${isOpen ? "" : `<span class="rq-status is-${r.status}">${esc(REQ_STATUS[r.status])}</span>`}
               <small class="muted">${esc(reqNumber(r))} · For ${esc(locLabel(r.loc))} · ${esc(whenShort(r.createdAt))}</small></div>
@@ -3789,7 +3832,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
               ${notListed ? `<span class="rq2-tag is-purple">${notListed} not on the product list</span>` : ""}
               ${r.note ? '<span class="rq2-tag">Has a note</span>' : ""}
               ${onPo ? '<span class="rq2-tag is-info">On a purchase order</span>' : ""}
-              ${isOpen ? jtTag(r) : ""}</div>
+              ${isOpen && !awaitingApproval(r) ? jtTag(r) : ""}</div>
           </div>
           <span class="rq2-chev" aria-hidden="true">${opened ? "▴" : "▾"}</span>
         </div>
@@ -3820,7 +3863,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         <td class="muted">${esc(sup || "—")}</td>
         ${isOpen ? `<td>${step(x)}</td>` : ""}</tr>`;
     }).join("");
-    const fillable = canFill && isOpen && plan.some((x) => x.state === "jt" || x.state === "part");
+    const wa = awaitingApproval(r);
+    const fillable = canFill && isOpen && !wa && plan.some((x) => x.state === "jt" || x.state === "part");
     const allJt = plan.every((x) => x.state === "done" || x.state === "jt");
     const needOrder = plan.some((x) => x.state === "order" || x.state === "part");
     const item = (attr, label) => `<button type="button" role="menuitem" class="pt-pop-item" ${attr} data-id="${esc(r.id)}">${label}</button>`;
@@ -3837,7 +3881,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       ${handled ? `<p class="rq-resp"><strong>${esc(REQ_STATUS[r.status])}${r.handledBy ? ` by ${esc(r.handledBy)}` : ""}${
         r.handledAt ? `, ${esc(when(r.handledAt))}` : ""}</strong>${r.response ? `: ${esc(r.response)}` : ""}</p>` : ""}
       ${fillable && needOrder ? '<p class="inv-hint">JT storage has some of this. Fill what it has, and order the rest.</p>' : ""}
-      ${isOpen && (canMove || mine) ? `<div class="rq2-acts">
+      ${wa ? waitActs(r, mine) : isOpen && (canMove || mine) ? `<div class="rq2-acts">
         ${fillable ? `<button type="button" class="lh-btn is-primary" data-rqfill="${esc(r.id)}">${allJt ? "Fill from JT storage" : "Fill what JT storage has…"}</button>` : ""}
         ${canMove && needOrder ? `<button type="button" class="lh-btn${fillable ? "" : " is-primary"}" data-rqpo="${esc(r.id)}">Make a purchase order…</button>` : ""}
         <span class="inv-spacer"></span>
@@ -3919,7 +3963,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   function poWizard(reqIds) {
     const chosen = new Set(reqIds);
     const lines = new Map();
-    st.requests.filter((r) => r.status === "open").forEach((r) => jtPlan(r).forEach((x) => {
+    st.requests.filter((r) => r.status === "open" && !awaitingApproval(r)).forEach((r) => jtPlan(r).forEach((x) => {
       if (x.state === "done" || itemOnPo(r.id, x.i, st.pos)) return;
       const key = `${x.p ? x.p.id : `free:${x.it.name.toLowerCase()}`}|${r.loc}`;
       const l = lines.get(key) || { key, p: x.p, name: x.p ? x.p.name : x.it.name, loc: r.loc,
@@ -4153,7 +4197,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
   // Several requests ordered together (e.g. one supplier order covers them)
   function bulkOrdered() {
-    const list = st.requests.filter((r) => st.reqSel.has(r.id) && r.status === "open");
+    const list = st.requests.filter((r) => st.reqSel.has(r.id) && r.status === "open" && !awaitingApproval(r));
     if (!list.length) return;
     const many = list.length === 1 ? "1 request" : `${list.length} requests`;
     const dlg = openDialog("inv-dlg", `
@@ -4336,7 +4380,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       if (!pick) return;
       supplierId = pick.id;
     }
-    const g = openItemsBySupplier(st.requests.filter((r) => r.status === "open")).get(sid);
+    const g = openItemsBySupplier(st.requests.filter((r) => r.status === "open" && !awaitingApproval(r))).get(sid);
     if (!g) return;
     const lines = g.map((l) => (l.p
       ? lineFromProduct(l.p, l.qty, l.loc, l.sources, supplierId)
@@ -4362,7 +4406,10 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
     try {
       const res = await callApi({ action: "inventory", op: "resendRequest", requestId: r.id });
-      showToast(res.sent ? `${reqNumber(r)} emailed to ${res.sent} ${res.sent === 1 ? "person" : "people"}`
+      showToast(res.approved ? `${reqNumber(r)} was approved automatically (no approver is set) and sent to the ordering team.`
+        : res.toApprover ? (res.sent ? `Sent to ${apName()} for approval` : `Couldn't email ${apName()}. They can approve it here in Requests.`)
+        : res.reason === "NO_APPROVER" ? `${apName()} has no email on file. They can approve it here in Requests.`
+        : res.sent ? `${reqNumber(r)} emailed to ${res.sent} ${res.sent === 1 ? "person" : "people"}`
         : res.queued ? "It's queued and goes out in the next few minutes."
         : res.reason === "RULE_OFF" ? "The “New order requests” email rule is turned off. Turn it on in Inventory → Notifications."
         : res.reason === "NOT_OPEN" ? "This request isn't open any more."
@@ -4385,6 +4432,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       catch (err) { console.error(err); showToast(errText(err, "Couldn't cancel. Try again.")); }
       return;
     }
+    if (awaitingApproval(r)) { showToast(`${reqNumber(r)} is waiting for ${apPoss()} approval.`); return; }
     const ordered = act === "ordered";
     const dlg = openDialog("inv-dlg", `
       <form class="lh-form" novalidate>
@@ -4458,7 +4506,130 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       }
     });
   }
+  // The approver, in the portal: approve everything as asked, or cancel. Changes go through the review page.
+  function approvalDialog(r, action) {
+    const approve = action === "approve";
+    const who = r.requestedBy || "The requester";
+    const dlg = openDialog("inv-dlg", `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>${approve ? "Approve" : "Cancel"} ${esc(reqNumber(r))}</h3>
+          <p>${approve ? `Everything goes to the ordering team, and ${esc(who)} is emailed.`
+            : `Nothing is ordered. ${esc(who)} is emailed, with your reason if you give one.`}</p></div>
+        <label class="lh-field"><span class="lh-label">${approve ? "Note (optional)" : "Why? (optional)"}</span>
+          <textarea name="note" rows="3" maxlength="1000" placeholder="${approve ? "e.g. Order the larger box this time" : "e.g. We have enough until next month"}"></textarea></label>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Go back</button>
+          <button type="submit" class="lh-btn is-primary">${approve ? "Approve as asked" : "Cancel request"}</button>
+        </div>
+      </form>`);
+    const form = dlg.querySelector("form");
+    const err = dlg.querySelector(".lh-error");
+    let busy = false;
+    dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => { if (!busy) dlg.close(); });
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      busy = true;
+      const btn = form.querySelector('[type="submit"]');
+      const label = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Saving…";
+      try {
+        const res = await callApi({ action: "invApproval", op: "save", requestId: r.id,
+          decision: { action, note: form.elements.note.value.trim() } });
+        if (!res || res.ok === false) throw new Error((res && res.error) || "No answer came back");
+        if (res.problem) {
+          if (res.done) { busy = false; dlg.close(); showToast(res.problem); load(); return; }
+          throw new Error(res.problem === "NOT_APPROVER" ? "Only the order approver can do this." : res.problem);
+        }
+        busy = false;
+        dlg.close();
+        showToast(approve ? `${reqNumber(r)} approved. It's with the ordering team now.` : `${reqNumber(r)} cancelled. ${who} has been emailed.`);
+        load();
+      } catch (ex) {
+        console.error("Approval failed:", ex);
+        busy = false;
+        err.textContent = errText(ex, "Couldn't save. Try again.");
+        err.hidden = false;
+        btn.disabled = false;
+        btn.textContent = label;
+      }
+    });
+    form.elements.note.focus();
+  }
 
+  // Review and change: the same review page as the email, in a new tab, with a fresh link
+  async function reviewOnPage(r, btn) {
+    const w = window.open("", "_blank");   // opened straight away, so the browser doesn't block it
+    btn.disabled = true;
+    try {
+      const res = await callApi({ action: "invApproval", op: "link", requestId: r.id });
+      if (!res || !res.url) throw new Error((res && (res.problem || res.error)) || "No link came back");
+      if (w) w.location.href = res.url; else location.href = res.url;
+      window.addEventListener("focus", () => { if (root.isConnected) load(); }, { once: true });   // back here: show what changed
+    } catch (ex) {
+      console.error("Review link failed:", ex);
+      if (w) w.close();
+      showToast(ex.message === "NOT_APPROVER" ? "Only the order approver can do this." : errText(ex, "Couldn't open it. Try again."));
+    }
+    if (btn.isConnected) btn.disabled = false;
+  }
+
+  // Manage inventory: who approves order requests
+  async function approverDialog() {
+    let staffList;
+    try { staffList = await fetchStaffList(); }
+    catch (err) { console.error(err); showToast("Couldn't load the staff list. Try again."); return; }
+    const cur = st.reqCfg.approverId;
+    const waitingN = st.requests.filter(awaitingApproval).length;
+    const dlg = openDialog("inv-dlg", `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>Order approver</h3>
+          <p>New order requests go to this person first. They approve them as asked, change amounts, take them from JT storage
+            or cancel them. Only then does the ordering team see them as ready to order. Their own requests are approved automatically.</p></div>
+        <div class="tb-staff">
+          <label class="fe-check"><input type="radio" name="who" value=""${cur ? "" : " checked"} /> Nobody: requests go straight to the ordering team</label>
+          ${staffList.map((s) => `<label class="fe-check"><input type="radio" name="who" value="${esc(s.id)}"${s.id === cur ? " checked" : ""} />
+            ${esc(s.name)} <small class="muted">${esc(s.role || "")}${s.hasEmail ? "" : " · no email on file, so they'd only see requests here"}</small></label>`).join("")}
+        </div>
+        ${waitingN ? `<p class="inv-hint">${esc(plural(waitingN, "request"))} ${waitingN === 1 ? "is" : "are"} waiting now.
+          A new approver sees them here in Requests. Links in emails already sent stop working.</p>` : ""}
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">Save</button>
+        </div>
+      </form>`);
+    const form = dlg.querySelector("form");
+    const err = dlg.querySelector(".lh-error");
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      const id = (form.querySelector('[name="who"]:checked') || {}).value || "";
+      if (!id && waitingN) {
+        err.textContent = `${plural(waitingN, "request")} ${waitingN === 1 ? "is" : "are"} waiting for approval. Choose who approves them, or approve or cancel them first.`;
+        err.hidden = false;
+        return;
+      }
+      const s = staffList.find((x) => x.id === id);
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      try {
+        await saveRequestSettings({ approverId: id, approverName: s ? s.name : "" }, staff);
+        dlg.close();
+        showToast(s ? `${s.name} now approves order requests` : "Order requests now go straight to the ordering team");
+        load();
+      } catch (ex) {
+        console.error("Approver not saved:", ex);
+        err.textContent = errText(ex, "Couldn't save. Try again.");
+        err.hidden = false;
+        btn.disabled = false;
+      }
+    });
+  }
   /* ---------- Events ---------- */
   root.addEventListener("click", (e) => {
     if (tab === "receive" && body.contains(e.target)) return;   // the receiving screen handles its own clicks
@@ -4502,6 +4673,14 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (rqPo) { poWizard([rqPo.dataset.rqpo]); return; }
     const rqFill = e.target.closest("[data-rqfill]");
     if (rqFill) { const r = st.requests.find((x) => x.id === rqFill.dataset.rqfill); if (r) fillFromJtDialog(r); return; }
+    const rqAppr = e.target.closest("[data-rqappr]");
+    if (rqAppr) {
+      const r = st.requests.find((x) => x.id === rqAppr.dataset.id);
+      if (r) { if (rqAppr.dataset.rqappr === "review") reviewOnPage(r, rqAppr); else approvalDialog(r, rqAppr.dataset.rqappr); }
+      return;
+    }
+    if (e.target.closest('[data-act="approver"]')) { approverDialog(); return; }
+
     if (e.target.closest('[data-act="rq-tosup"]')) { st.reqView = "supplier"; renderRequests(); return; }
     const rqHead = e.target.closest("[data-rqtoggle]");
     if (rqHead && !e.target.closest("input,a,button")) { toggleReq(rqHead.dataset.rqtoggle); return; }

@@ -561,6 +561,8 @@ export async function applyStock(product, { type, ops, reason = "", note = "" },
 export const REQ_STATUS = { open: "Open", ordered: "Ordered", received: "Received", declined: "Declined", cancelled: "Cancelled" };
 export const reqNumber = (r) => `R-${String((r && r.id) || "").slice(0, 6).toUpperCase()}`;
 export const myUid = () => (auth.currentUser && auth.currentUser.uid) || "";
+// Waiting for the order approver (Inventory → Settings). The ordering team can't act on it yet.
+export const awaitingApproval = (r) => !!r && r.status === "open" && r.approval === "waiting";
 
 // Low = at or below the reorder level for that storage
 export const lowAt = (p, loc) => p.reorder[loc] !== null && p.reorder[loc] !== undefined && p.stock[loc] <= p.reorder[loc];
@@ -581,6 +583,9 @@ function normaliseRequest(d) {
     poIds: Array.isArray(x.poIds) ? x.poIds : [],
     status: REQ_STATUS[x.status] ? x.status : "open",
     loc: LOCATIONS.some((l) => l.key === x.loc) ? x.loc : "shelf",
+    // Older requests have no approval field: they count as approved
+    approval: ["waiting", "cancelled"].includes(x.approval) ? x.approval : "approved",
+    approvedAt: toDate(x.approvedAt),
     createdAt: toDate(x.createdAt),
     handledAt: toDate(x.handledAt),
   };
@@ -604,6 +609,7 @@ export async function createRequest({ items, loc, urgency, note }, staff) {
     urgency: urgency === "urgent" ? "urgent" : "normal",
     note: clip(note, 1000),
     status: "open",
+    approval: "waiting",
     requestedBy: by,
     requestedByUid: uid(),
     createdAt: serverTimestamp(),
@@ -643,18 +649,25 @@ export async function cancelRequest(id, staff) {
   });
 }
 
-// Who is emailed about new requests
+// Who is emailed about new requests, and who approves them
 export async function getRequestSettings() {
   const snap = await getDoc(doc(db, "inv_settings", "requests"));
   const d = snap.exists() ? snap.data() : {};
-  return { notifyIds: Array.isArray(d.notifyIds) ? d.notifyIds.map(String) : [], urgentOnly: d.urgentOnly === true };
+  return {
+    notifyIds: Array.isArray(d.notifyIds) ? d.notifyIds.map(String) : [],
+    urgentOnly: d.urgentOnly === true,
+    approverId: String(d.approverId || ""),
+    approverName: String(d.approverName || ""),
+  };
 }
-export async function saveRequestSettings({ notifyIds, urgentOnly }, staff) {
+// Only the fields given are changed; everything else in the settings stays
+export async function saveRequestSettings({ notifyIds, urgentOnly, approverId, approverName }, staff) {
   await setDoc(doc(db, "inv_settings", "requests"), {
-    notifyIds: (Array.isArray(notifyIds) ? notifyIds : []).map(String).slice(0, 30),
-    urgentOnly: urgentOnly === true,
+    ...(Array.isArray(notifyIds) ? { notifyIds: notifyIds.map(String).slice(0, 30) } : {}),
+    ...(typeof urgentOnly === "boolean" ? { urgentOnly } : {}),
+    ...(approverId !== undefined ? { approverId: clip(approverId, 128), approverName: clip(approverName, 120) } : {}),
     ...stamp(staff),
-  });
+  }, { merge: true });
 }
 
 /* ===================== Purchase orders ===================== */
@@ -793,6 +806,12 @@ export async function createPo({ supplier, lines = [], orderDate = "" }, staff) 
   const poRef = doc(collection(db, "inv_pos"));
   await runTransaction(db, async (tx) => {
     const c = await tx.get(cRef);
+    for (const rid of requestIds) {
+      const r = await tx.get(doc(db, "inv_requests", rid));
+      if (r.exists() && r.data().approval === "waiting") {
+        throw new Error(`${reqNumber({ id: rid })} is waiting for approval, so it can't go on a purchase order yet.`);
+      }
+    }
     const base = poNumberBase(supplier.name, keyDate(dated));
     const { n, number } = nextPoNumber(c, base);
     tx.set(cRef, { poSeq: { [base]: n } }, { merge: true });
@@ -6257,6 +6276,7 @@ export async function undoCorrection(move, reason, staff) {
 // picks: [{ i (item index), productId, qty (stock units) }]. complete: every item is now covered, so it's marked Received.
 // What each item has had from JT storage is kept in jtFilled, so By supplier only orders what's left.
 export async function fillRequestFromJt(request, picks, { complete = false, note = "" } = {}, staff) {
+  if (awaitingApproval(request)) throw new Error("This request is waiting for approval. It can be filled once it's approved.");
   const want = (picks || []).map((p) => ({ i: parseInt(p.i, 10), productId: clip(p.productId, 60), qty: parseInt(p.qty, 10) }))
     .filter((p) => p.i >= 0 && p.productId && p.qty >= 1);
   if (!want.length) throw new Error("Enter how many to move.");

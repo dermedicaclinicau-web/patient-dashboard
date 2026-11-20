@@ -1,7 +1,7 @@
 // Task Manager → To Order (#/tasks/order[/<productId>|/low]): ask the ordering team for stock, and see your requests.
 import {
   INV_CATEGORIES, LOCATIONS, REQ_STATUS, plural, unitPlural, reqNumber, myUid, lowAt, suggestOrder, dayKey,
-  listProducts, listRequests, createRequest, cancelRequest,
+  listProducts, listRequests, createRequest, cancelRequest, getRequestSettings,
 } from "./inventory-api.js";
 import { callApi } from "./appointments.js";
 import { confirmDialog } from "./dialog.js";
@@ -28,8 +28,10 @@ export async function mountOrderRequest(container, { param = "", staff = null } 
 
   let products = [];
   let requests = [];
+  let reqCfg = { approverId: "", approverName: "" };
   try {
-    [products, requests] = await Promise.all([listProducts(), listRequests({ max: 200 })]);
+    [products, requests, reqCfg] = await Promise.all([listProducts(), listRequests({ max: 200 }),
+      getRequestSettings().catch(() => reqCfg)]);
   } catch (err) {
     console.error("Order request load failed:", err);
     if (root.isConnected) root.innerHTML = `<a class="back-link" href="${backHref}">← Back</a><div class="state"><strong>Couldn't open order requests</strong>${
@@ -49,7 +51,12 @@ export async function mountOrderRequest(container, { param = "", staff = null } 
   const pending = () => requests.filter((q) => q.status === "open"
     || (q.status === "ordered" && q.createdAt && Date.now() - q.createdAt.getTime() < RECENT_MS))
     .sort((a, b) => (b.createdAt ? b.createdAt.getTime() : 0) - (a.createdAt ? a.createdAt.getTime() : 0));
+  // Who approves requests: "Joanna" from "Dr Joanna Teh"
+  const apShort = String(reqCfg.approverName || "").replace(/^dr\.?\s+/i, "").split(/\s+/)[0];
+  const apWait = apShort ? `Waiting for ${apShort}'s approval` : "Waiting for approval";
+  const viaApprover = !!reqCfg.approverId && reqCfg.approverId !== myUid();
   const reqState = (q) => (q.status === "ordered" ? ["Ordered", "is-ordered"]
+    : q.status === "open" && q.approval === "waiting" ? [apWait, "is-appr"]
     : (q.poNumbers || []).length ? [`Being ordered (${q.poNumbers[q.poNumbers.length - 1]})`, "is-po"]
     : ["Waiting", "is-wait"]);
   const who = (q) => (q.requestedByUid === myUid() ? "You" : q.requestedBy || "Someone");
@@ -93,7 +100,8 @@ export async function mountOrderRequest(container, { param = "", staff = null } 
       <div class="ff-bar" role="region" aria-label="Order request">
         <div class="ff-bar-inner">
           <a class="ff-back" href="${backHref}" aria-label="Back" title="Back">${I.back}</a>
-          <div class="ff-bar-title"><strong>Request order</strong><span>To Order · goes to the ordering team</span></div>
+          <div class="ff-bar-title"><strong>Request order</strong><span>${viaApprover
+            ? `To Order · ${esc(apShort || "the approver")} approves it first` : "To Order · goes to the ordering team"}</span></div>
           <div class="ff-bar-actions">
             <a class="ff-btn is-quiet" href="${backHref}">Cancel</a>
             <button type="button" class="ff-btn is-primary" data-act="send">${I.send}<span>Send request</span></button>
@@ -272,10 +280,14 @@ export async function mountOrderRequest(container, { param = "", staff = null } 
     const mine = requests.filter((q) => q.requestedByUid === myUid()).slice(0, 15);
     $('[data-role="mine"]').innerHTML = mine.length ? `<ul class="or-mine">${mine.map((q) => `
       <li>
-        <div class="or-mine-head"><strong>${esc(reqNumber(q))}</strong><span class="rq-status is-${q.status}">${esc(REQ_STATUS[q.status])}</span>
+        <div class="or-mine-head"><strong>${esc(reqNumber(q))}</strong>${q.status === "open" && q.approval === "waiting"
+          ? `<span class="rq-status is-appr">${esc(apWait)}</span>`
+          : `<span class="rq-status is-${q.status}">${esc(REQ_STATUS[q.status])}</span>`}
           <small>${esc(day(q.createdAt))}</small></div>
         <span>${esc(q.items.map((it) => `${it.name} × ${plural(it.qty, it.unit)}`).join(", "))}</span>
-        ${q.response ? `<small class="muted">${esc(q.handledBy || "")}: ${esc(q.response)}</small>` : ""}
+        ${q.response ? `<small class="muted">${esc([q.handledBy || q.approvedBy, q.response].filter(Boolean).join(": "))}</small>` : ""}
+        ${q.approvalNote && q.approvalNote !== q.response
+          ? `<small class="muted">${esc(q.approvedBy || "Approver")}: “${esc(q.approvalNote)}”</small>` : ""}
         ${q.status === "open" ? `<button type="button" class="hx-add" data-cancel="${esc(q.id)}">Cancel request</button>` : ""}
       </li>`).join("")}</ul>` : '<p class="tb-none">You haven\'t requested anything yet.</p>';
   }
@@ -509,7 +521,7 @@ export async function mountOrderRequest(container, { param = "", staff = null } 
     try {
       const id = await createRequest({ items, loc: st.loc, urgency: st.urgency, note }, staff);
       callApi({ action: "inventory", op: "notifyRequest", requestId: id }).catch((err) => console.warn("Request email failed:", err));
-      showToast("Request sent to the ordering team");
+      showToast(viaApprover ? `Request sent. It goes to ${apShort || "the approver"} for approval first.` : "Request sent to the ordering team");
       st.rows = [blankRow()];
       $('[data-role="note"]').value = "";
       await reload();
@@ -563,6 +575,7 @@ const CSS = `
 .or-pend-st.is-wait{background:#fef3c7;color:#92400e}
 .or-pend-st.is-po{background:#dbeafe;color:#1d4ed8}
 .or-pend-st.is-ordered{background:#dcfce7;color:#166534}
+.or-pend-st.is-appr,.rq-status.is-appr{background:#ede9fe;color:#6d28d9}
 .or-pend-items{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
 .or-pend-item{display:inline-flex;align-items:center;gap:4px;padding:2px 4px 2px 9px;border-radius:999px;background:#f1f5f9;font-size:12.5px}
 .or-pend-add{width:20px;height:20px;border:0;border-radius:50%;background:#0f766e;color:#fff;font-size:14px;line-height:1;cursor:pointer}

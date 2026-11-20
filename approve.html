@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en-AU">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex" />
+  <meta name="referrer" content="no-referrer" />
+  <meta name="format-detection" content="telephone=no, date=no, email=no, address=no" />
+  <meta name="theme-color" content="#0f766e" />
+  <title>Dermedica · Order request</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=1" />
+  <link rel="preconnect" href="https://script.google.com" crossorigin />
+  <link rel="preconnect" href="https://script.googleusercontent.com" crossorigin />
+  <script>
+    // Ask for the request straight away, while the rest of the page is still loading
+    (function () {
+      var t = "";
+      try { t = new URLSearchParams(location.hash.slice(1)).get("t") || ""; } catch (e) { /* left empty */ }
+      if (!/^a1\./.test(t)) return;
+      window.__apGet = fetch("https://script.google.com/macros/s/AKfycbzb4J7itwDNblPVtBbbZoxdcd2DOqmiZTMXeI7lnRIKuCV92YjJ6hHgS74wz3G9uqOuSA/exec", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ action: "invApproval", op: "get", t: t }),
+      }).then(function (r) { return r.json(); });
+    })();
+  </script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f1f5f9; color: #1e293b; font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; }
+    .ap { max-width: 720px; margin: 0 auto; padding: 20px 16px 0; }
+
+    /* Heading */
+    .ap-head { margin: 0 0 14px; padding: 18px 20px; border-radius: 14px; background: #fff; box-shadow: 0 1px 2px rgba(15, 23, 42, .05); }
+    .ap-kicker { color: #0f766e; font-size: 13px; font-weight: 700; letter-spacing: .02em; }
+    .ap-urgent { margin-left: 6px; padding: 2px 8px; border-radius: 999px; background: #fee2e2; color: #b91c1c; font-size: 12px; }
+    .ap-head h1 { margin: 4px 0 2px; font-size: 20px; line-height: 1.35; color: #0f172a; }
+    .ap-sub { margin: 0; color: #64748b; font-size: 13px; }
+    .ap-note { margin: 10px 0 0; padding: 10px 12px; border-radius: 10px; background: #f8fafc; color: #334155; white-space: pre-wrap; }
+
+    /* Cards */
+    .ap-card { margin: 0 0 14px; padding: 16px 18px; border-radius: 14px; background: #fff; box-shadow: 0 1px 2px rgba(15, 23, 42, .05); }
+    .ap-card h2 { margin: 0 0 8px; font-size: 15px; color: #0f172a; }
+    .ap-item { padding: 12px 0; border-top: 1px solid #f1f5f9; }
+    .ap-item:first-of-type { border-top: 0; padding-top: 4px; }
+    .ap-top { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+    .ap-ask { color: #334155; white-space: nowrap; }
+    .ap-meta { margin-top: 2px; color: #64748b; font-size: 13px; }
+    .ap-meta .is-good { color: #027a48; font-weight: 600; }
+    .ap-added { margin-top: 2px; color: #64748b; font-size: 12.5px; }
+    .ap-tip { margin: 0 0 14px; padding: 10px 14px; border-radius: 10px; background: #ecfdf5; color: #065f46; font-size: 14px; }
+
+    /* Review: changing an item */
+    .ap-item.is-edit { padding: 14px 0 16px; }
+    .ap-item.is-removed .ap-top strong { text-decoration: line-through; color: #94a3b8; }
+    .ap-qty { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+    .ap-qty.is-off { opacity: .4; pointer-events: none; }
+    .ap-qty > span:first-child { min-width: 64px; color: #475569; font-size: 14px; }
+    .ap-step { display: inline-flex; border: 1px solid #cbd5e1; border-radius: 10px; overflow: hidden; }
+    .ap-step button { width: 40px; height: 40px; border: 0; background: #f8fafc; color: #0f766e; font-size: 20px; cursor: pointer; }
+    .ap-step input { width: 64px; height: 40px; border: 0; border-left: 1px solid #e2e8f0; border-right: 1px solid #e2e8f0;
+      text-align: center; font: inherit; font-size: 16px; }
+    .ap-unit { color: #334155; font-size: 14px; }
+    .ap-was { color: #b45309; font-size: 12.5px; }
+    .ap-choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .ap-choice { position: relative; }
+    .ap-choice input { position: absolute; opacity: 0; }
+    .ap-choice span { display: inline-block; padding: 8px 14px; border: 1px solid #cbd5e1; border-radius: 999px; background: #fff;
+      color: #334155; font-size: 14px; cursor: pointer; }
+    .ap-choice small { color: #64748b; }
+    .ap-choice input:checked + span { border-color: #0f766e; background: #0f766e; color: #fff; }
+    .ap-choice input:checked + span small { color: #ccfbf1; }
+    .ap-choice input[value="remove"]:checked + span { border-color: #b91c1c; background: #b91c1c; }
+    .ap-choice input:focus-visible + span { outline: 2px solid #0f766e; outline-offset: 2px; }
+    .ap-grant { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #f0fdfa; color: #134e4a; font-size: 14px; }
+    .ap-grant input { width: 70px; height: 36px; margin: 0 4px; border: 1px solid #99f6e4; border-radius: 8px; text-align: center;
+      font: inherit; font-size: 16px; }
+    .ap-grant small { display: block; margin-top: 4px; color: #0f766e; }
+
+    /* Note, messages and the buttons */
+    .ap-label { display: block; margin: 0 0 6px; font-weight: 600; color: #0f172a; }
+    .ap-label span { font-weight: 400; color: #64748b; font-size: 13px; }
+    textarea { width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 10px; font: inherit; font-size: 16px; resize: vertical; }
+    .ap-msg { margin: 0 0 12px; padding: 10px 14px; border-radius: 10px; background: #fef2f2; color: #991b1b; font-size: 14px; font-weight: 600; }
+    .ap-msg:empty { display: none; }
+    .ap-msg button { margin-left: 6px; }
+    .ap-sum { margin: 0 0 8px; color: #475569; font-size: 14px; }
+    .ap-foot { position: sticky; bottom: 0; z-index: 5; margin: 16px -16px 0; padding: 14px 16px calc(14px + env(safe-area-inset-bottom));
+      border-top: 1px solid #e2e8f0; background: rgba(255, 255, 255, .96); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+      text-align: center; }
+    .ap-btn { display: inline-block; width: 100%; max-width: 380px; min-height: 52px; padding: 0 20px; border: 1px solid transparent;
+      border-radius: 12px; font: inherit; font-size: 17px; font-weight: 700; text-decoration: none; line-height: 50px; cursor: pointer; }
+    .ap-btn.is-main { background: #0f766e; color: #fff; box-shadow: 0 6px 16px -6px rgba(15, 118, 110, .55); }
+    .ap-btn.is-main:hover { background: #115e59; }
+    .ap-btn.is-danger { background: #b91c1c; color: #fff; }
+    .ap-btn.is-ghost { border-color: #0f766e; background: #fff; color: #0f766e; }
+    .ap-btn:disabled { opacity: .55; cursor: default; box-shadow: none; }
+    .ap-alt { margin: 10px 0 0; color: #64748b; font-size: 13.5px; }
+    .ap-link { padding: 0; border: 0; background: none; color: #0f766e; font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer; }
+
+    /* Loading, messages and done */
+    .ap-state { max-width: 480px; margin: 10vh auto 0; padding: 32px 28px; border-radius: 16px; background: #fff; text-align: center;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, .08); }
+    .ap-state h1 { margin: 0 0 8px; font-size: 22px; color: #0f172a; }
+    .ap-state p { margin: 0 0 12px; color: #475569; }
+    .ap-state small { color: #94a3b8; }
+    .ap-tick { display: grid; place-items: center; width: 60px; height: 60px; margin: 0 auto 16px; border-radius: 50%;
+      background: #ecfdf5; color: #047857; }
+    .ap-tick svg { width: 30px; height: 30px; }
+    .ap-load { display: grid; gap: 12px; text-align: left; }
+    .ap-sk { height: 16px; border-radius: 8px; background: linear-gradient(90deg, #e2e8f0 25%, #f1f5f9 50%, #e2e8f0 75%);
+      background-size: 200% 100%; animation: ap-sh 1.2s infinite; }
+    .ap-sk.is-h { width: 55%; height: 22px; }
+    .ap-sk.is-s { width: 70%; }
+    .ap-load p { margin: 6px 0 0; text-align: center; }
+    @keyframes ap-sh { to { background-position: -200% 0; } }
+
+    @media (max-width: 640px) {
+      .ap { padding: 12px 12px 0; }
+      .ap-foot { margin: 16px -12px 0; }
+      .ap-state { margin: 6vh 12px 0; padding: 26px 20px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="ap" id="ap">
+    <div class="ap-state">
+      <div class="ap-load" aria-hidden="true">
+        <div class="ap-sk is-h"></div><div class="ap-sk"></div><div class="ap-sk is-s"></div><div class="ap-sk"></div>
+      </div>
+      <p>Loading the request…</p>
+    </div>
+  </main>
+
+  <script type="module">
+    const API = "https://script.google.com/macros/s/AKfycbzb4J7itwDNblPVtBbbZoxdcd2DOqmiZTMXeI7lnRIKuCV92YjJ6hHgS74wz3G9uqOuSA/exec";
+    const main = document.getElementById("ap");
+    const hash = new URLSearchParams(location.hash.slice(1));
+    const t = hash.get("t") || "";
+    let mode = ["approve", "review", "cancel"].includes(hash.get("do")) ? hash.get("do") : "review";
+    let req = null;
+    let state = {};
+    let busy = false;
+
+    const PROBLEM = {
+      BAD_LINK: ["This link doesn't work", "Open the newest email about this request, or use Inventory → Requests in the portal."],
+      EXPIRED: ["This link has expired", "Links work for 7 days. Open the request in the portal (Inventory → Requests), or ask for the email to be sent again."],
+      NOT_APPROVER: ["This link no longer works", "The order approver has been changed in the portal, so this link can't be used."],
+      GONE: ["This request isn't there any more", "It may have been removed. Check Inventory → Requests in the portal."],
+      BUSY: ["Please try again later", "This link has been used a lot in the last hour."],
+    };
+    const PORTAL = `<a class="ap-btn is-ghost" href="./#/inventory/requests">Open the portal</a>`;
+    const TICK = `<div class="ap-tick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></svg></div>`;
+
+    const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+    const unitWord = (n, u) => {
+      u = String(u || "item");
+      if (Number(n) === 1) return u;
+      return /s$/i.test(u) ? u : /(x|z|ch|sh)$/i.test(u) ? `${u}es` : `${u}s`;
+    };
+    const qty = (n, u) => `${n} ${unitWord(n, u)}`;
+    const when = (iso) => {
+      const d = new Date(iso);
+      return isNaN(d) ? "" : d.toLocaleString("en-AU", { timeZone: "Australia/Perth", weekday: "short", day: "numeric",
+        month: "short", hour: "numeric", minute: "2-digit" });
+    };
+    const item = (i) => req.items.find((x) => x.i === i);
+    const gmax = (it, s) => Math.max(0, Math.min(s.qty * it.pack, it.jt));
+    const canTake = (it) => req.canGrant && it.onList && it.jt > 0;
+    const isWaiting = () => req.status === "open" && req.approval === "waiting";
+
+    async function call(body) {
+      const r = await fetch(API, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ action: "invApproval", t, ...body }),
+      });
+      return r.json();
+    }
+
+    function showState(title, text, extra = "", icon = "") {
+      main.innerHTML = `<div class="ap-state">${icon}<h1>${esc(title)}</h1><p>${esc(text)}</p>${extra}</div>`;
+      window.scrollTo(0, 0);
+    }
+    function showLoading() {
+      main.innerHTML = `<div class="ap-state"><div class="ap-load" aria-hidden="true"><div class="ap-sk is-h"></div>
+        <div class="ap-sk"></div><div class="ap-sk is-s"></div></div><p>Loading the request…</p></div>`;
+    }
+
+    /* ---------- Loading ---------- */
+
+    async function start() {
+      if (!/^a1\./.test(t)) return showState(...PROBLEM.BAD_LINK, PORTAL);
+      let res = null;
+      try { res = await (window.__apGet || call({ op: "get" })); } catch (e) { res = null; }
+      if (!res) { try { res = await call({ op: "get" }); } catch (e) { res = null; } }   // the early request failed: once more
+      handleGet(res);
+    }
+    async function reload() {
+      showLoading();
+      let res = null;
+      try { res = await call({ op: "get" }); } catch (e) { res = null; }
+      handleGet(res);
+    }
+    function handleGet(res) {
+      if (!res || res.ok === false) {
+        return showState("Couldn't load the request", "Check your internet connection, then try again.",
+          `<button type="button" class="ap-btn is-main" data-reload>Try again</button>`);
+      }
+      if (res.problem) {
+        const p = PROBLEM[res.problem] || ["Something went wrong", res.problem];
+        return showState(p[0], p[1], PORTAL);
+      }
+      req = res.request;
+      state = {};
+      req.items.forEach((it) => {
+        state[it.i] = { qty: it.qty, choice: "order", grant: Math.max(1, Math.min(it.need, it.jt)), auto: true };
+      });
+      render();
+    }
+
+    /* ---------- Pieces ---------- */
+
+    function headHtml() {
+      const n = req.items.length;
+      return `<header class="ap-head">
+        <div class="ap-kicker">Order request ${esc(req.number)}${req.urgency === "urgent" ? '<span class="ap-urgent">Urgent</span>' : ""}</div>
+        <h1>${esc(req.requestedBy)} is asking for ${n} item${n === 1 ? "" : "s"} for ${req.loc === "jt" ? "JT storage" : "the Shelf"}</h1>
+        <p class="ap-sub">Sent ${esc(when(req.createdAt))}</p>
+        ${req.note ? `<p class="ap-note">“${esc(req.note)}”</p>` : ""}
+      </header>`;
+    }
+    const asked = (it) => qty(it.qty, it.unit) + (it.onList && it.pack > 1 ? ` (${qty(it.need, it.stockUnit)})` : "");
+    const added = (it) => (it.added.length
+      ? `<div class="ap-added">incl. ${esc(it.added.map((a) => `${a.qty} from ${a.by}`).join(", "))}</div>` : "");
+    const stockLine = (it) => (it.onList
+      ? `Shelf ${esc(qty(it.shelf, it.stockUnit))} · JT ${esc(qty(it.jt, it.stockUnit))}` : "Not on the product list");
+
+    function rowHtml(it) {
+      return `<div class="ap-item">
+        <div class="ap-top"><strong>${esc(it.name)}</strong><span class="ap-ask">${esc(asked(it))}</span></div>
+        ${added(it)}
+        <div class="ap-meta">${it.onList ? `${stockLine(it)} · ` : ""}<span class="${it.next === "JT storage has enough" ? "is-good" : ""}">${esc(it.next)}</span></div>
+      </div>`;
+    }
+
+    function choice(it, v, label) {
+      return `<label class="ap-choice"><input type="radio" name="c${it.i}" value="${v}" ${state[it.i].choice === v ? "checked" : ""}>
+        <span>${label}</span></label>`;
+    }
+    function editHtml(it) {
+      const s = state[it.i];
+      return `<div class="ap-item is-edit" data-i="${it.i}">
+        <div class="ap-top"><strong>${esc(it.name)}</strong></div>
+        ${added(it)}
+        <div class="ap-meta">${stockLine(it)}</div>
+        <div class="ap-qty">
+          <span>Amount</span>
+          <span class="ap-step">
+            <button type="button" data-step="-1" aria-label="Less">−</button>
+            <input type="number" inputmode="numeric" min="1" max="999" value="${s.qty}" data-f="qty" aria-label="Amount">
+            <button type="button" data-step="1" aria-label="More">+</button>
+          </span>
+          <span class="ap-unit" data-u></span>
+          <span class="ap-was" data-was></span>
+        </div>
+        <div class="ap-choices">
+          ${choice(it, "order", "Send to ordering")}
+          ${canTake(it) ? choice(it, "grant", `Take from JT storage <small>(JT has ${it.jt})</small>`) : ""}
+          ${choice(it, "remove", "Remove")}
+        </div>
+        ${canTake(it) ? `<div class="ap-grant" data-grant hidden>
+          Take <input type="number" inputmode="numeric" min="1" data-f="grant" aria-label="How many from JT storage">
+          <span data-gu></span> from JT storage <small data-grest></small>
+        </div>` : ""}
+      </div>`;
+    }
+
+    /* ---------- The three views ---------- */
+
+    function approveHtml() {
+      const enough = req.items.filter((it) => canTake(it) && it.jt >= it.need).length;
+      return `${headHtml()}
+        ${enough ? `<p class="ap-tip">JT storage has enough for ${enough} of these. To take ${enough === 1 ? "it" : "them"} from JT storage
+          instead of ordering, choose <button type="button" class="ap-link" data-mode="review">Review and change</button>.</p>` : ""}
+        <section class="ap-card"><h2>What's being asked for</h2>${req.items.map(rowHtml).join("")}</section>
+        <section class="ap-card">
+          <label class="ap-label" for="ap-note">Note <span>(optional: ${esc(req.requestedBy)} and the ordering team see it)</span></label>
+          <textarea id="ap-note" rows="2" maxlength="1000"></textarea>
+        </section>
+        <div class="ap-msg" id="ap-msg"></div>
+        <div class="ap-foot">
+          <button type="button" class="ap-btn is-main" data-go="approve">Approve as asked</button>
+          <p class="ap-alt">Everything goes to the ordering team.
+            <button type="button" class="ap-link" data-mode="review">Review and change instead</button> ·
+            <button type="button" class="ap-link" data-mode="cancel">Cancel request</button></p>
+        </div>`;
+    }
+
+    function cancelHtml() {
+      return `${headHtml()}
+        <section class="ap-card"><h2>What's being asked for</h2>${req.items.map(rowHtml).join("")}</section>
+        <section class="ap-card">
+          <label class="ap-label" for="ap-note">Why? <span>(optional: ${esc(req.requestedBy)} sees this)</span></label>
+          <textarea id="ap-note" rows="3" maxlength="1000"></textarea>
+        </section>
+        <div class="ap-msg" id="ap-msg"></div>
+        <div class="ap-foot">
+          <button type="button" class="ap-btn is-danger" data-go="cancel">Cancel this request</button>
+          <p class="ap-alt">Nothing is ordered. <button type="button" class="ap-link" data-mode="review">Go back to approving</button></p>
+        </div>`;
+    }
+
+    function reviewHtml() {
+      return `${headHtml()}
+        <section class="ap-card"><h2>Check each item</h2>${req.items.map(editHtml).join("")}</section>
+        <section class="ap-card">
+          <label class="ap-label" for="ap-note">Note <span>(optional: ${esc(req.requestedBy)} and the ordering team see it)</span></label>
+          <textarea id="ap-note" rows="2" maxlength="1000"></textarea>
+        </section>
+        <div class="ap-msg" id="ap-msg"></div>
+        <div class="ap-foot">
+          <p class="ap-sum" id="ap-sum"></p>
+          <button type="button" class="ap-btn is-main" data-go="approve">Approve</button>
+          <p class="ap-alt"><button type="button" class="ap-link" data-mode="approve">Approve everything as asked</button> ·
+            <button type="button" class="ap-link" data-mode="cancel">Cancel request</button></p>
+        </div>`;
+    }
+
+    function doneHtml() {
+      if (req.approval === "approved") {
+        return showState(req.status === "received" ? "Already approved and on the Shelf" : "Already approved",
+          `Approved by ${req.approvedBy || "the approver"}${req.approvedAt ? ` on ${when(req.approvedAt)}` : ""}.` +
+            (req.approvalNote ? ` Note: “${req.approvalNote}”` : ""), PORTAL, TICK);
+      }
+      if (req.status === "cancelled") {
+        return showState("This request was cancelled",
+          `${req.approvedBy ? `Cancelled by ${req.approvedBy}` : "It was cancelled"}${req.approvedAt ? ` on ${when(req.approvedAt)}` : ""}.`, PORTAL);
+      }
+      return showState("Nothing to do here", `This request has already been ${req.status}.`, PORTAL);
+    }
+
+    function render() {
+      if (!isWaiting()) return doneHtml();
+      main.innerHTML = mode === "approve" ? approveHtml() : mode === "cancel" ? cancelHtml() : reviewHtml();
+      if (mode === "review") {
+        req.items.forEach((it) => updateItem(it.i));
+        updateSummary();
+      }
+    }
+
+    function setMode(m) {
+      mode = m;
+      history.replaceState(null, "", `#t=${encodeURIComponent(t)}&do=${m}`);
+      render();
+      window.scrollTo(0, 0);
+    }
+
+    /* ---------- Review: keeping each card up to date ---------- */
+
+    function updateItem(i) {
+      const card = main.querySelector(`[data-i="${i}"]`);
+      if (!card) return;
+      const it = item(i), s = state[i];
+      card.classList.toggle("is-removed", s.choice === "remove");
+      card.querySelector(".ap-qty").classList.toggle("is-off", s.choice === "remove");
+      card.querySelector("[data-u]").textContent = unitWord(s.qty, it.unit) +
+        (it.onList && it.pack > 1 ? ` (${qty(s.qty * it.pack, it.stockUnit)})` : "");
+      card.querySelector("[data-was]").textContent = s.qty !== it.qty ? `Asked for ${it.qty}` : "";
+      const g = card.querySelector("[data-grant]");
+      if (!g) return;
+      g.hidden = s.choice !== "grant";
+      const max = gmax(it, s);
+      const inp = g.querySelector('[data-f="grant"]');
+      inp.max = max;
+      if (document.activeElement !== inp) inp.value = Math.min(s.grant, max);
+      g.querySelector("[data-gu]").textContent = unitWord(Math.min(s.grant, max), it.stockUnit);
+      const need = s.qty * it.pack;
+      const rest = need - Math.min(s.grant, max);
+      g.querySelector("[data-grest]").textContent = rest > 0
+        ? `The other ${qty(rest, it.stockUnit)} ${rest === 1 ? "goes" : "go"} to the ordering team.` +
+          (it.jt < need ? ` JT storage has ${qty(it.jt, it.stockUnit)}.` : "")
+        : "That covers all of it.";
+    }
+
+    function updateSummary() {
+      const el = document.getElementById("ap-sum");
+      if (!el) return;
+      let o = 0, g = 0, r = 0;
+      req.items.forEach((it) => {
+        const s = state[it.i];
+        if (s.choice === "remove") r++;
+        else if (s.choice === "grant") { g++; if (Math.min(s.grant, gmax(it, s)) < s.qty * it.pack) o++; }
+        else o++;
+      });
+      el.textContent = [o && `${o} to ordering`, g && `${g} from JT storage`, r && `${r} removed`].filter(Boolean).join(" · ");
+    }
+
+    function afterQty(i) {
+      const it = item(i), s = state[i];
+      s.grant = s.auto ? Math.max(1, gmax(it, s)) : Math.max(1, Math.min(s.grant, gmax(it, s)));
+      updateItem(i);
+      updateSummary();
+    }
+
+    /* ---------- Saving ---------- */
+
+    function showMsg(text, withReload) {
+      const el = document.getElementById("ap-msg");
+      if (!el) return;
+      el.innerHTML = esc(text) + (withReload
+        ? ` <button type="button" class="ap-link" data-reload>Load the latest</button>` : "");
+      el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+    function setBusy(on) {
+      busy = on;
+      main.querySelectorAll("[data-go]").forEach((b) => {
+        if (!b.dataset.label) b.dataset.label = b.textContent;
+        b.disabled = on;
+        b.textContent = on ? "Saving…" : b.dataset.label;
+      });
+    }
+
+    async function save(action) {
+      if (busy) return;
+      showMsg("");
+      const decision = { action, note: ((document.getElementById("ap-note") || {}).value || "").trim(), version: req.version };
+      if (action === "approve" && mode === "review") {
+        if (!req.items.some((it) => state[it.i].choice !== "remove")) {
+          return showMsg("Every item is removed. To turn the whole request down, use Cancel request.");
+        }
+        decision.items = req.items.map((it) => {
+          const s = state[it.i];
+          return { i: it.i, qty: s.qty, remove: s.choice === "remove",
+            grant: s.choice === "grant" ? Math.min(s.grant, gmax(it, s)) : 0 };
+        });
+      }
+      setBusy(true);
+      let res = null;
+      try { res = await call({ op: "save", decision }); } catch (e) { res = null; }
+      setBusy(false);
+      if (!res || res.ok === false) {
+        return showMsg("It couldn't be confirmed whether this saved. Check before trying again.", true);
+      }
+      if (res.problem) {
+        if (PROBLEM[res.problem]) return showState(...PROBLEM[res.problem], PORTAL);
+        if (res.done) return reload();   // shows who handled it
+        return showMsg(res.problem, !!res.changed);
+      }
+      const who = req.requestedBy;
+      const moved = Array.isArray(res.moved) && res.moved.length ? res.moved.join(", ") : "";
+      if (res.action === "cancelled") return showState("Request cancelled", `${who} has been told.`, "<p><small>You can close this page.</small></p>", TICK);
+      if (res.complete) {
+        return showState("Approved", `It's all been moved from JT storage to the Shelf (${moved}), and ${who} has been told.`,
+          "<p><small>You can close this page.</small></p>", TICK);
+      }
+      showState("Approved", `The ordering team has it now${moved ? `, and ${moved} moved from JT storage to the Shelf` : ""}. ${who} has been told.`,
+        "<p><small>You can close this page.</small></p>", TICK);
+    }
+
+    /* ---------- Taps and typing ---------- */
+
+    main.addEventListener("click", (e) => {
+      const el = e.target.closest("[data-mode],[data-go],[data-step],[data-reload]");
+      if (!el) return;
+      if (el.dataset.mode) return setMode(el.dataset.mode);
+      if (el.dataset.go) return save(el.dataset.go);
+      if (el.hasAttribute("data-reload")) return reload();
+      if (el.dataset.step) {
+        const card = el.closest("[data-i]");
+        const i = Number(card.dataset.i), s = state[i];
+        s.qty = Math.min(999, Math.max(1, s.qty + Number(el.dataset.step)));
+        card.querySelector('[data-f="qty"]').value = s.qty;
+        afterQty(i);
+      }
+    });
+
+    main.addEventListener("input", (e) => {
+      const card = e.target.closest("[data-i]");
+      if (!card) return;
+      const i = Number(card.dataset.i), s = state[i];
+      const n = parseInt(e.target.value, 10);
+      if (e.target.dataset.f === "qty" && n >= 1 && n <= 999) { s.qty = n; afterQty(i); }
+      if (e.target.dataset.f === "grant" && n >= 1) { s.grant = n; s.auto = false; updateItem(i); updateSummary(); }
+    });
+
+    main.addEventListener("change", (e) => {
+      const card = e.target.closest("[data-i]");
+      if (!card) return;
+      const i = Number(card.dataset.i), s = state[i], it = item(i);
+      if (e.target.type === "radio") {
+        s.choice = e.target.value;
+        if (s.choice === "grant" && s.auto) s.grant = Math.max(1, gmax(it, s));
+        updateItem(i);
+        updateSummary();
+        return;
+      }
+      if (e.target.dataset.f === "qty") e.target.value = s.qty;
+      if (e.target.dataset.f === "grant") {
+        s.grant = Math.min(Math.max(1, parseInt(e.target.value, 10) || 1), gmax(it, s));
+        e.target.value = s.grant;
+        updateItem(i);
+        updateSummary();
+      }
+    });
+
+    start();
+  </script>
+</body>
+</html>
