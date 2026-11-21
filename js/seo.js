@@ -13,7 +13,7 @@ import { compareHtml } from "./seo-compare.js";
 import { mountSeoSite } from "./seo-site.js";
 import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js";
 import { renderAds, clearAds, loadAds, adsPageHtml, peekAds, adsTotals } from "./seo-ads.js";
-import { loadLeads, peekLeads, clearLeads, leadsPageHtml, leadsTotals, leadsByPage, leadsNoPage } from "./seo-leads.js?v=2";
+import { loadLeads, peekLeads, clearLeads, leadsPageHtml, leadsTotals, leadsByPage, leadsNoPage, leadsRevenue, money } from "./seo-leads.js?v=3";
 import { renderResults } from "./seo-results.js";
 import { renderGbp, clearGbp, loadGbp, peekGbp, gbpTotals, gbpTabHtml } from "./seo-gbp.js";
 import { renderSocial } from "./seo-social.js";
@@ -1031,6 +1031,12 @@ export async function mountSeo(el, opts = {}) {
         lines.push(["flat", `Enquiries with no page known: <strong>${fmtInt(nop.n)}</strong> (${esc(nop.parts.join(", "))})${
           nop.from > r.from ? ` since ${esc(fmtDate(nop.from, false))}, when tracking began` : ""}. They came in another way, so no page gets the credit.`]);
       }
+      const rv = leadsRevenue(r.from, r.to);
+      if (rv && rv.payers) {
+        lines.push(["flat", `Revenue from website enquiries in these dates: <strong>${money(rv.rev)}</strong> so far, from ${fmtInt(rv.payers)} patient${
+          rv.payers === 1 ? "" : "s"}${rv.ads ? ` (${money(rv.ads)} from Google Ads visitors)` : ""} · inc GST, up to 12 months after they enquired.
+          <button class="seo-w-link" type="button" data-tab="pages">See it by page</button>`]);
+      }
 
       // 5d. Google Business Profile in the same dates (once its numbers are loaded)
       const gb = gbpTotals(r.from, r.to);
@@ -1140,6 +1146,8 @@ export async function mountSeo(el, opts = {}) {
   const leadCell = (x, k) => (x && x[k]
     ? `<strong>${fmtInt(x[k])}</strong>${k === "came" && x.enq ? ` <span class="seo-note">${Math.round((x.came / x.enq) * 100)}%</span>` : ""}`
     : `<span class="seo-note">0</span>`);
+  const revOn = () => !!(LM && LM.revenue);
+  const revCell = (x) => (x && x.rev ? `<strong>${money(x.rev)}</strong>` : `<span class="seo-note">$0</span>`);
 
   const COLS = [
     { key: "path",        label: "Page",         get: (p) => p.path },
@@ -1155,6 +1163,11 @@ export async function mountSeo(el, opts = {}) {
       tip: "People who arrived on this page from anywhere, then sent a website enquiry (last 12 months)" },
     { key: "came",        label: "Came in",      get: (p) => (LM ? leadOf(p)?.came || 0 : null),
       tip: "Of those, how many came in for an appointment (and what share of the page's enquiries)" },
+    { key: "rev",         label: "Revenue so far", get: (p) => (revOn() ? leadOf(p)?.rev || 0 : null),
+      tip: "What those people paid from the day they enquired, up to 12 months (invoices, inc GST)" },
+    { key: "revPer",      label: "Per enquiry",  nullsLast: true,
+      get: (p) => { const x = revOn() ? leadOf(p) : null; return x && x.enq ? x.rev / x.enq : null; },
+      tip: "Revenue so far divided by the page's enquiries" },
     { key: "bounce",      label: "Bounce",       get: (p) => pageBounce(p), nullsLast: true },
     { key: "engTime",     label: "Engaged time", get: (p) => pageTime(p), nullsLast: true },
     { key: "weekly",      label: "12 weeks",     get: null },
@@ -1175,7 +1188,8 @@ export async function mountSeo(el, opts = {}) {
       <div class="seo-note" style="margin-top:8px">Last 28 complete days of search data vs the 28 before. Organic sessions and key events from GA4.
         Bounce: visits from Google that left straight away (green up to 45%, red over 65%). Engaged time: per visit.
         Enquiries and Came in: website enquiries from people who arrived on that page, over the last 12 months (from when tracking began).
-        Phone calls and walk-ins aren't counted.</div>`;
+        Phone calls and walk-ins aren't counted. Revenue so far: what those people paid from the day they enquired, up to 12 months,
+        from the invoices (inc GST). It shows once the invoice history is loaded.</div>`;
   }
 
   function renderTable() {
@@ -1216,6 +1230,8 @@ export async function mountSeo(el, opts = {}) {
             <td>${fmtInt(p.m28.conversions)}</td>
             <td>${LM ? leadCell(leadOf(p), "enq") : "—"}</td>
             <td>${LM ? leadCell(leadOf(p), "came") : "—"}</td>
+            <td>${revOn() ? revCell(leadOf(p)) : "—"}</td>
+            <td>${revOn() && leadOf(p)?.enq ? money(leadOf(p).rev / leadOf(p).enq) : "—"}</td>
             <td>${bChip(pageBounce(p), p.eng ? p.eng.c[0] : p.m28.sessions)}</td>
             <td>${fmtDur(pageTime(p))}</td>
             <td>${sparkline(p.weekly)}</td>
