@@ -13,7 +13,7 @@ import { compareHtml } from "./seo-compare.js";
 import { mountSeoSite } from "./seo-site.js";
 import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js";
 import { renderAds, clearAds, loadAds, adsPageHtml, peekAds, adsTotals } from "./seo-ads.js";
-import { loadLeads, peekLeads, clearLeads, leadsPageHtml, leadsTotals, leadsByPage } from "./seo-leads.js";
+import { loadLeads, peekLeads, clearLeads, leadsPageHtml, leadsTotals, leadsByPage, leadsNoPage } from "./seo-leads.js?v=2";
 import { renderResults } from "./seo-results.js";
 import { renderGbp, clearGbp, loadGbp, peekGbp, gbpTotals, gbpTabHtml } from "./seo-gbp.js";
 import { renderSocial } from "./seo-social.js";
@@ -1025,6 +1025,11 @@ export async function mountSeo(el, opts = {}) {
         lines.push([tone, `Enquiries from free search: <strong>${fmtInt(ld.enq)}</strong>${was ? ` (was ${fmtInt(was.enq)})` : ""}${
           ld.other ? ` · Google ${fmtInt(ld.google)}, other ${fmtInt(ld.other)}` : ""} · ${fmtInt(ld.came)} came in${
           ld.top ? ` · most from ${esc(ld.top.path)} (${fmtInt(ld.top.n)})` : ""}`]);
+      }
+      const nop = leadsNoPage(r.from, r.to);
+      if (nop) {
+        lines.push(["flat", `Enquiries with no page known: <strong>${fmtInt(nop.n)}</strong> (${esc(nop.parts.join(", "))})${
+          nop.from > r.from ? ` since ${esc(fmtDate(nop.from, false))}, when tracking began` : ""}. They came in another way, so no page gets the credit.`]);
       }
 
       // 5d. Google Business Profile in the same dates (once its numbers are loaded)
