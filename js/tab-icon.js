@@ -4,7 +4,8 @@ import { db } from "./firebase-config.js";
 import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const KINDS = {
-  notes: { bg: "#16a34a", dot: true },        // consultation notes: a green dot
+  notes: { bg: "#16a34a", dot: true },        // consultation notes: a green dot (Reviewed)
+  notesDraft: { bg: "#eab308", dot: true },   // consultation notes still a Draft: a yellow dot
   recording: { bg: "#dc2626", dot: true },    // recording right now: a red dot
   tx: { bg: "#f97316", bg2: "#c2410c", text: "TxR", label: "TxR" },   // orange, like the Treatment Records cards
   consent: { bg: "#7c3aed", text: "C", label: "Consent" },
@@ -15,6 +16,10 @@ const KINDS = {
 let originals = null;    // the portal's own icon links, put back on other pages
 let shown = "";          // the icon kind showing now
 let wanted = "";         // the title this page asked for ("" = leave the title alone)
+let asked = "";          // the icon the page asked for ("notes" can show as green or yellow)
+
+// Notes: yellow while the tab's name starts with "Draft", green otherwise
+const notesKind = () => (/^\s*draft\b/i.test(wanted || document.title) ? "notesDraft" : "notes");
 const urls = new Map();  // kind → the drawn icon
 
 /* ---------- Drawing ---------- */
@@ -188,6 +193,7 @@ export function setMenuTab(key, svg, label) {
   const kind = `menu:${key}`;
   try {
     if (!urls.has(kind)) urls.set(kind, drawSvgIcon(svg));
+    asked = "";
     if (shown === kind) return;
     shown = kind;
     putIcon(urls.get(kind));
@@ -243,10 +249,12 @@ function keep() {
 
 export function setTabIcon(kind) {
   if (!KINDS[kind]) { resetTabIcon(); return; }
-  if (shown === kind) return;
+  asked = kind;
+  const real = kind === "notes" ? notesKind() : kind;
+  if (shown === real) return;
   try {
-    shown = kind;
-    putIcon(drawIcon(kind));
+    shown = real;
+    putIcon(drawIcon(real));
     keep();
   } catch (err) {
     shown = "";
@@ -255,6 +263,7 @@ export function setTabIcon(kind) {
 }
 
 export function resetTabIcon() {
+  asked = "";
   if (!shown) return;
   shown = "";
   putIcon("");
@@ -266,6 +275,7 @@ export function setTabTitle(text) {
   if (!wanted) return;
   if (document.title !== wanted) document.title = wanted;
   keep();
+  if (asked === "notes") setTabIcon("notes");   // Draft → Reviewed: the dot changes colour with the name
 }
 
 // Page change: stop holding, and go back to the usual title
