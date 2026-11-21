@@ -21,7 +21,7 @@ import { highlightRecord, openDeleteRecordDialog } from "./records-view.js";
 import { formTitleHtml } from "./form-fields.js";
 import { hydrateBankImages } from "./image-bank-api.js";
 import { attachAnnotators } from "./form-annotate.js";
-import { bankImageTry, bankFailHtml } from "./image-bank-api.js";
+import { bankImage, bankFailHtml } from "./image-bank-api.js";
 import { mountAftercareField } from "./aftercare-field.js";
 import { mountPhotoField } from "./photo-field.js";
 import { mountConsumablesField, consumablesViewHtml } from "./consumables-field.js";
@@ -432,7 +432,7 @@ function showSavedViews(sheet, fields, sub, staff) {
       if (sum && fig) fig.insertAdjacentHTML("beforeend", `<p class="an-sum">${esc(sum)}</p>`);
       const box = w.querySelector("[data-annot-img]");
       if (box) {
-        bankImage(f.fileId)
+        bankImageTry(f.fileId)
           .then((src) => {
             if (box.isConnected) box.innerHTML = `<span class="an-view"><img src="${esc(src)}" alt="" />${
               PNG_RE.test(saved.drawing || "") ? `<img class="an-over" src="${esc(saved.drawing)}" alt="Markings" />` : ""}</span>`;
@@ -1866,7 +1866,7 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
         const box = w.querySelector("[data-annot-img]");
         const drawing = PNG_RE.test(saved.drawing || "") ? saved.drawing : "";
         if (box) {
-          bankImage(f.fileId)
+          bankImageTry(f.fileId)
             .then((src) => {
               if (box.isConnected) box.innerHTML = `<span class="an-view"><img src="${esc(src)}" alt="" />${
                 drawing ? `<img class="an-over" src="${esc(drawing)}" alt="Markings" />` : ""}</span>`;
