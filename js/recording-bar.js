@@ -3,7 +3,7 @@
 import {
   subscribe, getState, startRecording, pauseRecording, resumeRecording, completeRecording, cancelRecording,
   uploadNow, retryProcessing, discardJob, dismissJob, markAnnounced, checkForUnfinished,
-  checkContinuation, unpark,
+  checkContinuation, unpark, setJoin,
 } from "./recorder.js";
 import { escapeHtml, showToast, getInitials, hueFromString } from "./utils.js";
 import { showSoapPanel } from "./soap-panel.js";
@@ -16,6 +16,8 @@ const ICONS = {
   play: svg('<polygon points="5 3 19 12 5 21 5 3"/>'),
   check: svg('<polyline points="20 6 9 17 4 12"/>'),
   upload: svg('<polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/>'),
+  link: svg('<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>'),
+  plus: svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/>'),
 };
 
 let bar = null;
@@ -25,6 +27,7 @@ let context = null;   // the patient page currently open
 let lastKey = "";
 let lastJobSig = "";
 const toasted = new Set();   // "notes ready" toasts already shown
+let lastToggle = 0;          // when Pause or Resume was last pressed
 
 const fmt = (ms) => {
   const total = Math.floor((ms || 0) / 1000);
@@ -193,7 +196,14 @@ function clearDone() {
 }
 
 /* ===================== Drawing ===================== */
-
+// Joining the earlier notes, or new notes: switchable until Complete appointment
+function joinSwitch(L) {
+  if (!L.offer) return "";
+  const at = L.offer.time ? `the ${escapeHtml(L.offer.time)} notes` : "the earlier notes";
+  return L.continuesId
+    ? `<span class="rec-join">${ICONS.link}Joining ${at} <button type="button" class="rec-link" data-rec="separate">Make separate</button></span>`
+    : `<span class="rec-join is-new">New notes <button type="button" class="rec-link" data-rec="join">Join ${at}</button></span>`;
+}
 function liveParts(L, remote) {
   if (L.status === "idle") {
     const sameOne = remote && context && remote.patient && remote.patient.id === context.id;
@@ -210,14 +220,13 @@ function liveParts(L, remote) {
     const name = escapeHtml(context.name);
     const joins = cont ? (ci.time ? `the ${escapeHtml(ci.time)} recording` : "today's recording") : "";
     const title = other
-      ? `Pauses ${escapeHtml(other)}'s recording (it's saved and can be continued), then ${cont ? `continues ${name}'s appointment` : `records ${name}`}`
-      : cont ? `Records ${name} again. It joins ${joins} (${fmt(ci.ms)} so far), so it's one set of notes.`
+      ? `Pauses ${escapeHtml(other)}'s recording (it's saved and can be continued), then records ${name}`
+      : cont ? `${name} was recorded earlier today (${joins}, ${fmt(ci.ms)}). You'll choose whether this continues it or starts new notes.`
       : ci && ci.reviewed ? `Today's notes for ${name} are signed off, so this makes a new set of notes.`
       : `Opens a new tab to record ${name}'s appointment`;
-    const note = other ? `${escapeHtml(firstName(other))} continues later` : cont ? `${fmt(ci.ms)} so far` : "";
-    return { cls: "", html: "", top: `<button type="button" class="tb-rec-btn${cont ? " is-continue" : ""}" data-rec="start" title="${title}">${
-      cont ? ICONS.play : ICONS.mic}<span>${cont ? "Continue appointment" : "Start appointment"}</span>${
-      note ? `<em class="tb-rec-note">${note}</em>` : ""}</button>` };
+    const note = other ? `${escapeHtml(firstName(other))} continues later` : cont ? "recorded earlier today" : "";
+    return { cls: "", html: "", top: `<button type="button" class="tb-rec-btn" data-rec="start" title="${title}">${
+      ICONS.mic}<span>Start appointment</span>${note ? `<em class="tb-rec-note">${note}</em>` : ""}</button>` };
   }
   const chip = patientChip(L.patient);
   const warn = otherPatientWarning(L);
@@ -238,6 +247,7 @@ function liveParts(L, remote) {
       ${chip}
       <span class="rec-timer">${fmt(L.elapsedMs)}</span>${prior
         ? `<span class="rec-prior" title="Recorded earlier today. This part joins the same notes.">+ ${fmt(prior)} earlier</span>` : ""}
+      ${joinSwitch(L)}
       ${warn}
       <span class="rec-actions">
         ${paused
@@ -325,7 +335,7 @@ function render(s) {
   const jobSig = s.jobs.map((j) => `${j.recId}:${j.status}`).join(",");
   if (jobSig !== lastJobSig) { lastJobSig = jobSig; contCache.clear(); }
 
-  const key = [L.status, L.recId, L.continuesId, L.priorMs, context && context.id,
+  const key = [L.status, L.recId, L.continuesId, L.priorMs, L.offer ? L.offer.id : "", context && context.id,
     s.remote ? `${s.remote.recId}:${s.remote.status}` : "",
     (s.parked || []).map((p) => `${p.patient.id}:${p.elapsedMs}`).join(","),
     context ? JSON.stringify(contKnown(context)) : "",
@@ -373,29 +383,97 @@ function openPatient(p) {
   else location.hash = target;
 }
 
-// Records a patient (or continues their appointment): in the Consultation tab, or here if pop-ups are blocked.
-// Nothing is awaited before window.open, so the browser still lets the tab open.
-async function startFor(patient, btn) {
+// Records a patient: in the Consultation tab, or here if pop-ups are blocked.
+// Recorded earlier today (still a Draft): they choose to continue those notes or start new ones.
+// direct: the paused list's Continue, which always continues.
+function startFor(patient, btn, { direct = false } = {}) {
   const rem = getState().remote;
   if (rem && rem.patient && rem.patient.id === patient.id) {
     showToast(`${patient.name}'s appointment is already recording in another tab.`);
     return;
   }
   const ci = contKnown(patient);
-  if (ci && ci.id && ci.edited && !confirm(`${patient.name}'s notes from earlier today were edited${
-    ci.editedBy ? ` by ${ci.editedBy}` : ""}. Continuing writes them again from both recordings, and the edited version is kept as the previous notes.\n\nContinue the appointment?`)) return;
+  const parked = (getState().parked || []).find((p) => p.patient.id === patient.id);
+  // Paused for another patient: that's the appointment to continue (it may not be on the server yet)
+  const offer = parked && parked.recId
+    ? Object.assign({ id: parked.recId, ms: parked.elapsedMs || 0, time: "" },
+        ci && ci.id === parked.recId
+          ? { ms: Math.max(ci.ms || 0, parked.elapsedMs || 0), time: ci.time, edited: ci.edited, editedBy: ci.editedBy } : {})
+    : ci && ci.id ? ci : null;
+  if (!offer) { openConsult(patient, null, btn); return; }
+  if (direct) {
+    if (offer.edited && !confirm(`${patient.name}'s notes from earlier today were edited${
+      offer.editedBy ? ` by ${offer.editedBy}` : ""}. Continuing writes them again from both recordings, and the edited version is kept as the previous notes.\n\nContinue the appointment?`)) return;
+    openConsult(patient, { join: true, offer }, btn);
+    return;
+  }
+  chooseJoin(patient, offer, (join) => openConsult(patient, { join, offer }, btn));
+}
 
-  const url = `${location.href.split("#")[0]}#/consult/new/${encodeURIComponent(patient.id)}`;
+// Opens the Consultation tab. Called straight from a click (nothing awaited first), so the browser lets the tab open.
+function openConsult(patient, choice, btn) {
+  const o = choice && choice.offer;
+  const tail = o ? `/${choice.join ? "join" : "new"}/${encodeURIComponent(o.id)}/${Math.round(o.ms || 0)}/${encodeURIComponent(o.time || "")}` : "";
+  const url = `${location.href.split("#")[0]}#/consult/new/${encodeURIComponent(patient.id)}${tail}`;
   if (window.open(url, "_blank")) return;   // the Consultation tab records it (and pauses the other one)
-  // Pop-ups blocked: record in this tab, as before
+  // Pop-ups blocked: record in this tab
   if (btn) btn.disabled = true;
-  const res = await startRecording(patient, staff, {
-    takeOver: true, continuesId: (ci && ci.id) || "", priorMs: (ci && ci.ms) || 0,
+  const join = !!(choice && choice.join);
+  startRecording(patient, staff, {
+    takeOver: true, continuesId: join ? o.id : "", priorMs: join ? o.ms || 0 : 0, separate: !join, offer: o || null,
+  }).then((res) => {
+    showToast(res && res.stopped
+      ? `${res.stopped.name}'s recording is paused and saved. ${patient.name}'s is recording now.`
+      : join ? `Continuing ${patient.name}'s appointment in this tab (pop-ups are blocked).`
+      : "Pop-ups are blocked, so this appointment is recording in this tab.");
+  }).catch((err) => {
+    console.error("Recording didn't start:", err);
+    showToast(err && err.name === "NotAllowedError"
+      ? "Microphone access was blocked. Click the lock icon in the address bar and allow the microphone."
+      : err && err.name === "NotFoundError" ? "No microphone found. Plug one in and try again."
+      : (err && err.message) || "Couldn't start recording.");
+  }).finally(() => { if (btn) btn.disabled = false; lastKey = ""; render(getState()); });
+}
+
+// The choice: continue the earlier appointment, or start a new one. pick(join) runs inside the click.
+function chooseJoin(patient, ci, pick) {
+  document.querySelectorAll(".cj-back").forEach((el) => el.remove());
+  const back = document.createElement("div");
+  back.className = "cj-back";
+  const time = ci.time ? escapeHtml(ci.time) : "";
+  back.innerHTML = `<div class="cj" role="dialog" aria-modal="true" aria-labelledby="cj-title">
+    <button type="button" class="cj-x" data-cj="close" aria-label="Cancel">×</button>
+    <div class="cj-head">
+      <span class="rec-av" style="--h:${hueFromString(patient.name)}">${escapeHtml(getInitials(patient.name))}</span>
+      <div><h3 id="cj-title">${escapeHtml(patient.name)} was recorded earlier today</h3>
+        <p>${time ? `${time} · ` : ""}${fmt(ci.ms)} recorded · Draft notes</p></div>
+    </div>
+    <p class="cj-q">Is this the same appointment, or a new one?</p>
+    <div class="cj-opts">
+      <button type="button" class="cj-opt is-main" data-cj="join">${ICONS.link}
+        <strong>Continue the ${time || "earlier"} appointment</strong>
+        <span>One set of notes, written again from both recordings.${ci.edited
+          ? ` The edited notes${ci.editedBy ? ` (by ${escapeHtml(ci.editedBy)})` : ""} are kept as the previous version.` : ""}</span>
+        <em>Continue</em></button>
+      <button type="button" class="cj-opt" data-cj="new">${ICONS.plus}
+        <strong>Start a new appointment</strong>
+        <span>Separate notes. The ${time ? `${time} ` : "earlier "}notes stay as they are.</span>
+        <em>Keep separate</em></button>
+    </div>
+    <p class="cj-foot">You can change this while recording, until you press Complete appointment.</p>
+  </div>`;
+  const close = () => { back.remove(); document.removeEventListener("keydown", onKey); };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  back.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-cj]");
+    if (e.target === back || (b && b.dataset.cj === "close")) { close(); return; }
+    if (!b) return;
+    close();
+    pick(b.dataset.cj === "join");
   });
-  showToast(res && res.stopped
-    ? `${res.stopped.name}'s recording is paused and saved. ${patient.name}'s is recording now.`
-    : res && res.continues ? `Continuing ${patient.name}'s appointment in this tab (pop-ups are blocked).`
-    : "Pop-ups are blocked, so this appointment is recording in this tab.");
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(back);
+  back.querySelector('[data-cj="join"]').focus();
 }
 
 async function onClick(e) {
@@ -408,17 +486,22 @@ async function onClick(e) {
 
   try {
     if (action === "start") {
-      if (context) await startFor(context, btn);
+      if (context) startFor(context, btn);
     } else if (action === "park-continue") {
-      if (parked) await startFor(parked.patient, btn);
+      if (parked) startFor(parked.patient, btn, { direct: true });
     } else if (action === "park-open") {
       if (parked) openPatient(parked.patient);
     } else if (action === "park-dismiss") {
       unpark(id);
-    } else if (action === "pause") {
-      pauseRecording();
-    } else if (action === "resume") {
-      resumeRecording();
+    } else if (action === "join" || action === "separate") {
+      if (!setJoin(action === "join")) showToast("That can't be changed now.");
+    } else if (action === "pause" || action === "resume") {
+      if (Date.now() - lastToggle < 900) return;   // a quick second tap mustn't undo the first
+      lastToggle = Date.now();
+      if (action === "pause") pauseRecording(); else resumeRecording();
+      if (getState().live.status !== (action === "pause" ? "paused" : "recording")) {
+        showToast(action === "pause" ? "The recording didn't pause. Try Pause again." : "The recording didn't resume. Try Resume again.");
+      }
     } else if (action === "complete") {
       if (!confirm("Complete this appointment? The recording uploads in the background.")) return;
       await completeRecording();

@@ -7,6 +7,7 @@ const KINDS = {
   notes: { bg: "#16a34a", dot: true },        // consultation notes: a green dot (Reviewed)
   notesDraft: { bg: "#eab308", dot: true },   // consultation notes still a Draft: a yellow dot
   recording: { bg: "#dc2626", dot: true },    // recording right now: a red dot
+  recPaused: { bg: "#d97706", dot: true },    // recording paused: an amber dot
   tx: { bg: "#f97316", bg2: "#c2410c", text: "TxR", label: "TxR" },   // orange, like the Treatment Records cards
   consent: { bg: "#7c3aed", text: "C", label: "Consent" },
   rx: { bg: "#db2777", text: "Rx", label: "Rx" },

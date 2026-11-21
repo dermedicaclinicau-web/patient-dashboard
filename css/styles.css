@@ -14083,3 +14083,43 @@ body.scan-full { overflow: hidden; }
 .pe-start { display: grid; gap: 8px; margin-top: 10px; }
 .pe-start-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .pe-start-m { max-width: 190px; }
+
+/* Consultation tab: paused */
+.cs-paused { margin: 0 0 .9rem; padding: .75rem 1rem; border: 1px solid #fde68a; border-radius: 12px;
+  background: #fffbeb; color: #92400e; font-size: .95rem; }
+
+  /* Same patient again today: continue or start new */
+.cj-back { position: fixed; inset: 0; z-index: 1200; display: flex; align-items: center; justify-content: center;
+  padding: 16px; background: rgba(15, 23, 42, .45); }
+.cj { position: relative; width: 100%; max-width: 540px; padding: 20px 22px; border-radius: 16px; background: #fff;
+  box-shadow: 0 20px 50px rgba(15, 23, 42, .25); }
+.cj-head { display: flex; align-items: center; gap: 12px; padding-right: 24px; }
+.cj-head h3 { margin: 0; font-size: 1.05rem; }
+.cj-head p { margin: 2px 0 0; font-size: .85rem; color: #64748b; }
+.cj-q { margin: 14px 0 12px; color: #475569; }
+.cj-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.cj-opt { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 14px; text-align: left;
+  border: 1px solid #cbd5e1; border-radius: 12px; background: #fff; color: #1e293b; font: inherit; cursor: pointer; }
+.cj-opt svg { width: 20px; height: 20px; color: #64748b; }
+.cj-opt span { flex: 1; font-size: .85rem; line-height: 1.4; color: #64748b; }
+.cj-opt em { align-self: stretch; margin-top: 6px; padding: 8px; border: 1px solid #cbd5e1; border-radius: 8px;
+  font-style: normal; font-weight: 600; text-align: center; }
+.cj-opt:hover { border-color: #0F766E; }
+.cj-opt:focus-visible { outline: 3px solid #99f6e4; outline-offset: 2px; }
+.cj-opt.is-main { border: 2px solid #0F766E; background: #f0fdfa; }
+.cj-opt.is-main svg, .cj-opt.is-main span { color: #0f6e56; }
+.cj-opt.is-main em { border-color: #0F766E; background: #0F766E; color: #fff; }
+.cj-foot { margin: 12px 0 0; font-size: .8rem; color: #94a3b8; text-align: center; }
+.cj-x { position: absolute; top: 10px; right: 12px; border: 0; background: none; font-size: 1.4rem; color: #94a3b8; cursor: pointer; }
+@media (max-width: 560px) { .cj-opts { grid-template-columns: 1fr; } }
+
+.cs-join { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 .9rem; padding: .6rem .9rem;
+  border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc; }
+.cs-join.is-join { border-color: #99f6e4; background: #f0fdfa; }
+.cs-join-chip { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 999px; background: #e2e8f0;
+  color: #334155; font-size: .85rem; font-weight: 600; }
+.cs-join.is-join .cs-join-chip { background: #ccfbf1; color: #115e59; }
+.cs-join .muted { flex: 1; font-size: .85rem; }
+.rec-join { display: inline-flex; align-items: center; gap: 6px; font-size: .8rem; color: #115e59; }
+.rec-join svg { width: 14px; height: 14px; }
+.rec-join.is-new { color: #475569; }

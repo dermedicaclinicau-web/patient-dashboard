@@ -1,7 +1,7 @@
 // The Consultation tab: opened by Start appointment. Records here, then shows the notes as soon as they're written.
 import {
   subscribe, getState, startRecording, pauseRecording, resumeRecording, completeRecording, cancelRecording,
-  uploadNow, retryProcessing, discardJob, markAnnounced,
+  uploadNow, retryProcessing, discardJob, markAnnounced, setJoin,
 } from "./recorder.js";
 import { setRecordingPatient } from "./recording-bar.js";
 import { getPatient } from "./patients.js";
@@ -30,6 +30,22 @@ const micText = (err) => (err && err.name === "NotAllowedError"
   : (err && err.message) || "Couldn't start the recording.");
 const stateHtml = (title, text, btn = "") =>
   `<div class="cs-state"><strong>${esc(title)}</strong>${text ? `<p>${esc(text)}</p>` : ""}${btn}</div>`;
+
+const REC_ID_RE = /^REC-[A-Z0-9-]{6,40}$/;
+// Joining the earlier notes, or new notes: switchable until Complete appointment
+const joinHtml = (L) => {
+  if (!L.offer || L.status === "stopping") return "";
+  const at = L.offer.time ? `the ${esc(L.offer.time)} notes` : "the earlier notes";
+  return L.continuesId
+    ? `<div class="cs-join is-join"><span class="cs-join-chip">Joining ${at}</span>
+        <span class="muted">One set of notes, written again from both recordings.</span>
+        <button type="button" class="lh-btn is-quiet" data-cs="separate">Make separate</button></div>`
+    : `<div class="cs-join"><span class="cs-join-chip">New notes</span>
+        <span class="muted">${L.offer.time ? `The ${esc(L.offer.time)}` : "The earlier"} notes stay as they are.</span>
+        <button type="button" class="lh-btn is-quiet" data-cs="join">Join ${at}</button></div>`;
+};
+
+
 // The patient's profile: same route the patient list opens ("" if we don't know which patient it is)
 const profileHref = (p) => (p && p.id ? `#/patient/${encodeURIComponent(p.id)}` : "");
 
@@ -45,8 +61,12 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
 
   document.body.classList.add("is-consult");   // hides the recording bar: this page has its own controls
   setRecordingPatient(null);
-  const [first = "", second = ""] = String(param || "").split("/");
+  // #/consult/new/<patient>/<join|new>/<earlier recording>/<ms>/<time>
+  const [first = "", second = "", mode = "", offId = "", offMs = "", offTime = ""] = String(param || "").split("/");
   const newFor = first === "new" ? decodeURIComponent(second) : "";
+  const offer = REC_ID_RE.test(decodeURIComponent(offId))
+    ? { id: decodeURIComponent(offId), ms: Number(offMs) || 0, time: decodeURIComponent(offTime || "") } : null;
+  const joinChosen = mode === "join" && !!offer;
   let recId = first === "new" ? "" : decodeURIComponent(first);
   let patient = null;        // { id, pttId, name }
   let server = null;         // this recording as the server sees it, when this tab isn't looking after it
@@ -168,7 +188,8 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
         : stateHtml("Starting the recording…", "Allow the microphone if your browser asks.");
     }
     if (v.kind === "live") {
-      return `${replaced ? `<div class="cs-switch">Stopped recording of <strong>${esc(replaced)}</strong>. It's saved, and its notes
+      return `${joinHtml(v.L)}${v.L.status === "paused" ? `<div class="cs-paused" role="status"><strong>Paused.</strong>
+          Nothing is being recorded. Press <strong>Resume</strong> to carry on.</div>` : ""}${replaced ? `<div class="cs-switch">Stopped recording of <strong>${esc(replaced)}</strong>. It's saved, and its notes
           are being written in its own tab. <strong>${esc((patient && patient.name) || "This patient")}</strong>'s recording is now running.</div>` : ""}
         <p class="cs-note">Talk as normal. When the appointment ends, press <strong>Complete appointment</strong>.
           The notes are written and appear in this tab.</p>${grid("Writes itself when you press Complete appointment.", false)}`;
@@ -198,7 +219,8 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
   // Only the numbers that change every second (the page isn't redrawn for these)
   function tick(s, v) {
     const name = (patient && patient.name) || "Consultation";
-    setTabIcon(v.kind === "live" && s.live.status !== "stopping" ? "recording" : "notes");   // red while recording
+    const rec = v.kind === "live" && s.live.status !== "stopping";
+    setTabIcon(rec ? (s.live.status === "paused" ? "recPaused" : "recording") : "notes");   // red recording, amber paused
     if (v.kind === "live") {
       const txt = fmt(s.live.elapsedMs);
       const t = root.querySelector('[data-role="time"]');
@@ -218,7 +240,8 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
     const v = viewOf(s);
     if (v.kind === "lookup") watchServer();
     if (!patient) patient = (v.L && v.L.patient) || (v.j && v.j.patient) || null;
-    const key = [v.kind, v.L && v.L.status, v.j && v.j.status, v.j && v.j.stage, v.j && v.j.transcriptId,
+    const key = [v.kind, v.L && v.L.status, v.L && v.L.continuesId, v.L && v.L.offer && v.L.offer.id,
+      v.j && v.j.status, v.j && v.j.stage, v.j && v.j.transcriptId,
       starting, startError, patient && patient.name, patient && patient.id, s.remote ? s.remote.recId : ""].join("|");
     if (key !== lastKey) {
       lastKey = key;
@@ -244,7 +267,11 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
       const p = await getPatient(newFor);
       if (!p) throw new Error("That patient couldn't be found.");
       patient = { id: p.id, pttId: p.pttId || "", name: p.name };
-      const res = await startRecording(p, me(), { takeOver: true });
+      // Joins only when they chose Continue. Otherwise new notes (the switch can still join them)
+      const res = await startRecording(p, me(), {
+        takeOver: true, continuesId: joinChosen ? offer.id : "", priorMs: joinChosen ? offer.ms : 0,
+        separate: !joinChosen, offer,
+      });
       recId = (res && res.recId) || getState().live.recId;
       if (res && res.stopped) {
         replaced = res.stopped.name || "the other patient";
@@ -259,13 +286,22 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
     draw(getState());
   }
 
+  let lastToggle = 0;   // Pause and Resume sit in the same spot: a quick second tap mustn't undo the first
   root.addEventListener("click", async (e) => {
     const b = e.target.closest("[data-cs]");
     if (!b || b.disabled) return;
     const a = b.dataset.cs;
+    if (a === "pause" || a === "resume") {
+      if (Date.now() - lastToggle < 900) return;
+      lastToggle = Date.now();
+    }
     try {
       if (a === "pause") pauseRecording();
       else if (a === "resume") resumeRecording();
+      else if (a === "join" || a === "separate") {
+        if (!setJoin(a === "join")) showToast("That can't be changed now.");
+        else showToast(a === "join" ? "This recording now joins the earlier notes." : "This recording now makes its own notes.");
+      }
       else if (a === "complete") {
         if (await confirmDialog({
           title: "Complete this appointment?",
