@@ -4,16 +4,62 @@ import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, updateDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 /* ---------- Hand-over from the patient page to the builder ---------- */
+// localStorage, so it reaches the builder's new tab. Taken once, and only within 10 minutes.
 const KEY = "dm.sspIntent";
+const TAB = "dm-ssp";   // the builder's tab name, when the patient page opened it
 
 // { mode: "edit" | "copy", patientId, recordId?, items?, fromDate? }
 export function setSspIntent(x) {
-  try { sessionStorage.setItem(KEY, JSON.stringify({ ...x, at: Date.now() })); } catch { /* private mode */ }
+  try { localStorage.setItem(KEY, JSON.stringify({ ...x, at: Date.now() })); } catch { /* private mode */ }
 }
 export function takeSspIntent(patientId) {
   let x = null;
-  try { x = JSON.parse(sessionStorage.getItem(KEY) || "null"); sessionStorage.removeItem(KEY); } catch { return null; }
-  return x && x.patientId === patientId && Date.now() - Number(x.at || 0) < 10 * 60000 ? x : null;
+  try { x = JSON.parse(localStorage.getItem(KEY) || "null"); } catch { return null; }
+  if (!x || x.patientId !== patientId) return null;   // another patient's: left for its own tab
+  try { localStorage.removeItem(KEY); } catch { /* ignore */ }
+  return Date.now() - Number(x.at || 0) < 10 * 60000 ? x : null;
+}
+
+// Opens the builder in a new tab (Edit, Duplicate or New SSP). Pop-ups blocked: in this tab instead.
+// Call it straight from the click, so the browser allows the tab.
+export function openSspBuilder(patientId, intent = null) {
+  if (intent) setSspIntent({ ...intent, patientId });
+  else { try { localStorage.removeItem(KEY); } catch { /* ignore */ } }   // New SSP: nothing left over from an earlier Edit
+  const hash = `#/ssp/new/${encodeURIComponent(patientId)}`;
+  const w = window.open(location.href.split("#")[0] + hash, `${TAB}:${Date.now()}`);
+  if (w) { try { w.focus(); } catch { /* ignore */ } return true; }
+  location.hash = hash;
+  return false;
+}
+// For a click that has to save something first: the tab opens straight away (so the browser allows it)
+// and goes to the builder once the protocol is saved. → { go(intent), cancel() }
+export function reserveSspTab(patientId) {
+  const hash = `#/ssp/new/${encodeURIComponent(patientId)}`;
+  const w = window.open("", `${TAB}:${Date.now()}`);
+  if (w) { try { w.document.title = "Opening…"; w.document.body.textContent = "Opening the Skin Script…"; } catch { /* ignore */ } }
+  return {
+    go(intent) {
+      setSspIntent({ ...intent, patientId });
+      if (w && !w.closed) { w.location.href = location.href.split("#")[0] + hash; try { w.focus(); } catch { /* ignore */ } }
+      else location.hash = hash;   // pop-ups blocked: this tab
+    },
+    cancel() { if (w && !w.closed) w.close(); },
+  };
+}
+export const inSspTab = () => String(window.name || "").startsWith(`${TAB}:`);
+
+// Saved in the builder: the patient page (in another tab) loads its protocols again
+const CH = "dm-ssp";
+export function announceSspSaved(patientId) {
+  try { const bc = new BroadcastChannel(CH); bc.postMessage({ type: "ssp-saved", patientId }); bc.close(); } catch { /* not supported */ }
+}
+export function onSspSaved(fn) {
+  let bc = null;
+  try {
+    bc = new BroadcastChannel(CH);
+    bc.onmessage = (e) => { if (e.data && e.data.type === "ssp-saved") fn(e.data); };
+  } catch { bc = null; }
+  return () => { if (bc) bc.close(); };
 }
 
 /* ---------- What changed ---------- */

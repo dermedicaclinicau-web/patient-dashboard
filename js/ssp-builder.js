@@ -7,7 +7,8 @@ import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 import { openSspPreview } from "./ssp-send.js";
 import { getSspSettings, openSspSettings, SSP_DEFAULTS } from "./ssp-settings.js";
-import { takeSspIntent, updateSspRecord, describeSspChanges } from "./ssp-edit.js";
+import { takeSspIntent, updateSspRecord, describeSspChanges, inSspTab, announceSspSaved } from "./ssp-edit.js";
+import { setTabTitle } from "./tab-icon.js";
 import { callApi } from "./appointments.js";
 import { sspShelfStock } from "./ssp-stock.js";
 
@@ -58,7 +59,8 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
   }
   if (!root.isConnected) return;
   if (!patient) { fail("Patient not found", "Go back to the patient list and try again."); return; }
-
+  setTabTitle(`Skin Script · ${patient.name}`);
+  const ownTab = inSspTab();   // opened from the patient page in a new tab
   const VALID_MONTHS = settings.validMonths || 3;
   let savedRecord = null; // once saved (from Save or from the preview)
   let stock = null;       // Skin Script product id → its Shelf stock in Inventory (null until loaded)
@@ -185,7 +187,20 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
   const msgEl = $('[data-role="msg"]');
   const countEl = $('[data-role="count"]');
   const banner = $('[data-role="banner"]');
-
+  // Done: tell the patient page, then close this tab (or go back to the patient if it's the usual tab)
+  function finish() {
+    announceSspSaved(patient.id);
+    if (!ownTab) { location.hash = backHref; return; }
+    window.close();
+    setTimeout(() => { if (root.isConnected) location.hash = backHref; }, 400);   // the browser wouldn't close it
+  }
+  // In its own tab: Cancel and Back close it, rather than opening the patient a second time
+  if (ownTab) root.addEventListener("click", (e) => {
+    if (!e.target.closest('a[href^="#/patient/"]')) return;
+    e.preventDefault();
+    window.close();
+    setTimeout(() => { if (root.isConnected) location.hash = backHref; }, 400);
+  });
   /* ---------- Drawing ---------- */
   function rowHtml(r) {
     const p = productMap.get(r.productId);
@@ -532,7 +547,7 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
 
   async function save() {
     if (saving) return;
-    if (savedRecord) { location.hash = backHref; return; }
+    if (savedRecord) { finish(); return; }
     saving = true;
     msgEl.textContent = "";
     const btn = $('[data-act="save"]');
@@ -544,7 +559,7 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
       showToast(editing
         ? "Skin Script Protocol updated"
         : `Skin Script Protocol saved (${rec.items.length} product${rec.items.length === 1 ? "" : "s"})`);
-      location.hash = backHref;
+      finish();
     } catch (err) {
       console.error("SSP save failed:", err);
       msgEl.textContent = err.message;
@@ -567,7 +582,7 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
       patient, staff,
       onSave: savedRecord ? null : doSave,
     });
-    if (res && res.saved) location.hash = backHref; // saved from the preview: back to the patient
+    if (res && res.saved) finish(); // saved from the preview: back to the patient
   }
 
   /* ---------- Start ---------- */

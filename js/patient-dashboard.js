@@ -47,7 +47,7 @@ import { listTaskTypes } from "./task-types.js";
 import { startPageCache, stopPageCache, clearPageCache } from "./page-cache.js";
 import { openPasteNotes } from "./paste-notes.js";
 import { loadTagLib, tagChipsHtml, openTagPicker } from "./patient-tags.js";
-
+import { openSspBuilder } from "./ssp-edit.js";
 /* ===================== Config ===================== */
 
 const DOC_ACTIONS = [
@@ -241,8 +241,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     if (!b || !root.contains(b) || !patient) return;
     e.preventDefault();
     e.stopPropagation();
-    const hash = `#/ssp/new/${encodeURIComponent(patient.id)}`;
-    if (!window.open(`${location.href.split("#")[0]}${hash}`, "_blank")) location.hash = hash;   // pop-ups blocked: same tab
+    openSspBuilder(patient.id);   // a new tab that closes after saving (pop-ups blocked: this tab)
   }, true);
   root.addEventListener("click", (e) => {
     const t = e.target;

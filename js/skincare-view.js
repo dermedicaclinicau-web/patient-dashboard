@@ -4,7 +4,7 @@ import { listSspRecords, createSspRecord } from "./ssp-api.js";
 import { openSspPreview, emailSspRecord } from "./ssp-send.js";
 import { getSspSettings } from "./ssp-settings.js";
 import { patientIds } from "./patients.js";
-import { setSspIntent } from "./ssp-edit.js";
+import { openSspBuilder, reserveSspTab, onSspSaved } from "./ssp-edit.js";
 import { confirmDialog } from "./dialog.js";
 import { can } from "./perms.js";
 
@@ -286,31 +286,36 @@ export function mountSkincare(root, patient, staff = null) {
       renderPurchases();
       return;
     }
-    // Edit (portal protocols) / Duplicate (any protocol): open the builder with it filled in
+    // Edit (portal protocols) / Duplicate (any protocol): the builder opens in a new tab with it filled in
     const ed = e.target.closest("[data-sk-ed]");
     if (ed) {
       const p = data && data.protocols[Number(ed.dataset.idx)];
-      if (!p) return;
+      if (!p || ed.disabled) return;
       if (ed.dataset.skEd === "edit" && p.portal) {
-        setSspIntent({ mode: "edit", patientId: patient.id, recordId: p.portal.id });
+        openSspBuilder(patient.id, { mode: "edit", recordId: p.portal.id });
       } else if (ed.dataset.skEd === "edit") {
-        // Old protocol from the sheet: saved into the portal once (same record ID and date), then edited there
+        // Old protocol from the sheet: saved into the portal once (same record ID and date), then edited there.
+        // The tab opens now, while it's still the click, and moves to the builder once it's saved.
+        const tab = reserveSspTab(patient.id);
         busyBtn(ed, async () => {
-          const rec = await sheetRecord(p, patient);
-          const id = await createSspRecord(rec, staff);
-          setSspIntent({ mode: "edit", patientId: patient.id, recordId: id });
-          location.hash = `#/ssp/new/${encodeURIComponent(patient.id)}`;
+          try {
+            const rec = await sheetRecord(p, patient);
+            const id = await createSspRecord(rec, staff);
+            tab.go({ mode: "edit", recordId: id });
+            if (grid.isConnected) load(true);   // it's a portal protocol now
+          } catch (err) {
+            tab.cancel();
+            throw err;   // busyBtn shows the message
+          }
         });
-        return;
       } else {
-        setSspIntent({
-          mode: "copy", patientId: patient.id,
+        openSspBuilder(patient.id, {
+          mode: "copy",
           recordId: p.portal ? p.portal.id : "",
           items: p.portal ? null : sheetItems(p),
           fromDate: p.date || p.dateText || "",
         });
       }
-      location.hash = `#/ssp/new/${encodeURIComponent(patient.id)}`;
       return;
     }
     // Email / Print on an older protocol from the sheet: saved into the portal once, then sent
@@ -346,7 +351,13 @@ export function mountSkincare(root, patient, staff = null) {
       });
     }
   });
-
+  // A protocol saved in the builder's tab: show it here, without pressing Refresh
+  const offSaved = onSspSaved((m) => {
+    if (!grid.isConnected) { offSaved(); return; }
+    if (m.patientId !== patient.id) return;
+    load(true);
+    showToast("Skin Script saved. The list has been updated.");
+  });
   // Counts on the collapsed bars: load quietly once the page has drawn
   syncHead();
   if (sspCard.open) load();
