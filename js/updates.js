@@ -29,7 +29,7 @@ async function refreshNow(v, auto = false) {
   }
   const files = Array.isArray(v && v.files) ? v.files : [];
   // Automatic refreshes wait up to 2 minutes at random, so the clinic's computers don't all go at once
-  await freshReload(files, { jitterMs: auto ? 120000 : 0 });
+  await freshReload(files, { jitterMs: auto ? 600000 : 0 });   // idle computers spread over 10 minutes
 }
 
 function showBanner(v) {

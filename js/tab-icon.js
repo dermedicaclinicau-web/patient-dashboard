@@ -12,6 +12,7 @@ const KINDS = {
   consent: { bg: "#7c3aed", text: "C", label: "Consent" },
   rx: { bg: "#db2777", text: "Rx", label: "Rx" },
   calendar: { bg: "#0F766E", icon: "calendar", label: "Calendar" },   // teal, with a white calendar
+  ssp: { bg: "#e11d48", icon: "drop", label: "Skin Script" },          // rose, with a white drop (like the Skin Script section)
 };
 
 let originals = null;    // the portal's own icon links, put back on other pages
@@ -84,6 +85,13 @@ function drawIcon(kind) {
     g.moveTo(41, 9); g.lineTo(41, 19);
     g.stroke();
     [[22, 37], [32, 37], [42, 37], [22, 46], [32, 46]].forEach(([x, y]) => g.fillRect(x - 3, y - 3, 6, 6));
+  } else if (k.icon === "drop") {
+    // A solid white drop: the same shape as the Skin Script section's icon, drawn large so it's clear at 16px
+    g.save();
+    g.translate(5.6, 4.5);
+    g.scale(2.2, 2.2);
+    g.fill(new Path2D("M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"));
+    g.restore();
   } else {
     g.save();
     g.translate(8, 6);
@@ -304,7 +312,11 @@ export function setFormTab(category, templateName, patientName) {
   setTabTitle(`${KINDS[kind].label} · ${patientName || "Patient"}`);
   return true;
 }
-
+// The Skin Script builder's tab: the rose drop, and "Skin Script · Jane Smith" as the title
+export function setSspTab(patientName) {
+  setTabIcon("ssp");
+  setTabTitle(`${KINDS.ssp.label} · ${patientName || "Patient"}`);
+}
 // #/form-record/<id>: the saved record's tab
 export async function labelFormRecordTab(id) {
   const hash = location.hash;

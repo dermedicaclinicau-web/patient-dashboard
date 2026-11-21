@@ -8,7 +8,7 @@ import { showToast } from "./utils.js";
 import { openSspPreview } from "./ssp-send.js";
 import { getSspSettings, openSspSettings, SSP_DEFAULTS } from "./ssp-settings.js";
 import { takeSspIntent, updateSspRecord, describeSspChanges, inSspTab, announceSspSaved } from "./ssp-edit.js";
-import { setTabTitle } from "./tab-icon.js";
+import { setSspTab } from "./tab-icon.js";
 import { callApi } from "./appointments.js";
 import { sspShelfStock } from "./ssp-stock.js";
 
@@ -59,7 +59,7 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
   }
   if (!root.isConnected) return;
   if (!patient) { fail("Patient not found", "Go back to the patient list and try again."); return; }
-  setTabTitle(`Skin Script · ${patient.name}`);
+  setSspTab(patient.name);   // rose drop icon, "Skin Script · Jane Smith"
   const ownTab = inSspTab();   // opened from the patient page in a new tab
   const VALID_MONTHS = settings.validMonths || 3;
   let savedRecord = null; // once saved (from Save or from the preview)
