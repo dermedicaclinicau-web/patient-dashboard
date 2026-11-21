@@ -392,6 +392,11 @@ function startFor(patient, btn, { direct = false } = {}) {
     showToast(`${patient.name}'s appointment is already recording in another tab.`);
     return;
   }
+  const cc = contCache.get(patient.id);
+  if (!direct && cc && cc.loading && !cc.info) {   // still checking today's recordings: wait for the answer
+    showToast("Checking today's recordings. Tap Start appointment again in a moment.");
+    return;
+  }
   const ci = contKnown(patient);
   const parked = (getState().parked || []).find((p) => p.patient.id === patient.id);
   // Paused for another patient: that's the appointment to continue (it may not be on the server yet)
