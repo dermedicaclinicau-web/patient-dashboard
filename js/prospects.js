@@ -216,8 +216,12 @@ function viaNorm(v) {
   const land = String(v.land || v.landing || v.page || "");
   if (!kind && !land) return null;
   const name = v.name || VIA_NAME[kind] || (kind ? kind[0].toUpperCase() + kind.slice(1) : "The website");
-  const first = v.first ? viaNorm(v.first) : (v.fvia || v.fland) ? viaNorm({ kind: v.fvia, land: v.fland, seen: v.fseen }) : null;
-  return { kind, name, land, seen: v.seen || v.t || "", first };
+  // The first visit: Code.gs saves firstKind / firstLand / firstSeen (older shapes: first, or fvia / fland / fseen)
+  const fk = v.firstKind || v.fvia || viaKindOf(v.firstSrc);
+  const fl = v.firstLand || v.fland;
+  const first = v.first ? viaNorm(v.first) : (fk || fl) ? viaNorm({ kind: fk, land: fl, seen: v.firstSeen || v.fseen }) : null;
+  const form = String(v.form || "");
+  return { kind, name, land, seen: v.seen || v.t || "", first, form };
 }
 // The prospect's own "via", otherwise the latest enquiry that has one
 const viaOfP = (p) => viaNorm(p.via) || viaNorm(((p.enquiries || []).slice().reverse().find((q) => q && q.via) || {}).via);
@@ -225,7 +229,8 @@ const isAdVia = (v) => !!v && ["a", "ad", "ads"].includes(v.kind);
 const isGoogleVia = (v) => !!v && ["g", "google"].includes(v.kind);
 const seenText = (s) => { const d = new Date(typeof s === "number" || /^\d+$/.test(String(s)) ? Number(s) : s); return isNaN(d) ? "" : fullDay(keyOf(d.toISOString())); };
 const viaText = (v) => (v ? [`Found us: ${v.name}${v.land ? ` → ${v.land}` : ""}`, seenText(v.seen) && `visited ${seenText(v.seen)}`,
-  v.first && (v.first.name !== v.name || v.first.land !== v.land) && `first visit: ${v.first.name}${v.first.land ? ` → ${v.first.land}` : ""}`]
+  v.first && (v.first.name !== v.name || v.first.land !== v.land) && `first visit: ${v.first.name}${v.first.land ? ` → ${v.first.land}` : ""}`,
+  v.form && v.form !== v.land && `sent the form on ${v.form}`]
   .filter(Boolean).join(" · ") : "");
 // Show the "Found us" tag unless it would only repeat the Google Ads tag
 const showVia = (p, v) => !!v && !(isAdVia(v) && p.ads);
@@ -1338,7 +1343,9 @@ async function mountProspect(container, id, staff) {
           <section class="pr-sec"><h3>${I(IC.inbox)} What they asked</h3>
             ${(p.enquiries || []).slice().reverse().map((q) => `<div class="pr-enq">
               <small>${esc(when(q.at))} · ${esc(q.source || "")}${q.concern ? ` · ${esc(q.concern)}` : ""}</small>
-              ${(() => { const v = viaNorm(q.via); return v ? `<small class="pr-enq-via">Came from ${esc(v.name)}${v.land ? ` · landed on ${esc(v.land)}` : ""}</small>` : ""; })()}
+              ${(() => { const v = viaNorm(q.via); return v ? `<small class="pr-enq-via">Came from ${esc(v.name)}${v.land ? ` · landed on ${esc(v.land)}` : ""}${
+                v.form && v.form !== v.land ? ` · sent the form on ${esc(v.form)}` : ""}${
+                v.first && (v.first.name !== v.name || v.first.land !== v.land) ? ` · first found us through ${esc(v.first.name)}${v.first.land ? ` (${esc(v.first.land)})` : ""}` : ""}</small>` : ""; })()}
               ${q.message ? `<p>${esc(q.message)}</p>` : '<p class="muted">No message.</p>'}
               ${q.link ? `<a href="${esc(q.link)}" target="_blank" rel="noopener">Open the email</a>` : ""}</div>`).join("") || '<p class="muted">Nothing recorded.</p>'}
           </section>
