@@ -11,7 +11,7 @@ const KINDS = {
   tx: { bg: "#f97316", bg2: "#c2410c", text: "TxR", label: "TxR" },   // orange, like the Treatment Records cards
   consent: { bg: "#7c3aed", text: "C", label: "Consent" },
   rx: { bg: "#db2777", text: "Rx", label: "Rx" },
-  calendar: { bg: "#ff1212", icon: "calendar", label: "Calendar" },   // teal, with a white calendar
+  calendar: { bg: "#DC2626", icon: "calendar", label: "Calendar" },   // red, with a white calendar
   ssp: { bg: "#e11d48", icon: "drop", label: "Skin Script" },          // rose, with a white drop (like the Skin Script section)
 };
 
@@ -135,11 +135,14 @@ function attrUp(el, svg, name) {
   return null;
 }
 
-function drawSvgIcon(svg) {
+// Menu pages with their own colour (the rest are teal)
+const MENU_BG = { calendar: "#DC2626" };
+
+function drawSvgIcon(svg, bg) {
   const c = document.createElement("canvas");
   c.width = c.height = 64;
   const g = c.getContext("2d");
-  roundSquare(g, "#0F766E");
+  roundSquare(g, bg || "#0F766E");
 
   let vb = String(svg.getAttribute("viewBox") || "0 0 24 24").trim().split(/[\s,]+/).map(Number);
   if (vb.length !== 4 || !vb.every(Number.isFinite) || vb[2] <= 0 || vb[3] <= 0) vb = [0, 0, 24, 24];
@@ -201,7 +204,7 @@ export function setMenuTab(key, svg, label) {
   if (!key || !svg) return;
   const kind = `menu:${key}`;
   try {
-    if (!urls.has(kind)) urls.set(kind, drawSvgIcon(svg));
+    if (!urls.has(kind)) urls.set(kind, drawSvgIcon(svg, MENU_BG[key]));
     asked = "";
     if (shown === kind) return;
     shown = kind;
