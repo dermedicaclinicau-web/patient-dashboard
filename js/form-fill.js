@@ -21,7 +21,7 @@ import { highlightRecord, openDeleteRecordDialog } from "./records-view.js";
 import { formTitleHtml } from "./form-fields.js";
 import { hydrateBankImages } from "./image-bank-api.js";
 import { attachAnnotators } from "./form-annotate.js";
-import { bankImage, bankFailHtml } from "./image-bank-api.js";
+import { bankImageTry, bankFailHtml } from "./image-bank-api.js";
 import { mountAftercareField } from "./aftercare-field.js";
 import { mountPhotoField } from "./photo-field.js";
 import { mountConsumablesField, consumablesViewHtml } from "./consumables-field.js";
