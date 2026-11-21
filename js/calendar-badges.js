@@ -1,9 +1,10 @@
 import { db } from "./firebase-config.js";
 import { collection, query, where, getDocs, getDoc, doc, FieldPath }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { parseDateKey } from "./utils.js";
-import { extractSection } from "./transcripts.js";
-import { categorize, portalCategory, CATEGORIES, OTHER_CATEGORY } from "./records.js";
+import { parseDateKey, toDateKey } from "./utils.js";
+import { extractSection, parseRecordDate } from "./transcripts.js";
+import { categorize, portalCategory, CATEGORIES, OTHER_CATEGORY, categoryFixes, fixedCat } from "./records.js";
+import { listPublishedForms, getFormTemplate, getFormVersion, formGroup } from "./form-templates.js";
 
 const MONTHS_LONG = ["January", "February", "March", "April", "May", "June", "July",
   "August", "September", "October", "November", "December"];
@@ -18,6 +19,99 @@ const CAT_TITLE = new Map(ALL_CATS.map((c) => [c.key, c.title]));
 
 // "Jan BRAY", "Jan Bray #1" -> "jan bray"
 const norm = (s) => String(s || "").toLowerCase().replace(/[^\p{L}\s]/gu, " ").replace(/\s+/g, " ").trim();
+
+/* ---------- Consent on file for today's treatments ---------- */
+
+const CANCELLED = /cancel|no.?show|\bdna\b|did not attend/i;
+const NO_CONSENT_SVC = /\breview|consult|follow.?up|check.?up/i;   // these services never need a consent
+const isoKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+function monthsBefore(dateKey, n) {
+  const d = parseDateKey(dateKey);
+  d.setMonth(d.getMonth() - n);
+  return isoKey(d);
+}
+
+// Which treatment groups need a consent, and for how many months: from the published treatment records
+// that have a Consent check. → Map(group → months). Remembered for 10 minutes.
+let rulesMemo = null;
+function consentRules() {
+  if (rulesMemo && Date.now() - rulesMemo.at < 600000) return rulesMemo.p;
+  const p = (async () => {
+    const forms = (await listPublishedForms()).filter((t) => t.category === "treatment");
+    const vers = await Promise.allSettled(forms.map(async (t) => {
+      const v = t.version || ((await getFormTemplate(t.id)) || {}).version;
+      return v ? getFormVersion(t.id, v) : null;
+    }));
+    const out = new Map();
+    vers.forEach((r, i) => {
+      if (r.status !== "fulfilled" || !r.value) return;
+      const g = formGroup(forms[i]);
+      if (!g || g === "other") return;
+      (r.value.fields || []).forEach((f) => {
+        if (!f || f.type !== "consent_status") return;
+        const m = Number(f.months) || 12;
+        out.set(g, Math.min(out.get(g) || m, m));   // two forms disagree: the shorter one
+      });
+    });
+    return out;
+  })();
+  rulesMemo = { at: Date.now(), p };
+  p.catch(() => { rulesMemo = null; });
+  return p;
+}
+
+// Portal consents for some patients, from a date onwards (only consents recent enough to matter are read,
+// as they carry signatures). Needs a Firestore index the first time; until then it reads them all.
+async function portalConsents(field, ids, fromKey) {
+  const col = collection(db, "form_submissions");
+  try {
+    return await getDocs(query(col, where("category", "==", "consent"), where(field, "in", ids), where("recordDate", ">=", fromKey)));
+  } catch (err) {
+    if (err && err.code !== "failed-precondition") throw err;
+    console.warn(`Calendar consent check: create the Firestore index from this link to make it quicker. ${err.message}`);
+    return getDocs(query(col, where("category", "==", "consent"), where(field, "in", ids)));
+  }
+}
+
+// Every consent for the day's patients → Map(patient ID on the schedule → [{ cat, date, title }])
+async function consentsOf(ids, fromKey) {
+  const out = new Map();
+  const add = (id, c) => { if (!id) return; if (!out.has(id)) out.set(id, []); out.get(id).push(c); };
+  const chunks = [];
+  for (let i = 0; i < ids.length; i += 30) chunks.push(ids.slice(i, i + 30));
+  const legacy = [];
+  await Promise.all(chunks.map(async (c) => {
+    const [old, byPtt, byDoc] = await Promise.all([
+      getDocs(query(collection(db, "consent_records"), where(new FieldPath("Patient ID"), "in", c))),
+      portalConsents("patientPttId", c, fromKey),
+      portalConsents("patientId", c, fromKey),
+    ]);
+    old.forEach((d) => {
+      const x = d.data();
+      if (x.deleted === true) return;
+      legacy.push({ docId: d.id, pid: String(x["Patient ID"] || "").trim(), title: String(x["Consent Type"] || "Consent"), raw: x["Record Date"] });
+    });
+    const seen = new Set();
+    [...byPtt.docs, ...byDoc.docs].forEach((d) => {
+      if (seen.has(d.id)) return;
+      seen.add(d.id);
+      const s = { id: d.id, ...d.data() };
+      if (s.deleted === true) return;
+      const pid = c.includes(String(s.patientPttId || "")) ? String(s.patientPttId) : String(s.patientId || "");
+      add(pid, { cat: portalCategory(s), date: String(s.recordDate || ""), title: s.templateName || "Consent" });
+    });
+  }));
+  const fixes = await categoryFixes(legacy.map((r) => r.docId));   // categories staff corrected
+  legacy.forEach((r) => {
+    const raw = String(r.raw || "");
+    let date = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : "";
+    if (!date) { const d = parseRecordDate(r.raw); date = d && !isNaN(d) ? isoKey(d) : ""; }
+    add(r.pid, { cat: fixedCat(fixes, "consent", r.docId, r.title).category, date, title: r.title });
+  });
+  return out;
+}
+
+/* ---------- Records on the day ---------- */
 
 // Every way a date might be written in your collections
 function dateVariants(dateKey) {
@@ -76,11 +170,23 @@ async function transcriptsOn(dateKey) {
 
 /**
  * Loads every record for one day and returns badgesFor(appointment) ->
- * [{ type, cat, code, catTitle, titles }] in display order
+ * [{ type, cat, code, catTitle, titles }] in display order.
+ * badgesFor.consentFor(bookings) -> the treatments on a card with no valid consent.
  */
 export async function fetchDayBadges(dateKey, appts) {
   const variants = dateVariants(dateKey);
-  if (!variants.length) return () => [];
+  if (!variants.length) return Object.assign(() => [], { consentFor: () => [] });
+
+  const apptIds = new Set(appts.map((a) => String(a.patientId || "").trim()).filter(Boolean));
+  const checkConsent = dateKey >= toDateKey();   // today and later: past visits are already done
+
+  // Consents: who needs one, then what's on file (a problem here only means no warnings)
+  const consentJob = checkConsent ? (async () => {
+    const rules = await consentRules();
+    if (!rules.size) return { rules, consents: new Map() };
+    const longest = Math.max(...rules.values());
+    return { rules, consents: await consentsOf([...apptIds], monthsBefore(dateKey, longest)) };
+  })().catch((err) => { console.warn("Calendar consent check failed:", err); return null; }) : Promise.resolve(null);
 
   const results = await Promise.allSettled([
     byExactDate("treatment_records", "Record Date", variants),
@@ -122,6 +228,7 @@ export async function fetchDayBadges(dateKey, appts) {
 
   // Portal forms: the same category as the Records cards (a Type & category correction wins)
   portal.forEach((s) => {
+    if (s.deleted === true) return;
     const c = String(s.category || "").toLowerCase();
     const id = s.patientPttId || s.patientId;
     if (c === "treatment") add("tx", id, s.patientName, s.templateName, portalCategory(s));
@@ -133,7 +240,6 @@ export async function fetchDayBadges(dateKey, appts) {
   records.forEach((r) => { r.id = String(r.id || "").trim(); r.name = norm(r.name); });
 
   // Record IDs that aren't schedule IDs (e.g. Firestore doc IDs) -> look up their clinic ID + name
-  const apptIds = new Set(appts.map((a) => String(a.patientId || "").trim()).filter(Boolean));
   const unknown = [...new Set(records.map((r) => r.id)
     .filter((id) => id && !apptIds.has(id) && /^[\w-]{1,128}$/.test(id)))].slice(0, 60);
 
@@ -146,7 +252,9 @@ export async function fetchDayBadges(dateKey, appts) {
     }
   });
 
-  return function badgesFor(appt) {
+  const cons = await consentJob;
+
+  function badgesFor(appt) {
     const pid = String(appt.patientId || "").trim();
     const pname = norm(appt.patientName);
     const found = new Map();   // "tx|wr" -> badge
@@ -182,5 +290,38 @@ export async function fetchDayBadges(dateKey, appts) {
     return [...found.values()].sort((x, y) =>
       ORDER.indexOf(x.type) - ORDER.indexOf(y.type)
       || (CAT_RANK.get(x.cat) ?? 99) - (CAT_RANK.get(y.cat) ?? 99));
+  }
+
+  // A card's bookings (one, or a whole visit) → [{ cat, code, catTitle, months, services, last, beforeVisit }]
+  badgesFor.consentFor = (rows) => {
+    if (!cons || !cons.rules.size) return [];
+    const live = (rows || []).filter((a) => a && !CANCELLED.test(String(a.status || "")));
+    const pid = live.length ? String(live[0].patientId || "").trim() : "";
+    if (!pid) return [];   // no Patient ID: can't be checked, so no warning
+    const need = new Map();   // group → the services that need it
+    live.forEach((a) => (a.services || []).forEach((s) => {
+      s = String(s || "").trim();
+      if (!s || NO_CONSENT_SVC.test(s)) return;
+      const c = categorize(s);
+      if (!cons.rules.has(c)) return;
+      if (!need.has(c)) need.set(c, []);
+      if (!need.get(c).includes(s)) need.get(c).push(s);
+    }));
+    const mine = (cons.consents.get(pid) || []).slice().sort((a, b) => b.date.localeCompare(a.date));
+    const today = toDateKey();
+    const out = [];
+    need.forEach((services, cat) => {
+      const months = cons.rules.get(cat);
+      const list = mine.filter((c) => c.cat === cat && c.date && c.date <= dateKey);
+      if (list.some((c) => c.date >= monthsBefore(dateKey, months))) return;   // valid on the visit day
+      const last = list[0] || null;
+      out.push({
+        type: "nocons", cat, code: CAT_CODES[cat] || "", catTitle: CAT_TITLE.get(cat) || "", months, services, last,
+        beforeVisit: !!last && dateKey > today && last.date >= monthsBefore(today, months),   // valid now, not by then
+      });
+    });
+    return out.sort((x, y) => (CAT_RANK.get(x.cat) ?? 99) - (CAT_RANK.get(y.cat) ?? 99));
   };
+
+  return badgesFor;
 }

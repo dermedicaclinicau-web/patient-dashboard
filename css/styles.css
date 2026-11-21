@@ -14123,3 +14123,8 @@ body.scan-full { overflow: hidden; }
 .rec-join { display: inline-flex; align-items: center; gap: 6px; font-size: .8rem; color: #115e59; }
 .rec-join svg { width: 14px; height: 14px; }
 .rec-join.is-new { color: #475569; }
+
+
+/* Calendar: booked for a treatment with no valid consent */
+.cb.cb-nocons { background: #fef2f2; color: #991b1b; border: 1px solid #fca5a5; font-weight: 700; }
+.cb.cb-nocons .cb-code { color: #991b1b; }

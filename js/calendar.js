@@ -170,7 +170,16 @@ export function mountCalendar(container, param) {
     badgeCache.delete(dateKey);
     loadBadges(shown);
   };
-
+  // A consent saved in another tab: the warnings are checked again
+  let formsBc = null;
+  try { formsBc = new BroadcastChannel("dm-forms"); } catch { formsBc = null; }
+  if (formsBc) formsBc.onmessage = (e) => {
+    if (!board.isConnected) { formsBc.close(); return; }
+    const m = e.data || {};
+    if (m.type !== "form-saved" || m.category !== "consent" || !shown.length) return;
+    badgeCache.delete(dateKey);
+    loadBadges(shown);
+  };
     // Badges load after the schedule is shown, so they never slow it down
   async function loadBadges(appts) {
     const key = dateKey;
@@ -186,7 +195,10 @@ export function mountCalendar(container, param) {
       board.querySelectorAll(".appt[data-i]").forEach((card) => {
         const a = appts[Number(card.dataset.i)];
         const slot = card.querySelector(".appt-badges");
-        if (a && slot) slot.innerHTML = badgesFor(a).map(badgeHtml).join("");
+        if (!a || !slot) return;
+        const rows = String(card.dataset.rows || card.dataset.i).split(",").map(Number).map((i) => appts[i]).filter(Boolean);
+        slot.innerHTML = badgesFor(a).map(badgeHtml).join("")
+          + (badgesFor.consentFor ? badgesFor.consentFor(rows).map(noConsentHtml).join("") : "");
       });
     } catch (err) {
       console.warn("Calendar badges failed:", err);
@@ -443,7 +455,8 @@ function visitCard(group) {
   const title = escapeHtml(group.map((a) =>
     [a.timeRange || a.time, (a.services || []).join(", "), a.resources].filter(Boolean).join(" · ")).join("\n"));
   const classes = `appt is-visit ${cls}${changeClass(group)}`.trim();
-  const idx = Number.isInteger(first._i) ? ` data-i="${first._i}"` : "";
+  const idx = Number.isInteger(first._i)
+    ? ` data-i="${first._i}" data-rows="${group.map((a) => a._i).filter(Number.isInteger).join(",")}"` : "";
 
   return first.patientId
     ? `<a class="${classes}"${idx} ${patientHref(first.patientId)} title="${title}">${inner}</a>`
@@ -471,7 +484,17 @@ function badgeHtml(b) {
     b.code ? `<b class="cb-code">${escapeHtml(b.code)}</b>` : ""}${
     st ? `<b class="cb-st">${st === "reviewed" ? "✓" : "Draft"}</b>` : ""}</span>`;
 }
-
+// "! Cs WR": booked for a treatment that needs consent, and none is valid on the visit day
+function noConsentHtml(b) {
+  const nice = (k) => { const d = parseDateKey(k); return d ? d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : k; };
+  const tip = [
+    `No valid consent for ${b.catTitle || "this treatment"} (valid for ${b.months} months).`,
+    b.last ? `Last one: ${nice(b.last.date)} (${b.last.title}), ${b.beforeVisit ? "expires before this visit" : "expired"}.`
+      : "None on file.",
+    `Booked: ${b.services.join(", ")}`,
+  ].join("\n");
+  return `<span class="cb cb-nocons" title="${escapeHtml(tip)}">! Cs${b.code ? `<b class="cb-code">${escapeHtml(b.code)}</b>` : ""}</span>`;
+}
 // A booking added in the portal: tagged, with Edit and Remove
 function manualCard(a) {
   const services = (a.services || []).map((s) => `<span class="appt-service">${escapeHtml(s)}</span>`).join("");

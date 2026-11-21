@@ -93,7 +93,7 @@ async function portalRecords(patient) {
 const byDateDesc = (a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0);
 
 // Older records: categories staff corrected (record_categories/<kind>__<id>). A problem here never stops the records showing.
-async function categoryFixes(ids) {
+export async function categoryFixes(ids) {
   const out = new Map();
   const list = [...new Set(ids)];
   const chunks = [];
@@ -107,7 +107,7 @@ async function categoryFixes(ids) {
   return out;
 }
 // A corrected category wins over the one guessed from the record's name
-function fixedCat(fixes, kind, id, title) {
+export function fixedCat(fixes, kind, id, title) {
   const f = fixes.get(`${kind}__${id}`);
   if (!f || !GROUP_KEYS.includes(f.group)) return { category: categorize(title), catFix: null };
   const ch = Array.isArray(f.changes) ? f.changes[f.changes.length - 1] : null;
