@@ -11,7 +11,7 @@ const KINDS = {
   tx: { bg: "#f97316", bg2: "#c2410c", text: "TxR", label: "TxR" },   // orange, like the Treatment Records cards
   consent: { bg: "#7c3aed", text: "C", label: "Consent" },
   rx: { bg: "#db2777", text: "Rx", label: "Rx" },
-  calendar: { bg: "#0F766E", icon: "calendar", label: "Calendar" },   // teal, with a white calendar
+  calendar: { bg: "#ff1212", icon: "calendar", label: "Calendar" },   // teal, with a white calendar
   ssp: { bg: "#e11d48", icon: "drop", label: "Skin Script" },          // rose, with a white drop (like the Skin Script section)
 };
 
