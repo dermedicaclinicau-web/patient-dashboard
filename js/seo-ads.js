@@ -3,6 +3,7 @@
 import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, getDocs, query, orderBy, limit, collection, writeBatch, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
+import { loadLeads, peekLeads } from "./seo-leads.js?v=3";
 
 // Apps Script action "seoAds" (SeoAds.gs → handleSeoAds_)
 const api = (op, data = {}) => callApi({ action: "seoAds", op, ...data });
@@ -124,6 +125,35 @@ function sum(A, from, to, camp = "") {
   t.cpke = t.ke ? t.cost / t.ke : null;
   t.bounce = t.sess ? 1 - t.eng / t.sess : null;
   return t;
+}
+
+// Revenue from people who came from an ad, by campaign (SeoLeads.gs: invoices, inc GST, up to 12 months after enquiring).
+// Enquiries made between two dates. by[-1]: campaign not known. null until the enquiries load, or without the invoice history.
+function adRevenue(A, from, to) {
+  const L = peekLeads();
+  if (!L || L.none || !L.revenue) return null;
+  const out = { rev: 0, payers: 0, by: {} };
+  L.rows.forEach((r) => {
+    if (!r.rev || r.date < from || r.date > to || !(r.k === "a" || r.camp)) return;
+    const i = campIndexOf(A, r.camp);
+    out.rev += r.rev;
+    out.payers++;
+    const x = out.by[i] || (out.by[i] = { rev: 0, payers: 0 });
+    x.rev += r.rev;
+    x.payers++;
+  });
+  return out;
+}
+
+// The Revenue card (not clickable). spend: over the same dates
+function revTile(RV, camp, spend) {
+  const x = !RV ? null : camp === "" ? RV : RV.by[Number(camp)] || { rev: 0, payers: 0 };
+  const back = x && spend ? x.rev / spend : null;
+  const note = !peekLeads() ? "Loading…"
+    : !RV ? "Shows once the invoice history is loaded"
+    : `${back != null ? `$${back.toFixed(2)} back for every $1 spent · ` : ""}${num(x.payers)} paying · so far, inc GST`;
+  return `<div class="seo-kpi" title="What patients who came from an ad paid from the day they enquired, up to 12 months (invoices, inc GST)">
+    <div class="l">Revenue from ad patients</div><div class="v">${x ? money(x.rev) : "—"}</div><div class="p">${note}</div></div>`;
 }
 
 // Enquiries from ads between two dates (by the day they enquired)
@@ -1037,7 +1067,7 @@ function adsDrillHtml(o) {
 
 /* ---------- the tab ---------- */
 
-let B = null, C = null, AD = null, lastR = null;
+let B = null, C = null, AD = null, lastR = null, leadsWait = false;
 
 export function renderAds(body, ctx) {
   B = body; C = ctx;
@@ -1083,6 +1113,14 @@ function draw() {
   const camp = ui.camp !== "" && A.camps[Number(ui.camp)] ? ui.camp : "";
   const cur = sum(A, r.from, r.to, camp);
   const prev = cmp && cmp.ok ? sum(A, cmp.from, cmp.to, camp) : null;
+  // Revenue from patients who came from an ad (loaded with the website enquiries)
+  const RV = adRevenue(A, r.from, r.to);
+  if (!peekLeads() && !leadsWait) {
+    leadsWait = true;
+    loadLeads().then(() => { if (B && B.isConnected && AD === A && B.querySelector(".seo-kpis")) draw(); })
+      .catch(() => { /* no enquiry data: the card says so */ })
+      .finally(() => { leadsWait = false; });
+  }
 
   /* Dates and campaign */
   const rangeText = `${h.fmtDate(r.from)} – ${h.fmtDate(r.to)} · ${r.n} day${r.n === 1 ? "" : "s"}` +
@@ -1142,6 +1180,7 @@ function draw() {
       tile("cpe", "Cost per enquiry", money(cpe), Lp && Lp.enq ? chg(h, cpe, prev.cost / Lp.enq, { invert: true }) : "", "lower is better"),
       tile("came", "Came in", num(L.came), Lp ? chg(h, L.came, Lp.came) : "", both(`${num(L.cb)} booked a consultation`, `${num(L.tx)} treated`)),
       tile("cpp", "Cost per patient who came in", money(cpp), Lp && Lp.came ? chg(h, cpp, prev.cost / Lp.came, { invert: true }) : "", "the number that matters"),
+      revTile(RV, camp, cur.cost),
     ].join("");
     leadNote = `<p class="seo-note" style="margin:-6px 0 14px">${r.from < A.leadsFrom
       ? `Enquiries are tracked from ${esc(h.fmtDate(A.leadsFrom))}, so cost per enquiry and per patient use the spend from then. ` : ""}Recent enquiries may not have come in yet, so "Came in" grows over the following weeks.</p>`;
@@ -1192,13 +1231,17 @@ function draw() {
     ${per.length ? `<div class="seo-table-wrap" style="max-height:none"><table class="seo-table">
       <thead><tr>${th("name", "Campaign")}${th("cost", "Spend")}<th>vs before</th>${th("clicks", "Clicks")}${th("cpc", "Cost per click")}
         ${th("sess", "Visits")}${th("ke", "Key events")}${th("cpke", "Cost per key event")}${th("bounce", "Bounce")}
-        ${A.leadsFrom ? `<th>Enquiries</th><th>Came in</th>` : ""}</tr></thead>
+        ${A.leadsFrom ? `<th>Enquiries</th><th>Came in</th>` : ""}${RV ? `<th title="What patients from this campaign paid from the day they enquired, up to 12 months (inc GST)">Revenue so far</th><th title="Revenue so far for every $1 spent in these dates">Back per $1</th>` : ""}</tr></thead>
       <tbody>${per.map((x) => `<tr data-ads-camp="${x.i}" class="${camp === String(x.i) ? "is-on" : ""}">
         <td><div class="seo-path" title="${esc(x.name)}">${esc(x.name)}${x.type ? ` <span class="seo-note">${esc(x.type)}</span>` : ""}</div></td>
         <td>${money(x.cur.cost)}</td><td>${x.prev ? chg(h, x.cur.cost, x.prev.cost, { neutral: true }) : "—"}</td>
         <td>${num(x.cur.clicks)}</td><td>${money(x.cur.cpc)}</td><td>${num(x.cur.sess)}</td>
         <td>${keF(x.cur.ke)}</td><td>${money(x.cur.cpke)}</td><td>${pct0(x.cur.bounce)}</td>
-        ${x.leads ? `<td>${num(x.leads.enq)}</td><td>${num(x.leads.came)}</td>` : ""}</tr>`).join("")}</tbody>
+        ${x.leads ? `<td>${num(x.leads.enq)}</td><td>${num(x.leads.came)}</td>` : ""}${RV ? (() => {
+          const y = RV.by[x.i];
+          return `<td>${y ? `<strong>${money(y.rev)}</strong>` : `<span class="seo-note">$0</span>`}</td><td>${
+            y && x.cur.cost ? "$" + (y.rev / x.cur.cost).toFixed(2) : "—"}</td>`;
+        })() : ""}</tr>`).join("")}</tbody>
     </table></div>` : `<p class="seo-note">No campaign activity in these dates.</p>`}</div>`;
 
   /* Opportunities */
