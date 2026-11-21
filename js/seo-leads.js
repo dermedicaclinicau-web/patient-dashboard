@@ -115,7 +115,7 @@ export function leadsPageHtml(L, path, h) {
       <tr><td>Treated</td><td>${t.treated}${pct(t.treated)}</td></tr>
       <tr><td>Became patients</td><td>${t.patients}${pct(t.patients)}</td></tr></table>
       <p class="seo-note" style="margin:6px 0 0">How they came: ${by}</p>` : ""}
-    ${formHere ? `<p class="seo-note" style="margin:6px 0 0">${ppl(formHere)} sent the enquiry form from this page after arriving on another page.</p>` : ""}
+    ${formHere ? `<p class="seo-note" style="margin:6px 0 0">${ppl(formHere)} enquired from this page (a form or the chat) after arriving on another page.</p>` : ""}
     ${firstHere ? `<p class="seo-note" style="margin:6px 0 0">This was also the first page ${ppl(firstHere)} found before enquiring from another page.</p>` : ""}
   </div>`;
 }
