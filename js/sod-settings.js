@@ -168,6 +168,26 @@ export function sodColumnsCss(arrange, split) {
 
 /* ---------- The builder ---------- */
 
+/* ---------- A small in-page question (instead of the browser's confirm pop-up) ---------- */
+function sodAsk(title, text, okLabel = "OK", danger = false) {
+  return new Promise((resolve) => {
+    const d = document.createElement("dialog");
+    d.className = "sds-ask";
+    d.innerHTML = `<form method="dialog">
+        <h3>${esc(title)}</h3>${text ? `<p>${esc(text)}</p>` : ""}
+        <div class="sds-ask-acts">
+          <button value="no" class="sds-btn is-quiet">Cancel</button>
+          <button value="yes" class="sds-btn ${danger ? "is-danger" : "is-primary"}">${esc(okLabel)}</button>
+        </div>
+      </form>`;
+    document.body.appendChild(d);
+    d.addEventListener("click", (e) => { if (e.target === d) d.close("no"); });
+    d.addEventListener("close", () => { resolve(d.returnValue === "yes"); d.remove(); });
+    d.showModal();
+    d.querySelector('[value="yes"]').focus();
+  });
+}
+
 export async function mountSodSettings(host) {
   if (!can("sod.manage")) {
     host.innerHTML = `<p class="sds-empty">You don't have access to set up Start of Day. Ask an admin to tick
@@ -297,9 +317,15 @@ export async function mountSodSettings(host) {
           `<option value="${k}"${f.tone === k ? " selected" : ""}>${l}</option>`).join("")}</select></label>`; break;
       default: body = `<p class="sds-hint">${esc(SOD_CARD_TYPES[c.type].desc)} Nothing else to set.</p>`;
     }
+    const n = cols();
+    const place = n > 1 ? `<label class="sds-f"><span>Column</span><select data-col${c.full ? " disabled" : ""}>${Array.from({ length: n }, (_, i) =>
+        `<option value="${i + 1}"${c.col === i + 1 ? " selected" : ""}>Column ${i + 1}</option>`).join("")}</select></label>
+      <label class="sds-chk sds-fullchk"><input type="checkbox" data-full${c.full ? " checked" : ""}> Full width (across all columns)</label>` : "";
     return `<div class="sds-panel">
         <label class="sds-f is-wide"><span>Card title</span><input type="text" maxlength="60" data-k="title" value="${esc(c.title)}"></label>
+        ${place}
         ${body}
+        <div class="sds-done"><button type="button" class="sds-btn" data-edit>Done</button></div>
       </div>`;
   }
 
@@ -312,7 +338,7 @@ export async function mountSodSettings(host) {
       <div class="sds-tile-top">
         <button type="button" class="sds-grip" data-grip aria-label="Drag to move">${I.grip}</button>
         <span class="sds-ico">${t.icon}</span>
-        <div class="sds-tt"><strong data-title>${esc(c.title)}</strong><small>${esc(summary(c))}</small></div>
+        <div class="sds-tt"><strong data-title>${esc(c.title)}</strong><small>${c.full ? "Full width · " : ""}${esc(summary(c))}</small></div>
         <div class="sds-acts">
           <button type="button" class="sds-ib" data-up aria-label="Move up">${I.up}</button>
           <button type="button" class="sds-ib" data-down aria-label="Move down">${I.down}</button>
@@ -320,11 +346,6 @@ export async function mountSodSettings(host) {
           <button type="button" class="sds-ib is-danger" data-del aria-label="Remove card">${I.x}</button>
         </div>
       </div>
-      ${n > 1 ? `<div class="sds-place">
-        <label>Column <select data-col${c.full ? " disabled" : ""}>${Array.from({ length: n }, (_, i) =>
-          `<option value="${i + 1}"${c.col === i + 1 ? " selected" : ""}>${i + 1}</option>`).join("")}</select></label>
-        <label class="sds-chk"><input type="checkbox" data-full${c.full ? " checked" : ""}> Full width</label>
-      </div>` : ""}
       ${open ? panel(c) : `<div class="sds-sample">${sample(c)}</div>`}
     </div>`;
   }
@@ -384,7 +405,8 @@ export async function mountSodSettings(host) {
               ? `<div class="sds-band is-full">${tile(b.cards[0])}</div>`
               : `<div class="sds-band" style="grid-template-columns:${sodColumnsCss(lay.arrange, lay.split)}">${Array.from({ length: n }, (_, i) => {
                   const mine = b.cards.filter((c) => (n === 1 ? true : c.col === i + 1));
-                  return `<div class="sds-colbox" data-col="${i + 1}" data-ids="${b.cards.map((c) => c.id).join(",")}">${
+                  return `<div class="sds-colbox${n > 1 ? " is-multi" : ""}" data-col="${i + 1}" data-ids="${b.cards.map((c) => c.id).join(",")}">${
+                    n > 1 ? `<span class="sds-collabel">Column ${i + 1}</span>` : ""}${
                     mine.map(tile).join("") || '<div class="sds-drop-here">Drag a card here</div>'}</div>`;
                 }).join("")}</div>`).join("")
               : `<div class="sds-band"><div class="sds-colbox" data-col="1" data-ids="">
@@ -495,6 +517,66 @@ export async function mountSodSettings(host) {
     move(e);
   }
 
+  /* ----- Preview: the layout as staff will see it (unsaved changes included), over this page ----- */
+  function openPreview() {
+    const lay = cleanSodLayout(L());
+    const d = document.createElement("dialog");
+    d.className = "sds-pv";
+    let phone = false;
+    const h = new Date().getHours();
+    const part = h < 12 ? "morning" : h < 17 ? "afternoon" : "evening";
+    const day = new Date().toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long" });
+    const pvCard = (c) => `<article class="sds-pv-card">
+        <header><span class="sds-ico">${SOD_CARD_TYPES[c.type].icon}</span><strong>${esc(c.title)}</strong></header>
+        <div class="sds-sample">${sample(c)}</div>
+      </article>`;
+
+    const draw = () => {
+      const n = phone ? 1 : colsOf(lay.arrange);
+      const colCss = phone ? "minmax(0, 1fr)" : sodColumnsCss(lay.arrange, lay.split);
+      const bands = sodBands(lay.cards, n).map((b) => b.full
+        ? `<div class="sds-pv-band">${pvCard(b.cards[0])}</div>`
+        : `<div class="sds-pv-band" style="grid-template-columns:${colCss}">${Array.from({ length: n }, (_, i) =>
+            `<div class="sds-pv-col">${b.cards.filter((c) => n === 1 || c.col === i + 1).map(pvCard).join("")}</div>`).join("")}</div>`)
+        .join("");
+      d.innerHTML = `
+        <div class="sds-pv-bar">
+          <span><strong>Preview</strong> · sample information, including changes you haven't saved</span>
+          <div class="sds-seg" role="group">
+            <button type="button" data-pv="set" class="${phone ? "" : "is-on"}">As set</button>
+            <button type="button" data-pv="phone" class="${phone ? "is-on" : ""}">Phone</button>
+          </div>
+          <button type="button" class="sds-btn" data-pv="close">Close preview</button>
+        </div>
+        <div class="sds-pv-sheet size-${phone ? "phone" : lay.size}">
+          <div class="sds-pv-hero">
+            <span class="sds-av">AB</span>
+            <div><small>Good ${part} · ${esc(day)}</small><h2>Welcome, [their name]</h2><p>Have a great day today!</p></div>
+          </div>
+          <article class="sds-pv-card is-kit">
+            <header><span class="sds-ico">${I.box}</span><strong>Your kit</strong><em>Injectors only</em></header>
+            <div class="sds-srow"><span>Xeomin · batch 2611</span><span class="sds-pv-input">units left</span></div>
+          </article>
+          ${bands || '<p class="sds-hint">No cards yet. Add some from the list.</p>'}
+          <button type="button" class="sds-startbtn" data-pv="start">Start my day</button>
+          <p class="sds-pv-note" hidden>This is a preview, so nothing happens. For staff, this saves their start and closes.</p>
+        </div>`;
+    };
+
+    draw();
+    d.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-pv]");
+      if (!b) { if (e.target === d) d.close(); return; }
+      const k = b.dataset.pv;
+      if (k === "close") d.close();
+      else if (k === "phone" || k === "set") { phone = k === "phone"; draw(); }
+      else if (k === "start") d.querySelector(".sds-pv-note").hidden = false;
+    });
+    d.addEventListener("close", () => d.remove());
+    document.body.appendChild(d);
+    d.showModal();
+  }
+
   /* ----- Saving ----- */
   async function save() {
     if (st.saving) return;
@@ -549,6 +631,11 @@ export async function mountSodSettings(host) {
       if (b.dataset.seg === "arrange") {
         const n = cols();
         L().cards.forEach((x) => { x.col = Math.min(x.col, n); if (n === 1) x.full = false; });
+        // Two or three columns need room
+        if (n === 2 && L().size === "compact") L().size = "wide";
+        if (n === 3) L().size = "full";
+        // Everything still in column 1: share the cards out so the columns show straight away
+        if (n > 1 && L().cards.every((x) => x.col === 1 && !x.full)) L().cards.forEach((x, i) => { x.col = (i % n) + 1; });
       }
       changed(); render(); return;
     }
@@ -566,7 +653,7 @@ export async function mountSodSettings(host) {
     if (c && "down" in b.dataset) { step(c.id, 1); return; }
     if (c && "edit" in b.dataset) { st.open = st.open === c.id ? "" : c.id; render(); return; }
     if (c && "del" in b.dataset) {
-      if (!confirm(`Remove "${c.title}" from Start of Day?`)) return;
+      if (!(await sodAsk(`Remove "${c.title}"?`, "It comes off Start of Day when you save. You can add it again from the list.", "Remove", true))) return;
       L().cards = L().cards.filter((x) => x.id !== c.id);
       if (st.open === c.id) st.open = "";
       changed(); render(); return;
@@ -577,15 +664,12 @@ export async function mountSodSettings(host) {
     const act = b.dataset.act;
     if (act === "save") save();
     if (act === "reset") {
-      if (!confirm("Replace this layout with the standard Start of Day? Nothing changes for staff until you press Save.")) return;
+      if (!(await sodAsk("Use the standard layout?", "This replaces the cards and arrangement here. Nothing changes for staff until you press Save.", "Use the standard layout"))) return;
       st.layout = cleanSodLayout(SOD_DEFAULT_LAYOUT);
       st.open = "";
       changed(); render();
     }
-    if (act === "preview") {
-      if (st.dirty && !confirm("The preview shows the saved layout. Leave without saving your changes?")) return;
-      location.href = location.pathname + "?sod=preview#/home";
-    }
+    if (act === "preview") openPreview();
   });
 
   // Typing: kept without redrawing, so the cursor stays put
