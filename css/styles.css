@@ -14416,3 +14416,11 @@ body.scan-full { overflow: hidden; }
 .rf-notify .prs-toggle.is-off { opacity: .55; cursor: not-allowed; }
 .rf-notify .prs-toggle small { line-height: 1.4; }
 .rf-mailline { margin: .3rem 0 0; font-size: .78rem; color: var(--muted); }
+
+
+/* Refunds: "Email … again" */
+.rf-resend { padding: 0; border: 0; background: none; color: var(--primary); font: inherit; font-weight: 600;
+  text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.rf-resend:hover { color: var(--primary-hover); }
+.rf-resend:disabled { color: var(--muted); text-decoration: none; cursor: default; }
+a.md-tcheck { color: var(--primary); text-decoration: none; font-weight: 800; }

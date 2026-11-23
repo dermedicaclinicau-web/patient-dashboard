@@ -649,6 +649,24 @@ async function mountForm(container, { staff, patientId }) {
     if (t.tagName === "SELECT" && t.dataset.f) { setPath(t.dataset.f, t.value); drawSum(); }
   });
 
+    async function resend(key, btn) {
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Sending…";
+    try {
+      const res = await callApi({ action: "refunds", op: "resendStep", id, key });
+      if (!res || res.problem) throw new Error((res && res.problem) || "Not sent.");
+      showToast(`Emailed ${res.to}`);
+      btn.textContent = "Sent ✓";
+    } catch (ex) {
+      console.warn("Resend failed:", ex);
+      showToast(ex.code === "FORBIDDEN" ? "Only the person who asked for the refund, or an Admin, can resend it."
+        : ex.message || "Couldn't send. Try again.");
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  }
+
   root.addEventListener("click", (e) => {
     const a = e.target.closest("[data-act]");
     if (!a || a.dataset.act === "buy") return;
@@ -768,7 +786,9 @@ async function mountRefund(container, { id, staff }) {
         <div class="rf-step-top"><strong>${esc(s.title)}</strong><span class="rf-who">${avatar(s.whoName || "?")}${esc(s.whoName || "Anyone")}</span></div>
         ${s.done ? `<p class="rf-step-done">${esc([valueText(s), s.doneBy, s.doneAt && niceDay(new Date(s.doneAt))].filter(Boolean).join(" · "))}</p>`
           : wait ? '<p class="rf-step-wait">Waiting for approval</p>'
-          : r.status === "open" ? `<p class="rf-step-due${late ? " is-late" : ""}">${late ? "Overdue · " : ""}Due ${esc(niceKey(s.dueDate))}</p>` : ""}
+          : r.status === "open" ? `<p class="rf-step-due${late ? " is-late" : ""}">${late ? "Overdue · " : ""}Due ${esc(niceKey(s.dueDate))}${
+            s.whoId && s.whoId !== myUid() && (boss() || r.createdByUid === myUid())
+              ? ` · <button type="button" class="rf-resend" data-act="resend" data-k="${s.key}">Email ${esc(String(s.whoName || "them").split(" ")[0])} again</button>` : ""}</p>` : ""}
         ${s.key === "stock" && (act || s.lines) ? stockAct(s, act)
           : act ? `<div class="rf-step-act">${help}<div class="rf-step-row">${field}${btns}</div><p class="rf-err" data-err="${s.key}" hidden></p></div>` : ""}
       </div></article>`;
@@ -1123,6 +1143,7 @@ async function mountRefund(container, { id, staff }) {
     if (a.dataset.act === "done") complete(a.dataset.k, a);
     else if (a.dataset.act === "decline") cancel(true);
     else if (a.dataset.act === "cancel") cancel(false);
+    else if (a.dataset.act === "resend") resend(a.dataset.k, a);
     else if (a.dataset.act === "copy") navigator.clipboard.writeText(a.dataset.v).then(() => showToast("Copied")).catch(() => showToast("Couldn't copy"));
   });
   // Batch typed in, or a batch chosen, for a returned product

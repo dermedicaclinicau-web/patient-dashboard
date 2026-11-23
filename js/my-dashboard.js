@@ -47,6 +47,7 @@ const ICON = {
   chev: '<polyline points="6 9 12 15 18 9"/>',
   info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
   chat: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+  refund: '<path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 3 3 9 9 9"/><path d="M12 8v8"/>',
   grid: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
   sliders: '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>',
 };
@@ -56,7 +57,7 @@ const CARD_ICON = {
   "Needs you now": ICON.alert, "Visits without a record": ICON.note, "My appointments & notes": ICON.cal,
   Tasks: ICON.ok, "My follow-ups": ICON.chat, "My kit": ICON.kit, "My records": ICON.note,
   "What I used": ICON.box, "My requests": ICON.box, "Stock I use": ICON.box, "Clinic overview": ICON.info,
-  "Start & end of day": ICON.cal,
+  "Start & end of day": ICON.cal, "My refunds": ICON.refund,
 };
 const cardHead = (title) => `${CARD_ICON[title] ? `<span class="md-hic">${svg(CARD_ICON[title])}</span>` : ""}<h3>${esc(title)}</h3>`;
 const card = (title, inner, cls = "", link = "") => `
@@ -72,12 +73,13 @@ const quiet = (title, text, href = "") => (href
 // The cards, in their default order. "notes" is for everyone; "visits" for anyone who records treatments; the rest need their dash.* tick.
 const DASH_CARDS = [
   ["attention", "Needs you now"], ["visits", "Visits without a record"], ["appts", "My appointments & notes"], ["tasks", "Tasks"],
+  ["refunds", "My refunds"],
   ["followups", "My follow-ups"],
   ["notes", "My notes"], ["days", "Start & end of day"], ["kit", "My kit"], ["records", "My records"], ["usage", "What I used"],
   ["requests", "My requests"], ["stock", "Stock I use"], ["overview", "Clinic overview"],
 ];
 const SIDE_CARDS = new Set(["notes", "kit", "requests", "stock"]);
-const allowedCard = (k) => k === "notes" || (k === "visits" ? can("consult.record")
+const allowedCard = (k) => k === "notes" || k === "refunds" || (k === "visits" ? can("consult.record")
   : k === "followups" ? can("menu.prospects") : can(`dash.${k}`));
 
 // Per person: hidden and collapsed cards, the order, columns and colours (dash-prefs.js: this device and their login)
@@ -140,7 +142,12 @@ async function myCallBacks(uid) {
     .filter((c) => c.callBackDue)
     .sort((a, b) => String(a.callBackDue).localeCompare(String(b.callBackDue)));
 }
-
+// Open refunds: which tasks are refund steps, and which steps are mine
+async function openRefunds() {
+  const snap = await getDocs(query(collection(db, "refunds"), where("status", "==", "open")));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+const refWaiting = (steps, s) => s.key !== "approve" && steps.some((x) => x.key === "approve" && !x.done);
 const TASK_TAB_KEY = "dm.dash.tasktab";
 const readTaskTab = () => { try { return localStorage.getItem(TASK_TAB_KEY) || "mine"; } catch { return "mine"; } };
 const saveTaskTab = (v) => { try { localStorage.setItem(TASK_TAB_KEY, v); } catch { /* private mode */ } };
@@ -381,7 +388,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     const hidden = readSet(hideKey(me0));
     const show = (k) => allowedCard(k) && !hidden.has(k);
     const todayKey = dayKey();
-    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts, notes, formsT, invs, unrec, countCfg, myDay, myCreated, callBacks] = await Promise.all([
+    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts, notes, formsT, invs, unrec, countCfg, myDay, myCreated, callBacks, refunds] = await Promise.all([
       safe(listProducts(), []),
       safe(listAllLots(), []),
       safe(listKits(), []),
@@ -408,6 +415,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
       canKit ? safe(getMyKitDay(), null) : null,
       show("tasks") ? safe(myCreatedTasks(me0), []) : [],
       show("attention") && (can("recall.work") || can("recall.manage")) ? safe(myCallBacks(me0), []) : [],
+      safe(openRefunds(), []),
     ]);
     if (!root.isConnected) return;
 
@@ -522,6 +530,21 @@ export async function mountMyDashboard(container, { staff } = {}) {
           late ? ` (${late} from an earlier day)` : " today"}: ${names}${callBacks.length > 3 ? ` and ${callBacks.length - 3} more` : ""}`,
         href: "#/recall", act: "Call",
       });
+    }
+    // Refunds: which tasks are refund steps (finished on the refund page), and the steps waiting on me
+    const refundByTask = new Map();
+    refunds.forEach((r) => (r.steps || []).forEach((s) => { if (s.taskId) refundByTask.set(s.taskId, r.id); }));
+    const myRefSteps = refunds.flatMap((r) => (r.steps || [])
+      .filter((s) => !s.done && s.whoId && myIds.includes(String(s.whoId)) && !refWaiting(r.steps || [], s))
+      .map((s) => ({ r, s })))
+      .sort((a, b) => String(a.s.dueDate || "9999").localeCompare(String(b.s.dueDate || "9999")));
+    const lateRef = myRefSteps.filter(({ s }) => s.dueDate && s.dueDate < todayKey);
+    if (lateRef.length === 1) {
+      const { r, s } = lateRef[0];
+      att.push({ tone: "bad", text: `Refund step overdue: ${s.title} for ${r.patientName || "a patient"}`,
+        href: `#/refunds/r/${encodeURIComponent(r.id)}`, act: "Open" });
+    } else if (lateRef.length) {
+      att.push({ tone: "bad", text: `${lateRef.length} refund steps overdue`, href: "#/refunds/mine", act: "Open" });
     }
     const myOverdue = tasks.filter((t) => isMine(t) && t.dueDate && t.dueDate < todayKey).length;
     if (myOverdue) att.push({ tone: "bad", ttab: "mine",
@@ -773,10 +796,13 @@ export async function mountMyDashboard(container, { staff } = {}) {
         : t.createdBy ? `<span class="md-twho">From ${esc(t.createdBy)}</span>` : "";
       const patientHtml = !t.patientName ? ""
         : t.patientId ? `<a href="#/patient/${encodeURIComponent(t.patientId)}">${esc(t.patientName)}</a>` : `<span>${esc(t.patientName)}</span>`;
+      const refId = refundByTask.get(t.id);
+      const refHref = refId ? `#/refunds/r/${encodeURIComponent(refId)}` : "";
       return `<li class="md-trow${overdue ? " is-overdue" : ""}${done ? " is-done" : ""}">
         ${done ? '<span class="md-tcheck" aria-hidden="true">✓</span>'
+          : refId ? `<a class="md-tcheck" href="${refHref}" title="Finish this step on the refund" aria-label="Open the refund">›</a>`
           : `<button type="button" class="md-tcheck" data-task-done="${esc(t.id)}" title="Mark as done" aria-label="Mark as done">✓</button>`}
-        <div class="md-tbody" data-task-open="${esc(t.id)}" role="button" tabindex="0" aria-label="Open task: ${esc(t.taskText || "Task")}">
+        <div class="md-tbody" ${refId ? `data-refund="${esc(refHref)}"` : `data-task-open="${esc(t.id)}"`} role="button" tabindex="0" aria-label="Open task: ${esc(t.taskText || "Task")}">
           <span class="md-ttitle">${esc(t.taskText || "Untitled reminder")}</span>
           <span class="md-tmeta">${done ? "" : statusPillHtml(t)}${patientHtml}
             <span class="md-tdue${overdue ? " is-late" : ""}">${esc(dueText)}</span>${personHtml}
@@ -821,6 +847,18 @@ export async function mountMyDashboard(container, { staff } = {}) {
       if (el) el.innerHTML = tasksInner();
     };
     const tasksHtml = card("Tasks", `<div data-role="tasks-card">${tasksInner()}</div>`, "md-tasks-card");
+
+    /* ---------- My refunds: steps waiting on me ---------- */
+    const refundsHtml = !myRefSteps.length ? quiet("My refunds", "No refund steps for you", "#/refunds")
+      : card("My refunds", `<ul class="md-list">${myRefSteps.slice(0, 8).map(({ r, s }) => {
+          const late = s.dueDate && s.dueDate < todayKey;
+          const when = late ? "Overdue" : s.dueDate === todayKey ? "Due today" : s.dueDate ? `Due ${niceKey(s.dueDate)}` : "";
+          return `<li><a href="#/refunds/r/${encodeURIComponent(r.id)}">
+            <span><strong>${esc(r.patientName || "Patient")}</strong> · ${esc(s.title || "Refund step")}</span>
+            <span class="rq-status ${late ? "is-declined" : "is-open"}">${esc(when)}</span>
+            <small>$${Number(r.total || 0).toFixed(2)}</small></a></li>`;
+        }).join("")}</ul>${myRefSteps.length > 8 ? `<small class="muted">and ${myRefSteps.length - 8} more</small>` : ""}`,
+        "", '<a class="md-link" href="#/refunds/mine">Open Refunds</a>');
 
     /* ---------- My notes (filled in by my-notes.js) and Start & end of day (Admins, by staff-days.js) ---------- */
     const notesHtml = '<section class="md-card md-notes-card" data-role="notes"></section>';
@@ -881,7 +919,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     /* ---------- The cards: work on the left, tools on the right, each in this person's order ---------- */
     const SIDE = SIDE_CARDS;
     const CARDS = [["attention", attentionHtml], ["visits", '<section class="md-card" data-role="visits"></section>'],
-      ["appts", apptHtml], ["tasks", tasksHtml], ["followups", '<section class="md-card" data-role="followups"></section>'],
+      ["appts", apptHtml], ["tasks", tasksHtml], ["refunds", refundsHtml], ["followups", '<section class="md-card" data-role="followups"></section>'],
       ["notes", notesHtml], ["days", daysHtml],
       ["kit", kitHtml], ["records", recordsHtml], ["usage", usedHtml], ["requests", reqHtml], ["stock", stockHtml], ["overview", overviewHtml]];
     const shown = byOrder(CARDS, readOrder(me)).filter(([k, h]) => h && show(k));
@@ -1105,6 +1143,8 @@ export async function mountMyDashboard(container, { staff } = {}) {
     }
     const td = e.target.closest("[data-task-done]");
     if (td) { const t = taskMap.get(td.dataset.taskDone); if (t) doneDialog(t); return; }
+    const rf = e.target.closest("[data-refund]");
+    if (rf && !e.target.closest("a")) { location.hash = rf.dataset.refund; return; }
     const to = e.target.closest("[data-task-open]");
     if (to && !e.target.closest("a")) { openTask(to.dataset.taskOpen); return; }
     const te = e.target.closest("[data-task-email]");
