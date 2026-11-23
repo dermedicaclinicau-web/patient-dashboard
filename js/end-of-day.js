@@ -370,7 +370,7 @@ function readAnswer(form, q, i) {
 }
 
 function renderForm(dlg, staff, cfg, day, kit, lead = "") {
-  const editLink = can("tasks.build") ? '<a class="eod-edit" href="#/tasks/end-of-day">Edit these questions</a>' : "";
+  const editLink = can("eod.manage") ? '<a class="eod-edit" href="#/settings/eod">Edit these questions</a>' : "";
   dlg.innerHTML = `<form class="lh-form eod-form" novalidate>
     <div class="lh-dialog-head"><h3>End of day</h3><p>${esc(lead || `${todayText()} · Thanks for today, ${firstName(staff.name)}.`)}</p></div>
     ${staff.injector === true && day && day.start ? `<p class="eod-fix">Wrong count this morning?

@@ -472,10 +472,10 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // End of Day questions: all staff read them; Admin / Build tasks edits them
+    // End of Day questions: all staff read them; Admins, Build tasks and the End of Day tick edit them
     match /app_settings/{id} {
       allow read: if isStaff();
-      allow write: if can('tasks.build');
+      allow write: if can('tasks.build') || can('eod.manage');
     }
 
     // Order requests: anyone with "Request orders" asks. Each new request waits for the order approver; only Apps Script
@@ -1965,20 +1965,19 @@ match /inv_count_drafts/{id} {
       allow delete: if false;
     }
 
-        match /sod_announcements/{id} {
+    match /sod_announcements/{id} {
       allow read: if request.auth != null;
-      allow create, update: if CAN_MANAGE;
+      allow create, update: if can('sod.manage');
       allow delete: if false;
 
       // Each person's "seen" and "confirmed": only they write their own
       match /reads/{uid} {
-        allow read: if request.auth != null && (request.auth.uid == uid || CAN_MANAGE);
+        allow read: if request.auth != null && (request.auth.uid == uid || can('sod.manage'));
         allow create, update: if request.auth != null && request.auth.uid == uid
           && request.resource.data.uid == uid;
         allow delete: if false;
       }
     }
-
     // ===================== Safety net =====================
     // Anything not allowed by a rule above stays locked
     // (this includes staff_roles and staff_audit, which only Apps Script writes)

@@ -433,6 +433,7 @@ const pageAllowed = (p, param = "") => {
   if (p === "settings" && String(param).split("/")[0] === "recall") return can("recall.manage");
   if (p === "settings" && can("flows.build") && (!param || String(param).split("/")[0] === "flows")) return true;
   if (p === "settings" && can("sod.manage") && (!param || String(param).split("/")[0] === "sod")) return true;
+  if (p === "settings" && can("eod.manage") && (!param || String(param).split("/")[0] === "eod")) return true;
   const need = PAGE_PERM[p];
   if (!need) return true;
   return need === "admin" ? isAdminNow() : can(need);
@@ -488,8 +489,8 @@ function router() {
     return;
   }
   // Not an Admin: System configuration only shows Email flows
-  if (page === "settings" && !isAdminNow() && !["flows", "recall", "sod"].includes(param.split("/")[0])) {
-    location.replace(can("flows.build") ? "#/settings/flows" : "#/settings/sod");
+  if (page === "settings" && !isAdminNow() && !["flows", "recall", "sod", "eod"].includes(param.split("/")[0])) {
+    location.replace(can("flows.build") ? "#/settings/flows" : can("sod.manage") ? "#/settings/sod" : "#/settings/eod");
     return;
   }
 

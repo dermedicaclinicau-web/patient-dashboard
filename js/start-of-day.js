@@ -82,6 +82,65 @@ let watching = false;
 let checking = false;
 let startedKey = "";   // "<uid>:<date>" once today is known to be started (no more checks today)
 
+/* ---------- Other windows of this browser: only one welcome at a time ---------- */
+// Started or put off in one window closes the welcome in the others. A window opening while another one's
+// welcome is up waits its turn. Started on another device: checked again when this window comes back into view.
+const chan = (() => {
+  try { return "BroadcastChannel" in window ? new BroadcastChannel("dm-start-of-day") : null; } catch { return null; }
+})();
+function tellOthers(type, staff) {
+  if (!chan || !staff || !staff.uid) return;
+  try { chan.postMessage({ type, uid: staff.uid, day: toDateKey() }); } catch { /* ignore */ }
+}
+// The welcome is on screen (not the preview, and not "Edit start of day")
+const welcomeUp = () => !!current && !current.dataset.preview && !current.dataset.edit;
+function dayStartedHere(staff) {
+  startedKey = `${staff.uid}:${toDateKey()}`;
+  if (welcomeUp()) closeStartOfDay();
+  window.dispatchEvent(new Event("kitday:changed"));   // the top bar follows
+}
+if (chan) chan.addEventListener("message", (e) => {
+  const m = e.data || {};
+  const s = watchStaff || btnStaff;
+  if (!s || m.uid !== s.uid || m.day !== toDateKey()) return;
+  if (m.type === "started") dayStartedHere(s);
+  else if (m.type === "snoozed") { if (welcomeUp()) closeStartOfDay(); }
+  else if (m.type === "ask" && welcomeUp()) tellOthers("showing", s);
+});
+// Is the welcome already open in another window of this browser?
+function otherWindowShowing(staff) {
+  if (!chan) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let done = false;
+    const on = (e) => {
+      const m = e.data || {};
+      if (m.type !== "showing" || m.uid !== staff.uid) return;
+      done = true;
+      chan.removeEventListener("message", on);
+      resolve(true);
+    };
+    chan.addEventListener("message", on);
+    tellOthers("ask", staff);
+    setTimeout(() => { if (!done) { chan.removeEventListener("message", on); resolve(false); } }, 400);
+  });
+}
+// Started on another device while this welcome was open: it closes when this window comes back into view
+document.addEventListener("visibilitychange", async () => {
+  const s = watchStaff || btnStaff;
+  if (document.visibilityState !== "visible" || !s || !welcomeUp()) return;
+  const dlg = current;
+  const day = await getMyKitDay().catch(() => null);
+  if (day && (day.start || day.end) && current === dlg) dayStartedHere(s);
+});
+// Pressing start in a welcome that's out of date: nothing is saved twice
+async function startedElsewhere(staff) {
+  const day = await getMyKitDay().catch(() => null);
+  if (!day || !(day.start || day.end)) return false;
+  dayStartedHere(staff);
+  showToast("You've already started today, in another window or device.");
+  return true;
+}
+
 function watchStartOfDay(staff) {
   watchStaff = staff;
   if (watching) return;
@@ -106,6 +165,8 @@ async function checkStartOfDay(staff) {
     if (mine !== session || current || watchStaff !== staff) return;
     if (st === null) { startedKey = today; return; }   // started today
     if (st === undefined) return;                        // couldn't check: try again later
+    if (await otherWindowShowing(staff)) return;   // already open in another window of this browser
+    if (mine !== session || current) return;
     showStartOfDay(staff, st.kit ? { kit: st.kit } : { noKit: true });
   } finally {
     checking = false;
@@ -280,6 +341,8 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
 
   const dlg = document.createElement("dialog");
   dlg.className = "sod";
+  if (preview) dlg.dataset.preview = "1";
+  if (kit && kit.edit) dlg.dataset.edit = "1";
   dlg.setAttribute("aria-labelledby", "sod-title");
   dlg.innerHTML = `
     <div class="sod-card">
@@ -320,7 +383,7 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
     setTimeout(() => { if (current === dlg) closeStartOfDay(); }, 180);
   };
   // Not started yet: it can only be put off (back in 15 minutes), never just clicked away
-  const later = () => { if (!preview) snooze(staff); close(); };
+  const later = () => { if (!preview) { snooze(staff); tellOthers("snoozed", staff); } close(); };
   dlg.addEventListener("cancel", (e) => { e.preventDefault(); later(); });
   dlg.addEventListener("click", (e) => {
     if (e.target.closest('[data-act="later"]')) { later(); return; }
@@ -372,6 +435,7 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
       showToast("Preview only. Nothing was saved.");
       return;
     }
+    if (await startedElsewhere(staff)) return;   // started in another window or device meanwhile
     // Kit count + start of day, together
     if (kitShown) {
       const errEl = kitBox.querySelector(".lh-error");
@@ -388,6 +452,7 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
       try {
         const r = await saveKitDayStart({ items: r0.items }, staff);
         window.dispatchEvent(new Event("kitday:changed"));
+        tellOthers("started", staff);
         close();
         showToast(kitToast(r));
       } catch (ex) {
@@ -401,6 +466,7 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
     try {
       await saveDayStart(staff);
       window.dispatchEvent(new Event("kitday:changed"));
+      tellOthers("started", staff);
     } catch (err) {
       console.warn("Start of day not saved:", err);
       showToast("Couldn't record your start. Press “Start my day” at the top to try again.");
@@ -464,7 +530,7 @@ function renderKit(dlg, staff, kit, close) {
   wireKitCount(card);
   card.addEventListener("input", () => showErr(""));
   card.querySelector('[data-act="later"]').addEventListener("click", () => {
-    if (!edit) snooze(staff);
+    if (!edit) { snooze(staff); tellOthers("snoozed", staff); }
     close();
     if (!edit) showToast(`No problem. I'll remind you again in ${SNOOZE_MIN} minutes.`);
   });
@@ -473,6 +539,7 @@ function renderKit(dlg, staff, kit, close) {
     e.preventDefault();
     const r0 = readKitCount(card, products);
     if (r0.error) { showErr(r0.error, r0.focus); return; }
+    if (!edit && await startedElsewhere(staff)) return;   // started in another window or device meanwhile
 
     const btn = form.querySelector('[type="submit"]');
     btn.disabled = true;
@@ -481,6 +548,7 @@ function renderKit(dlg, staff, kit, close) {
     try {
       const r = await saveKitDayStart({ items: r0.items }, staff);
       window.dispatchEvent(new Event("kitday:changed"));
+      if (!edit) tellOthers("started", staff);
       close();
       showToast(kitToast(r, !!edit));
     } catch (ex) {

@@ -16,7 +16,6 @@ import { mountOrderRequest } from "./order-request.js";
 import { can, isInjector } from "./perms.js";
 import { mountStockCount } from "./stock-count.js";
 import { renderCountCard } from "./count-card.js";
-import { mountEndOfDaySettings } from "./end-of-day-admin.js";
 import { mountDataUploader } from "./data-uploader.js";
 import { mountMarketing } from "./marketing.js";
 import { mountTemplateBuilder } from "./mkt-templates.js";
@@ -70,6 +69,9 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
     container.innerHTML = `<section class="page"><div class="state"><strong>No access</strong>${esc(msg)}</div></section>`;
   };
 
+  // End of Day's setup moved to System configuration → End of Day (old links and bookmarks still work)
+  if (view === "end-of-day") { location.replace("#/settings/eod"); return; }
+
   // Full-page screens
   if (view === "run" && sub) {
     if (!can("tasks.run") || !(can("tasks.patient") || can("tasks.staff"))) { noAccess("Ask an Admin for access to run tasks."); return; }
@@ -112,7 +114,7 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
     uploads: can("data.upload"),
     marketing: can("marketing.manage"),
     types: isAdmin,
-    "end-of-day": isAdmin,
+
   };
   if (view in allowed && !allowed[view]) {
     const first = Object.keys(allowed).find((k) => allowed[k]);
@@ -140,7 +142,7 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
         ${allowed.uploads ? link("uploads", "#/tasks/uploads", I.upload, "Daily uploads") : ""}
         ${allowed.marketing ? link("marketing", "#/tasks/marketing", I.megaphone, "Marketing") : ""}
         ${isAdmin ? link("types", "#/tasks/types", I.types, "Task types") : ""}
-        ${isAdmin ? link("end-of-day", "#/tasks/end-of-day", I.moon, "End of day") : ""}
+
       </nav>
       <div class="tm-main" data-role="main"></div>
     </div>`;
@@ -158,11 +160,7 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
     mountMarketing(main, { sub, staff });
     return;
   }
-  if (view === "end-of-day") {
-    if (!isAdmin) { main.innerHTML = '<div class="tm-empty">Only admins can set up End of day.</div>'; return; }
-    mountEndOfDaySettings(main, { staff, embedded: true });
-    return;
-  }
+
   if (view === "types") {
     if (!isAdmin) { main.innerHTML = '<div class="tm-empty">Only admins can set up task types.</div>'; return; }
     mountTaskTypes(main, { staff });

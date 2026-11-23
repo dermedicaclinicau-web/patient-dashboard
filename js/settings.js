@@ -8,6 +8,7 @@ import { renderPlanWorkflowSettings } from "./plan-workflow-settings.js";
 import { renderPlanCopySettings } from "./plan-copy-settings.js";
 import { mountServicePrices } from "./service-prices.js";
 import { mountSodSettings } from "./sod-settings.js";
+import { mountEndOfDaySettings } from "./end-of-day-admin.js";
 import { can } from "./perms.js";
 const TABS = [
   ["recording", "Recording rules"],
@@ -16,6 +17,7 @@ const TABS = [
   ["wording", "Wording"],
   ["pricing", "Services and pricing"],
   ["sod", "Start of Day"],
+  ["eod", "End of Day"],
   ["flows", "Email flows"],
 ];
 
@@ -46,8 +48,9 @@ export function mountSettings(container, { param = "", staff = null } = {}) {
   root.className = "page wide";
   container.replaceChildren(root);
   const admin = isAdmin(staff);
-  // Not an Admin, but has the Start of Day tick: only the Start of Day tab
-  const only = !admin && can("sod.manage") ? ["sod"] : null;
+  // Not an Admin: only the tabs their ticks allow (Start of Day, End of Day)
+  const ticks = [can("sod.manage") && "sod", can("eod.manage") && "eod"].filter(Boolean);
+  const only = !admin && ticks.length ? ticks : null;
   if (!admin && !only) {
     root.innerHTML = '<div class="state"><strong>No access</strong>Only Admins can change the system configuration.</div>';
     return;
@@ -55,7 +58,7 @@ export function mountSettings(container, { param = "", staff = null } = {}) {
 
   const first = String(param || "").split("/")[0];
   // "flows" is opened by app.js straight into email-flows.js, so it never reaches here
-  const tab = only ? "sod" : TABS.some(([k]) => k === first && k !== "flows") ? first : "recording";
+  const tab = only ? (only.includes(first) ? first : only[0]) : TABS.some(([k]) => k === first && k !== "flows") ? first : "recording";
 
   root.innerHTML = settingsHeaderHtml(tab, only) + '<div data-role="body"></div>';
   const body = root.querySelector('[data-role="body"]');
@@ -88,5 +91,6 @@ export function mountSettings(container, { param = "", staff = null } = {}) {
   else if (tab === "wording") renderUiTextSettings(body, { staff });
   else if (tab === "pricing") mountServicePrices(body, { staff });
   else if (tab === "sod") mountSodSettings(body, { staff });
+  else if (tab === "eod") mountEndOfDaySettings(body, { staff });
   else mountRecordingSettings(body, { staff, embedded: true });
 }

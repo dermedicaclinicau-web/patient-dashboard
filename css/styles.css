@@ -14820,3 +14820,7 @@ a.sds-btn { display: inline-flex; align-items: center; text-decoration: none; }
 .sda-pop-note { margin: .8rem 0 0; font-size: .8rem; color: var(--muted); }
 .sda-pop-acts { display: flex; justify-content: flex-end; margin-top: .9rem; }
 @media (max-width: 640px) { .sda-row { flex-wrap: wrap; } }
+
+/* ---------- Settings → End of Day ---------- */
+.eod-admin > .sds { margin-bottom: 1rem; }
+.eod-qcard .eod-presets { margin: .75rem 0 1rem; }
