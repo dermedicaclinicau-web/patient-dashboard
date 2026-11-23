@@ -1,5 +1,7 @@
-// Settings → Start of Day: the layout everyone sees when they start their day.
-// Saved in sod_settings/layout. start-of-day.js reads it (Stage 2) through loadSodLayout().
+// Settings → Start of Day: what staff see when they start their day.
+// Presets work like End of Day's question sets: Everyone, plus presets given to roles or to particular people.
+// A person gets the preset given to them by name, then their role's preset, otherwise Everyone's.
+// Saved in sod_settings/layout: Everyone's layout at the top level, the presets in "sets".
 // Injectors always count their kit first: that card is fixed at the top and can't be removed.
 
 import { db } from "./firebase-config.js";
@@ -8,8 +10,10 @@ import { getAuth } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-aut
 import { escapeHtml, showToast } from "./utils.js";
 import { can } from "./perms.js";
 import { listProducts } from "./inventory-api.js";
+import { callApi } from "./appointments.js";
+import { confirmDialog } from "./dialog.js";
 
-const esc = escapeHtml;
+const esc = (s) => escapeHtml(String(s ?? ""));
 const svg = (p) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const I = {
@@ -60,6 +64,8 @@ const PAGES = [["#/home", "My dashboard"], ["#/patients", "Patient List"], ["#/c
   ["#/tasks", "Task Manager"], ["#/inventory", "Inventory"], ["#/refunds", "Refunds"], ["#/recall", "Recall"],
   ["#/prospects", "Prospects"], ["#/scanner", "Scanner"]];
 const MAX_CARDS = 16;
+const MAX_SETS = 12;
+const EVERYONE = "all";
 
 // What everyone sees until a layout is saved: the same as today's Start of Day
 export const SOD_DEFAULT_LAYOUT = {
@@ -74,7 +80,7 @@ export const SOD_DEFAULT_LAYOUT = {
   ],
 };
 
-/* ---------- Checking a layout (used when saving here, and when start-of-day.js reads it) ---------- */
+/* ---------- Checking layouts (used when saving here, and when start-of-day.js reads them) ---------- */
 
 const pick = (v, list, def) => (list.some((x) => x[0] === v) ? v : def);
 const int = (v, lo, hi, def) => {
@@ -82,8 +88,11 @@ const int = (v, lo, hi, def) => {
   return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : def;
 };
 const text = (v, max) => String(v == null ? "" : v).replace(/\s+/g, " ").trim().slice(0, max);
+const cleanList = (a, max, len) => [...new Set((Array.isArray(a) ? a : []).map((x) => text(x, len)).filter(Boolean))].slice(0, max);
 const colsOf = (arrange) => (arrange === "grid" ? 3 : arrange === "split" ? 2 : 1);
 const newId = () => "c_" + Math.random().toString(36).slice(2, 10);
+const newPid = () => "p_" + Math.random().toString(36).slice(2, 10);
+const copy = (o) => JSON.parse(JSON.stringify(o));
 
 function cleanCfg(type, c) {
   c = c && typeof c === "object" ? c : {};
@@ -96,7 +105,7 @@ function cleanCfg(type, c) {
       return {
         show: show.length ? [...new Set(show)] : ["low"],
         days: int(c.days, 7, 365, 60),
-        cats: [...new Set((Array.isArray(c.cats) ? c.cats : []).map((s) => text(s, 60)).filter(Boolean))].slice(0, 40),
+        cats: cleanList(c.cats, 40, 60),
         loc: ["shelf", "jt"].includes(c.loc) ? c.loc : "any",
         max: int(c.max, 1, 20, 6),
         stockOnly: c.stockOnly !== false,
@@ -115,6 +124,7 @@ function cleanCfg(type, c) {
   }
 }
 
+// One layout: { size, arrange, split, cards }
 export function cleanSodLayout(raw) {
   const r = raw && typeof raw === "object" ? raw : {};
   const arrange = pick(r.arrange, ARRANGE, "stack");
@@ -138,13 +148,55 @@ export function cleanSodLayout(raw) {
   return { size: pick(r.size, SIZES, "compact"), arrange, split: pick(r.split, SPLIT, "left"), cards };
 }
 
-// The layout for the overlay: the saved one, or the standard one
-export async function loadSodLayout() {
+// Everything: Everyone's layout, plus the presets. A role or person belongs to one preset only (the first keeps them).
+export function cleanSodSettings(raw) {
+  const r = raw && typeof raw === "object" ? raw : {};
+  const base = cleanSodLayout(Array.isArray(r.cards) ? r : SOD_DEFAULT_LAYOUT);
+  const takenRoles = new Set();
+  const takenPeople = new Set();
+  const ids = new Set();
+  const sets = (Array.isArray(r.sets) ? r.sets : []).slice(0, MAX_SETS).map((x) => {
+    x = x && typeof x === "object" ? x : {};
+    let id = /^p_[a-z0-9]{4,20}$/.test(String(x.id || "")) ? String(x.id) : newPid();
+    if (ids.has(id)) id = newPid();
+    ids.add(id);
+    return {
+      id, name: text(x.name, 60),
+      roles: cleanList(x.roles, 20, 40).filter((y) => !takenRoles.has(y.toLowerCase()) && takenRoles.add(y.toLowerCase())),
+      staffIds: cleanList(x.staffIds, 80, 80).filter((y) => !takenPeople.has(y) && takenPeople.add(y)),
+      ...cleanSodLayout(Array.isArray(x.cards) ? x : SOD_DEFAULT_LAYOUT),
+    };
+  });
+  return { ...base, sets };
+}
+
+// Which layout a person gets: a preset given to them by name, then their role's, otherwise Everyone's
+export function sodLayoutFor(cfg, { uid = "", role = "" } = {}) {
+  const sets = (cfg && cfg.sets) || [];
+  const r = String(role || "").toLowerCase();
+  const set = sets.find((x) => uid && x.staffIds.includes(uid))
+    || sets.find((x) => r && x.roles.some((y) => y.toLowerCase() === r)) || null;
+  const lay = set || cfg;
+  return {
+    size: lay.size, arrange: lay.arrange, split: lay.split, cards: lay.cards,
+    presetId: set ? set.id : EVERYONE, presetName: set ? set.name : "Everyone",
+  };
+}
+
+export async function loadSodSettings() {
+  const s = await getDoc(doc(db, "sod_settings", "layout"));
+  return { ...cleanSodSettings(s.exists() ? s.data() : null), saved: s.exists() };
+}
+
+// The layout for this person's Start of Day (the standard one if nothing is saved or it can't be read)
+export async function loadSodLayout(staff) {
   try {
-    const s = await getDoc(doc(db, "sod_settings", "layout"));
-    if (s.exists()) return { ...cleanSodLayout(s.data()), saved: true };
-  } catch (err) { console.warn("Start of Day layout not read:", err); }
-  return { ...cleanSodLayout(SOD_DEFAULT_LAYOUT), saved: false };
+    const cfg = await loadSodSettings();
+    return { ...sodLayoutFor(cfg, { uid: staff && staff.uid, role: staff && (staff.role || staff.staffRole) }), saved: cfg.saved };
+  } catch (err) {
+    console.warn("Start of Day layout not read:", err);
+    return { ...cleanSodLayout(SOD_DEFAULT_LAYOUT), presetId: EVERYONE, presetName: "Everyone", saved: false };
+  }
 }
 
 // Cards in rows: full-width cards are a row of their own; the rest share the columns until the next one
@@ -168,27 +220,7 @@ export function sodColumnsCss(arrange, split) {
 
 /* ---------- The builder ---------- */
 
-/* ---------- A small in-page question (instead of the browser's confirm pop-up) ---------- */
-function sodAsk(title, text, okLabel = "OK", danger = false) {
-  return new Promise((resolve) => {
-    const d = document.createElement("dialog");
-    d.className = "sds-ask";
-    d.innerHTML = `<form method="dialog">
-        <h3>${esc(title)}</h3>${text ? `<p>${esc(text)}</p>` : ""}
-        <div class="sds-ask-acts">
-          <button value="no" class="sds-btn is-quiet">Cancel</button>
-          <button value="yes" class="sds-btn ${danger ? "is-danger" : "is-primary"}">${esc(okLabel)}</button>
-        </div>
-      </form>`;
-    document.body.appendChild(d);
-    d.addEventListener("click", (e) => { if (e.target === d) d.close("no"); });
-    d.addEventListener("close", () => { resolve(d.returnValue === "yes"); d.remove(); });
-    d.showModal();
-    d.querySelector('[value="yes"]').focus();
-  });
-}
-
-export async function mountSodSettings(host) {
+export async function mountSodSettings(host, { staff = null } = {}) {
   if (!can("sod.manage")) {
     host.innerHTML = `<p class="sds-empty">You don't have access to set up Start of Day. Ask an admin to tick
       "Start of Day: set up the overlay and post announcements" for you in Staff → Roles and access.</p>`;
@@ -196,34 +228,48 @@ export async function mountSodSettings(host) {
   }
   host.innerHTML = '<div class="skeleton" style="height:420px;border-radius:14px"></div>';
 
-  const st = { layout: null, version: 0, saved: false, savedBy: "", savedAt: null, dirty: false, open: "", cats: [], saving: false };
+  const st = { cfg: null, tab: EVERYONE, version: 0, saved: false, savedBy: "", savedAt: null,
+    dirty: false, open: "", cats: [], people: [], roles: [], saving: false };
   try {
-    const [snap, products] = await Promise.all([
+    const [snap, products, people] = await Promise.all([
       getDoc(doc(db, "sod_settings", "layout")),
       listProducts().catch(() => []),
+      callApi({ action: "staffList" }).then((r) => r.staff || []).catch((err) => { console.warn("Staff list not loaded:", err); return []; }),
     ]);
+    st.cfg = cleanSodSettings(snap.exists() ? snap.data() : null);
     if (snap.exists()) {
       const d = snap.data();
-      st.layout = cleanSodLayout(d);
       st.version = Number(d.version || 0);
       st.saved = true;
       st.savedBy = d.updatedBy || "";
       st.savedAt = d.updatedAt && d.updatedAt.toDate ? d.updatedAt.toDate() : null;
-    } else {
-      st.layout = cleanSodLayout(SOD_DEFAULT_LAYOUT);
     }
     st.cats = [...new Set(products.filter((p) => p.active !== false).map((p) => String(p.category || "").trim())
       .filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    st.people = people.map((p) => ({ id: p.id, name: p.name, role: p.role || "" }));
+    const roles = new Set(["Admin", ...st.people.map((p) => p.role).filter(Boolean)]);
+    st.cfg.sets.forEach((x) => x.roles.forEach((r) => roles.add(r)));
+    st.roles = [...roles].sort((a, b) => (a === "Admin" ? -1 : b === "Admin" ? 1 : a.localeCompare(b)));
   } catch (err) {
     console.error("Start of Day settings failed:", err);
-    host.innerHTML = `<p class="sds-empty">Start of Day settings couldn't be loaded. Check your connection and try again.</p>`;
+    host.innerHTML = `<p class="sds-empty">Start of Day settings couldn't be loaded. Check your connection and the sod_settings Firestore rule.</p>`;
     return;
   }
 
-  const L = () => st.layout;
+  const sets = () => st.cfg.sets;
+  const curSet = () => (st.tab === EVERYONE ? null : sets().find((x) => x.id === st.tab) || null);
+  const L = () => curSet() || st.cfg;   // the layout being edited
   const cols = () => colsOf(L().arrange);
   const card = (id) => L().cards.find((c) => c.id === id);
   const changed = () => { st.dirty = true; status(); };
+  const gets = (id) => st.people.filter((p) => sodLayoutFor(st.cfg, { uid: p.id, role: p.role }).presetId === id);
+  const roleOwner = (r) => sets().find((x) => x.roles.some((y) => y.toLowerCase() === r.toLowerCase())) || null;
+  const personOwner = (id) => sets().find((x) => x.staffIds.includes(id)) || null;
+  const givenText = (x) => {
+    const bits = [...x.roles];
+    if (x.staffIds.length) bits.push(`${x.staffIds.length} ${x.staffIds.length === 1 ? "person" : "people"}`);
+    return bits.join(" · ") || "Not given to anyone yet";
+  };
 
   function status() {
     const el = host.querySelector(".sds-status");
@@ -238,7 +284,63 @@ export async function mountSodSettings(host) {
   const seg = (name, list, val) => `<div class="sds-seg" role="group">${list.map(([k, l]) =>
     `<button type="button" data-seg="${name}" data-v="${k}" class="${k === val ? "is-on" : ""}" aria-pressed="${k === val}">${esc(l)}</button>`).join("")}</div>`;
 
-  /* ----- What each card looks like in the preview ----- */
+  /* ----- Presets ----- */
+  function tabsHtml() {
+    const tab = (id, title, sub, n) => {
+      const who = gets(id).length;
+      return `<button type="button" role="tab" class="sds-tab${st.tab === id ? " is-on" : ""}" data-tab="${esc(id)}" aria-selected="${st.tab === id}">
+        <b>${esc(title)}</b><small>${esc(sub)}</small>
+        <span>${n} card${n === 1 ? "" : "s"} · ${who} ${who === 1 ? "person" : "people"}</span></button>`;
+    };
+    return tab(EVERYONE, "Everyone", "Anyone not in a preset", st.cfg.cards.length) +
+      sets().map((x) => tab(x.id, x.name || "New preset", givenText(x), x.cards.length)).join("") +
+      (sets().length < MAX_SETS ? `<button type="button" class="sds-tab is-add" data-act="add-set">
+        <b>${I.plus} New preset</b><small>For a role or particular people</small></button>` : "");
+  }
+
+  function whoHtml(id) {
+    const list = gets(id);
+    return `<div class="sds-who"><b>${list.length} ${list.length === 1 ? "person gets" : "people get"} this</b>${list.length
+      ? `<div class="sds-who-names">${list.map((p) => `<span title="${esc(p.role)}">${esc(p.name)}</span>`).join("")}</div>`
+      : `<small class="sds-muted">${id === EVERYONE ? "Everyone is in a preset." : "Tick a role or a person above."}</small>`}</div>`;
+  }
+
+  function presetHtml() {
+    const x = curSet();
+    if (!x) {
+      return `<div class="sds-setbox is-all"><p class="sds-hint">Everyone who isn't in a preset gets this layout.
+        Someone given a preset by name gets it whatever their role.</p>${whoHtml(EVERYONE)}</div>`;
+    }
+    const chip = (attr, val, label, own, sub) => {
+      const mine = !!own && own.id === x.id;
+      const taken = !!own && !mine;
+      return `<label class="sds-chip${taken ? " is-taken" : ""}${mine ? " is-on" : ""}">
+        <input type="checkbox" ${attr}="${esc(val)}"${mine ? " checked" : ""}${taken ? " disabled" : ""}>
+        <span>${esc(label)}</span>${taken ? `<em>in ${esc(own.name || "another preset")}</em>` : sub ? `<em>${esc(sub)}</em>` : ""}</label>`;
+    };
+    return `<div class="sds-setbox">
+      <div class="sds-setgrid">
+        <label class="sds-f"><span>Preset name</span>
+          <input type="text" data-set="name" maxlength="60" placeholder="e.g. Booking team" value="${esc(x.name)}"></label>
+        <div class="sds-f"><span>Given to these roles</span>
+          <div class="sds-chips2">${st.roles.map((r) => chip("data-role-chip", r, r, roleOwner(r))).join("")
+            || '<small class="sds-muted">No roles found.</small>'}</div></div>
+      </div>
+      <details class="sds-people"${x.staffIds.length ? " open" : ""}>
+        <summary>And these people <small>${x.staffIds.length ? `${x.staffIds.length} chosen · ` : ""}they get this preset whatever their role</small></summary>
+        <div class="sds-chips2">${st.people.map((p) => chip("data-person", p.id, p.name, personOwner(p.id), p.role)).join("")
+          || '<small class="sds-muted">The staff list couldn\'t be loaded.</small>'}</div>
+      </details>
+      ${whoHtml(x.id)}
+      <div class="sds-setacts">
+        <button type="button" class="sds-btn is-quiet" data-act="copy-all">Copy Everyone's layout</button>
+        <button type="button" class="sds-btn is-quiet" data-act="dup-set">Duplicate</button>
+        <button type="button" class="sds-btn is-quiet is-dangertext" data-act="del-set">Delete this preset</button>
+      </div>
+    </div>`;
+  }
+
+  /* ----- What each card looks like ----- */
   function summary(c) {
     const f = c.cfg;
     switch (c.type) {
@@ -276,7 +378,7 @@ export async function mountSodSettings(host) {
     }
   }
 
-  /* ----- A card's settings ----- */
+  /* ----- A card's settings (the gear) ----- */
   function panel(c) {
     const f = c.cfg;
     const num = (k, lo, hi, label) =>
@@ -329,10 +431,9 @@ export async function mountSodSettings(host) {
       </div>`;
   }
 
-  /* ----- One card in the preview ----- */
+  /* ----- One card in the builder ----- */
   function tile(c) {
     const t = SOD_CARD_TYPES[c.type];
-    const n = cols();
     const open = st.open === c.id;
     return `<div class="sds-tile${open ? " is-open" : ""}${c.full ? " is-full" : ""}" data-id="${c.id}">
       <div class="sds-tile-top">
@@ -358,30 +459,34 @@ export async function mountSodSettings(host) {
     const used = new Set(lay.cards.map((c) => c.type));
     const full = lay.cards.length >= MAX_CARDS;
     const y = window.scrollY;
+    const x = curSet();
 
     host.innerHTML = `<div class="sds">
       <div class="sds-head">
         <div>
           <h2 class="sds-h">Start of Day</h2>
-          <p class="sds-sub">What everyone sees when they start their day. Each card shows that person's own information.</p>
+          <p class="sds-sub">What staff see when they start their day. Each card shows that person's own information.</p>
         </div>
         <div class="sds-top-acts">
           <span class="sds-status"></span>
           <button type="button" class="sds-btn is-quiet" data-act="preview">Preview</button>
-          <button type="button" class="sds-btn is-quiet" data-act="reset">Use the standard layout</button>
           <button type="button" class="sds-btn is-primary" data-act="save">Save</button>
         </div>
       </div>
+
+      <div class="sds-tabs" role="tablist" data-role="tabs">${tabsHtml()}</div>
+      ${presetHtml()}
 
       <div class="sds-opts">
         <div class="sds-opt"><span>Size</span>${seg("size", SIZES, lay.size)}</div>
         <div class="sds-opt"><span>Arrangement</span>${seg("arrange", ARRANGE, lay.arrange)}</div>
         ${lay.arrange === "split" ? `<div class="sds-opt"><span>Columns</span>${seg("split", SPLIT, lay.split)}</div>` : ""}
+        <button type="button" class="sds-btn is-quiet sds-reset" data-act="reset">Reset to the standard layout</button>
       </div>
 
       <div class="sds-main">
         <aside class="sds-pal">
-          <h3>Add a card</h3>
+          <h3>Add a card${x ? ` to ${esc(x.name || "this preset")}` : ""}</h3>
           ${Object.entries(SOD_CARD_TYPES).map(([k, t]) => {
             const added = !t.multi && used.has(k);
             return `<button type="button" class="sds-add${added ? " is-added" : ""}" data-add="${k}"${added || full ? " disabled" : ""}>
@@ -401,7 +506,7 @@ export async function mountSodSettings(host) {
             </div>
             <div class="sds-kit"><span class="sds-ico">${I.lock}</span>
               <div><strong>Your kit</strong><small>Injectors only. Always first, and always counted before they can start.</small></div></div>
-            ${bands.length ? bands.map((b, bi) => b.full
+            ${bands.length ? bands.map((b) => b.full
               ? `<div class="sds-band is-full">${tile(b.cards[0])}</div>`
               : `<div class="sds-band" style="grid-template-columns:${sodColumnsCss(lay.arrange, lay.split)}">${Array.from({ length: n }, (_, i) => {
                   const mine = b.cards.filter((c) => (n === 1 ? true : c.col === i + 1));
@@ -422,8 +527,9 @@ export async function mountSodSettings(host) {
     window.scrollTo(0, y);
   }
 
+  const drawTabs = () => { const el = host.querySelector('[data-role="tabs"]'); if (el) el.innerHTML = tabsHtml(); };
+
   /* ----- Moving cards ----- */
-  // Up / down along the card's own column (full-width cards count in every column)
   function step(id, dir) {
     const cs = L().cards;
     const i = cs.findIndex((c) => c.id === id);
@@ -433,8 +539,9 @@ export async function mountSodSettings(host) {
     let j = i + dir;
     while (j >= 0 && j < cs.length && !same(cs[j])) j += dir;
     if (j < 0 || j >= cs.length) return;
+    const other = cs[j];
     cs.splice(i, 1);
-    const k = cs.indexOf(cs[dir < 0 ? j : j - 1]);
+    const k = cs.indexOf(other);
     cs.splice(dir < 0 ? k : k + 1, 0, me);
     changed();
     render();
@@ -517,9 +624,11 @@ export async function mountSodSettings(host) {
     move(e);
   }
 
-  /* ----- Preview: the layout as staff will see it (unsaved changes included), over this page ----- */
+  /* ----- Preview: the preset being edited, as staff will see it (unsaved changes included) ----- */
   function openPreview() {
     const lay = cleanSodLayout(L());
+    const who = gets(st.tab);
+    const first = who[0] ? String(who[0].name || "").replace(/^(dr|prof)\.?\s+/i, "").split(/\s+/)[0] : "";
     const d = document.createElement("dialog");
     d.className = "sds-pv";
     let phone = false;
@@ -541,7 +650,7 @@ export async function mountSodSettings(host) {
         .join("");
       d.innerHTML = `
         <div class="sds-pv-bar">
-          <span><strong>Preview</strong> · sample information, including changes you haven't saved</span>
+          <span><strong>Preview: ${esc(curSet() ? curSet().name || "New preset" : "Everyone")}</strong> · sample information, including unsaved changes</span>
           <div class="sds-seg" role="group">
             <button type="button" data-pv="set" class="${phone ? "" : "is-on"}">As set</button>
             <button type="button" data-pv="phone" class="${phone ? "is-on" : ""}">Phone</button>
@@ -550,8 +659,8 @@ export async function mountSodSettings(host) {
         </div>
         <div class="sds-pv-sheet size-${phone ? "phone" : lay.size}">
           <div class="sds-pv-hero">
-            <span class="sds-av">AB</span>
-            <div><small>Good ${part} · ${esc(day)}</small><h2>Welcome, [their name]</h2><p>Have a great day today!</p></div>
+            <span class="sds-av">${esc(first ? first.slice(0, 2).toUpperCase() : "AB")}</span>
+            <div><small>Good ${part} · ${esc(day)}</small><h2>Welcome, ${esc(first || "[their name]")}</h2><p>Have a great day today!</p></div>
           </div>
           <article class="sds-pv-card is-kit">
             <header><span class="sds-ico">${I.box}</span><strong>Your kit</strong><em>Injectors only</em></header>
@@ -580,28 +689,42 @@ export async function mountSodSettings(host) {
   /* ----- Saving ----- */
   async function save() {
     if (st.saving) return;
-    const clean = cleanSodLayout(L());
-    const bad = clean.cards.find((c) => c.type === "message" && !c.cfg.text.trim());
-    if (bad) { st.open = bad.id; render(); showToast(`Write the message for "${bad.title}", or remove that card.`); return; }
+    for (const x of sets()) {
+      if (!x.name.trim()) { st.tab = x.id; render(); showToast("Give this preset a name."); host.querySelector('[data-set="name"]')?.focus(); return; }
+      if (!x.roles.length && !x.staffIds.length) {
+        st.tab = x.id; render(); showToast(`"${x.name}" isn't given to anyone yet. Tick a role or a person.`); return;
+      }
+    }
+    for (const lay of [st.cfg, ...sets()]) {
+      const bad = lay.cards.find((c) => c.type === "message" && !String(c.cfg.text || "").trim());
+      if (bad) {
+        st.tab = lay === st.cfg ? EVERYONE : lay.id;
+        st.open = bad.id;
+        render();
+        showToast(`Write the message for "${bad.title}", or remove that card.`);
+        return;
+      }
+    }
+    const clean = cleanSodSettings(st.cfg);
     st.saving = true;
     const btn = host.querySelector('[data-act="save"]');
     if (btn) { btn.disabled = true; btn.textContent = "Saving…"; }
     try {
       const u = getAuth().currentUser;
-      let name = "";
-      try { name = String((await u.getIdTokenResult()).claims.staffName || ""); } catch { /* the name is optional */ }
+      const name = String((staff && staff.name) || "").slice(0, 120);
       await setDoc(doc(db, "sod_settings", "layout"), {
-        ...clean, version: st.version + 1,
-        updatedAt: serverTimestamp(), updatedBy: name, updatedByUid: u ? u.uid : "",
+        size: clean.size, arrange: clean.arrange, split: clean.split, cards: clean.cards, sets: clean.sets,
+        version: st.version + 1, updatedAt: serverTimestamp(), updatedBy: name, updatedByUid: u ? u.uid : "",
       });
-      st.layout = clean;
+      st.cfg = clean;
+      if (st.tab !== EVERYONE && !sets().some((x) => x.id === st.tab)) st.tab = EVERYONE;
       st.version += 1;
       st.saved = true;
       st.savedBy = name;
       st.savedAt = new Date();
       st.dirty = false;
       render();
-      showToast("Start of Day saved. Everyone sees it the next time their Start of Day opens.");
+      showToast("Start of Day saved. Staff see it the next time their Start of Day opens.");
     } catch (err) {
       console.error("Start of Day not saved:", err);
       showToast(err && err.code === "permission-denied"
@@ -621,6 +744,8 @@ export async function mountSodSettings(host) {
   });
 
   host.addEventListener("click", async (e) => {
+    const tb = e.target.closest("[data-tab]");
+    if (tb) { st.tab = tb.dataset.tab; st.open = ""; render(); return; }
     const b = e.target.closest("button");
     if (!b || b.disabled) return;
     const tileEl = b.closest(".sds-tile");
@@ -641,9 +766,9 @@ export async function mountSodSettings(host) {
     }
     if (b.dataset.add) {
       const t = SOD_CARD_TYPES[b.dataset.add];
-      const nc = { id: newId(), type: b.dataset.add, title: t.title, col: 1, full: false, cfg: JSON.parse(JSON.stringify(t.cfg)) };
+      const nc = { id: newId(), type: b.dataset.add, title: t.title, col: 1, full: false, cfg: copy(t.cfg) };
       L().cards.push(nc);
-      if (b.dataset.add === "message" || b.dataset.add === "links" || b.dataset.add === "inventory") st.open = nc.id;
+      if (["message", "links", "inventory"].includes(b.dataset.add)) st.open = nc.id;
       changed(); render();
       const el = host.querySelector(`.sds-tile[data-id="${nc.id}"]`);
       if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -653,7 +778,9 @@ export async function mountSodSettings(host) {
     if (c && "down" in b.dataset) { step(c.id, 1); return; }
     if (c && "edit" in b.dataset) { st.open = st.open === c.id ? "" : c.id; render(); return; }
     if (c && "del" in b.dataset) {
-      if (!(await sodAsk(`Remove "${c.title}"?`, "It comes off Start of Day when you save. You can add it again from the list.", "Remove", true))) return;
+      if (!(await confirmDialog({ title: `Remove "${c.title}"?`,
+        message: "It comes off this layout when you save. You can add it again from the list.",
+        confirmLabel: "Remove", tone: "warning" }))) return;
       L().cards = L().cards.filter((x) => x.id !== c.id);
       if (st.open === c.id) st.open = "";
       changed(); render(); return;
@@ -662,19 +789,57 @@ export async function mountSodSettings(host) {
     if (c && b.dataset.lrm != null) { c.cfg.links.splice(Number(b.dataset.lrm), 1); changed(); render(); return; }
 
     const act = b.dataset.act;
+    const x = curSet();
     if (act === "save") save();
-    if (act === "reset") {
-      if (!(await sodAsk("Use the standard layout?", "This replaces the cards and arrangement here. Nothing changes for staff until you press Save.", "Use the standard layout"))) return;
-      st.layout = cleanSodLayout(SOD_DEFAULT_LAYOUT);
+    else if (act === "preview") openPreview();
+    else if (act === "add-set") {
+      const nx = { id: newPid(), name: "", roles: [], staffIds: [], ...copy(cleanSodLayout(st.cfg)) };
+      sets().push(nx);
+      st.tab = nx.id;
+      st.open = "";
+      changed(); render();
+      host.querySelector('[data-set="name"]')?.focus();
+    }
+    else if (act === "dup-set" && x) {
+      const nx = { ...copy(x), id: newPid(), name: `${x.name || "Preset"} (copy)`.slice(0, 60), roles: [], staffIds: [] };
+      nx.cards.forEach((k) => { k.id = newId(); });
+      sets().splice(sets().indexOf(x) + 1, 0, nx);
+      st.tab = nx.id;
+      changed(); render();
+      showToast("Copied. Give it a name and choose who gets it.");
+    }
+    else if (act === "del-set" && x) {
+      if (!(await confirmDialog({ title: `Delete "${x.name || "this preset"}"?`,
+        message: "Its staff will get their role's preset, or Everyone's, once you save.",
+        confirmLabel: "Delete preset", tone: "warning" }))) return;
+      st.cfg.sets = sets().filter((y) => y.id !== x.id);
+      st.tab = EVERYONE;
       st.open = "";
       changed(); render();
     }
-    if (act === "preview") openPreview();
+    else if (act === "copy-all" && x) {
+      if (x.cards.length && !(await confirmDialog({ title: "Replace this preset's layout?",
+        message: "Its cards, size and arrangement are replaced with a copy of Everyone's.",
+        confirmLabel: "Replace", tone: "warning" }))) return;
+      Object.assign(x, copy(cleanSodLayout(st.cfg)));
+      x.cards.forEach((k) => { k.id = newId(); });
+      st.open = "";
+      changed(); render();
+    }
+    else if (act === "reset") {
+      if (!(await confirmDialog({ title: "Reset to the standard layout?",
+        message: `This replaces the cards and arrangement of ${x ? `"${x.name || "this preset"}"` : "Everyone's layout"}. Nothing changes for staff until you save.`,
+        confirmLabel: "Reset", tone: "warning" }))) return;
+      Object.assign(L(), copy(cleanSodLayout(SOD_DEFAULT_LAYOUT)));
+      st.open = "";
+      changed(); render();
+    }
   });
 
   // Typing: kept without redrawing, so the cursor stays put
   host.addEventListener("input", (e) => {
     const el = e.target;
+    if (el.dataset.set === "name" && curSet()) { curSet().name = el.value; changed(); drawTabs(); return; }
     const tileEl = el.closest(".sds-tile");
     const c = tileEl ? card(tileEl.dataset.id) : null;
     if (!c) return;
@@ -694,6 +859,17 @@ export async function mountSodSettings(host) {
   // Choices: saved and redrawn
   host.addEventListener("change", (e) => {
     const el = e.target;
+    const x = curSet();
+    if (x && el.dataset.roleChip !== undefined) {
+      const r = el.dataset.roleChip;
+      x.roles = el.checked ? [...x.roles, r] : x.roles.filter((y) => y !== r);
+      changed(); render(); return;
+    }
+    if (x && el.dataset.person !== undefined) {
+      const id = el.dataset.person;
+      x.staffIds = el.checked ? [...x.staffIds, id] : x.staffIds.filter((y) => y !== id);
+      changed(); render(); return;
+    }
     const tileEl = el.closest(".sds-tile");
     const c = tileEl ? card(tileEl.dataset.id) : null;
     if (!c) return;
@@ -702,7 +878,7 @@ export async function mountSodSettings(host) {
     else if (el.dataset.show) {
       const s = new Set(c.cfg.show);
       if (el.checked) s.add(el.dataset.show); else s.delete(el.dataset.show);
-      c.cfg.show = INV_SHOW.map((x) => x[0]).filter((k) => s.has(k));
+      c.cfg.show = INV_SHOW.map((k) => k[0]).filter((k) => s.has(k));
     } else if (el.dataset.cat != null) {
       const s = new Set(c.cfg.cats);
       if (el.checked) s.add(el.dataset.cat); else s.delete(el.dataset.cat);
@@ -715,6 +891,17 @@ export async function mountSodSettings(host) {
     changed();
     render();
   });
+
+  // Leaving with unsaved changes: ask first (as End of Day does)
+  const guard = (e) => {
+    if (!st.dirty || !host.isConnected) { window.removeEventListener("hashchange", guard, true); return; }
+    if (location.hash.startsWith("#/settings/sod")) return;
+    if (!confirm("You have unsaved Start of Day changes. Leave without saving?")) {
+      history.replaceState(null, "", e.oldURL);
+      e.stopImmediatePropagation();
+    } else window.removeEventListener("hashchange", guard, true);
+  };
+  window.addEventListener("hashchange", guard, true);
 
   render();
 }
