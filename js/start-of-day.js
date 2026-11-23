@@ -262,11 +262,18 @@ export async function previewStartOfDay(staff) {
 export async function maybeShowStartOfDay(staff) {
   if (!staff) return;
   refreshStartOfDayButton(staff);
-  if (new URLSearchParams(location.search).get("sod") === "preview") { previewStartOfDay(staff); return; }
+  // ?sod=preview: the welcome once, to look at. The address is tidied straight away, so a refresh doesn't open it again.
+  const preview = new URLSearchParams(location.search).get("sod") === "preview";
+  if (preview) {
+    const u = new URL(location.href);
+    u.searchParams.delete("sod");
+    history.replaceState(null, "", u.pathname + u.search + u.hash);
+    previewStartOfDay(staff);
+  }
   watchAnnouncements(staff, { ready: dayStartedOrOff });   // must-read announcements, once their day has started
   if (await isStartOfDayOff()) return;   // Staff → Start of Day Off
   watchStartOfDay(staff);
-  checkStartOfDay(staff);
+  if (!preview) checkStartOfDay(staff);
 }
 
 export function closeStartOfDay() {
@@ -1107,7 +1114,7 @@ async function refreshDayBadge(staff) {
 export async function refreshStartOfDayButton(staff) {
   btnStaff = staff || null;
   const mine = ++btnCheck;
-  if (!staff) { setPending(false); setEditable(false); return; }
+  if (!staff) { setPending(false); setEditable(false); setDayPill(false); return; }
   const [info, off] = await Promise.all([
     dayInfo(staff).catch((err) => { console.warn("Day check failed:", err); return null; }),
     isStartOfDayOff(),
@@ -1115,7 +1122,7 @@ export async function refreshStartOfDayButton(staff) {
   if (mine !== btnCheck || btnStaff !== staff) return;
   setPending(!off && !!info && !info.started);   // off: no "Start my day", and "End my day" shows straight away
   setEditable(!!info && info.canEdit);
-  setDayPill(!!info && (info.started || off), staff);
+  setDayPill(off || (!!info && info.started), staff);
 }
 
 // On logout

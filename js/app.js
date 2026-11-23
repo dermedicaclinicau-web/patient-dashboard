@@ -91,7 +91,7 @@ const PAPER_V = 12;
 // Raise this each time prospects.js changes, so browsers don't keep using an old copy
 const PROSPECTS_V = 11;
 // Raise this each time refunds.js changes, so browsers don't keep using an old copy
-const REFUNDS_V = 7;
+const REFUNDS_V = 10;
 let currentStaff = null;
 initFormPicker(els.content, { getStaff: () => currentStaff });
 initTopbar();
@@ -488,7 +488,7 @@ function router() {
       Your account doesn't have access to any pages yet. Please ask an Admin.</div></section>`;
     return;
   }
-  // Not an Admin: System configuration only shows Email flows
+  // Not an Admin: System configuration only shows the tabs their ticks allow (Email flows, Recall, Start of Day, End of Day)
   if (page === "settings" && !isAdminNow() && !["flows", "recall", "sod", "eod"].includes(param.split("/")[0])) {
     location.replace(can("flows.build") ? "#/settings/flows" : can("sod.manage") ? "#/settings/sod" : "#/settings/eod");
     return;
