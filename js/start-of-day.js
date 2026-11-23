@@ -4,6 +4,7 @@ import { listProducts, isKitProduct, getMyKitDay, saveKitDayStart, saveDayStart,
   getServiceLinks, serviceKey, listOpenContainers, listAllLots, listRequests, lowAt, batchText, locLabel,
   reqNumber, awaitingApproval } from "./inventory-api.js";
 import { loadSodLayout, sodBands, sodColumnsCss } from "./sod-settings.js";
+import { listMyAnnouncements, markSeen, annCardHtml, wireAnnouncements, watchAnnouncements, stopAnnouncements } from "./sod-announcements.js";
 import { can } from "./perms.js";
 import { db } from "./firebase-config.js";
 import { collection, getDocs, query, where, FieldPath, doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -201,6 +202,7 @@ export async function maybeShowStartOfDay(staff) {
   if (!staff) return;
   refreshStartOfDayButton(staff);
   if (new URLSearchParams(location.search).get("sod") === "preview") { previewStartOfDay(staff); return; }
+  watchAnnouncements(staff, { ready: dayStartedOrOff });   // must-read announcements, once their day has started
   if (await isStartOfDayOff()) return;   // Staff → Start of Day Off
   watchStartOfDay(staff);
   checkStartOfDay(staff);
@@ -427,7 +429,7 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
     localStorage.setItem(seenKey(staff), "1");
   } catch { /* ignore */ }
 
-  renderLayout(dlg, staff);
+  renderLayout(dlg, staff, { preview });
 }
 /* ---------- Your kit: "How many units remaining?" (blind: nothing is filled in) ---------- */
 // Every clinician ticked as carrying a kit counts it, every day, whether or not they're injecting.
@@ -598,6 +600,13 @@ function getLayout(staff) {
   return entry.p;
 }
 
+// Started today, or Start of Day is off for them: announcements to confirm can pop up
+async function dayStartedOrOff() {
+  if (await isStartOfDayOff()) return true;
+  const day = await getMyKitDay().catch(() => null);
+  return !!(day && (day.start || day.end));
+}
+
 const CARD_ICO = {
   clinic: svg('<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>'),
   appts: ICO.cal, tasks: ICO.task, notes: ICO.note, inventory: ICO.box,
@@ -750,7 +759,7 @@ async function inventoryBody(cfg, appts) {
   return secs.map((s) => `${heads ? `<p class="sod-c-h">${esc(s.title)}</p>` : ""}${s.body}`).join("");
 }
 
-async function renderLayout(dlg, staff) {
+async function renderLayout(dlg, staff, { preview = false } = {}) {
   const box = dlg.querySelector('[data-role="cards"]');
   if (!box) return;
   const lay = await getLayout(staff);
@@ -771,6 +780,24 @@ async function renderLayout(dlg, staff) {
   const val = (r) => (r.status === "fulfilled" ? r.value : null);
   const appts = val(apR) ? val(apR).appointments || [] : null;
   const invHtml = inv ? await inventoryBody(inv.cfg, appts) : "";
+  // Announcements: still to confirm always show, then the newest up to the card's limit
+  const annCard = cards.find((c) => c.type === "announcements");
+  const anns = annCard
+    ? await listMyAnnouncements(staff).catch((err) => { console.warn("Start of Day announcements failed:", err); return null; })
+    : [];
+  let annShown = [];
+  let annHtml = "";
+  if (annCard) {
+    const manage = can("sod.manage") ? '<a class="sod-c-more" href="#/settings/sod/announcements">Post or manage announcements →</a>' : "";
+    if (!anns) annHtml = sodNone("Couldn't load announcements.") + manage;
+    else {
+      const must = anns.filter((a) => a.confirm && !a.confirmed);
+      const rest = anns.filter((a) => !(a.confirm && !a.confirmed));
+      annShown = [...must, ...rest.slice(0, Math.max(0, annCard.cfg.max - must.length))];
+      annHtml = annShown.length ? annShown.map(annCardHtml).join("") + manage
+        : manage ? sodNone("No announcements right now.") + manage : "";
+    }
+  }
   if (!box.isConnected) return;
 
   const ctx = { staff, key, appts, tasks: val(tkR), notes: val(ntR) };
@@ -783,7 +810,8 @@ async function renderLayout(dlg, staff) {
       case "inventory": return invHtml;
       case "links": return linksBody(c);
       case "message": return messageBody(c);
-      default: return "";   // Announcements: Stage 3
+      case "announcements": return annHtml;
+      default: return "";
     }
   };
   const cardHtml = (c) => {
@@ -797,6 +825,10 @@ async function renderLayout(dlg, staff) {
     : `<div class="sod-band${n > 1 ? " is-cols" : ""}" style="--sod-cols:${sodColumnsCss(lay.arrange, lay.split)}">${
       Array.from({ length: n }, (_, i) => `<div class="sod-col">${
         band.cards.filter((c) => n === 1 || c.col === i + 1).map(cardHtml).join("")}</div>`).join("")}</div>`)).join("");
+  if (annShown.length) {
+    wireAnnouncements(box, annShown, staff, { preview });
+    if (!preview) markSeen(annShown, staff);
+  }
 }
 
 /* ---------- The top bar: "Start my day" until started, and "Edit start of day" until ended ---------- */
@@ -924,6 +956,7 @@ export async function refreshStartOfDayButton(staff) {
 // On logout
 export function hideStartOfDayButton() {
   watchStaff = null;
+  stopAnnouncements();
   startedKey = "";
   btnStaff = null;
   btnCheck++;

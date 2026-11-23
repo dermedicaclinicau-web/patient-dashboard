@@ -404,6 +404,8 @@ const PAGES = {
         (m, e) => m.mountRecallEmails(e, { staff: currentStaff }))(el, param);
       return recallSettingsPage(el, param);
     }
+    if (top === "sod" && sub === "announcements") return lazyPage("./sod-announcements.js", "Announcements",
+      (m, e) => m.mountSodAnnouncements(e, { staff: currentStaff }))(el, param);
     if (top === "flows") return lazyPage("./email-flows.js", "Email flows",
       (m, e, p) => m.mountEmailFlows(e, { param: p, staff: currentStaff }))(el, param);
     return settingsPage(el, param);

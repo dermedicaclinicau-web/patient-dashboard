@@ -45,7 +45,7 @@ export const SOD_CARD_TYPES = {
     title: "My tasks", cfg: { show: "due", max: 5 } },
   notes: { label: "Notes to review", desc: "Their Draft consultation notes.", icon: I.note,
     title: "Notes to review", cfg: {} },
-  announcements: { label: "Announcements", desc: "Clinic news you post (Stage 3).", icon: I.mega,
+  announcements: { label: "Announcements", desc: "Clinic news you post in Announcements.", icon: I.mega,
     title: "Announcements", cfg: { max: 3 } },
   inventory: { label: "Inventory highlights", desc: "Low stock, expiring, today's stock, requests.", icon: I.box,
     title: "Inventory highlights", cfg: { show: ["low"], days: 60, cats: [], loc: "any", max: 6, stockOnly: true } },
@@ -469,6 +469,7 @@ export async function mountSodSettings(host, { staff = null } = {}) {
         </div>
         <div class="sds-top-acts">
           <span class="sds-status"></span>
+          <a class="sds-btn is-quiet" href="#/settings/sod/announcements">Announcements</a>
           <button type="button" class="sds-btn is-quiet" data-act="preview">Preview</button>
           <button type="button" class="sds-btn is-primary" data-act="save">Save</button>
         </div>
@@ -895,7 +896,7 @@ export async function mountSodSettings(host, { staff = null } = {}) {
   // Leaving with unsaved changes: ask first (as End of Day does)
   const guard = (e) => {
     if (!st.dirty || !host.isConnected) { window.removeEventListener("hashchange", guard, true); return; }
-    if (location.hash.startsWith("#/settings/sod")) return;
+    if (/^#\/settings\/sod\/?$/.test(location.hash)) return;   // still on this page (Announcements is another page)
     if (!confirm("You have unsaved Start of Day changes. Leave without saving?")) {
       history.replaceState(null, "", e.oldURL);
       e.stopImmediatePropagation();
