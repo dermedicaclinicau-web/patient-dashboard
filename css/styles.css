@@ -14535,3 +14535,14 @@ a.md-tcheck { color: var(--primary); text-decoration: none; font-weight: 800; }
 .rf-pk-sum .is-total { margin-top: 4px; padding-top: 6px; border-top: 1px solid #cbd5e1; font-weight: 700; }
 .rf-linkbtn { padding: 0; border: 0; background: none; color: #0f766e; font: inherit; text-decoration: underline; cursor: pointer; }
 .rf-calc { display: block; margin-top: 2px; color: #64748b; }
+
+/* Refund form: check and edit the patient email */
+.rf-mailacts { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 6px 0 12px; }
+.rf-mailline.is-warn { color: #b45309; font-weight: 600; }
+.rf-mail-dlg { width: min(760px, calc(100vw - 32px)); }
+.rf-mail-dlg .rf-ed { min-height: 240px; max-height: 50vh; overflow: auto; }
+.rf-mail-dlg .rf-prev-frame { width: 100%; height: 50vh; border: 1px solid #e2e8f0; border-radius: 10px; background: #f1f5f9; }
+.rf-md-tabs { display: flex; gap: 4px; margin: 6px 0 8px; border-bottom: 1px solid #e2e8f0; }
+.rf-md-tabs button { padding: 6px 14px; border: 0; border-bottom: 2px solid transparent; background: none; font: inherit; color: #64748b; cursor: pointer; }
+.rf-md-tabs button[aria-selected="true"] { color: #0f766e; border-bottom-color: #0f766e; font-weight: 600; }
+.rf-md-gap { flex: 1; }

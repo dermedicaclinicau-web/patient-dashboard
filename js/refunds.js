@@ -367,7 +367,8 @@ async function mountForm(container, { staff, patientId }) {
   const st = { patient: null, hits: [], sales: null, visits: null, src: null, prodList: null, tried: false,
     kinds: { service: false, package: false, product: false }, services: [], packages: [], products: [],
     total: null, method: "", cashGiven: "", cashAmount: "", bank: { name: "", bsb: "", acct: "" }, note: "",
-    notifyPatient: true, notifyStaff: true };
+    notifyPatient: true, notifyStaff: true, mail: null };
+  const newRef = doc(collection(db, "refunds"));   // its number is known now, so the email preview can show it
 
   root.innerHTML = `
     <a class="tm-back" href="#/tasks/new">${I.back}<span>Task Manager</span></a>
@@ -611,6 +612,9 @@ async function mountForm(container, { staff, patientId }) {
     return `<div class="rf-notify">
       <label class="prs-toggle${email ? "" : " is-off"}"><input type="checkbox" data-act="np"${onP ? " checked" : ""}${email ? "" : " disabled"}>
         <span class="prs-sw"></span><span><b>Email the patient</b><small>${esc(pNote)}</small></span></label>
+      ${onP && !(st.method === "cash" && st.cashGiven === "yes") ? `<div class="rf-mailacts">
+        <button type="button" class="btn-ghost" data-act="mail">${st.mail ? "Check the edited email" : "Preview and edit the email"}</button>
+        ${st.mail ? '<button type="button" class="rf-linkbtn" data-act="mailreset">Use the standard email</button>' : ""}</div>` : ""}
       <label class="prs-toggle"><input type="checkbox" data-act="ns"${st.notifyStaff ? " checked" : ""}>
         <span class="prs-sw"></span><span><b>Email the staff now</b><small>Each person gets an email with their step. Their task is on their dashboard either way.</small></span></label>
     </div>`;
@@ -679,6 +683,9 @@ async function mountForm(container, { staff, patientId }) {
       if (s.srcKey && s.method === "regular" && !pkgCalc(s).ok) out.push(`${s.name || "Package"}: enter the regular price of each used visit.`);
     });
     if (r.items.length && !(r.total > 0)) out.push("Enter the total to refund.");
+    if (st.mail && r.notifyPatient && st.mail.sig !== mailSig()) {
+      out.push("The refund changed after you edited the patient email. Open the email again to check it.");
+    }
     if (!st.method) out.push("Choose how they get the money back.");
     if (st.method === "cash" && !st.cashGiven) out.push("Say whether the cash has been given.");
     if (st.method === "bank") {
@@ -703,7 +710,10 @@ async function mountForm(container, { staff, patientId }) {
     sum.querySelector('[data-role="sum-method"]').innerHTML = (st.method
       ? `<p class="rf-methodline">${METHODS[st.method].icon}<span>${esc(methodText({ ...r, cashGiven: st.cashGiven === "yes" }))}</span></p>` : "")
       + (st.patient ? `<p class="rf-mailline">${r.notifyPatient ? "Patient is emailed" : "No emails to the patient"} · ${
-        r.notifyStaff ? "staff are emailed now" : "staff not emailed"}</p>` : "");
+        r.notifyStaff ? "staff are emailed now" : "staff not emailed"}</p>` : "")
+      + (st.patient && r.notifyPatient && st.mail ? (st.mail.sig !== mailSig()
+        ? '<p class="rf-mailline is-warn">The refund changed after the patient email was edited: check it again</p>'
+        : '<p class="rf-mailline">Patient email checked and edited</p>') : "");
     const steps = r.items.length && st.method ? buildSteps(r, set) : [];
     sum.querySelector('[data-role="sum-next"]').innerHTML = steps.length ? `<h4>What happens next</h4><ol>${steps.map((s) =>
       `<li class="${waiting(steps, s) ? "is-wait" : ""}">${avatar(s.whoName || "?")}<span><strong>${esc(s.title)}</strong>
@@ -760,6 +770,123 @@ async function mountForm(container, { staff, patientId }) {
     }, 280);
   }
 
+  // "Preview and edit the email": Request received, filled in for this refund. Changes are for this patient only.
+  const mailSig = () => {
+    const r = draftRefund();
+    return JSON.stringify([st.patient && st.patient.id, r.total, r.method,
+      r.items.map((i) => [i.kind, i.name, i.qty || 1, i.amount, i.calc ? i.calc.worked : null])]);
+  };
+  async function openMail() {
+    if (!st.patient) return;
+    const r = draftRefund();
+    if (!r.items.length) { showToast("Add what's being refunded first, so the email has the details."); return; }
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog rf-mail-dlg";
+    dlg.innerHTML = '<div class="lh-form"><p class="muted rf-wait">Getting the email ready…</p></div>';
+    dlg.addEventListener("close", () => dlg.remove());
+    dlg.addEventListener("click", (e) => { if (e.target.closest('[data-m="cancel"]')) dlg.close(); });
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    const msg = (title, text) => {
+      dlg.innerHTML = `<div class="lh-form"><div class="lh-dialog-head"><h3>${esc(title)}</h3><p>${esc(text)}</p></div>
+        <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-m="cancel">Close</button></div></div>`;
+    };
+    let data, lh = null;
+    try {
+      [data, lh] = await Promise.all([
+        callApi({ action: "refunds", op: "draftMail", id: newRef.id, refund: {
+          patientName: st.patient.name, total: r.total, itemsTotal: r.itemsTotal, method: r.method, items: r.items } }),
+        getDoc(doc(db, "form_settings", "letterhead")).then((s) => (s.exists() ? s.data() : null)).catch(() => null),
+      ]);
+      if (!data || data.problem || typeof data.html !== "string") throw new Error((data && data.problem) || "");
+    } catch (err) {
+      console.warn("Email not prepared:", err);
+      if (dlg.open) msg("Couldn't get the email ready", err.message || "Check your connection and try again.");
+      return;
+    }
+    if (!dlg.open) return;
+    if (data.on === false) {
+      msg("This email is turned off", 'The "Request received" email is switched off in Refunds → Patient emails, so nothing is sent when the request is made.');
+      return;
+    }
+    const mine = st.mail;
+    const stale = !!mine && mine.sig !== mailSig();
+    const tb = [["bold", "<b>B</b>", "Bold"], ["italic", "<i>I</i>", "Italic"], ["underline", "<u>U</u>", "Underline"],
+      ["insertUnorderedList", TB.ul, "Bulleted list"], ["insertOrderedList", TB.ol, "Numbered list"]];
+    dlg.innerHTML = `<form class="lh-form" novalidate>
+      <div class="lh-dialog-head"><h3>Email to ${esc(st.patient.name)}</h3>
+        <p>Sent to ${esc(patientEmail())} when you send the refund request. Changes here are for this patient only.</p></div>
+      ${stale ? `<p class="rf-warn">The refund has changed since you edited this email.
+        <button type="button" class="rf-linkbtn" data-m="fresh">Start again with the new details</button></p>` : ""}
+      <label class="lh-field"><span class="lh-label">Subject</span>
+        <input class="fe-input" name="subject" maxlength="200" value="${esc(mine ? mine.subject : data.subject)}"></label>
+      <div class="rf-md-tabs" role="tablist">
+        <button type="button" role="tab" data-m="edit" aria-selected="true">Edit</button>
+        <button type="button" role="tab" data-m="preview" aria-selected="false">Preview</button></div>
+      <div class="rf-md-edit">
+        <div class="rf-tbar" role="toolbar" aria-label="Formatting">${tb.map(([c, inner, t]) =>
+          `<button type="button" class="rf-tb" data-c="${c}" title="${t}" aria-label="${t}">${inner}</button>`).join("")}</div>
+        <div class="rf-ed" contenteditable="true" spellcheck="true" role="textbox" aria-multiline="true" aria-label="Email message"></div>
+      </div>
+      <iframe class="rf-prev-frame" sandbox="" title="Email preview" hidden></iframe>
+      <p class="lh-error" hidden></p>
+      <div class="lh-actions">
+        <button type="button" class="lh-btn is-quiet" data-m="standard">Use the standard wording</button>
+        <span class="rf-md-gap"></span>
+        <button type="button" class="lh-btn is-quiet" data-m="cancel">Cancel</button>
+        <button type="submit" class="btn-primary">Save the email</button></div>
+    </form>`;
+    const f = dlg.querySelector("form");
+    const ed = f.querySelector(".rf-ed");
+    const frame = f.querySelector("iframe");
+    const editBox = f.querySelector(".rf-md-edit");
+    const err = f.querySelector(".lh-error");
+    ed.innerHTML = data.html;
+    const stdHtml = ed.innerHTML.trim();   // the standard email, as the browser holds it
+    if (mine) ed.innerHTML = mine.html;
+    const show = (m) => {
+      f.querySelectorAll(".rf-md-tabs [data-m]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.m === m)));
+      editBox.hidden = m !== "edit";
+      frame.hidden = m !== "preview";
+      if (m === "preview") frame.srcdoc = `<!doctype html><html><body style="margin:0">${mailPage(ed.innerHTML, data.look, lh)}</body></html>`;
+    };
+    f.addEventListener("mousedown", (e) => { if (e.target.closest("[data-c]")) e.preventDefault(); });
+    f.addEventListener("paste", (e) => {
+      if (!e.target.closest(".rf-ed")) return;
+      e.preventDefault();
+      document.execCommand("insertText", false, (e.clipboardData || window.clipboardData).getData("text/plain"));
+    });
+    f.addEventListener("drop", (e) => { if (e.target.closest(".rf-ed")) e.preventDefault(); });
+    f.addEventListener("click", (e) => {
+      const c = e.target.closest("[data-c]");
+      if (c) { ed.focus(); document.execCommand(c.dataset.c, false, null); return; }
+      const b = e.target.closest("[data-m]");
+      if (!b) return;
+      if (b.dataset.m === "edit" || b.dataset.m === "preview") show(b.dataset.m);
+      else if (b.dataset.m === "standard" || b.dataset.m === "fresh") {
+        f.elements.subject.value = data.subject;
+        ed.innerHTML = stdHtml;
+        const w = f.querySelector(".rf-warn");
+        if (w) w.remove();
+        show("edit");
+      }
+    });
+    f.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const say = (m) => { err.textContent = m; err.hidden = false; };
+      const subject = f.elements.subject.value.replace(/\s+/g, " ").trim().slice(0, 200);
+      const html = ed.innerHTML.trim();
+      if (!subject) { say("Add a subject."); return; }
+      if (ed.textContent.replace(/\s+/g, " ").trim().length < 10) { say("Add a message."); return; }
+      if (html.length > 400000) { say("The email is too long. Remove a picture or some of the text."); return; }
+      st.mail = subject === data.subject && html === stdHtml ? null : { subject, html, sig: mailSig() };
+      dlg.close();
+      draw();
+      drawSum();
+      showToast(st.mail ? "Email saved. It's sent when you send the refund request." : "The standard email will be sent.");
+    });
+  }
+
   async function send(btn) {
     st.tried = true;
     drawSum();
@@ -780,7 +907,7 @@ async function mountForm(container, { staff, patientId }) {
   }
 
   async function saveRefund(r) {
-    const ref = doc(collection(db, "refunds"));
+    const ref = newRef;
     const by = nameOf(staff);
     const p = st.patient;
     const base = { patientId: p.id, patientPttId: p.pttId || "", patientName: p.name, patientEmail: p.email || "", patientMobile: p.mobile || "", total: r.total };
@@ -796,6 +923,7 @@ async function mountForm(container, { staff, patientId }) {
     batch.set(ref, {
       ...base, items: r.items, itemsTotal: r.itemsTotal, method: r.method, cashGiven: r.cashGiven, cashAmount: r.cashAmount,
       bankLast3: r.bankLast3, note: r.note, notifyPatient: r.notifyPatient, notifyStaff: r.notifyStaff,
+      ...(st.mail && r.notifyPatient ? { patientMail: { received: { subject: st.mail.subject, html: st.mail.html, by, at: new Date().toISOString() } } } : {}),
       steps, ...recompute(steps), status: "open",
       events: [{ at: new Date().toISOString(), by, action: "Requested", note: `${money(r.total)} · ${METHODS[r.method].label}` }],
       createdAt: serverTimestamp(), createdBy: by, createdByUid: myUid(), updatedAt: serverTimestamp(),
@@ -869,7 +997,7 @@ async function mountForm(container, { staff, patientId }) {
       refreshProd(); drawSum();
       return;
     }
-    if (t.dataset.act === "np") { st.notifyPatient = t.checked; drawSum(); return; }
+    if (t.dataset.act === "np") { st.notifyPatient = t.checked; draw(); drawSum(); return; }
     if (t.dataset.act === "ns") { st.notifyStaff = t.checked; drawSum(); return; }
     if (t.dataset.act === "addprod") {
       const p = (st.prodList || []).find((x) => x.id === t.value);
@@ -885,10 +1013,10 @@ async function mountForm(container, { staff, patientId }) {
     if (!a || a.dataset.act === "buy" || a.dataset.act === "src") return;
     const act = a.dataset.act;
     if (act === "pick") {
-      st.patient = st.hits[+a.dataset.i] || null; st.sales = null; st.visits = null; st.src = null; dropSrc();
+      st.patient = st.hits[+a.dataset.i] || null; st.sales = null; st.visits = null; st.src = null; st.mail = null; dropSrc();
       draw(); drawSum(); loadPatientBits();
     } else if (act === "unpick") {
-      st.patient = null; st.sales = null; st.visits = null; st.src = null; dropSrc();
+      st.patient = null; st.sales = null; st.visits = null; st.src = null; st.mail = null; dropSrc();
       draw(); drawSum();
       const q = main.querySelector('[data-role="pq"]'); if (q) q.focus();
     } else if (act === "kind") {
@@ -909,6 +1037,10 @@ async function mountForm(container, { staff, patientId }) {
       st[a.dataset.list].splice(+a.dataset.i, 1);
       if (a.dataset.list === "products") refreshProd(); else draw();
       drawSum();
+    } else if (act === "mail") {
+      openMail();
+    } else if (act === "mailreset") {
+      st.mail = null; draw(); drawSum();
     } else if (act === "pkgauto") {
       const i = +a.dataset.i;
       if (st.packages[i]) { st.packages[i].auto = true; recalcPkg(i); }
@@ -1233,7 +1365,8 @@ async function mountRefund(container, { id, staff }) {
             <p class="rf-methodline">${(METHODS[r.method] || {}).icon || ""}<span>${esc(methodText(r))}</span></p>
             ${r.note ? `<p class="rf-note">${esc(r.note)}</p>` : ""}
             <p class="rf-mailline">${r.notifyPatient === false ? "No emails to the patient" : "The patient is emailed"} · ${
-              r.notifyStaff === false ? "staff weren't emailed when it was made" : "staff were emailed their steps"}</p>
+              r.notifyStaff === false ? "staff weren't emailed when it was made" : "staff were emailed their steps"}${
+              r.patientMail && r.patientMail.received ? ` · email wording checked by ${esc(r.patientMail.received.by || "staff")}` : ""}</p>
           </section>
           ${r.method === "bank" ? bankCard() : ""}
           <section class="rf-box2"><h4>History</h4><ul class="rf-tl">${[...(r.events || [])].reverse().map((ev) =>
