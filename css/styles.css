@@ -14393,3 +14393,20 @@ body.scan-full { overflow: hidden; }
 .rf-sum-items li span { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
 .rf-sum-items li b { flex: none; white-space: nowrap; }
 .rf-money.is-big input { min-width: 0; }
+
+/* Refunds: step cards, tidy */
+.rf .rf-step { display: grid; grid-template-columns: 32px minmax(0, 1fr); column-gap: .9rem; align-items: start; padding: 1rem 1.1rem; }
+.rf .rf-step-n { margin: 0; }
+.rf .rf-step-main { display: flex; flex-direction: column; gap: .3rem; min-width: 0; }
+.rf .rf-step-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .4rem .75rem; min-height: 32px; margin: 0; }
+.rf .rf-step-top > strong { margin: 0; font-size: 1rem; line-height: 1.3; }
+.rf .rf-who { display: inline-flex; flex-direction: row; align-items: center; gap: .4rem; margin: 0 0 0 auto;
+  padding: .2rem .65rem .2rem .25rem; border-radius: 999px; background: var(--surface-2); font-size: .8rem; color: #475569; white-space: nowrap; }
+.rf .rf-who .tk-av { width: 22px; height: 22px; margin: 0; font-size: .6rem; }
+.rf .rf-step-due, .rf .rf-step-done, .rf .rf-step-wait, .rf .rf-step-help { margin: 0; }
+.rf .rf-step-act { margin-top: .45rem; padding-top: .75rem; gap: .6rem; }
+.rf .rf-step-row .fe-input { height: 44px; }
+.rf .rf-step-row .btn-primary { flex: none; }
+
+/* Bank details: numbers stay plain text (no phone-link underline) */
+.rf-bankrow b a, .rf-bankrow a[x-apple-data-detectors] { color: inherit !important; text-decoration: none !important; pointer-events: none; }

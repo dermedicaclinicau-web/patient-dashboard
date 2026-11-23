@@ -744,8 +744,9 @@ async function mountRefund(container, { id, staff }) {
     const late = !s.done && !wait && s.dueDate && s.dueDate < dayKey();
     const act = r.status === "open" && !s.done && !wait && canDo(s);
     const cls = s.done ? "is-done" : wait ? "is-wait" : act ? "is-mine" : "is-todo";
-    const field = s.need === "ref" ? `<input class="fe-input" data-sv="${s.key}" placeholder="Transfer reference" autocomplete="off">`
-      : s.need === "invoice" ? `<input class="fe-input" data-sv="${s.key}" placeholder="Timely invoice number" autocomplete="off">`
+    const noFill = 'autocomplete="off" data-lpignore="true" data-1p-ignore data-bwignore="true" data-form-type="other"';
+    const field = s.need === "ref" ? `<input class="fe-input" data-sv="${s.key}" placeholder="Transfer reference" ${noFill}>`
+      : s.need === "invoice" ? `<input class="fe-input" data-sv="${s.key}" placeholder="Timely invoice number" ${noFill}>`
       : s.need === "amount" ? `<span class="rf-money"><em>$</em><input class="fe-input" inputmode="decimal" data-sv="${s.key}" value="${round2(r.total).toFixed(2)}"></span>` : "";
     const help = s.key === "stock" ? `<ul class="rf-stock">${stockLines(r.items).map((l) => `<li>${esc(l)}</li>`).join("")}</ul>`
       : `<p class="rf-step-help">${esc(s.help)}</p>`;
