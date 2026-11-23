@@ -273,6 +273,7 @@ service cloud.firestore {
     function invUse() { return invStock() || can('consult.record'); }         // records products used in treatments
     function invSell() { return invUse() || can('data.upload'); }            // invoice uploads take sold stock off the Shelf
     function invReport() { return can('menu.reports'); }                      // reviews count differences
+    function invRefund() { return invStock() || can('inventory.count') || can('refunds.manage'); }   // returned products from a refund
     function kitOk() {
       return request.resource.data.sealed is int && request.resource.data.sealed >= 0
         && request.resource.data.open is number && request.resource.data.open >= 0;
@@ -290,14 +291,14 @@ service cloud.firestore {
       allow create: if invManage() && request.resource.data.name is string
         && request.resource.data.stock.shelf == 0 && request.resource.data.stock.jt == 0;
       allow update: if (invManage() && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['stock', 'stockAt']))
-        || ((invSell() || invReport()) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stock', 'stockAt']));
+        || ((invSell() || invReport() || invRefund()) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stock', 'stockAt']));
       allow delete: if false;
     }
 
     // Batches on the Shelf and in JT storage
     match /inv_lots/{id} {
       allow read: if isStaff();
-      allow create, update: if (invSell() || invReport()) && request.resource.data.qty is int && request.resource.data.qty >= 0;
+      allow create, update: if (invSell() || invReport() || invRefund()) && request.resource.data.qty is int && request.resource.data.qty >= 0;
       allow delete: if false;
     }
 
@@ -312,7 +313,8 @@ service cloud.firestore {
           || (invKit() && request.resource.data.type in ['kit-take', 'kit-open', 'kit-return', 'kit-discard', 'kit-use', 'kit-borrow'])
           || (invJt() && request.resource.data.type == 'release')
           || (invUse() && request.resource.data.type in ['use', 'sale'])
-          || (invSell() && request.resource.data.type == 'sale'));
+          || (invSell() && request.resource.data.type == 'sale')
+          || (invRefund() && request.resource.data.type == 'return'));
       allow update, delete: if false;
     }
 
@@ -407,7 +409,7 @@ service cloud.firestore {
         && request.resource.data.lines is list && request.resource.data.lines.size() <= 400
         && ((request.resource.data.kind == 'opening' && (can('inventory.count') || invOrder()))
           || (request.resource.data.kind == 'kit' && invKit()));
-      allow update: if ((can('menu.reports') || invUse() || can('data.upload'))
+      allow update: if ((can('menu.reports') || invUse() || can('data.upload') || invRefund())
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lines', 'openCount', 'updatedAt', 'updatedBy', 'events']))
         // An injector correcting their Start of Day retires their own earlier kit check (it stays on record)
         || (invKit() && resource.data.kind == 'kit' && resource.data.byUid == request.auth.uid
@@ -442,7 +444,7 @@ service cloud.firestore {
                'status', 'recount', 'outcome', 'outcomeNote', 'closedAt', 'closedBy', 'closedByUid', 'events', 'updatedAt'])
         ) || invManage()
         // Invoices uploaded after the count: digital corrected, closed only as "Sold before the count"
-        || ((invUse() || can('data.upload'))
+        || ((invUse() || can('data.upload') || invRefund())
           && resource.data.status != 'closed'
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
                'digital', 'variance', 'recount', 'status', 'outcome', 'outcomeNote', 'applied',
@@ -485,7 +487,7 @@ service cloud.firestore {
         return ['approval', 'approvedBy', 'approvedByUid', 'approvedAt', 'approvalNote', 'approvalEmailedAt'];
       }
       allow read: if can('menu.inventory') || can('inventory.request') || invReceive();
-      allow create: if can('inventory.request')
+      allow create: if (can('inventory.request') || invRefund())
         && request.resource.data.requestedByUid == request.auth.uid
         && request.resource.data.status == 'open'
         && request.resource.data.approval == 'waiting'
@@ -1465,7 +1467,8 @@ match /inv_count_drafts/{id} {
     // Returns: from patients, and back to suppliers. Supplier returns wait for their credit, marked once.
     match /inv_returns/{id} {
       allow read: if isStaff();
-      allow create: if invOrder() && request.resource.data.byUid == request.auth.uid
+      allow create: if (invOrder() || (invRefund() && request.resource.data.kind == 'patient'))
+        && request.resource.data.byUid == request.auth.uid
         && request.resource.data.kind in ['patient', 'supplier']
         && request.resource.data.qty is int && request.resource.data.qty >= 1
         && request.resource.data.status in ['none', 'awaiting'];
@@ -1926,7 +1929,7 @@ match /inv_count_drafts/{id} {
       allow read: if isStaff();
       allow write: if can('refunds.manage');
     }
-    
+
     // ===================== Safety net =====================
     // Anything not allowed by a rule above stays locked
     // (this includes staff_roles and staff_audit, which only Apps Script writes)

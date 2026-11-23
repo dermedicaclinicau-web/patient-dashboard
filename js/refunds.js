@@ -4,13 +4,16 @@
 import { db, auth } from "./firebase-config.js";
 import {
   collection, doc, getDoc, getDocs, setDoc, updateDoc, query, where, onSnapshot, writeBatch, runTransaction,
-  serverTimestamp, arrayUnion,
+  serverTimestamp, arrayUnion, Timestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
 import { showToast } from "./utils.js";
 import { can, isAdmin } from "./perms.js";
 import { fetchPatients, findPatientsById, searchPatientsByPhone, getPatient } from "./patients.js";
-import { listProducts, appointmentsBetween, dayKey } from "./inventory-api.js";
+import {
+  listProducts, appointmentsBetween, dayKey, listLotsForProduct, listSuppliers, recordPatientReturn, createRequest,
+  isKitProduct, isSharedProduct, batchName, reqNumber,
+} from "./inventory-api.js";
 
 /* ===================== Helpers ===================== */
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -64,6 +67,19 @@ const REASONS = {
   product: ["Changed their mind", "Wrong product bought", "Reaction to the product", "Other"],
 };
 const RETURNED = [["unopened", "Returned unopened"], ["opened", "Returned opened"], ["no", "Not returned"]];
+
+// What happens to each returned product (the onsite team's step)
+const HOW = {
+  shelf: { label: "Back into stock", done: "Back in stock" },
+  tester: { label: "Keep as a tester", done: "Kept as a tester" },
+  bin: { label: "Throw it out", done: "Thrown out" },
+  supplier: { label: "Back to the supplier", done: "Set aside for the supplier" },
+};
+const howOpts = (it) => (it.condition === "faulty" ? ["supplier", "tester", "bin"]
+  : it.returned === "unopened" ? ["shelf", "tester", "bin"] : ["tester", "bin"]);
+const defaultHow = (it) => (it.condition === "faulty" ? (it.action === "supplier" ? "supplier" : "tester")
+  : it.returned === "unopened" ? "shelf" : "tester");
+const stockItems = (items) => (items || []).map((it, idx) => ({ it, idx })).filter(({ it }) => it.kind === "product" && it.returned !== "no");
 
 /* ===================== Staff and settings ===================== */
 let staffCache = null;
@@ -165,24 +181,32 @@ export async function mountRefunds(container, { param = "", staff = null } = {})
   if (parts[0] === "new") return mountForm(container, { staff, patientId: parts[1] ? decodeURIComponent(parts[1]) : "" });
   if (parts[0] === "r" && parts[1]) return mountRefund(container, { id: decodeURIComponent(parts[1]), staff });
   if (parts[0] === "settings") return mountSettings(container, { staff });
+  if (parts[0] === "report") return mountReport(container);
+  if (parts[0] === "emails") return mountEmails(container);
   return mountList(container, { tab: parts[0] || "mine" });
 }
 
 /* ===================== The list ===================== */
+const canReport = () => boss() || can("menu.reports");
+const tabsHtml = (tab) => `<nav class="rf-tabs" aria-label="Refunds">${[["mine", "Needs me"], ["open", "All open"], ["done", "Completed"],
+  ...(canReport() ? [["report", "Reports"]] : [])].map(([k, l]) =>
+  `<a href="#/refunds/${k}" class="${tab === k ? "is-on" : ""}"${tab === k ? ' aria-current="page"' : ""}>${l}<em data-n="${k}"></em></a>`).join("")}</nav>`;
+const headHtml = () => `<div class="fb-head">
+    <div><h2>Refunds</h2><p class="muted">Every refund request, and the steps still to do.</p></div>
+    <div class="fb-head-actions">
+      ${boss() ? `<a class="btn-ghost" href="#/refunds/emails"><span>Patient emails</span></a>
+        <a class="btn-ghost" href="#/refunds/settings">${I.gear}<span>Settings</span></a>` : ""}
+      <a class="btn-primary" href="#/refunds/new">${I.plus}<span>New refund request</span></a>
+    </div>
+  </div>`;
+
 async function mountList(container, { tab }) {
   if (!["mine", "open", "done"].includes(tab)) tab = "mine";
   const root = document.createElement("section");
   root.className = "page wide rf";
   root.innerHTML = `
-    <div class="fb-head">
-      <div><h2>Refunds</h2><p class="muted">Every refund request, and the steps still to do.</p></div>
-      <div class="fb-head-actions">
-        ${boss() ? `<a class="btn-ghost" href="#/refunds/settings">${I.gear}<span>Settings</span></a>` : ""}
-        <a class="btn-primary" href="#/refunds/new">${I.plus}<span>New refund request</span></a>
-      </div>
-    </div>
-    <nav class="rf-tabs" aria-label="Refunds">${[["mine", "Needs me"], ["open", "All open"], ["done", "Completed"]].map(([k, l]) =>
-      `<a href="#/refunds/${k}" class="${tab === k ? "is-on" : ""}"${tab === k ? ' aria-current="page"' : ""}>${l}<em data-n="${k}"></em></a>`).join("")}</nav>
+    ${headHtml()}
+    ${tabsHtml(tab)}
     <div class="rf-list" data-role="list"><div class="skeleton" style="height:86px"></div><div class="skeleton" style="height:86px"></div></div>`;
   container.replaceChildren(root);
   const list = root.querySelector('[data-role="list"]');
@@ -698,6 +722,8 @@ async function mountRefund(container, { id, staff }) {
   const by = nameOf(staff);
   let r = null, bank = null, bankState = "idle";
   const drafts = {};
+  const inv = { state: "idle", products: null, lots: {} };   // for the returned-products step
+  const picks = {};                                           // what's chosen for each returned product
 
   const stop = onSnapshot(doc(db, "refunds", id), (snap) => {
     if (!root.isConnected) { stop(); return; }
@@ -732,8 +758,167 @@ async function mountRefund(container, { id, staff }) {
         ${s.done ? `<p class="rf-step-done">${esc([valueText(s), s.doneBy, s.doneAt && niceDay(new Date(s.doneAt))].filter(Boolean).join(" · "))}</p>`
           : wait ? '<p class="rf-step-wait">Waiting for approval</p>'
           : r.status === "open" ? `<p class="rf-step-due${late ? " is-late" : ""}">${late ? "Overdue · " : ""}Due ${esc(niceKey(s.dueDate))}</p>` : ""}
-        ${act ? `<div class="rf-step-act">${help}<div class="rf-step-row">${field}${btns}</div><p class="rf-err" data-err="${s.key}" hidden></p></div>` : ""}
+        ${s.key === "stock" && (act || s.lines) ? stockAct(s, act)
+          : act ? `<div class="rf-step-act">${help}<div class="rf-step-row">${field}${btns}</div><p class="rf-err" data-err="${s.key}" hidden></p></div>` : ""}
       </div></article>`;
+  }
+
+  /* ---------- Returned products: each one into stock, kept as a tester, thrown out, or back to the supplier ---------- */
+  function pickFor(idx, it) {
+    if (!picks[idx]) picks[idx] = { how: defaultHow(it), loc: "shelf", lot: "", batch: "", expiry: "" };
+    return picks[idx];
+  }
+  const seg2 = (idx, field, opts, cur) => `<div class="rf-seg">${opts.map(([v, l]) =>
+    `<button type="button" class="${cur === v ? "is-on" : ""}" data-act="pk" data-pk="${idx}.${field}" data-v="${v}" aria-pressed="${cur === v}">${esc(l)}</button>`).join("")}</div>`;
+
+  function lotSelect(p, pk, idx) {
+    const lots = (inv.lots[p.id] || []).filter((l) => l.loc === pk.loc);
+    if (!pk.lot) pk.lot = (lots.find((l) => l.qty > 0) || lots[0] || { id: "__new" }).id;
+    return `<select class="fb-select" data-pk="${idx}.lot" aria-label="${esc(batchName(p))}">${lots.map((l) =>
+      `<option value="${esc(l.id)}"${l.id === pk.lot ? " selected" : ""}>${esc(`${batchName(p)} ${l.batch || "-"} · exp ${niceKey(l.expiry) || "-"} · ${l.qty} there now`)}</option>`).join("")}
+      <option value="__new"${pk.lot === "__new" ? " selected" : ""}>Another ${esc(batchName(p).toLowerCase())}…</option></select>`;
+  }
+
+  function stockAct(s, act) {
+    const lines = s.lines || {};
+    const rows = stockItems(r.items).map(({ it, idx }) => {
+      const head = `<span class="rf-put-main"><strong>${it.qty > 1 ? `${it.qty} × ` : ""}${esc(it.name)}</strong><small>${esc(itemSub(it))}</small></span>`;
+      const done = lines[idx];
+      if (done) {
+        return `<li class="rf-put is-done">${head}<span class="rf-put-res">${I.check}${esc((HOW[done.how] || {}).done || "")}${
+          done.loc ? ` (${done.loc === "jt" ? "JT storage" : "Shelf"})` : ""}${done.requestId ? ` · replacement on order request ${esc(reqNumber({ id: done.requestId }))}` : ""}${
+          done.note ? ` · ${esc(done.note)}` : ""}<small>${esc(done.by || "")}</small></span></li>`;
+      }
+      if (!act) return `<li class="rf-put">${head}<span class="rf-put-res muted">Not done yet</span></li>`;
+      const pk = pickFor(idx, it);
+      const p = inv.products ? inv.products.get(it.productId) : null;
+      const special = !!p && (isKitProduct(p) || isSharedProduct(p));
+      let extra = "";
+      if (pk.how === "shelf" && p && !special) {
+        extra = `<div class="rf-put-where">${seg2(idx, "loc", [["shelf", "Shelf"], ["jt", "JT storage"]], pk.loc)}
+          ${p.tracked ? lotSelect(p, pk, idx) : ""}
+          ${p.tracked && pk.lot === "__new" ? `<input class="fe-input" data-pk="${idx}.batch" value="${esc(pk.batch)}" placeholder="${esc(batchName(p))} number" autocomplete="off">
+            <input class="fe-input" type="date" data-pk="${idx}.expiry" value="${esc(pk.expiry)}" aria-label="Expiry">` : ""}</div>`;
+      } else if (pk.how === "supplier") {
+        extra = '<p class="rf-hint">An order request for a replacement is made. Keep the faulty one aside to send back.</p>';
+      } else if (pk.how === "tester" || pk.how === "bin") {
+        extra = "<p class=\"rf-hint\">Recorded as returned. Stock doesn't change: it came off when it was sold.</p>";
+      }
+      return `<li class="rf-put">${head}
+        ${inv.state === "ok" && !p ? "<p class=\"rf-hint\">This product isn't in Inventory any more, so it's recorded on the refund only.</p>" : ""}
+        ${special ? '<p class="rf-hint">Kit and shared products are recorded on the refund only.</p>' : ""}
+        ${seg2(idx, "how", howOpts(it).map((k) => [k, HOW[k].label]), pk.how)}
+        ${extra}
+        <div class="rf-step-row"><button type="button" class="btn-primary" data-act="put" data-i="${idx}"${inv.state !== "ok" ? " disabled" : ""}>${I.check}Done</button></div>
+        <p class="rf-err" data-err="put${idx}" hidden></p></li>`;
+    }).join("");
+    return `<div class="rf-step-act">
+      ${act && inv.state !== "ok" ? `<p class="muted rf-wait">${inv.state === "failed" ? "Couldn't load the products. Reload to try again." : "Loading the products…"}</p>` : ""}
+      <ul class="rf-puts">${rows}</ul></div>`;
+  }
+
+  async function loadInv() {
+    inv.state = "loading";
+    try {
+      const list = await listProducts();
+      inv.products = new Map(list.map((p) => [p.id, p]));
+      const tracked = [...new Set(stockItems(r.items).map(({ it }) => inv.products.get(it.productId)).filter((p) => p && p.tracked).map((p) => p.id))];
+      await Promise.all(tracked.map(async (pid) => { inv.lots[pid] = await listLotsForProduct(pid).catch(() => []); }));
+      inv.state = "ok";
+    } catch (err) {
+      console.warn("Products not loaded:", err);
+      inv.state = "failed";
+    }
+    if (root.isConnected && r) draw();
+  }
+
+  async function saveLine(idx, btn) {
+    const it = r.items[idx];
+    const pk = pickFor(idx, it);
+    const err = root.querySelector(`[data-err="put${idx}"]`);
+    const say = (m) => { err.textContent = m; err.hidden = false; };
+    if (inv.state !== "ok") { say("Still loading the products."); return; }
+    const p = inv.products.get(it.productId) || null;
+    const special = !!p && (isKitProduct(p) || isSharedProduct(p));
+    const tag = `Refund ${refundNo(r)}`;
+    const result = { how: pk.how, at: new Date().toISOString(), by, byUid: myUid(), returnId: "", requestId: "", loc: "", note: "" };
+
+    let lot = { batch: "", expiry: "" };
+    if (p && !special && p.tracked && pk.how === "shelf") {
+      if (pk.lot === "__new") lot = { batch: String(pk.batch || "").trim(), expiry: pk.expiry || "" };
+      else { const l = (inv.lots[p.id] || []).find((x) => x.id === pk.lot); if (l) lot = { batch: l.batch, expiry: l.expiry }; }
+      if (!lot.batch || !/^\d{4}-\d{2}-\d{2}$/.test(lot.expiry)) { say(`Choose the ${batchName(p).toLowerCase()} and its expiry.`); return; }
+    }
+    err.hidden = true;
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+    try {
+      if (!p) result.note = "Not in Inventory: recorded on the refund only";
+      else if (special) result.note = "Recorded on the refund only";
+      else {
+        // 1. The return, linked to the Timely sale when there is one (dated the day of the request)
+        const date = dayKey(toDate(r.createdAt) || new Date());
+        const fromInvoice = String(it.saleId || "").startsWith("invoice__") ? it.invoiceId : "";
+        const base = { date, qty: it.qty, patientId: r.patientId, patientName: r.patientName, resell: pk.how === "shelf",
+          loc: pk.loc === "jt" ? "jt" : "shelf", batch: lot.batch, expiry: lot.expiry, note: `${tag} · ${HOW[pk.how].done}`.slice(0, 300) };
+        let res;
+        try {
+          res = await recordPatientReturn(p, { ...base, invoiceId: fromInvoice });
+        } catch (ex) {
+          // The sale can't take it (already returned, or the invoice changed): recorded without the link
+          if (!fromInvoice || !/invoice|sale/i.test(String(ex.message || ""))) throw ex;
+          res = await recordPatientReturn(p, { ...base, invoiceId: "" });
+        }
+        result.returnId = res.id;
+        if (pk.how === "shelf") result.loc = base.loc;
+        // 2. A replacement from the supplier
+        if (pk.how === "supplier") {
+          try {
+            result.requestId = await createRequest({
+              items: [{ productId: p.id, name: p.name, supplierId: p.supplierId || "", qty: it.qty, unitKind: "stock", unit: p.stockUnit, stockQty: it.qty }],
+              loc: "shelf", urgency: "normal",
+              note: `Replacement for a faulty ${p.name} returned by ${r.patientName} (${tag}). The faulty one is set aside to go back to the supplier.`,
+            }, staff);
+          } catch (ex) {
+            console.warn("Replacement not requested:", ex);
+            result.note = "The order request couldn't be made: ask the ordering team for a replacement";
+          }
+        }
+      }
+
+      // 3. On the refund; the step finishes itself once every product is done
+      await runTransaction(db, async (tx) => {
+        const ref = doc(db, "refunds", id);
+        const cur = (await tx.get(ref)).data();
+        if (!cur || cur.status !== "open") throw new Error("This refund has already been closed.");
+        const steps = (cur.steps || []).map((x) => ({ ...x }));
+        const k = steps.findIndex((x) => x.key === "stock");
+        if (k === -1) throw new Error("This refund has no returned products step.");
+        const lines = { ...(steps[k].lines || {}), [idx]: result };
+        steps[k] = { ...steps[k], lines };
+        if (!steps[k].done && stockItems(cur.items).every(({ idx: i }) => lines[i])) {
+          steps[k] = { ...steps[k], done: true, doneAt: result.at, doneBy: by, doneByUid: myUid() };
+          if (steps[k].taskId) {
+            tx.update(doc(db, "staff-task-list", steps[k].taskId), { status: "Completed", completedAt: serverTimestamp(), completedBy: by, completedByUid: myUid() });
+          }
+        }
+        const rc = recompute(steps);
+        const allDone = rc.stepsOpen === 0;
+        tx.update(ref, {
+          steps, ...rc, status: allDone ? "done" : "open", ...(allDone ? { completedAt: serverTimestamp() } : {}),
+          updatedAt: serverTimestamp(), updatedBy: by,
+          events: arrayUnion({ at: result.at, by, action: `${it.name}: ${HOW[pk.how].done}`, note: result.note }),
+        });
+      });
+      delete picks[idx];
+      Promise.resolve(callApi({ action: "refunds", op: "notify", id })).catch(() => {});
+      showToast(pk.how === "shelf" ? "Back in stock" : pk.how === "supplier" ? "Recorded, and a replacement requested" : "Recorded");
+    } catch (ex) {
+      console.error("Returned product not saved:", ex);
+      btn.disabled = false;
+      btn.innerHTML = `${I.check}Done`;
+      say(ex.code === "permission-denied" ? "You don't have access to change stock. Ask someone with Inventory access." : ex.message || "Couldn't save. Try again.");
+    }
   }
 
   function bankCard() {
@@ -806,6 +991,8 @@ async function mountRefund(container, { id, staff }) {
       </div>`;
     Object.entries(drafts).forEach(([k, v]) => { const i = root.querySelector(`[data-sv="${k}"]`); if (i) i.value = v; });
     if (r.method === "bank" && bankState === "idle" && canSeeBank()) loadBank();
+    if (inv.state === "idle" && r.status === "open"
+      && (r.steps || []).some((s) => s.key === "stock" && !s.done && canDo(s) && !waiting(r.steps, s))) loadInv();
   }
 
   async function complete(key, btn) {
@@ -896,11 +1083,35 @@ async function mountRefund(container, { id, staff }) {
   root.addEventListener("click", (e) => {
     const a = e.target.closest("[data-act]");
     if (!a || !r) return;
+    if (a.dataset.act === "pk") {
+      const [i, f] = a.dataset.pk.split(".");
+      const pk = pickFor(+i, r.items[+i]);
+      pk[f] = a.dataset.v;
+      if (f === "loc") pk.lot = "";
+      draw();
+      return;
+    }
+    if (a.dataset.act === "put") { saveLine(+a.dataset.i, a); return; }
     if (a.dataset.act === "done") complete(a.dataset.k, a);
     else if (a.dataset.act === "decline") cancel(true);
     else if (a.dataset.act === "cancel") cancel(false);
     else if (a.dataset.act === "copy") navigator.clipboard.writeText(a.dataset.v).then(() => showToast("Copied")).catch(() => showToast("Couldn't copy"));
   });
+  // Batch typed in, or a batch chosen, for a returned product
+  root.addEventListener("input", (e) => {
+    const k = e.target.dataset.pk;
+    if (!k || e.target.tagName === "SELECT" || !r) return;
+    const [i, f] = k.split(".");
+    pickFor(+i, r.items[+i])[f] = e.target.value;
+  });
+  root.addEventListener("change", (e) => {
+    const k = e.target.dataset.pk;
+    if (!k || !r) return;
+    const [i, f] = k.split(".");
+    pickFor(+i, r.items[+i])[f] = e.target.value;
+    if (e.target.tagName === "SELECT") draw();
+  });
+
   root.addEventListener("keydown", (e) => {
     if (e.key !== "Enter" || !e.target.dataset.sv) return;
     const btn = root.querySelector(`[data-act="done"][data-k="${e.target.dataset.sv}"]`);
@@ -966,6 +1177,182 @@ async function mountSettings(container, { staff }) {
       err.hidden = false;
     } finally {
       btn.disabled = false;
+    }
+  });
+}
+
+/* ===================== Reports ===================== */
+const PERIODS = { month: "This month", last: "Last month", d90: "Last 90 days", year: "This year" };
+function periodRange(k) {
+  const now = new Date();
+  const y = now.getFullYear(), m = now.getMonth();
+  const end = new Date(Date.now() + 60000);
+  if (k === "last") return [new Date(y, m - 1, 1), new Date(y, m, 1)];
+  if (k === "d90") return [new Date(Date.now() - 90 * 864e5), end];
+  if (k === "year") return [new Date(y, 0, 1), end];
+  return [new Date(y, m, 1), end];
+}
+function groupSum(list, keyFn, valFn) {
+  const m = new Map();
+  list.forEach((x) => {
+    const k = keyFn(x);
+    if (!k) return;
+    const g = m.get(k) || { k, v: 0, n: 0, x };
+    g.v = round2(g.v + valFn(x));
+    g.n += 1;
+    m.set(k, g);
+  });
+  return [...m.values()].sort((a, b) => b.v - a.v);
+}
+const bars = (rows, fmt) => {
+  if (!rows.length) return '<p class="muted rf-wait">Nothing in this period.</p>';
+  const max = Math.max(1, ...rows.map((r) => r.v));
+  return `<div class="rf-bars">${rows.slice(0, 10).map((r) => `<div class="rf-bar"><span title="${esc(r.k)}">${esc(r.k)}</span>
+    <i><b style="width:${Math.max(3, Math.round((r.v / max) * 100))}%"></b></i><em>${fmt(r)}</em></div>`).join("")}</div>`;
+};
+
+async function mountReport(container) {
+  const root = document.createElement("section");
+  root.className = "page wide rf";
+  container.replaceChildren(root);
+  if (!canReport()) { root.innerHTML = '<div class="rf-empty"><strong>No access</strong>Ask an Admin for Reporting access.</div>'; return; }
+  let period = "month";
+  root.innerHTML = `${headHtml()}${tabsHtml("report")}
+    <div class="rf-rtools"><select class="fb-select" data-role="period" aria-label="Period">${Object.entries(PERIODS).map(([k, l]) =>
+      `<option value="${k}">${l}</option>`).join("")}</select></div>
+    <div data-role="body"><div class="skeleton" style="height:240px;border-radius:14px"></div></div>`;
+  const body = root.querySelector('[data-role="body"]');
+  const [products, suppliers] = await Promise.all([listProducts().catch(() => []), listSuppliers().catch(() => [])]);
+  const prodBy = new Map(products.map((p) => [p.id, p]));
+  const supName = new Map(suppliers.map((s) => [s.id, s.name]));
+  const supplierOf = (it) => supName.get((prodBy.get(it.productId) || {}).supplierId) || "No supplier set";
+
+  async function load() {
+    const [from, to] = periodRange(period);
+    body.innerHTML = '<div class="skeleton" style="height:240px;border-radius:14px"></div>';
+    try {
+      const col = collection(db, "refunds");
+      const [snap, openSnap] = await Promise.all([
+        getDocs(query(col, where("createdAt", ">=", Timestamp.fromDate(from)))),
+        getDocs(query(col, where("status", "==", "open"))),
+      ]);
+      if (!root.isConnected) return;
+      const all = snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((r) => ms(r.createdAt) < to.getTime());
+      const live = all.filter((r) => r.status !== "cancelled");
+      const openNow = openSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const total = round2(live.reduce((a, r) => a + (Number(r.total) || 0), 0));
+      const finished = all.filter((r) => r.status === "done" && r.completedAt && r.createdAt);
+      const avgDays = finished.length
+        ? Math.round((finished.reduce((a, r) => a + (ms(r.completedAt) - ms(r.createdAt)), 0) / finished.length / 864e5) * 10) / 10 : null;
+      const items = live.flatMap((r) => (r.items || []).map((it) => ({ ...it })));
+      const faulty = items.filter((it) => it.kind === "product" && it.condition === "faulty");
+      const overdue = openNow.flatMap((r) => (r.steps || []).filter((s) => !s.done && !waiting(r.steps, s) && s.dueDate && s.dueDate < dayKey()));
+      const cancelled = all.length - live.length;
+
+      const tile = (label, value, sub = "", tone = "") => `<div class="rf-tile${tone ? ` is-${tone}` : ""}"><small>${label}</small><b>${value}</b>${sub ? `<span>${sub}</span>` : ""}</div>`;
+      const card = (title, inner, wide = false) => `<section class="rf-box2${wide ? " rf-span2" : ""}"><h4>${title}</h4>${inner}</section>`;
+      const faultyRows = groupSum(faulty, (it) => it.name, (it) => it.qty || 1);
+
+      body.innerHTML = `
+        <div class="rf-tiles">
+          ${tile("Refunds", live.length, cancelled ? `${cancelled} cancelled or declined` : "")}
+          ${tile("Total refunded", money(total))}
+          ${tile("Average refund", live.length ? money(total / live.length) : "—")}
+          ${tile("Open now", openNow.length, overdue.length ? `${overdue.length} step${overdue.length === 1 ? "" : "s"} overdue` : "", overdue.length ? "bad" : "")}
+          ${tile("Average days to finish", avgDays === null ? "—" : avgDays)}
+        </div>
+        <div class="rf-rgrid">
+          ${card("How it was paid back", bars(groupSum(live, (r) => (METHODS[r.method] || {}).label, (r) => r.total), (g) => `${money(g.v)} · ${g.n}`))}
+          ${card("What was refunded", bars(groupSum(items, (it) => (KINDS[it.kind] || {}).label, (it) => it.amount), (g) => `${money(g.v)} · ${g.n}`))}
+          ${card("Reasons", bars(groupSum(items, (it) => it.reason || "Not given", (it) => it.amount), (g) => `${g.n} · ${money(g.v)}`))}
+          ${card("Faulty products by supplier", bars(groupSum(faulty, supplierOf, (it) => it.qty || 1), (g) => `${g.v} item${g.v === 1 ? "" : "s"}`))}
+          ${card("Faulty products", faultyRows.length ? `<table class="inv-table rf-rtable"><thead><tr><th>Product</th><th>Supplier</th><th>Items</th></tr></thead><tbody>${
+            faultyRows.slice(0, 15).map((g) => `<tr><td>${esc(g.k)}</td><td>${esc(supplierOf(g.x))}</td><td>${g.v}</td></tr>`).join("")}</tbody></table>`
+            : '<p class="muted rf-wait">No faulty products in this period.</p>')}
+          ${card("Steps overdue now", bars(groupSum(overdue, (s) => s.whoName || "Anyone", () => 1), (g) => `${g.v}`))}
+        </div>
+        <h3 class="rf-rh">Refunds in this period</h3>
+        <div class="rf-list">${all.length ? all.sort((a, b) => ms(b.createdAt) - ms(a.createdAt)).map(cardHtml).join("")
+          : '<div class="rf-empty"><strong>No refunds in this period</strong></div>'}</div>`;
+    } catch (err) {
+      console.error("Refund report not loaded:", err);
+      body.innerHTML = '<div class="rf-empty"><strong>Couldn\'t load the report</strong>Check your connection and try again.</div>';
+    }
+  }
+  root.querySelector('[data-role="period"]').addEventListener("change", (e) => { period = e.target.value; load(); });
+  load();
+}
+
+/* ===================== Patient emails (Settings) ===================== */
+async function mountEmails(container) {
+  const root = document.createElement("section");
+  root.className = "page rf";
+  container.replaceChildren(root);
+  if (!boss()) { root.innerHTML = '<div class="rf-empty"><strong>No access</strong>Ask an Admin for Refunds settings access.</div>'; return; }
+  root.innerHTML = `${headHtml()}<div data-role="body"><div class="skeleton" style="height:240px;border-radius:14px"></div></div>`;
+  const body = root.querySelector('[data-role="body"]');
+  let data;
+  try {
+    data = await callApi({ action: "refunds", op: "emails" });
+    if (!data || !data.templates) throw new Error((data && data.problem) || "");
+  } catch (err) {
+    body.innerHTML = `<div class="rf-empty"><strong>Couldn't load the emails</strong>${esc(err.message || "Try again.")}</div>`;
+    return;
+  }
+  const keys = ["received", "transfer", "credit"];
+  const when = {
+    received: "Sent when a refund request is saved. Not sent when cash was already handed over.",
+    transfer: "Sent when the bank transfer is marked done. {Reference} is the transfer reference.",
+    credit: "Sent when the account credit is marked done in Timely.",
+  };
+  const t = data.templates;
+  body.innerHTML = `
+    <p class="muted rf-mh">These go to the patient. Blanks you can use: ${data.blanks.map((b) => `<code>{${esc(b)}}</code>`).join(" ")}</p>
+    ${keys.map((k) => `<section class="rf-box2 rf-mail" data-k="${k}">
+      <div class="rf-mail-head"><h4>${esc(t[k].label)}</h4>
+        <label class="rf-mail-on"><input type="checkbox" data-f="on"${t[k].on ? " checked" : ""}> Send it</label></div>
+      <p class="muted">${esc(when[k])}</p>
+      <label class="rf-mail-f">Subject<input class="fe-input" data-f="subject" maxlength="200" value="${esc(t[k].subject)}"></label>
+      <label class="rf-mail-f">Message<textarea class="fe-input" data-f="body" rows="10" maxlength="4000">${esc(t[k].body)}</textarea></label>
+      <div class="rf-step-row">
+        <button type="button" class="btn-ghost" data-act="test">Send a test to me</button>
+        <button type="button" class="btn-ghost" data-act="reset">Use the original wording</button>
+      </div>
+    </section>`).join("")}
+    <div class="rf-step-row"><button type="button" class="btn-primary" data-act="save">Save</button></div>`;
+
+  const box = (k) => body.querySelector(`[data-k="${k}"]`);
+  const read = (k) => ({
+    on: box(k).querySelector('[data-f="on"]').checked,
+    subject: box(k).querySelector('[data-f="subject"]').value,
+    body: box(k).querySelector('[data-f="body"]').value,
+  });
+  body.addEventListener("click", async (e) => {
+    const a = e.target.closest("[data-act]");
+    if (!a) return;
+    const k = a.closest("[data-k]")?.dataset.k;
+    if (a.dataset.act === "reset") {
+      box(k).querySelector('[data-f="subject"]').value = data.defaults[k].subject;
+      box(k).querySelector('[data-f="body"]').value = data.defaults[k].body;
+      return;
+    }
+    a.disabled = true;
+    try {
+      if (a.dataset.act === "test") {
+        const r = await callApi({ action: "refunds", op: "testEmail", key: k, subject: read(k).subject, body: read(k).body });
+        if (!r || r.problem) throw new Error((r && r.problem) || "The test wasn't sent.");
+        showToast(`Test sent to ${r.to}`);
+      } else if (a.dataset.act === "save") {
+        const emails = {};
+        keys.forEach((x) => { emails[x] = read(x); });
+        const r = await callApi({ action: "refunds", op: "saveEmails", emails });
+        if (!r || r.problem) throw new Error((r && r.problem) || "Not saved.");
+        showToast("Patient emails saved");
+      }
+    } catch (err) {
+      showToast(err.message || "Couldn't do that. Try again.");
+    } finally {
+      a.disabled = false;
     }
   });
 }

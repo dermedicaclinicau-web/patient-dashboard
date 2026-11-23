@@ -90,6 +90,8 @@ const els = {
 const PAPER_V = 12;
 // Raise this each time prospects.js changes, so browsers don't keep using an old copy
 const PROSPECTS_V = 11;
+// Raise this each time refunds.js changes, so browsers don't keep using an old copy
+const REFUNDS_V = 1;
 let currentStaff = null;
 initFormPicker(els.content, { getStaff: () => currentStaff });
 initTopbar();
@@ -378,6 +380,8 @@ const PAGES = {
   }),
   tasks: lazyPage("./task-manager.js", "Task Manager",
     (m, el, param) => m.mountTaskManager(el, { param, isAdmin: can("tasks.build"), staff: currentStaff })),
+  refunds: lazyPage(`./refunds.js?v=${REFUNDS_V}`, "Refunds",
+    (m, el, param) => m.mountRefunds(el, { param, staff: currentStaff })),
   inventory: lazyPage("./inventory.js", "Inventory", (m, el, param) => m.mountInventory(el, { param, staff: currentStaff })),
   reports: lazyPage("./reports.js", "Reporting", (m, el, param) => m.mountReports(el, { param, staff: currentStaff })),
   staff: lazyPage("./staff-manager.js", "Staff", (m, el) => m.mountStaffManager(el, { staff: currentStaff })),
