@@ -6,11 +6,13 @@ import { renderPlanCatalogue } from "./plan-catalogue.js";
 import { renderUiTextSettings } from "./ui-text-settings.js";
 import { renderPlanWorkflowSettings } from "./plan-workflow-settings.js";
 import { renderPlanCopySettings } from "./plan-copy-settings.js";
+import { mountServicePrices } from "./service-prices.js";
 const TABS = [
   ["recording", "Recording rules"],
   ["plans", "Treatment plans"],
   ["workflow", "Plan workflow"],
   ["wording", "Wording"],
+  ["pricing", "Services and pricing"],
   ["flows", "Email flows"],
 ];
 
@@ -76,5 +78,6 @@ export function mountSettings(container, { param = "", staff = null } = {}) {
   }
   else if (tab === "workflow") renderPlanWorkflowSettings(body, { staff });
   else if (tab === "wording") renderUiTextSettings(body, { staff });
+  else if (tab === "pricing") mountServicePrices(body, { staff });
   else mountRecordingSettings(body, { staff, embedded: true });
 }
