@@ -8,6 +8,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
 import { showToast } from "./utils.js";
+import { confirmDialog } from "./dialog.js";
 import { can, isAdmin } from "./perms.js";
 import { findPatientsById, getPatient } from "./patients.js";
 import { searchPatients, warmPatients } from "./patient-list.js";
@@ -1334,6 +1335,373 @@ async function mountReport(container) {
 }
 
 /* ===================== Patient emails (Settings) ===================== */
+// Rich text: headings, bold, lists, colours, links and pictures. The top of each email is the clinic letterhead
+// (Form Builder → Letterhead), the logo, or nothing. Pictures are kept inside the email and sent with it.
+const LOOKS = [
+  ["letterhead", "Clinic letterhead", "The logo, name and lines from Form Builder → Letterhead"],
+  ["logo", "Logo only", "The clinic logo at the top"],
+  ["none", "Nothing", "Starts with your message"],
+];
+const TB = {
+  ul: ic('<line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/>'),
+  ol: ic('<line x1="10" y1="6" x2="20" y2="6"/><line x1="10" y1="12" x2="20" y2="12"/><line x1="10" y1="18" x2="20" y2="18"/><path d="M4 5h1v4"/><path d="M4 14.5a1 1 0 0 1 2 .5c0 .8-2 1.5-2 3h2"/>'),
+  left: ic('<line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="18" y2="18"/>'),
+  center: ic('<line x1="3" y1="6" x2="21" y2="6"/><line x1="6" y1="12" x2="18" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/>'),
+  right: ic('<line x1="3" y1="6" x2="21" y2="6"/><line x1="9" y1="12" x2="21" y2="12"/><line x1="6" y1="18" x2="21" y2="18"/>'),
+  link: ic('<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>'),
+  image: ic('<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>'),
+  line: ic('<line x1="3" y1="12" x2="21" y2="12"/>'),
+  clear: ic('<path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/><line x1="3" y1="21" x2="21" y2="3"/>'),
+};
+
+// The same look as Refunds.gs (rfStyled_ / rfLetterheadHtml_ / rfPatientHtml_), for the preview
+const MAIL_STYLE = {
+  h1: "margin:0 0 12px;font-size:24px;line-height:1.3;color:#0f172a", h2: "margin:0 0 10px;font-size:20px;line-height:1.3;color:#0f172a",
+  h3: "margin:0 0 8px;font-size:17px;line-height:1.35;color:#0f172a", p: "margin:0 0 12px",
+  ul: "margin:0 0 12px;padding-left:22px", ol: "margin:0 0 12px;padding-left:22px",
+  blockquote: "margin:0 0 12px;padding-left:12px;border-left:3px solid #cbd5e1;color:#475569",
+  hr: "border:0;border-top:1px solid #e2e8f0;margin:18px 0", img: "max-width:100%;height:auto",
+};
+const mailStyled = (html) => String(html || "").replace(/<(h1|h2|h3|p|ul|ol|blockquote|hr|img)\b([^>]*)>/gi, (m, tag, attrs) => {
+  const st = MAIL_STYLE[tag.toLowerCase()];
+  const a = attrs.replace(/\s*\/\s*$/, "");
+  return /\sstyle\s*=\s*"/i.test(a) ? `<${tag}${a.replace(/style\s*=\s*"([^"]*)"/i, (x, v) => `style="${st};${v}"`)}>` : `<${tag}${a} style="${st}">`;
+});
+function letterheadHtml(lh) {
+  if (!lh) return "";
+  const center = /center/i.test(String(lh.layout || ""));
+  const size = Math.min(120, Math.max(30, Number(lh.logoSize) || 60));
+  const logo = /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(String(lh.logo || ""))
+    ? `<img src="${lh.logo}" alt="" style="max-height:${size}px;max-width:260px;display:block;margin:${center ? "0 auto 8px" : "0 0 8px"}">` : "";
+  const name = lh.showName !== false && lh.name ? `<div style="font-size:20px;font-weight:bold;color:#0f172a">${esc(lh.name)}</div>` : "";
+  const lines = [lh.line1, lh.line2].filter(Boolean).map((l) => `<div style="font-size:12px;color:#64748b">${esc(l)}</div>`).join("");
+  return logo || name || lines
+    ? `<div style="text-align:${center ? "center" : "left"};padding-bottom:14px;margin-bottom:20px;border-bottom:1px solid #e2e8f0">${logo}${name}${lines}</div>` : "";
+}
+function mailPage(inner, look, lh) {
+  let head = look === "letterhead" ? letterheadHtml(lh) : "";
+  if (!head && look !== "none") {
+    head = '<p style="margin:0 0 18px"><span style="display:inline-block;padding:10px 16px;border:1px dashed #cbd5e1;border-radius:8px;color:#94a3b8;font-size:12px">Clinic logo</span></p>';
+  }
+  return `<div style="margin:0;padding:24px 12px;background:#f1f5f9"><div style="max-width:600px;margin:0 auto;padding:28px 30px;background:#fff;border-radius:12px;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.6;color:#1e293b">${head}${mailStyled(inner)}</div></div>`;
+}
+const SAMPLE = {
+  "first name": "Sarah", "full name": "Sarah Smith", "refund number": "RF-TEST01", amount: "$120.00",
+  items: "• Product: ZO Daily Power Defense ($120.00)", "refund method": "Bank transfer", reference: "123456789", "clinic phone": "(08) 9000 0000",
+};
+const sampleOf = (k) => SAMPLE[String(k).replace(/&nbsp;|\s+/g, " ").trim().toLowerCase()];
+const fillSampleHtml = (html) => String(html).replace(/\{([^{}<>]{1,40})\}/g, (m, k) => { const v = sampleOf(k); return v === undefined ? "" : esc(v).replace(/\n/g, "<br>"); });
+const fillSampleText = (s) => String(s).replace(/\{([^{}]{1,40})\}/g, (m, k) => sampleOf(k) ?? "");
+
+// A picture from the device, made small enough to send (800 px wide at most)
+function readPicture(file, maxW = 800) {
+  return new Promise((resolve, reject) => {
+    if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) { reject(new Error("Choose a PNG or JPG picture.")); return; }
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxW / img.naturalWidth);
+      const w = Math.max(1, Math.round(img.naturalWidth * scale));
+      const h = Math.max(1, Math.round(img.naturalHeight * scale));
+      const draw = (bg) => {
+        const c = document.createElement("canvas");
+        c.width = w; c.height = h;
+        const g = c.getContext("2d");
+        if (bg) { g.fillStyle = "#fff"; g.fillRect(0, 0, w, h); }
+        g.drawImage(img, 0, 0, w, h);
+        return c;
+      };
+      let src = file.type === "image/png" ? draw(false).toDataURL("image/png") : "";
+      if (!src || src.length > 250000) src = draw(true).toDataURL("image/jpeg", 0.82);   // big PNGs become JPGs on white
+      URL.revokeObjectURL(url);
+      resolve({ src, w });
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("That picture couldn't be read.")); };
+    img.src = url;
+  });
+}
+
+const toolbarHtml = (blanks) => {
+  const b = (cmd, inner, title) => `<button type="button" class="rf-tb" data-cmd="${cmd}" title="${title}" aria-label="${title}">${inner}</button>`;
+  return `<div class="rf-tbar" role="toolbar" aria-label="Formatting">
+    <select class="fb-select rf-tb-sel" data-cmd="block" aria-label="Text style">
+      <option value="">Text style…</option><option value="h1">Big heading</option><option value="h2">Heading</option>
+      <option value="h3">Small heading</option><option value="p">Normal text</option></select>
+    <span class="rf-tb-sep"></span>
+    ${b("bold", "<b>B</b>", "Bold")}${b("italic", "<i>I</i>", "Italic")}${b("underline", "<u>U</u>", "Underline")}
+    <label class="rf-tb rf-tb-color" title="Text colour"><span>A</span><input type="color" data-cmd="color" value="#0f766e" aria-label="Text colour"></label>
+    <span class="rf-tb-sep"></span>
+    ${b("insertUnorderedList", TB.ul, "Bulleted list")}${b("insertOrderedList", TB.ol, "Numbered list")}
+    ${b("justifyLeft", TB.left, "Align left")}${b("justifyCenter", TB.center, "Centre")}${b("justifyRight", TB.right, "Align right")}
+    <span class="rf-tb-sep"></span>
+    ${b("link", TB.link, "Add a link")}
+    <label class="rf-tb" title="Add a picture" aria-label="Add a picture">${TB.image}<input type="file" accept="image/png,image/jpeg,image/gif,image/webp" data-cmd="image" hidden></label>
+    ${b("insertHorizontalRule", TB.line, "Dividing line")}${b("removeFormat", TB.clear, "Clear formatting")}
+    <span class="rf-tb-sep"></span>
+    <select class="fb-select rf-tb-sel" data-cmd="blank" aria-label="Insert a blank"><option value="">Insert a blank…</option>${
+      blanks.map((x) => `<option value="${esc(x)}">{${esc(x)}}</option>`).join("")}</select>
+  </div>
+  <div class="rf-imgbar" data-role="imgbar" hidden><span>Picture:</span>
+    <button type="button" class="lh-btn is-quiet" data-img="30">Small</button>
+    <button type="button" class="lh-btn is-quiet" data-img="60">Medium</button>
+    <button type="button" class="lh-btn is-quiet" data-img="100">Full width</button>
+    <button type="button" class="lh-btn is-quiet" data-img="center">Centre</button>
+    <button type="button" class="lh-btn is-quiet" data-img="left">Left</button>
+    <button type="button" class="lh-btn is-quiet" data-img="remove">Remove</button>
+  </div>`;
+};
+
+async function mountEmails(container) {
+  const root = document.createElement("section");
+  root.className = "page rf";
+  container.replaceChildren(root);
+  if (!boss()) { root.innerHTML = '<div class="rf-empty"><strong>No access</strong>Ask an Admin for Refunds settings access.</div>'; return; }
+  root.innerHTML = `${headHtml()}<div data-role="body"><div class="skeleton" style="height:240px;border-radius:14px"></div></div>`;
+  const body = root.querySelector('[data-role="body"]');
+  let data, lh = null;
+  try {
+    [data, lh] = await Promise.all([
+      callApi({ action: "refunds", op: "emails" }),
+      getDoc(doc(db, "form_settings", "letterhead")).then((s) => (s.exists() ? s.data() : null)).catch(() => null),
+    ]);
+    if (!data || !data.templates) throw new Error((data && data.problem) || "");
+  } catch (err) {
+    body.innerHTML = `<div class="rf-empty"><strong>Couldn't load the emails</strong>${esc(err.message || "Try again.")}</div>`;
+    return;
+  }
+  if (!root.isConnected) return;
+  const keys = ["received", "transfer", "credit"];
+  const when = {
+    received: "Sent when a refund request is saved. Not sent when cash was already handed over.",
+    transfer: "Sent when the bank transfer is marked done. {Reference} is the transfer reference.",
+    credit: "Sent when the account credit is marked done in Timely.",
+  };
+  const t = data.templates;
+  let look = data.look || "logo";
+  let dirty = false;
+  const hasLh = !!letterheadHtml(lh);
+
+  body.innerHTML = `
+    <section class="rf-box2"><h4>Top of every email</h4>
+      <div class="rf-looks">${LOOKS.map(([k, l, s]) => `<button type="button" class="rf-lookbtn${look === k ? " is-on" : ""}" data-act="look" data-v="${k}"
+        aria-pressed="${look === k}"><strong>${l}</strong><small>${esc(s)}</small></button>`).join("")}</div>
+      <p class="rf-hint" data-role="lhnote"${look === "letterhead" && !hasLh ? "" : " hidden"}>No letterhead is set up yet, so the logo is used for now.
+        Set one up in Form Builder → Letterhead.</p>
+    </section>
+    <p class="muted rf-mh">These go to the patient. Use <strong>Insert a blank</strong> to add their name, the amount and so on.</p>
+    ${keys.map((k) => `<section class="rf-box2 rf-mail" data-k="${k}">
+      <div class="rf-mail-head"><h4>${esc(t[k].label)}</h4>
+        <label class="rf-mail-on"><input type="checkbox" data-f="on"${t[k].on ? " checked" : ""}> Send it</label></div>
+      <p class="muted">${esc(when[k])}</p>
+      <label class="rf-mail-f">Subject<input class="fe-input" data-f="subject" maxlength="200" value="${esc(t[k].subject)}"></label>
+      ${toolbarHtml(data.blanks || [])}
+      <div class="rf-ed" contenteditable="true" spellcheck="true" role="textbox" aria-multiline="true" aria-label="${esc(t[k].label)} message"></div>
+      <div class="rf-step-row">
+        <button type="button" class="btn-ghost" data-act="preview">Preview</button>
+        <button type="button" class="btn-ghost" data-act="test">Send a test to me</button>
+        <button type="button" class="btn-ghost" data-act="reset">Use the original wording</button>
+      </div>
+    </section>`).join("")}
+    <div class="rf-savebar"><span class="rf-dirty" data-role="dirty" hidden>Unsaved changes</span>
+      <button type="button" class="btn-primary" data-act="save">Save</button></div>`;
+
+  const box = (k) => body.querySelector(`[data-k="${k}"]`);
+  keys.forEach((k) => { box(k).querySelector(".rf-ed").innerHTML = t[k].html || ""; });
+  const setDirty = (v = true) => { dirty = v; body.querySelector('[data-role="dirty"]').hidden = !v; };
+  const read = (k) => {
+    const ed = box(k).querySelector(".rf-ed").cloneNode(true);
+    ed.querySelectorAll(".is-sel").forEach((n) => n.classList.remove("is-sel"));
+    ed.querySelectorAll('[class=""]').forEach((n) => n.removeAttribute("class"));
+    return {
+      on: box(k).querySelector('[data-f="on"]').checked,
+      subject: box(k).querySelector('[data-f="subject"]').value,
+      html: ed.innerHTML.trim(),
+    };
+  };
+
+  // Where the cursor was in each editor, so toolbar buttons, menus and pictures go in the right place
+  let saved = null;
+  const onSel = () => {
+    if (!root.isConnected) { document.removeEventListener("selectionchange", onSel); return; }
+    const s = document.getSelection();
+    if (!s || !s.rangeCount) return;
+    const r0 = s.getRangeAt(0);
+    const node = r0.commonAncestorContainer.nodeType === 1 ? r0.commonAncestorContainer : r0.commonAncestorContainer.parentElement;
+    const ed = node && node.closest ? node.closest(".rf-ed") : null;
+    if (ed && body.contains(ed)) saved = { ed, range: r0.cloneRange() };
+  };
+  document.addEventListener("selectionchange", onSel);
+  const restore = (ed) => {
+    ed.focus({ preventScroll: true });
+    const s = document.getSelection();
+    s.removeAllRanges();
+    if (saved && saved.ed === ed && ed.contains(saved.range.commonAncestorContainer)) s.addRange(saved.range);
+    else { const r = document.createRange(); r.selectNodeContents(ed); r.collapse(false); s.addRange(r); }
+  };
+  const exec = (ed, cmd, val = null) => {
+    restore(ed);
+    try { document.execCommand("defaultParagraphSeparator", false, "p"); } catch { /* older browsers */ }
+    document.execCommand("styleWithCSS", false, cmd === "foreColor" || /^justify/.test(cmd));
+    document.execCommand(cmd, false, val);
+    onSel();
+    setDirty();
+  };
+
+  // A picture tapped in the editor: its size bar shows
+  let selImg = null;
+  const selectImg = (img) => {
+    body.querySelectorAll(".rf-ed img.is-sel").forEach((i) => i.classList.remove("is-sel"));
+    body.querySelectorAll('[data-role="imgbar"]').forEach((b) => { b.hidden = true; });
+    selImg = img;
+    if (!img) return;
+    img.classList.add("is-sel");
+    img.closest(".rf-mail").querySelector('[data-role="imgbar"]').hidden = false;
+  };
+
+  function addLink(ed) {
+    const url = (window.prompt("Link address (https://…, mailto: or tel:)", "https://") || "").trim();
+    if (!url || url === "https://") return;
+    if (!/^(https?:\/\/|mailto:|tel:)\S+$/i.test(url)) { showToast("Links start with https://, mailto: or tel:"); return; }
+    restore(ed);
+    const s = document.getSelection();
+    if (s.isCollapsed) exec(ed, "insertHTML", `<a href="${esc(url)}">${esc(url.replace(/^(mailto:|tel:)/i, ""))}</a>`);
+    else exec(ed, "createLink", url);
+  }
+
+  function preview(k) {
+    const x = read(k);
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog rf-prev-dlg";
+    dlg.innerHTML = `<div class="lh-form">
+      <div class="lh-dialog-head"><h3>${esc(fillSampleText(x.subject) || "No subject")}</h3><p>How it looks to the patient, with example details.</p></div>
+      <iframe class="rf-prev-frame" sandbox="" title="Email preview"></iframe>
+      <div class="lh-actions"><button type="button" class="lh-btn is-primary" data-act="close">Close</button></div></div>`;
+    dlg.querySelector('[data-act="close"]').addEventListener("click", () => dlg.close());
+    dlg.addEventListener("close", () => dlg.remove());
+    document.body.appendChild(dlg);
+    dlg.querySelector("iframe").srcdoc = `<!doctype html><html><body style="margin:0">${mailPage(fillSampleHtml(x.html), look, lh)}</body></html>`;
+    dlg.showModal();
+  }
+
+  // Toolbar buttons keep the cursor in the editor
+  body.addEventListener("mousedown", (e) => { if (e.target.closest("button[data-cmd], [data-img]")) e.preventDefault(); });
+  // Pasting from Word or a website: the words only, so the email keeps its own look
+  body.addEventListener("paste", (e) => {
+    if (!e.target.closest(".rf-ed")) return;
+    e.preventDefault();
+    const text = (e.clipboardData || window.clipboardData).getData("text/plain");
+    document.execCommand("insertText", false, text);
+  });
+  body.addEventListener("drop", (e) => { if (e.target.closest(".rf-ed")) e.preventDefault(); });
+  body.addEventListener("input", (e) => {
+    if (e.target.closest(".rf-ed") || e.target.dataset.f === "subject") setDirty();
+  });
+
+  body.addEventListener("change", async (e) => {
+    const t2 = e.target;
+    const mail = t2.closest(".rf-mail");
+    if (t2.dataset.f === "on") { setDirty(); return; }
+    if (!mail || !t2.dataset.cmd) return;
+    const ed = mail.querySelector(".rf-ed");
+    if (t2.dataset.cmd === "block") { if (t2.value) exec(ed, "formatBlock", `<${t2.value}>`); t2.value = ""; return; }
+    if (t2.dataset.cmd === "blank") { if (t2.value) exec(ed, "insertText", `{${t2.value}}`); t2.value = ""; return; }
+    if (t2.dataset.cmd === "color") {
+      t2.closest(".rf-tb-color").style.setProperty("--rf-c", t2.value);
+      exec(ed, "foreColor", t2.value);
+      return;
+    }
+    if (t2.dataset.cmd === "image") {
+      const file = t2.files && t2.files[0];
+      t2.value = "";
+      if (!file) return;
+      try {
+        const pic = await readPicture(file);
+        exec(ed, "insertHTML", `<img src="${pic.src}" alt="" style="width:${Math.min(pic.w, 560)}px;max-width:100%;height:auto">`);
+      } catch (ex) { showToast(ex.message || "That picture couldn't be added."); }
+    }
+  });
+
+  body.addEventListener("click", async (e) => {
+    const img = e.target.closest(".rf-ed img");
+    if (img) { selectImg(img); return; }
+    const ib = e.target.closest("[data-img]");
+    if (ib && selImg) {
+      const v = ib.dataset.img;
+      if (v === "remove") { selImg.remove(); selectImg(null); }
+      else if (v === "center") { selImg.style.display = "block"; selImg.style.margin = "0 auto 12px"; }
+      else if (v === "left") { selImg.style.display = ""; selImg.style.margin = ""; }
+      else { selImg.style.width = `${v}%`; selImg.style.maxWidth = "100%"; selImg.style.height = "auto"; }
+      setDirty();
+      return;
+    }
+    if (e.target.closest(".rf-ed")) { if (selImg) selectImg(null); return; }
+
+    const cb = e.target.closest("button[data-cmd]");
+    if (cb) {
+      const ed = cb.closest(".rf-mail").querySelector(".rf-ed");
+      if (cb.dataset.cmd === "link") addLink(ed);
+      else exec(ed, cb.dataset.cmd);
+      return;
+    }
+    const a = e.target.closest("[data-act]");
+    if (!a) return;
+    const k = a.closest("[data-k]")?.dataset.k;
+    if (a.dataset.act === "look") {
+      look = a.dataset.v;
+      body.querySelectorAll('[data-act="look"]').forEach((b) => {
+        b.classList.toggle("is-on", b === a);
+        b.setAttribute("aria-pressed", String(b === a));
+      });
+      body.querySelector('[data-role="lhnote"]').hidden = !(look === "letterhead" && !hasLh);
+      setDirty();
+      return;
+    }
+    if (a.dataset.act === "preview") { preview(k); return; }
+    if (a.dataset.act === "reset") {
+      if (!(await confirmDialog({
+        title: "Use the original wording?", message: "This email's subject and message go back to how they first were. Nothing is saved until you press Save.",
+        confirmLabel: "Use the original", tone: "warning",
+      }))) return;
+      box(k).querySelector('[data-f="subject"]').value = data.defaults[k].subject;
+      box(k).querySelector(".rf-ed").innerHTML = data.defaults[k].html;
+      setDirty();
+      return;
+    }
+    a.disabled = true;
+    const label = a.textContent;
+    try {
+      if (a.dataset.act === "test") {
+        a.textContent = "Sending…";
+        const x = read(k);
+        const r = await callApi({ action: "refunds", op: "testEmail", key: k, subject: x.subject, html: x.html, look });
+        if (!r || r.problem) throw new Error((r && r.problem) || "The test wasn't sent.");
+        showToast(`Test sent to ${r.to}`);
+      } else if (a.dataset.act === "save") {
+        a.textContent = "Saving…";
+        const emails = {};
+        keys.forEach((x) => { emails[x] = read(x); });
+        const size = keys.reduce((n, x) => n + emails[x].html.length, 0);
+        if (size > 850000) throw new Error("The emails have too many pictures between them. Remove one or two, or use smaller ones.");
+        const r = await callApi({ action: "refunds", op: "saveEmails", emails, look });
+        if (!r || r.problem) throw new Error((r && r.problem) || "Not saved.");
+        setDirty(false);
+        showToast("Patient emails saved");
+      }
+    } catch (err) {
+      showToast(err.message || "Couldn't do that. Try again.");
+    } finally {
+      a.disabled = false;
+      a.textContent = label;
+    }
+  });
+
+  // Leaving with unsaved changes: the browser asks first
+  const onUnload = (e) => {
+    if (!root.isConnected) { window.removeEventListener("beforeunload", onUnload); return; }
+    if (dirty) { e.preventDefault(); e.returnValue = ""; }
+  };
+  window.addEventListener("beforeunload", onUnload);
+}
 async function mountEmails(container) {
   const root = document.createElement("section");
   root.className = "page rf";
