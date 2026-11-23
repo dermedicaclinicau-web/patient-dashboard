@@ -41,6 +41,7 @@ const I = {
   moon: ic('<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>'),
   upload: ic('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>'),  
   megaphone: ic('<path d="M3 11v2a1 1 0 0 0 1 1h2l5 4V6L6 10H4a1 1 0 0 0-1 1z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/>'),
+  refund: ic('<path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 3 3 9 9 9"/><path d="M12 8v8M14.5 9.5c-.4-.8-1.3-1.2-2.5-1.2-1.4 0-2.4.7-2.4 1.7 0 2.5 5 1.3 5 3.9 0 1.1-1.1 1.8-2.6 1.8-1.3 0-2.3-.5-2.7-1.4"/>'),
 };
 
 const CATEGORIES = [
@@ -52,6 +53,8 @@ const CATEGORIES = [
     blurb: "Print any form: blank, with a patient's details, or a completed copy." },
   { key: "order", title: "To Order", icon: I.box, tone: "sky", href: "#/tasks/order", perm: "inventory.request",
     blurb: "Ask the ordering team for stock: products running low, or something new." },
+  { key: "refund", title: "Refund request", icon: I.refund, tone: "rose", href: "#/refunds/new",
+    blurb: "A patient wants money back for a service, package or product." },
 ];
 
 // A category card shows when the person has its tick (and "Run tasks", for the sending ones)

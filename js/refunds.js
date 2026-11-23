@@ -1,0 +1,971 @@
+// Refunds: a patient asks for money back. The request lists what's refunded and how it's paid back,
+// and each person gets their step (and a task on their dashboard) until it's all done.
+// Routes: #/refunds[/mine|open|done] · #/refunds/new[/<patientId>] · #/refunds/r/<id> · #/refunds/settings
+import { db, auth } from "./firebase-config.js";
+import {
+  collection, doc, getDoc, getDocs, setDoc, updateDoc, query, where, onSnapshot, writeBatch, runTransaction,
+  serverTimestamp, arrayUnion,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { callApi } from "./appointments.js";
+import { showToast } from "./utils.js";
+import { can, isAdmin } from "./perms.js";
+import { fetchPatients, findPatientsById, searchPatientsByPhone, getPatient } from "./patients.js";
+import { listProducts, appointmentsBetween, dayKey } from "./inventory-api.js";
+
+/* ===================== Helpers ===================== */
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+const I = {
+  back: ic('<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>'),
+  plus: ic('<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>'),
+  gear: ic('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>'),
+  refund: ic('<path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 3 3 9 9 9"/><path d="M12 8v8M14.5 9.5c-.4-.8-1.3-1.2-2.5-1.2-1.4 0-2.4.7-2.4 1.7 0 2.5 5 1.3 5 3.9 0 1.1-1.1 1.8-2.6 1.8-1.3 0-2.3-.5-2.7-1.4"/>'),
+  service: ic('<path d="M12 3l1.9 4.6 5.1.7-3.8 3.4 1.1 5L12 14.3l-4.3 2.4 1.1-5L5 8.3l5.1-.7z"/>'),
+  package: ic('<path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4a2 2 0 0 0 1-1.7z"/><polyline points="3.3 7 12 12 20.7 7"/><line x1="12" y1="22" x2="12" y2="12"/>'),
+  product: ic('<path d="M9 2h6v3H9z"/><path d="M8 5h8l1 4v11a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V9z"/><line x1="7" y1="12" x2="17" y2="12"/>'),
+  cash: ic('<rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6 10v4M18 10v4"/>'),
+  bank: ic('<path d="M3 10l9-6 9 6"/><path d="M5 10v8M9.5 10v8M14.5 10v8M19 10v8"/><line x1="3" y1="21" x2="21" y2="21"/>'),
+  credit: ic('<rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/><line x1="6" y1="15" x2="10" y2="15"/>'),
+  check: ic('<polyline points="20 6 9 17 4 12"/>'),
+  lock: ic('<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>'),
+  search: ic('<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.6" y2="16.6"/>'),
+};
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const num = (v) => { const n = Number(String(v ?? "").replace(/[^0-9.]/g, "")); return Number.isFinite(n) ? round2(n) : 0; };
+const money = (n) => `$${round2(n).toLocaleString("en-AU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+export const refundNo = (r) => `RF-${String((r && r.id) || "").slice(0, 6).toUpperCase()}`;
+const myUid = () => (auth.currentUser && auth.currentUser.uid) || "";
+const boss = () => isAdmin() || can("refunds.manage");
+const canSeeBank = () => isAdmin() || can("refunds.bank");
+const keyPlus = (n) => dayKey(new Date(Date.now() + n * 864e5));
+const toDate = (v) => (v && typeof v.toDate === "function" ? v.toDate() : v ? new Date(v) : null);
+const ms = (v) => { const d = toDate(v); return d && !isNaN(d) ? d.getTime() : 0; };
+const niceDay = (d) => (d && !isNaN(d) ? d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "");
+const niceKey = (k) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(k || ""); return m ? niceDay(new Date(+m[1], +m[2] - 1, +m[3])) : ""; };
+const initials = (n) => String(n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase() || "?";
+const hue = (s) => [...String(s || "")].reduce((a, c) => (a * 31 + c.charCodeAt(0)) % 360, 7);
+const avatar = (n) => `<span class="tk-av" style="--h:${hue(n)}">${esc(initials(n))}</span>`;
+const normName = (s) => String(s || "").toLowerCase().replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim();
+const nameOf = (staff) => String((staff && staff.name) || "").slice(0, 120);
+
+const KINDS = {
+  service: { label: "Service", icon: I.service, blurb: "A treatment they paid for" },
+  package: { label: "Package", icon: I.package, blurb: "A package or course of treatments" },
+  product: { label: "Product", icon: I.product, blurb: "Something they bought to take home" },
+};
+const METHODS = {
+  cash: { label: "Cash", icon: I.cash, blurb: () => "Given at the desk" },
+  bank: { label: "Bank transfer", icon: I.bank, blurb: (s) => `${s.bankName || "Dr Joanna"} transfers it` },
+  credit: { label: "Account credit", icon: I.credit, blurb: () => "Added to their Timely account" },
+};
+const REASONS = {
+  service: ["Not happy with the result", "Reaction or side effect", "Treatment wasn't done", "Charged twice or by mistake", "Other"],
+  package: ["Changed their mind", "Medical reason", "Moving away", "Charged twice or by mistake", "Other"],
+  product: ["Changed their mind", "Wrong product bought", "Reaction to the product", "Other"],
+};
+const RETURNED = [["unopened", "Returned unopened"], ["opened", "Returned opened"], ["no", "Not returned"]];
+
+/* ===================== Staff and settings ===================== */
+let staffCache = null;
+async function staffList() {
+  if (staffCache && Date.now() - staffCache.at < 10 * 60000) return staffCache.list;
+  const res = await callApi({ action: "staffList" });
+  staffCache = { at: Date.now(), list: (res.staff || []).map((s) => ({ id: String(s.id || ""), name: String(s.name || "") })).filter((s) => s.id) };
+  return staffCache.list;
+}
+
+const SET_DEFAULT = { bankId: "", bankName: "", timelyId: "", timelyName: "", cashId: "", cashName: "",
+  onsiteId: "", onsiteName: "", approverId: "", approverName: "", approveOver: null, recordBank: true };
+async function loadSettings() {
+  try {
+    const s = await getDoc(doc(db, "refund_settings", "config"));
+    return { ...SET_DEFAULT, ...(s.exists() ? s.data() : {}) };
+  } catch (err) {
+    console.warn("Refund settings not read:", err);
+    return { ...SET_DEFAULT };
+  }
+}
+
+/* ===================== The steps ===================== */
+const waiting = (steps, s) => s.key !== "approve" && steps.some((x) => x.key === "approve" && !x.done);
+
+function stockLines(items) {
+  return (items || []).filter((i) => i.kind === "product" && i.returned !== "no").map((i) => {
+    const what = i.condition === "faulty"
+      ? (i.action === "supplier" ? "set it aside to send back to the supplier for a replacement" : "keep it as a tester")
+      : i.returned === "unopened" ? "put it back on the Shelf" : "it's opened, so it can't be resold: keep it as a tester or throw it out";
+    return `${i.qty > 1 ? `${i.qty} × ` : ""}${i.name}: ${what}`;
+  });
+}
+
+function buildSteps(r, set) {
+  const out = [];
+  const add = (key, title, id, name, need, help) => out.push({ key, title, whoId: id || "", whoName: name || "",
+    need, help, done: false, value: "", taskId: "", dueDate: "" });
+  const timely = [set.timelyId, set.timelyName || "Timely"];
+  if (set.approveOver !== null && set.approveOver !== "" && r.total > Number(set.approveOver)) {
+    add("approve", `Approve the refund (over ${money(set.approveOver)})`, set.approverId, set.approverName || "An Admin", "none",
+      "Check the details. Approving starts everyone else's steps.");
+  }
+  if (r.method === "cash" && !r.cashGiven) {
+    add("cash", "Give the cash refund", set.cashId, set.cashName, "amount", "Give the cash to the patient, then enter how much was given.");
+  }
+  if (r.method === "bank") {
+    add("bank", "Transfer the refund", set.bankId, set.bankName || "Dr Joanna", "ref",
+      "Transfer the money to the patient's account (details on the right), then enter the transfer reference.");
+  }
+  if (r.method === "credit") {
+    add("credit", "Add the account credit in Timely", ...timely, "invoice", "Add the credit to the patient's Timely account, then enter the invoice number.");
+  }
+  if (r.method === "cash" || (r.method === "bank" && set.recordBank !== false)) {
+    add("timely", "Record the refund in Timely", ...timely, "invoice", "Record the refund on the patient's Timely account, then enter the invoice number.");
+  }
+  if (r.items.some((i) => i.kind === "product")) {
+    add("void", "Void the product sale in Timely", ...timely, "invoice", "Void the product on the original sale in Timely, then enter the invoice number.");
+  }
+  if (r.items.some((i) => i.kind === "product" && i.returned !== "no")) {
+    add("stock", "Deal with the returned products", set.onsiteId, set.onsiteName, "none", "");
+  }
+  return out;
+}
+
+// Who can act on the refund right now (used by the Firestore rules and the Needs me tab)
+function recompute(steps) {
+  const open = steps.filter((s) => !s.done);
+  const live = open.filter((s) => !waiting(steps, s));
+  return { stepsOpen: open.length, ownerIds: [...new Set(live.map((s) => s.whoId).filter(Boolean))], openToAll: live.some((s) => !s.whoId) };
+}
+const canDo = (s) => boss() || s.whoId === myUid() || (!s.whoId && s.key !== "approve");
+const nextFor = (r) => (r.steps || []).find((s) => !s.done && !waiting(r.steps, s)) || null;
+
+function taskData(base, refundId, s, by) {
+  return {
+    patientId: String(base.patientId || ""), patientName: String(base.patientName || ""),
+    taskText: `Refund ${refundNo({ id: refundId })} · ${s.title} · ${money(base.total)}. Open Refunds to finish it.`.slice(0, 500),
+    dueDate: s.dueDate, status: "Open", assignedToId: s.whoId || "", assignedToName: s.whoId ? s.whoName : "",
+    createdAt: serverTimestamp(), createdBy: by, createdByUid: myUid(), notes: [],
+    history: [{ at: new Date().toISOString(), by, what: "Added from a refund request" }],
+  };
+}
+
+const valueText = (s) => (!s.value ? "" : s.need === "ref" ? `Reference ${s.value}` : s.need === "invoice" ? `Invoice ${s.value}`
+  : s.need === "amount" ? `${money(s.value)} given` : "");
+const methodText = (r) => (r.method === "cash" ? (r.cashGiven ? `Cash, ${money(r.cashAmount)} already given` : "Cash, not given yet")
+  : r.method === "bank" ? `Bank transfer to the account ending ${r.bankLast3 || "…"}` : "Account credit in Timely");
+function itemSub(it) {
+  if (it.kind !== "product") return [it.reason, it.note].filter(Boolean).join(" · ");
+  const cond = it.condition === "faulty" ? `Faulty · ${it.action === "supplier" ? "back to the supplier" : "keep as a tester"}` : it.reason;
+  const back = (RETURNED.find(([k]) => k === it.returned) || [, ""])[1];
+  return [cond, back, it.invoiceId && `Invoice ${it.invoiceId}`, it.note].filter(Boolean).join(" · ");
+}
+
+/* ===================== Page ===================== */
+export async function mountRefunds(container, { param = "", staff = null } = {}) {
+  const parts = String(param || "").split("/").filter(Boolean);
+  if (parts[0] === "new") return mountForm(container, { staff, patientId: parts[1] ? decodeURIComponent(parts[1]) : "" });
+  if (parts[0] === "r" && parts[1]) return mountRefund(container, { id: decodeURIComponent(parts[1]), staff });
+  if (parts[0] === "settings") return mountSettings(container, { staff });
+  return mountList(container, { tab: parts[0] || "mine" });
+}
+
+/* ===================== The list ===================== */
+async function mountList(container, { tab }) {
+  if (!["mine", "open", "done"].includes(tab)) tab = "mine";
+  const root = document.createElement("section");
+  root.className = "page wide rf";
+  root.innerHTML = `
+    <div class="fb-head">
+      <div><h2>Refunds</h2><p class="muted">Every refund request, and the steps still to do.</p></div>
+      <div class="fb-head-actions">
+        ${boss() ? `<a class="btn-ghost" href="#/refunds/settings">${I.gear}<span>Settings</span></a>` : ""}
+        <a class="btn-primary" href="#/refunds/new">${I.plus}<span>New refund request</span></a>
+      </div>
+    </div>
+    <nav class="rf-tabs" aria-label="Refunds">${[["mine", "Needs me"], ["open", "All open"], ["done", "Completed"]].map(([k, l]) =>
+      `<a href="#/refunds/${k}" class="${tab === k ? "is-on" : ""}"${tab === k ? ' aria-current="page"' : ""}>${l}<em data-n="${k}"></em></a>`).join("")}</nav>
+    <div class="rf-list" data-role="list"><div class="skeleton" style="height:86px"></div><div class="skeleton" style="height:86px"></div></div>`;
+  container.replaceChildren(root);
+  const list = root.querySelector('[data-role="list"]');
+  const col = collection(db, "refunds");
+  const get = (q) => getDocs(q).then((s) => s.docs.map((d) => ({ id: d.id, ...d.data() })));
+  try {
+    const [mine, open, done] = await Promise.all([
+      get(query(col, where("ownerIds", "array-contains", myUid()))).then((l) => l.filter((r) => r.status === "open")),
+      get(query(col, where("status", "==", "open"))),
+      tab === "done" ? get(query(col, where("status", "in", ["done", "cancelled"]))) : [],
+    ]);
+    if (!root.isConnected) return;
+    const nMine = root.querySelector('[data-n="mine"]');
+    nMine.textContent = mine.length || "";
+    nMine.classList.toggle("is-hot", mine.length > 0);
+    root.querySelector('[data-n="open"]').textContent = open.length || "";
+    const show = tab === "done"
+      ? done.sort((a, b) => ms(b.completedAt || b.cancelledAt || b.updatedAt) - ms(a.completedAt || a.cancelledAt || a.updatedAt)).slice(0, 100)
+      : (tab === "mine" ? mine : open).sort((a, b) => ms(a.createdAt) - ms(b.createdAt));
+    list.innerHTML = show.length ? show.map(cardHtml).join("")
+      : `<div class="rf-empty"><strong>${tab === "mine" ? "Nothing needs you" : tab === "open" ? "No open refunds" : "No completed refunds yet"}</strong>${
+        tab === "mine" ? "Refund steps given to you show here." : "New requests are made in Task Manager → Refund request."}</div>`;
+  } catch (err) {
+    console.error("Refunds not loaded:", err);
+    list.innerHTML = `<div class="rf-empty"><strong>Couldn't load refunds</strong>${err.code === "permission-denied"
+      ? "The Firestore rules for refunds haven't been added yet." : "Check your connection and try again."}</div>`;
+  }
+}
+
+function cardHtml(r) {
+  const steps = r.steps || [];
+  const doneN = steps.filter((s) => s.done).length;
+  const nx = nextFor(r);
+  const late = r.status === "open" && steps.some((s) => !s.done && !waiting(steps, s) && s.dueDate && s.dueDate < dayKey());
+  const pct = steps.length ? Math.round((doneN / steps.length) * 100) : 0;
+  return `<a class="rf-card is-${esc(r.status)}${late ? " is-late" : ""}" href="#/refunds/r/${encodeURIComponent(r.id)}">
+    <span class="rf-card-ic is-${esc(r.method)}">${(METHODS[r.method] || {}).icon || I.refund}</span>
+    <span class="rf-card-main">
+      <span class="rf-card-top"><strong>${esc(r.patientName)}</strong><span class="rf-no">${refundNo(r)}</span></span>
+      <small>${esc((r.items || []).map((i) => i.name).join(", "))}</small>
+      <span class="rf-card-next">${r.status === "open" ? (nx ? `${esc(nx.title)} · ${esc(nx.whoName || "Anyone")}` : "")
+        : r.status === "done" ? "Completed" : "Cancelled"}</span>
+    </span>
+    <span class="rf-card-side">
+      <b>${money(r.total)}</b><small>${esc((METHODS[r.method] || {}).label || "")}</small>
+      <span class="rf-prog"><i style="width:${pct}%"></i></span>
+      <small>${doneN} of ${steps.length} done${late ? ' · <em class="is-late">Overdue</em>' : ""}</small>
+    </span>
+  </a>`;
+}
+
+/* ===================== The request form ===================== */
+async function findPatientsAny(q) {
+  const t = q.trim();
+  if (/^\+?[\d\s]{6,}$/.test(t)) return (await searchPatientsByPhone(t)).filter((p) => !p.mergedInto).slice(0, 12);
+  const [byName, byId] = await Promise.all([
+    fetchPatients({ mode: "name", term: t }).then((r) => r.patients).catch(() => []),
+    findPatientsById(t).catch(() => []),
+  ]);
+  const m = new Map();
+  [...byId, ...byName].forEach((p) => { if (!p.mergedInto) m.set(p.id, p); });
+  return [...m.values()].slice(0, 12);
+}
+
+async function salesFor(p) {
+  try {
+    const snap = await getDocs(query(collection(db, "inv_sales"), where("patientName", "==", p.name)));
+    return snap.docs.flatMap((d) => {
+      const x = d.data() || {};
+      if (x.voided) return [];
+      const date = String(x.apptDate || x.dateKey || "");
+      return (Array.isArray(x.lines) ? x.lines : []).map((l) => ({
+        key: `${d.id}|${l.productId}`, saleId: d.id, invoiceId: String(x.invoiceId || ""), date,
+        productId: String(l.productId || ""), name: String(l.name || "Product"), qty: Number(l.qty) || 1,
+        fee: l.fee === null || l.fee === undefined ? null : Number(l.fee),
+      }));
+    }).sort((a, b) => b.date.localeCompare(a.date));
+  } catch (err) { console.warn("Purchases not read:", err); return []; }
+}
+
+async function visitsFor(p) {
+  try {
+    const list = await appointmentsBetween(keyPlus(-120), dayKey());
+    const ids = new Set([p.id, p.pttId].filter(Boolean).map((s) => String(s).toLowerCase()));
+    const nm = normName(p.name);
+    const seen = new Set();
+    const out = [];
+    list.filter((a) => (ids.has(String(a.patientId || "").toLowerCase()) || (nm && normName(a.patientName) === nm))
+      && !/cancel|no.?show|resched/i.test(String(a.status || "")))
+      .sort((a, b) => b.dateKey.localeCompare(a.dateKey))
+      .forEach((a) => (a.services || []).forEach((s) => {
+        const k = `${a.dateKey}|${s}`;
+        if (seen.has(k)) return;
+        seen.add(k);
+        out.push({ name: String(s), date: a.dateKey, staff: String(a.staff || "") });
+      }));
+    return out.slice(0, 40);
+  } catch (err) { console.warn("Visits not read:", err); return []; }
+}
+
+async function mountForm(container, { staff, patientId }) {
+  const root = document.createElement("section");
+  root.className = "page wide rf";
+  root.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
+  container.replaceChildren(root);
+  const set = await loadSettings();
+  if (!root.isConnected) return;
+
+  const blank = () => ({ name: "", amount: "", reason: "", note: "" });
+  const st = { patient: null, hits: [], sales: null, visits: null, prodList: null, tried: false,
+    kinds: { service: false, package: false, product: false }, services: [], packages: [], products: [],
+    total: null, method: "", cashGiven: "", cashAmount: "", bank: { name: "", bsb: "", acct: "" }, note: "" };
+
+  root.innerHTML = `
+    <a class="tm-back" href="#/tasks/new">${I.back}<span>Task Manager</span></a>
+    <div class="rf-formhead"><h2>Refund request</h2>
+      <p class="muted">Fill this in with the patient. The right people are given a step to finish it.</p></div>
+    <div class="rf-form">
+      <div class="rf-form-main" data-role="main"></div>
+      <aside class="rf-sum"><div class="rf-sum-card">
+        <h3>Summary</h3>
+        <div data-role="sum-pt"></div>
+        <ul class="rf-sum-items" data-role="sum-items"></ul>
+        <label class="rf-total"><span>Total to refund</span>
+          <span class="rf-money is-big"><em>$</em><input class="fe-input" inputmode="decimal" data-role="total" placeholder="0.00"></span></label>
+        <small class="rf-total-note" data-role="total-note"></small>
+        <div data-role="sum-method"></div>
+        <div class="rf-next" data-role="sum-next"></div>
+        <ul class="rf-probs" data-role="probs" hidden></ul>
+        <button type="button" class="btn-primary rf-send" data-act="send">Send refund request</button>
+      </div></aside>
+    </div>`;
+  const main = root.querySelector('[data-role="main"]');
+  const sum = root.querySelector(".rf-sum");
+
+  const setPath = (path, v) => { const k = path.split("."); let o = st; while (k.length > 1) o = o[k.shift()]; o[k[0]] = v; };
+  const fmtBsb = (d) => (d.length > 3 ? `${d.slice(0, 3)}-${d.slice(3)}` : d);
+  const seg = (path, opts, cur) => `<div class="rf-seg" role="group">${opts.map(([v, l]) =>
+    `<button type="button" class="${cur === v ? "is-on" : ""}" data-act="set" data-f="${path}" data-v="${v}" aria-pressed="${cur === v}">${esc(l)}</button>`).join("")}</div>`;
+  const reasonSelect = (path, kind, cur) => `<select class="fb-select" data-f="${path}"><option value="">Choose…</option>${REASONS[kind].map((x) =>
+    `<option${x === cur ? " selected" : ""}>${esc(x)}</option>`).join("")}</select>`;
+  const sec = (n, title, body, sub = "") => `<section class="rf-sec"><header><span class="rf-n">${n}</span>
+    <div><h3>${title}</h3>${sub ? `<p>${sub}</p>` : ""}</div></header>${body}</section>`;
+  const moneyIn = (path, val, ph = "0.00") => `<span class="rf-money"><em>$</em><input class="fe-input" inputmode="decimal" data-f="${path}" value="${esc(val)}" placeholder="${ph}"></span>`;
+
+  function patientHtml() {
+    if (st.patient) {
+      const p = st.patient;
+      return `<div class="rf-chosen">${avatar(p.name)}<span><strong>${esc(p.name)}</strong>
+        <small>${esc([p.pttId, p.mobile, p.email].filter(Boolean).join(" · "))}</small></span>
+        <button type="button" class="lh-btn is-quiet" data-act="unpick">Change</button></div>`;
+    }
+    return `<label class="rf-search">${I.search}<input class="fe-input" type="search" data-role="pq" placeholder="Search by name, mobile or patient ID"
+      autocomplete="off" aria-label="Find the patient"></label><div class="rf-hits" data-role="presults"></div>`;
+  }
+
+  const itemHtml = (list, label, s, i) => `<div class="rf-item">
+    <div class="rf-item-head"><strong>${KINDS[list === "services" ? "service" : "package"].icon}${label}${st[list].length > 1 ? ` ${i + 1}` : ""}</strong>
+      ${st[list].length > 1 ? `<button type="button" class="rf-x" data-act="rm" data-list="${list}" data-i="${i}" aria-label="Remove">×</button>` : ""}</div>
+    <div class="rf-grid">
+      <label class="rf-f rf-span2"><span>Which ${label.toLowerCase()}?</span><input class="fe-input" data-f="${list}.${i}.name" value="${esc(s.name)}"
+        ${list === "services" ? 'list="rf-visits"' : ""} autocomplete="off" placeholder="${list === "services"
+          ? (st.visits && st.visits.length ? "Pick a recent visit or type it" : "e.g. Anti-wrinkle, 3 areas") : "e.g. Skin peel, course of 6"}"></label>
+      <label class="rf-f"><span>Amount to refund</span>${moneyIn(`${list}.${i}.amount`, s.amount)}</label>
+      <label class="rf-f"><span>Reason</span>${reasonSelect(`${list}.${i}.reason`, list === "services" ? "service" : "package", s.reason)}</label>
+      <label class="rf-f rf-span2"><span>Details <small>(needed for "Other")</small></span>
+        <input class="fe-input" data-f="${list}.${i}.note" value="${esc(s.note)}" placeholder="What happened, in a few words"></label>
+    </div></div>`;
+
+  const productCard = (p, i) => `<div class="rf-item">
+    <div class="rf-item-head"><strong>${I.product}${esc(p.name)}</strong>
+      <button type="button" class="rf-x" data-act="rm" data-list="products" data-i="${i}" aria-label="Remove">×</button></div>
+    <div class="rf-grid">
+      <label class="rf-f"><span>How many</span><input class="fe-input" type="number" min="1" max="99" data-f="products.${i}.qty" value="${esc(p.qty)}"></label>
+      <label class="rf-f"><span>Amount to refund</span>${moneyIn(`products.${i}.amount`, p.amount)}</label>
+    </div>
+    <div class="rf-q"><span>Is it faulty?</span>${seg(`products.${i}.condition`, [["faulty", "Yes, it's faulty"], ["ok", "No"]], p.condition)}</div>
+    ${p.condition === "faulty" ? `<div class="rf-q"><span>What happens to it?</span>${seg(`products.${i}.action`,
+      [["supplier", "Send back to the supplier for a replacement"], ["tester", "Keep as a tester"]], p.action)}</div>` : ""}
+    ${p.condition === "ok" ? `<div class="rf-q"><span>Why are they returning it?</span>${reasonSelect(`products.${i}.reason`, "product", p.reason)}</div>` : ""}
+    <div class="rf-q"><span>Did they bring it back?</span>${seg(`products.${i}.returned`, RETURNED, p.returned)}</div>
+    <label class="rf-f"><span>Details <small>(optional)</small></span><input class="fe-input" data-f="products.${i}.note" value="${esc(p.note)}"></label>
+  </div>`;
+
+  function productInner() {
+    const picked = new Set(st.products.map((p) => p.key));
+    const buys = !st.patient ? '<p class="rf-hint">Choose the patient first to see what they bought.</p>'
+      : st.sales === null ? '<p class="muted rf-wait">Loading what they bought…</p>'
+      : !st.sales.length ? '<p class="rf-hint">No purchases found on their Timely invoices. Add the product below.</p>'
+      : `<p class="rf-hint">Tick what's being refunded. These are their purchases from Timely invoices.</p>
+        <ul class="rf-buys">${st.sales.slice(0, 40).map((b) => `<li><label class="rf-buy${picked.has(b.key) ? " is-on" : ""}">
+          <input type="checkbox" data-act="buy" data-key="${esc(b.key)}"${picked.has(b.key) ? " checked" : ""}>
+          <span><strong>${esc(b.name)}</strong><small>${esc([niceKey(b.date), b.invoiceId && `Invoice ${b.invoiceId}`, b.qty > 1 && `${b.qty} bought`].filter(Boolean).join(" · "))}</small></span>
+          ${b.fee !== null ? `<b>${money(b.fee)}</b>` : ""}</label></li>`).join("")}</ul>`;
+    return `<div class="rf-subh">${I.product}<strong>Products</strong></div>${buys}
+      <select class="fb-select" data-act="addprod" aria-label="Add another product">
+        <option value="">${st.prodList ? "+ Add a product that isn't listed…" : "Loading products…"}</option>
+        ${(st.prodList || []).map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select>
+      ${st.products.map(productCard).join("")}`;
+  }
+  const refreshProd = () => { const w = main.querySelector('[data-role="prodwrap"]'); if (w) w.innerHTML = productInner(); };
+
+  function methodHtml() {
+    const b = st.bank;
+    return `<div class="rf-methods">${Object.entries(METHODS).map(([k, m]) => `<button type="button" class="rf-method${st.method === k ? " is-on" : ""}"
+        data-act="set" data-f="method" data-v="${k}" aria-pressed="${st.method === k}">${m.icon}<strong>${m.label}</strong><small>${esc(m.blurb(set))}</small></button>`).join("")}</div>
+      ${st.method === "cash" ? `<div class="rf-box">
+        <div class="rf-q"><span>Has the cash been given to the patient?</span>${seg("cashGiven", [["yes", "Yes, already given"], ["no", "Not yet"]], st.cashGiven)}</div>
+        ${st.cashGiven === "yes" ? `<label class="rf-f"><span>How much was given?</span>${moneyIn("cashAmount", st.cashAmount, "Same as the total")}</label>`
+          : st.cashGiven === "no" ? `<p class="rf-hint">${esc(set.cashName || "Someone at the desk")} is given a step to hand it over.</p>` : ""}</div>` : ""}
+      ${st.method === "bank" ? `<div class="rf-box">
+        <p class="rf-lock">${I.lock}Only ${esc(set.bankName || "Dr Joanna")} and Admins can see these. They're removed once the transfer is done.</p>
+        <div class="rf-grid">
+          <label class="rf-f rf-span2"><span>Account name</span><input class="fe-input" data-f="bank.name" value="${esc(b.name)}" autocomplete="off"></label>
+          <label class="rf-f"><span>BSB</span><input class="fe-input" inputmode="numeric" maxlength="7" data-f="bank.bsb" value="${esc(fmtBsb(b.bsb))}" placeholder="123-456" autocomplete="off"></label>
+          <label class="rf-f"><span>Account number</span><input class="fe-input" inputmode="numeric" maxlength="10" data-f="bank.acct" value="${esc(b.acct)}" autocomplete="off"></label>
+        </div><p class="rf-hint">Read the numbers back to the patient to check them.</p></div>` : ""}
+      ${st.method === "credit" ? `<div class="rf-box"><p class="rf-hint">${esc(set.timelyName || "The Timely team")} adds the credit to their Timely account.</p></div>` : ""}`;
+  }
+
+  function draw() {
+    main.innerHTML = `
+      ${sec(1, "Patient", patientHtml())}
+      ${sec(2, "What's being refunded?", `<div class="rf-kinds">${Object.entries(KINDS).map(([k, v]) =>
+        `<button type="button" class="rf-kind${st.kinds[k] ? " is-on" : ""}" data-act="kind" data-k="${k}" aria-pressed="${st.kinds[k]}">
+          ${v.icon}<strong>${v.label}</strong><small>${v.blurb}</small><span class="rf-tick">${I.check}</span></button>`).join("")}</div>
+        ${st.kinds.service ? `<div class="rf-group">${st.services.map((s, i) => itemHtml("services", "Service", s, i)).join("")}
+          <button type="button" class="rf-add" data-act="addrow" data-list="services">+ Another service</button></div>` : ""}
+        ${st.kinds.package ? `<div class="rf-group">${st.packages.map((s, i) => itemHtml("packages", "Package", s, i)).join("")}
+          <button type="button" class="rf-add" data-act="addrow" data-list="packages">+ Another package</button></div>` : ""}
+        ${st.kinds.product ? `<div class="rf-group" data-role="prodwrap">${productInner()}</div>` : ""}`, "Tick everything that applies.")}
+      ${sec(3, "How do they want the money back?", methodHtml())}
+      ${sec(4, "Anything else?", `<textarea class="fe-input rf-notein" rows="3" maxlength="1000" data-f="note"
+        placeholder="Optional. Anything the team should know.">${esc(st.note)}</textarea>`)}
+      <datalist id="rf-visits">${(st.visits || []).map((v) => `<option value="${esc(v.name)}">${esc(niceKey(v.date))}${v.staff ? ` · ${esc(v.staff)}` : ""}</option>`).join("")}</datalist>`;
+  }
+
+  function draftRefund() {
+    const items = [];
+    const plain = (kind, s) => ({ kind, name: s.name.trim().slice(0, 150), amount: num(s.amount), reason: s.reason || "", note: s.note.trim().slice(0, 300) });
+    if (st.kinds.service) st.services.forEach((s) => items.push(plain("service", s)));
+    if (st.kinds.package) st.packages.forEach((s) => items.push(plain("package", s)));
+    if (st.kinds.product) st.products.forEach((p) => items.push({
+      kind: "product", name: p.name.slice(0, 150), productId: p.productId, saleId: p.saleId, invoiceId: p.invoiceId,
+      qty: Math.max(1, parseInt(p.qty, 10) || 1), amount: num(p.amount), condition: p.condition,
+      action: p.condition === "faulty" ? p.action : "", reason: p.condition === "faulty" ? "Faulty" : p.reason,
+      returned: p.returned, note: p.note.trim().slice(0, 300),
+    }));
+    const itemsTotal = round2(items.reduce((a, i) => a + i.amount, 0));
+    const total = st.total === null ? itemsTotal : round2(st.total);
+    return {
+      items, itemsTotal, total, method: st.method,
+      cashGiven: st.method === "cash" && st.cashGiven === "yes",
+      cashAmount: st.method === "cash" && st.cashGiven === "yes" ? num(st.cashAmount) || total : 0,
+      bankLast3: st.method === "bank" ? st.bank.acct.slice(-3) : "", note: st.note.trim().slice(0, 1000),
+    };
+  }
+
+  function problems() {
+    const out = [];
+    const r = draftRefund();
+    if (!st.patient) out.push("Choose the patient.");
+    if (!Object.values(st.kinds).some(Boolean)) out.push("Tick what's being refunded.");
+    if (st.kinds.product && !st.products.length) out.push("Choose the product being refunded.");
+    r.items.forEach((it) => {
+      const lbl = it.name || KINDS[it.kind].label;
+      if (!it.name) out.push(`${KINDS[it.kind].label}: say what it was.`);
+      if (!(it.amount > 0)) out.push(`${lbl}: enter the amount.`);
+      if (it.kind !== "product" && !it.reason) out.push(`${lbl}: choose a reason.`);
+      if (it.kind === "product" && !it.condition) out.push(`${lbl}: is it faulty?`);
+      if (it.condition === "faulty" && !it.action) out.push(`${lbl}: choose what happens to it.`);
+      if (it.condition === "ok" && !it.reason) out.push(`${lbl}: choose why it's being returned.`);
+      if (it.reason === "Other" && !it.note) out.push(`${lbl}: add the details for "Other".`);
+    });
+    if (r.items.length && !(r.total > 0)) out.push("Enter the total to refund.");
+    if (!st.method) out.push("Choose how they get the money back.");
+    if (st.method === "cash" && !st.cashGiven) out.push("Say whether the cash has been given.");
+    if (st.method === "bank") {
+      if (st.bank.name.trim().length < 2) out.push("Enter the name on the bank account.");
+      if (!/^\d{6}$/.test(st.bank.bsb)) out.push("The BSB is 6 numbers.");
+      if (!/^\d{5,10}$/.test(st.bank.acct)) out.push("Check the account number (5 to 10 numbers).");
+    }
+    return out;
+  }
+
+  function drawSum() {
+    const r = draftRefund();
+    sum.querySelector('[data-role="sum-pt"]').innerHTML = st.patient
+      ? `<p class="rf-sum-pt">${avatar(st.patient.name)}<strong>${esc(st.patient.name)}</strong></p>` : '<p class="muted rf-sum-pt">No patient chosen yet</p>';
+    sum.querySelector('[data-role="sum-items"]').innerHTML = r.items.length
+      ? r.items.map((i) => `<li><span>${i.qty > 1 ? `${i.qty} × ` : ""}${esc(i.name || KINDS[i.kind].label)}</span><b>${money(i.amount)}</b></li>`).join("")
+      : '<li class="muted">Nothing added yet</li>';
+    const t = sum.querySelector('[data-role="total"]');
+    if (document.activeElement !== t) t.value = r.total > 0 ? r.total.toFixed(2) : "";
+    sum.querySelector('[data-role="total-note"]').innerHTML = st.total !== null && round2(st.total) !== r.itemsTotal
+      ? `The items add up to ${money(r.itemsTotal)}. <button type="button" data-act="resettotal">Use that</button>` : "";
+    sum.querySelector('[data-role="sum-method"]').innerHTML = st.method
+      ? `<p class="rf-methodline">${METHODS[st.method].icon}<span>${esc(methodText({ ...r, cashGiven: st.cashGiven === "yes" }))}</span></p>` : "";
+    const steps = r.items.length && st.method ? buildSteps(r, set) : [];
+    sum.querySelector('[data-role="sum-next"]').innerHTML = steps.length ? `<h4>What happens next</h4><ol>${steps.map((s) =>
+      `<li class="${waiting(steps, s) ? "is-wait" : ""}">${avatar(s.whoName || "?")}<span><strong>${esc(s.title)}</strong>
+        <small>${esc(s.whoName || "Anyone on the team")}${waiting(steps, s) ? " · after approval" : ""}</small></span></li>`).join("")}</ol>
+      ${steps.some((s) => !s.whoId) && boss() ? '<p class="rf-warn">Some steps have no one set. Choose who in Refunds → Settings.</p>' : ""}` : "";
+    const probsEl = sum.querySelector('[data-role="probs"]');
+    const probs = st.tried ? problems() : [];
+    probsEl.hidden = !probs.length;
+    probsEl.innerHTML = probs.map((p) => `<li>${esc(p)}</li>`).join("");
+  }
+
+  async function loadPatientBits() {
+    const p = st.patient;
+    if (!p) return;
+    const [sales, visits] = await Promise.all([salesFor(p), visitsFor(p)]);
+    if (st.patient !== p || !root.isConnected) return;
+    st.sales = sales;
+    st.visits = visits;
+    refreshProd();
+    const dl = main.querySelector("#rf-visits");
+    if (dl) dl.innerHTML = visits.map((v) => `<option value="${esc(v.name)}">${esc(niceKey(v.date))}${v.staff ? ` · ${esc(v.staff)}` : ""}</option>`).join("");
+  }
+
+  const priceOf = (pid) => { const p = (st.prodList || []).find((x) => x.id === pid); return p && p.price !== null ? p.price : null; };
+  const newProduct = (o) => ({ key: o.key, saleId: o.saleId || "", invoiceId: o.invoiceId || "", productId: o.productId || "", name: o.name,
+    qty: "1", unit: o.unit ?? null, amount: o.unit != null ? round2(o.unit).toFixed(2) : "", auto: o.unit != null,
+    condition: "", action: "", reason: "", returned: "unopened", note: "" });
+
+  let qTimer = 0, qSeq = 0;
+  function search(q) {
+    clearTimeout(qTimer);
+    const box = main.querySelector('[data-role="presults"]');
+    if (!box) return;
+    if (q.trim().length < 2) { box.innerHTML = ""; return; }
+    box.innerHTML = '<p class="muted rf-wait">Searching…</p>';
+    qTimer = setTimeout(async () => {
+      const seq = ++qSeq;
+      const list = await findPatientsAny(q).catch(() => []);
+      if (seq !== qSeq || !box.isConnected) return;
+      st.hits = list;
+      box.innerHTML = list.length ? list.map((p, i) => `<button type="button" class="rf-hit" data-act="pick" data-i="${i}">${avatar(p.name)}
+        <span><strong>${esc(p.name)}</strong><small>${esc([p.dobKey && niceKey(p.dobKey), p.mobile, p.email].filter(Boolean).join(" · "))}</small></span></button>`).join("")
+        : '<p class="muted rf-wait">No patients found.</p>';
+    }, 280);
+  }
+
+  async function send(btn) {
+    st.tried = true;
+    drawSum();
+    if (problems().length) { sum.querySelector('[data-role="probs"]').scrollIntoView({ block: "nearest", behavior: "smooth" }); return; }
+    btn.disabled = true;
+    btn.textContent = "Sending…";
+    try {
+      const id = await saveRefund(draftRefund());
+      showToast("Refund request sent");
+      location.hash = `#/refunds/r/${encodeURIComponent(id)}`;
+    } catch (err) {
+      console.error("Refund not saved:", err);
+      btn.disabled = false;
+      btn.textContent = "Send refund request";
+      showToast(err.code === "permission-denied" ? "Refunds aren't set up in the Firestore rules yet." : "Couldn't send. Try again.");
+    }
+  }
+
+  async function saveRefund(r) {
+    const ref = doc(collection(db, "refunds"));
+    const by = nameOf(staff);
+    const p = st.patient;
+    const base = { patientId: p.id, patientPttId: p.pttId || "", patientName: p.name, patientEmail: p.email || "", patientMobile: p.mobile || "", total: r.total };
+    const steps = buildSteps(r, set);
+    const batch = writeBatch(db);
+    steps.forEach((s) => {
+      s.dueDate = keyPlus(s.key === "approve" ? 1 : 2);
+      if (waiting(steps, s)) return;
+      const t = doc(collection(db, "staff-task-list"));
+      batch.set(t, taskData(base, ref.id, s, by));
+      s.taskId = t.id;
+    });
+    batch.set(ref, {
+      ...base, items: r.items, itemsTotal: r.itemsTotal, method: r.method, cashGiven: r.cashGiven, cashAmount: r.cashAmount,
+      bankLast3: r.bankLast3, note: r.note, steps, ...recompute(steps), status: "open",
+      events: [{ at: new Date().toISOString(), by, action: "Requested", note: `${money(r.total)} · ${METHODS[r.method].label}` }],
+      createdAt: serverTimestamp(), createdBy: by, createdByUid: myUid(), updatedAt: serverTimestamp(),
+    });
+    if (r.method === "bank") {
+      batch.set(doc(db, "refund_bank", ref.id), { accountName: st.bank.name.trim().slice(0, 120), bsb: st.bank.bsb,
+        accountNumber: st.bank.acct, createdByUid: myUid(), createdAt: serverTimestamp() });
+    }
+    await batch.commit();
+    return ref.id;
+  }
+
+  root.addEventListener("input", (e) => {
+    const t = e.target;
+    if (t.dataset.role === "pq") { search(t.value); return; }
+    if (t.dataset.role === "total") { const v = t.value.trim(); st.total = v === "" ? null : num(v); drawSum(); return; }
+    const f = t.dataset.f;
+    if (!f || t.tagName === "BUTTON" || t.tagName === "SELECT") return;
+    let v = t.value;
+    if (f === "bank.bsb") { v = v.replace(/\D/g, "").slice(0, 6); t.value = fmtBsb(v); }
+    if (f === "bank.acct") { v = v.replace(/\D/g, "").slice(0, 10); t.value = v; }
+    setPath(f, v);
+    const m = /^products\.(\d+)\.(qty|amount)$/.exec(f);
+    if (m) {
+      const p = st.products[+m[1]];
+      if (m[2] === "amount") p.auto = false;
+      else if (p.auto && p.unit != null) {
+        p.amount = round2(p.unit * (parseInt(v, 10) || 1)).toFixed(2);
+        const a = main.querySelector(`[data-f="products.${m[1]}.amount"]`);
+        if (a) a.value = p.amount;
+      }
+    }
+    drawSum();
+  });
+
+  root.addEventListener("change", (e) => {
+    const t = e.target;
+    if (t.dataset.act === "buy") {
+      const b = (st.sales || []).find((x) => x.key === t.dataset.key);
+      if (!b) return;
+      if (t.checked) st.products.push(newProduct({ ...b, unit: b.fee !== null ? b.fee / Math.max(1, b.qty) : priceOf(b.productId) }));
+      else st.products = st.products.filter((p) => p.key !== b.key);
+      refreshProd(); drawSum();
+      return;
+    }
+    if (t.dataset.act === "addprod") {
+      const p = (st.prodList || []).find((x) => x.id === t.value);
+      if (p) st.products.push(newProduct({ key: `p_${p.id}_${Date.now()}`, productId: p.id, name: p.name, unit: p.price }));
+      refreshProd(); drawSum();
+      return;
+    }
+    if (t.tagName === "SELECT" && t.dataset.f) { setPath(t.dataset.f, t.value); drawSum(); }
+  });
+
+  root.addEventListener("click", (e) => {
+    const a = e.target.closest("[data-act]");
+    if (!a || a.dataset.act === "buy") return;
+    const act = a.dataset.act;
+    if (act === "pick") {
+      st.patient = st.hits[+a.dataset.i] || null; st.sales = null; st.visits = null;
+      draw(); drawSum(); loadPatientBits();
+    } else if (act === "unpick") {
+      st.patient = null; st.sales = null; st.visits = null;
+      draw(); drawSum();
+      const q = main.querySelector('[data-role="pq"]'); if (q) q.focus();
+    } else if (act === "kind") {
+      const k = a.dataset.k;
+      st.kinds[k] = !st.kinds[k];
+      if (st.kinds[k] && k === "service" && !st.services.length) st.services.push(blank());
+      if (st.kinds[k] && k === "package" && !st.packages.length) st.packages.push(blank());
+      if (st.kinds[k] && k === "product" && !st.prodList) {
+        listProducts().then((l) => {
+          st.prodList = l.filter((p) => p.active).sort((x, y) => (x.category === "retail" ? 0 : 1) - (y.category === "retail" ? 0 : 1) || x.name.localeCompare(y.name, "en-AU"));
+          refreshProd();
+        }).catch(() => { st.prodList = []; refreshProd(); });
+      }
+      draw(); drawSum();
+    } else if (act === "addrow") {
+      st[a.dataset.list].push(blank()); draw(); drawSum();
+    } else if (act === "rm") {
+      st[a.dataset.list].splice(+a.dataset.i, 1);
+      if (a.dataset.list === "products") refreshProd(); else draw();
+      drawSum();
+    } else if (act === "set") {
+      setPath(a.dataset.f, a.dataset.v);
+      if (a.dataset.f.startsWith("products.")) refreshProd(); else draw();
+      drawSum();
+    } else if (act === "resettotal") {
+      st.total = null; drawSum();
+    } else if (act === "send") {
+      send(a);
+    }
+  });
+
+  if (patientId) {
+    const p = await getPatient(patientId).catch(() => null);
+    if (p) { st.patient = p; loadPatientBits(); }
+  }
+  draw();
+  drawSum();
+}
+
+/* ===================== One refund ===================== */
+function askReason({ title, intro = "", label, ok }) {
+  return new Promise((resolve) => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog fe-confirm";
+    dlg.innerHTML = `<form class="lh-form" novalidate>
+      <div class="lh-dialog-head"><h3>${esc(title)}</h3>${intro ? `<p>${esc(intro)}</p>` : ""}</div>
+      <label class="lh-field"><span class="lh-label">${esc(label)}</span><textarea name="v" rows="3" maxlength="300"></textarea></label>
+      <p class="lh-error" hidden></p>
+      <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="no">Back</button>
+        <button type="submit" class="lh-btn is-danger">${esc(ok)}</button></div></form>`;
+    let out = null;
+    const f = dlg.querySelector("form");
+    dlg.querySelector('[data-act="no"]').addEventListener("click", () => dlg.close());
+    f.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const v = f.elements.v.value.trim();
+      if (v.length < 3) { const er = dlg.querySelector(".lh-error"); er.textContent = "Add a reason."; er.hidden = false; return; }
+      out = v;
+      dlg.close();
+    });
+    dlg.addEventListener("close", () => { dlg.remove(); resolve(out); });
+    document.body.appendChild(dlg);
+    dlg.showModal();
+  });
+}
+
+async function mountRefund(container, { id, staff }) {
+  const root = document.createElement("section");
+  root.className = "page wide rf";
+  root.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
+  container.replaceChildren(root);
+  const by = nameOf(staff);
+  let r = null, bank = null, bankState = "idle";
+  const drafts = {};
+
+  const stop = onSnapshot(doc(db, "refunds", id), (snap) => {
+    if (!root.isConnected) { stop(); return; }
+    if (!snap.exists()) { root.innerHTML = '<div class="rf-empty"><strong>Refund not found</strong>It may have been removed.</div>'; return; }
+    r = { id, ...snap.data() };
+    draw();
+  }, (err) => {
+    console.error("Refund not loaded:", err);
+    root.innerHTML = '<div class="rf-empty"><strong>Couldn\'t load this refund</strong>Check your connection and try again.</div>';
+  });
+  window.addEventListener("hashchange", () => stop(), { once: true });
+
+  function stepHtml(s, i) {
+    const steps = r.steps || [];
+    const wait = waiting(steps, s);
+    const late = !s.done && !wait && s.dueDate && s.dueDate < dayKey();
+    const act = r.status === "open" && !s.done && !wait && canDo(s);
+    const cls = s.done ? "is-done" : wait ? "is-wait" : act ? "is-mine" : "is-todo";
+    const field = s.need === "ref" ? `<input class="fe-input" data-sv="${s.key}" placeholder="Transfer reference" autocomplete="off">`
+      : s.need === "invoice" ? `<input class="fe-input" data-sv="${s.key}" placeholder="Timely invoice number" autocomplete="off">`
+      : s.need === "amount" ? `<span class="rf-money"><em>$</em><input class="fe-input" inputmode="decimal" data-sv="${s.key}" value="${round2(r.total).toFixed(2)}"></span>` : "";
+    const help = s.key === "stock" ? `<ul class="rf-stock">${stockLines(r.items).map((l) => `<li>${esc(l)}</li>`).join("")}</ul>`
+      : `<p class="rf-step-help">${esc(s.help)}</p>`;
+    const btns = s.key === "approve"
+      ? `<button type="button" class="btn-primary" data-act="done" data-k="${s.key}">${I.check}Approve</button>
+         <button type="button" class="lh-btn is-quiet" data-act="decline">Decline</button>`
+      : `<button type="button" class="btn-primary" data-act="done" data-k="${s.key}">${I.check}Done</button>`;
+    return `<article class="rf-step ${cls}${late ? " is-late" : ""}">
+      <span class="rf-step-n">${s.done ? I.check : i + 1}</span>
+      <div class="rf-step-main">
+        <div class="rf-step-top"><strong>${esc(s.title)}</strong><span class="rf-who">${avatar(s.whoName || "?")}${esc(s.whoName || "Anyone")}</span></div>
+        ${s.done ? `<p class="rf-step-done">${esc([valueText(s), s.doneBy, s.doneAt && niceDay(new Date(s.doneAt))].filter(Boolean).join(" · "))}</p>`
+          : wait ? '<p class="rf-step-wait">Waiting for approval</p>'
+          : r.status === "open" ? `<p class="rf-step-due${late ? " is-late" : ""}">${late ? "Overdue · " : ""}Due ${esc(niceKey(s.dueDate))}</p>` : ""}
+        ${act ? `<div class="rf-step-act">${help}<div class="rf-step-row">${field}${btns}</div><p class="rf-err" data-err="${s.key}" hidden></p></div>` : ""}
+      </div></article>`;
+  }
+
+  function bankCard() {
+    const head = `<h4>${I.lock}Bank details</h4>`;
+    if (!canSeeBank()) return `<section class="rf-box2">${head}<p class="muted">Only the person paying it and Admins can see the bank details.</p></section>`;
+    if (bankState === "idle" || bankState === "loading") return `<section class="rf-box2">${head}<p class="muted">Loading…</p></section>`;
+    if (bankState !== "ok" || !bank) return `<section class="rf-box2">${head}<p class="muted">${bankState === "denied" ? "You don't have access to the bank details." : "The bank details couldn't be loaded."}</p></section>`;
+    if (bank.masked) return `<section class="rf-box2">${head}<p class="muted">Removed after the transfer (account ending ${esc(String(bank.accountNumber || "").slice(-3))}).</p></section>`;
+    const row = (l, v) => `<div class="rf-bankrow"><span>${l}</span><b>${esc(v)}</b><button type="button" class="rf-copy" data-act="copy" data-v="${esc(v)}">Copy</button></div>`;
+    return `<section class="rf-box2">${head}${row("Account name", bank.accountName)}${row("BSB", String(bank.bsb || "").replace(/^(\d{3})(\d{3})$/, "$1-$2"))}${row("Account number", bank.accountNumber)}${row("Amount", round2(r.total).toFixed(2))}</section>`;
+  }
+
+  async function loadBank() {
+    bankState = "loading";
+    try {
+      const s = await getDoc(doc(db, "refund_bank", id));
+      bank = s.exists() ? s.data() : null;
+      bankState = "ok";
+    } catch (ex) {
+      bankState = ex.code === "permission-denied" ? "denied" : "failed";
+    }
+    if (root.isConnected && r) draw();
+  }
+
+  async function maskBank() {
+    if (!canSeeBank()) return;
+    const ref = doc(db, "refund_bank", id);
+    const b = bank || ((await getDoc(ref)).data());
+    if (!b || b.masked) return;
+    const masked = { accountNumber: `••••${String(b.accountNumber || "").slice(-3)}`, bsb: "", masked: true };
+    await updateDoc(ref, masked);
+    bank = { ...b, ...masked };
+  }
+
+  const canCancel = () => r.status === "open" && (boss() || r.createdByUid === myUid()
+    || (r.steps || []).some((s) => s.key === "approve" && !s.done && s.whoId === myUid()));
+
+  function draw() {
+    root.querySelectorAll("[data-sv]").forEach((i) => { drafts[i.dataset.sv] = i.value; });
+    const steps = r.steps || [];
+    const doneN = steps.filter((s) => s.done).length;
+    const created = toDate(r.createdAt);
+    root.innerHTML = `
+      <a class="tm-back" href="#/refunds">${I.back}<span>Refunds</span></a>
+      <header class="rf-head">
+        <div><span class="rf-no">${refundNo(r)}</span>
+          <h2>${money(r.total)} to ${esc(r.patientName)}</h2>
+          <p class="muted">${esc((METHODS[r.method] || {}).label || "")} · requested by ${esc(r.createdBy || "")}${created ? ` on ${esc(niceDay(created))}` : ""}${
+            r.patientId ? ` · <a href="#/patient/${encodeURIComponent(r.patientId)}">Open patient</a>` : ""}</p></div>
+        <span class="rf-status is-${esc(r.status)}">${r.status === "open" ? `${doneN} of ${steps.length} done` : r.status === "done" ? "Completed" : "Cancelled"}</span>
+      </header>
+      ${r.status === "open" ? `<div class="rf-prog is-lg"><i style="width:${steps.length ? Math.round((doneN / steps.length) * 100) : 0}%"></i></div>` : ""}
+      ${r.status === "cancelled" ? `<p class="rf-cancelled">Cancelled by ${esc(r.cancelledBy || "")}: ${esc(r.cancelReason || "")}</p>` : ""}
+      <div class="rf-detail">
+        <div class="rf-steps">${steps.map(stepHtml).join("")}</div>
+        <aside class="rf-side">
+          <section class="rf-box2"><h4>What's refunded</h4>
+            <ul class="rf-items">${(r.items || []).map((it) => `<li><span class="rf-ik">${KINDS[it.kind].icon}</span>
+              <span><strong>${it.qty > 1 ? `${it.qty} × ` : ""}${esc(it.name)}</strong><small>${esc(itemSub(it))}</small></span><b>${money(it.amount)}</b></li>`).join("")}</ul>
+            ${r.itemsTotal !== undefined && round2(r.itemsTotal) !== round2(r.total) ? `<p class="rf-note">The items add up to ${money(r.itemsTotal)}.</p>` : ""}
+            <div class="rf-totalrow"><span>Total</span><b>${money(r.total)}</b></div>
+            <p class="rf-methodline">${(METHODS[r.method] || {}).icon || ""}<span>${esc(methodText(r))}</span></p>
+            ${r.note ? `<p class="rf-note">${esc(r.note)}</p>` : ""}
+          </section>
+          ${r.method === "bank" ? bankCard() : ""}
+          <section class="rf-box2"><h4>History</h4><ul class="rf-tl">${[...(r.events || [])].reverse().map((ev) =>
+            `<li>${esc(ev.action)}${ev.note ? ` · ${esc(ev.note)}` : ""}<small>${esc(ev.by || "")}${ev.at ? ` · ${esc(new Date(ev.at).toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }))}` : ""}</small></li>`).join("")}</ul></section>
+          ${canCancel() ? '<button type="button" class="lh-btn is-danger" data-act="cancel">Cancel this refund</button>' : ""}
+        </aside>
+      </div>`;
+    Object.entries(drafts).forEach(([k, v]) => { const i = root.querySelector(`[data-sv="${k}"]`); if (i) i.value = v; });
+    if (r.method === "bank" && bankState === "idle" && canSeeBank()) loadBank();
+  }
+
+  async function complete(key, btn) {
+    const s = (r.steps || []).find((x) => x.key === key);
+    if (!s) return;
+    const inp = root.querySelector(`[data-sv="${key}"]`);
+    const err = root.querySelector(`[data-err="${key}"]`);
+    let value = inp ? inp.value.trim() : "";
+    const bad = s.need === "ref" && value.length < 3 ? "Enter the transfer reference."
+      : s.need === "invoice" && !value ? "Enter the Timely invoice number."
+      : s.need === "amount" && !(num(value) > 0) ? "Enter how much was given." : "";
+    if (bad) { err.textContent = bad; err.hidden = false; if (inp) inp.focus(); return; }
+    if (s.need === "amount") value = String(num(value));
+    value = value.slice(0, 80);
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+    try {
+      await runTransaction(db, async (tx) => {
+        const ref = doc(db, "refunds", id);
+        const snap = await tx.get(ref);
+        const cur = snap.data();
+        if (!cur || cur.status !== "open") throw new Error("This refund has already been closed.");
+        const steps = (cur.steps || []).map((x) => ({ ...x }));
+        const k = steps.findIndex((x) => x.key === key);
+        if (k === -1 || steps[k].done) throw new Error("Someone has just done this step.");
+        const wasWaiting = steps.filter((x) => !x.done && waiting(steps, x)).map((x) => x.key);
+        const at = new Date().toISOString();
+        steps[k] = { ...steps[k], done: true, value, doneAt: at, doneBy: by, doneByUid: myUid() };
+        if (steps[k].taskId) {
+          tx.update(doc(db, "staff-task-list", steps[k].taskId), { status: "Completed", completedAt: serverTimestamp(), completedBy: by, completedByUid: myUid() });
+        }
+        // Just approved: everyone else gets their task now
+        steps.forEach((x) => {
+          if (x.done || x.taskId || !wasWaiting.includes(x.key) || waiting(steps, x)) return;
+          x.dueDate = keyPlus(2);
+          const t = doc(collection(db, "staff-task-list"));
+          tx.set(t, taskData(cur, id, x, by));
+          x.taskId = t.id;
+        });
+        const rc = recompute(steps);
+        const allDone = rc.stepsOpen === 0;
+        tx.update(ref, {
+          steps, ...rc, status: allDone ? "done" : "open", ...(allDone ? { completedAt: serverTimestamp() } : {}),
+          updatedAt: serverTimestamp(), updatedBy: by,
+          events: arrayUnion({ at, by, action: key === "approve" ? "Approved" : `${steps[k].title}: done`, note: valueText(steps[k]) }),
+        });
+      });
+      delete drafts[key];
+      showToast(key === "approve" ? "Approved. Everyone else has their steps now." : "Step done");
+      if (key === "bank") maskBank().catch((ex) => console.warn("Bank details not removed:", ex));
+    } catch (ex) {
+      console.error("Step not saved:", ex);
+      btn.disabled = false;
+      btn.innerHTML = `${I.check}${key === "approve" ? "Approve" : "Done"}`;
+      err.textContent = ex.code === "permission-denied" ? "This step isn't yours to complete." : ex.message || "Couldn't save. Try again.";
+      err.hidden = false;
+    }
+  }
+
+  async function cancel(declined) {
+    const reason = await askReason(declined
+      ? { title: "Decline this refund?", intro: "Everyone's steps are closed.", label: "Why is it declined?", ok: "Decline" }
+      : { title: "Cancel this refund?", intro: "Everyone's steps are closed. This can't be undone.", label: "Why is it cancelled?", ok: "Cancel refund" });
+    if (!reason) return;
+    try {
+      await runTransaction(db, async (tx) => {
+        const ref = doc(db, "refunds", id);
+        const snap = await tx.get(ref);
+        const cur = snap.data();
+        if (!cur || cur.status !== "open") throw new Error("This refund has already been closed.");
+        (cur.steps || []).forEach((x) => {
+          if (!x.done && x.taskId) tx.update(doc(db, "staff-task-list", x.taskId), { status: "Completed", completedAt: serverTimestamp(), completedBy: by, completedByUid: myUid() });
+        });
+        tx.update(ref, {
+          status: "cancelled", cancelReason: reason, cancelledBy: by, cancelledAt: serverTimestamp(),
+          stepsOpen: 0, ownerIds: [], openToAll: false, updatedAt: serverTimestamp(), updatedBy: by,
+          events: arrayUnion({ at: new Date().toISOString(), by, action: declined ? "Declined" : "Cancelled", note: reason }),
+        });
+      });
+      showToast(declined ? "Refund declined" : "Refund cancelled");
+      if (r.method === "bank") maskBank().catch(() => {});
+    } catch (ex) {
+      console.error("Refund not cancelled:", ex);
+      showToast(ex.code === "permission-denied" ? "Only the person who asked, the approver or an Admin can cancel it." : ex.message || "Couldn't cancel. Try again.");
+    }
+  }
+
+  root.addEventListener("click", (e) => {
+    const a = e.target.closest("[data-act]");
+    if (!a || !r) return;
+    if (a.dataset.act === "done") complete(a.dataset.k, a);
+    else if (a.dataset.act === "decline") cancel(true);
+    else if (a.dataset.act === "cancel") cancel(false);
+    else if (a.dataset.act === "copy") navigator.clipboard.writeText(a.dataset.v).then(() => showToast("Copied")).catch(() => showToast("Couldn't copy"));
+  });
+  root.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || !e.target.dataset.sv) return;
+    const btn = root.querySelector(`[data-act="done"][data-k="${e.target.dataset.sv}"]`);
+    if (btn) { e.preventDefault(); btn.click(); }
+  });
+}
+
+/* ===================== Settings ===================== */
+async function mountSettings(container, { staff }) {
+  const root = document.createElement("section");
+  root.className = "page wide rf";
+  container.replaceChildren(root);
+  if (!boss()) { root.innerHTML = '<div class="rf-empty"><strong>No access</strong>Only Admins can change refund settings.</div>'; return; }
+  root.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
+  const [set, people] = await Promise.all([loadSettings(), staffList().catch(() => [])]);
+  if (!root.isConnected) return;
+  const guess = (cur, re) => cur || ((people.find((p) => re.test(p.name)) || {}).id || "");
+  const pick = (name, cur, anyText) => `<select class="fb-select" name="${name}"><option value="">${esc(anyText)}</option>${people.map((p) =>
+    `<option value="${esc(p.id)}"${p.id === cur ? " selected" : ""}>${esc(p.name)}</option>`).join("")}</select>`;
+  const row = (title, sub, control) => `<div class="rf-setrow"><div><strong>${title}</strong>${sub ? `<small>${sub}</small>` : ""}</div>${control}</div>`;
+  root.innerHTML = `
+    <a class="tm-back" href="#/refunds">${I.back}<span>Refunds</span></a>
+    <div class="fb-head"><div><h2>Refund settings</h2><p class="muted">Who does each step. They get a task on their dashboard for every refund.</p></div></div>
+    <form class="rf-set" novalidate>
+      <section class="rf-box2"><h4>Who does what</h4>
+        ${row("Bank transfers", "Pays bank transfer refunds and enters the reference.", pick("bankId", guess(set.bankId, /joanna/i), "Choose someone"))}
+        ${row("Timely", "Adds account credit, records refunds and voids product sales.", pick("timelyId", guess(set.timelyId, /bethany/i), "Choose someone"))}
+        ${row("Cash refunds", "Hands over the cash when it wasn't given at the time.", pick("cashId", set.cashId, "Anyone at the desk"))}
+        ${row("Returned products", "Puts returned products back, or sets them aside.", pick("onsiteId", set.onsiteId, "Anyone onsite"))}
+      </section>
+      <section class="rf-box2"><h4>Checks</h4>
+        ${row("Record bank transfers in Timely too", "After the transfer, Timely gets a step to record it.",
+          `<label class="fe-check"><input type="checkbox" name="recordBank"${set.recordBank !== false ? " checked" : ""}> Yes</label>`)}
+        ${row("Refunds that need approval", "Refunds over this amount wait for approval first. Leave it empty for no approval.",
+          `<span class="rf-money"><em>$</em><input class="fe-input" name="approveOver" inputmode="decimal" value="${esc(set.approveOver ?? "")}" placeholder="No approval"></span>`)}
+        ${row("Approved by", "", pick("approverId", set.approverId, "Choose someone"))}
+      </section>
+      <p class="lh-error" hidden></p>
+      <div class="lh-actions"><button class="btn-primary" type="submit">Save</button></div>
+    </form>`;
+  const form = root.querySelector("form");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = form.elements;
+    const err = form.querySelector(".lh-error");
+    const nm = (v) => (people.find((p) => p.id === v) || {}).name || "";
+    const over = f.approveOver.value.trim() === "" ? null : num(f.approveOver.value);
+    if (over !== null && !f.approverId.value) { err.textContent = "Choose who approves refunds over that amount."; err.hidden = false; return; }
+    err.hidden = true;
+    const btn = form.querySelector('[type="submit"]');
+    btn.disabled = true;
+    try {
+      await setDoc(doc(db, "refund_settings", "config"), {
+        bankId: f.bankId.value, bankName: nm(f.bankId.value), timelyId: f.timelyId.value, timelyName: nm(f.timelyId.value),
+        cashId: f.cashId.value, cashName: nm(f.cashId.value), onsiteId: f.onsiteId.value, onsiteName: nm(f.onsiteId.value),
+        approverId: f.approverId.value, approverName: nm(f.approverId.value), approveOver: over, recordBank: f.recordBank.checked,
+        updatedAt: serverTimestamp(), updatedBy: nameOf(staff),
+      }, { merge: true });
+      showToast("Refund settings saved");
+    } catch (ex) {
+      console.error("Settings not saved:", ex);
+      err.textContent = "Couldn't save. Try again.";
+      err.hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}

@@ -1888,6 +1888,45 @@ match /inv_count_drafts/{id} {
         && request.resource.data.updatedByUid == request.auth.uid;
       allow delete: if false;
     }
+
+    // ===================== Refunds =====================
+    // Anyone on staff can ask. The people with an open step (or a Refunds manager) move it along.
+    match /refunds/{id} {
+      allow read: if isStaff();
+      allow create: if isStaff()
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.status == 'open'
+        && request.resource.data.items is list
+        && request.resource.data.items.size() > 0 && request.resource.data.items.size() <= 40
+        && request.resource.data.steps is list && request.resource.data.steps.size() <= 12
+        && request.resource.data.total is number && request.resource.data.total > 0;
+      allow update: if isStaff()
+        && resource.data.status == 'open'
+        && (can('refunds.manage')
+          || request.auth.uid in resource.data.get('ownerIds', [])
+          || resource.data.get('openToAll', false) == true
+          || resource.data.createdByUid == request.auth.uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+             'steps', 'stepsOpen', 'ownerIds', 'openToAll', 'status', 'events', 'updatedAt', 'updatedBy',
+             'completedAt', 'cancelReason', 'cancelledBy', 'cancelledAt'])
+        && request.resource.data.status in ['open', 'done', 'cancelled'];
+      allow delete: if false;
+    }
+    // Bank details: written with the request, read only by whoever pays them, removed after the transfer
+    match /refund_bank/{id} {
+      allow read, update: if can('refunds.bank');
+      allow create: if isStaff()
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['accountName', 'bsb', 'accountNumber', 'createdByUid', 'createdAt'])
+        && request.resource.data.bsb.matches('^[0-9]{6}$')
+        && request.resource.data.accountNumber.matches('^[0-9]{5,10}$');
+      allow delete: if false;
+    }
+    match /refund_settings/{id} {
+      allow read: if isStaff();
+      allow write: if can('refunds.manage');
+    }
+    
     // ===================== Safety net =====================
     // Anything not allowed by a rule above stays locked
     // (this includes staff_roles and staff_audit, which only Apps Script writes)
