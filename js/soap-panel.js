@@ -1,7 +1,7 @@
 import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, updateDoc, collection, query, where, getDocs, addDoc }
 from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { SECTIONS, parseSoap, assembleSoap, transcriptHtml, cleanPlaceholders } from "./soap.js";
+import { SECTIONS, parseSoap, assembleSoap, transcriptHtml, cleanPlaceholders, transcriptToText, transcriptSpeakers } from "./soap.js";
 import {
   readSidecar, buildSidecar, planFromSidecar, planToSidecarPlan, planToText, priorCategories,
   planCardHtml, fieldHtml, getPlanValue, setPlanValue, refFrom, catKey, planFromText,
@@ -433,12 +433,17 @@ function render() {
             d["Merged By"] ? ` (merged: ${escapeHtml(String(d["Merged By"]))})` : ""}. The raw transcript below contains all of them.</p>`
         : ""}
       ${fixBannerHtml(d)}
+      ${d["Transcript Edited At"] ? `<p class="sp-banner info">Transcript edited ${escapeHtml(stamp(new Date(d["Transcript Edited At"])))}${
+        d["Transcript Edited By"] ? ` by ${escapeHtml(d["Transcript Edited By"])}` : ""}. The first version is kept.</p>` : ""}
       ${rulesHtml(d)}
 
       <details class="sp-raw">
         <summary>${ICONS.chev}${ICONS.lines}<span>${pasted ? "Pasted text" : "Raw transcript"}</span>${
-          canFixTranscript(d) ? `<button type="button" class="sp-secbtn" data-sp="fix-transcript" style="margin-left:auto"
-            title="Move part of the recording to another patient, or leave out lines that aren't needed">Fix transcript</button>` : ""}</summary>
+          canEditTranscript(d) || canFixTranscript(d) ? `<span class="sp-raw-acts">${
+            canEditTranscript(d) ? `<button type="button" class="sp-secbtn" data-sp="edit-transcript"
+              title="Fix words that were heard wrongly, or who said them">${ICONS.note}Edit</button>` : ""}${
+            canFixTranscript(d) ? `<button type="button" class="sp-secbtn" data-sp="fix-transcript"
+              title="Move part of the recording to another patient, or leave out lines that aren't needed">Fix transcript</button>` : ""}</span>` : ""}</summary>
         <div class="sp-raw-body">${transcriptHtml(d["Full Raw Transcript"], escapeHtml)}</div>
       </details>
 
@@ -604,6 +609,7 @@ async function onClick(e) {
   else if (action === "save-note") saveNote(btn);
   else if (action === "regenerate") regenerate();
   else if (action === "fix-transcript") { e.preventDefault(); fixTranscript(); }
+  else if (action === "edit-transcript") { e.preventDefault(); editTranscript(); }
   else if (action === "open-split") { if (btn.dataset.id) showSoapPanel(btn.dataset.id, { mode: "open" }); }
   else if (action === "undo-regen") undoRegenerate();
   else if (action === "email-draft") draftEmail();
@@ -1369,6 +1375,144 @@ async function fixTranscript() {
     onOpenRecord: (rid) => showSoapPanel(rid, { mode: "open" }),
   });
 }
+/* ===================== Edit transcript ===================== */
+// The clinician who recorded it (or an Admin). Apps Script checks this again and rebuilds the speaker formatting.
+
+function canEditTranscript(d) {
+  if (/^reviewed$/i.test(String(d.Status || "")) || d["Merged Into"] || /^merged$|processing/i.test(String(d.Status || ""))) return false;
+  if (!String(d["Full Raw Transcript"] || "").trim()) return false;
+  const uid = auth.currentUser ? auth.currentUser.uid : "";
+  if (uid && (d["Staff Uid"] === uid || d["Created By Uid"] === uid)) return true;
+  const nm = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
+  if (!d["Staff Uid"] && staff && nm(staff.name) && nm(staff.name) === nm(d["Staff Name"])) return true;
+  return /^admin$/i.test(String((staff && (staff.role || staff.staffRole)) || ""));
+}
+
+const TX_EDIT_ERRORS = {
+  UNAUTHORIZED: "Your session has expired. Please log in again.",
+  FORBIDDEN: "You don't have access to edit transcripts.",
+  NOT_FOUND: "This record no longer exists.",
+  BAD_REQUEST: "The server hasn't been updated yet. In Apps Script, deploy a new version.",
+  INVALID_PIN: "The server hasn't been updated yet. In Apps Script, deploy a new version.",
+};
+
+function editTranscript() {
+  if (!current || !current.data) return;
+  const d = current.data;
+  const id = current.id;
+  const raw = String(d["Full Raw Transcript"] || "");
+  const plain = !/<\w/.test(raw);
+  const speakers = plain ? [] : transcriptSpeakers(raw);
+  const original = String(d["Original Raw Transcript"] || "");
+  const dlg = document.createElement("dialog");
+  dlg.className = "lh-dialog sp-tx-dlg";
+  dlg.innerHTML = `<form class="lh-form" novalidate>
+    <div class="lh-dialog-head"><h3>Edit transcript</h3>
+      <p>${plain ? "Fix any words that were heard wrongly."
+        : "Fix any words that were heard wrongly, or who said them. Each turn starts with who's speaking, like <b>Patient:</b>. A line without a name joins the turn above."}</p></div>
+    ${speakers.length ? `<p class="sp-tx-who">Speakers: ${speakers.map((s) => `<code>${escapeHtml(s)}:</code>`).join(" ")}</p>` : ""}
+    <textarea class="fe-input sp-tx-text" name="text" spellcheck="true" aria-label="Transcript">${escapeHtml(transcriptToText(raw))}</textarea>
+    <label class="lh-field"><span class="lh-label">What you changed (optional)</span>
+      <input name="note" maxlength="300" placeholder="e.g. Fixed product names" /></label>
+    <p class="fe-note">The first version is always kept. The notes only change if you choose <strong>Save and rewrite the notes</strong>.</p>
+    <p class="lh-error" role="alert" hidden></p>
+    <div class="lh-actions">
+      ${original ? '<button type="button" class="lh-btn is-quiet" data-act="original">Start again from the original</button><span style="flex:1"></span>' : ""}
+      <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+      <button type="button" class="lh-btn" data-act="save">Save transcript</button>
+      <button type="button" class="lh-btn is-primary" data-act="rewrite">Save and rewrite the notes</button>
+    </div></form>`;
+  document.body.appendChild(dlg);
+  const ta = dlg.querySelector("textarea");
+  const err = dlg.querySelector(".lh-error");
+  const startText = ta.value;
+  let busy = false;
+  dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
+  dlg.addEventListener("close", () => dlg.remove());
+  dlg.addEventListener("submit", (e) => e.preventDefault());
+
+  dlg.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-act]");
+    if (!b || busy) return;
+    const act = b.dataset.act;
+    if (act === "original") {
+      if (!(await confirmDialog({
+        title: "Start again from the original?",
+        message: "The text here is replaced with the transcript as it was first recorded. Nothing is saved until you press Save.",
+        confirmLabel: "Use the original", tone: "warning",
+      }))) return;
+      ta.value = transcriptToText(original);
+      return;
+    }
+    if (act === "cancel") {
+      if (ta.value !== startText && !(await confirmDialog({
+        title: "Close without saving?", message: "Your changes to the transcript haven't been saved.",
+        confirmLabel: "Close without saving", tone: "warning",
+      }))) return;
+      dlg.close();
+      return;
+    }
+    const rewrite = act === "rewrite";
+    if (!ta.value.trim()) { err.textContent = "The transcript can't be empty."; err.hidden = false; return; }
+    if (rewrite && hasUnsavedNotes() && !(await confirmDialog({
+      title: "Discard unsaved changes?",
+      message: "Rewriting replaces the notes, so your unsaved edits to them will be lost.",
+      confirmLabel: "Discard and rewrite", tone: "warning",
+    }))) return;
+
+    busy = true;
+    err.hidden = true;
+    const buttons = dlg.querySelectorAll("button");
+    buttons.forEach((x) => { x.disabled = true; });
+    const label = b.textContent;
+    b.textContent = rewrite ? "Saving and rewriting… (up to a minute)" : "Saving…";
+    try {
+      const res = await callApi({
+        action: "editTranscript", recordId: id, text: ta.value,
+        note: dlg.querySelector('[name="note"]').value, base: String(d["Transcript Edited At"] || ""), rewrite,
+      });
+      if (res.problem) throw new Error(res.problem);
+      busy = false;
+      dlg.close();
+      if (!current || current.id !== id) return;
+      if (res.unchanged) { showToast("Nothing was changed."); return; }
+      if (rewrite) {
+        current.dirty = false;
+        await load(id);
+        updateTab();
+        showToast(res.rewrite === "done"
+          ? "Transcript saved and the notes rewritten."
+          : "Transcript saved, but the notes couldn't be rewritten. Press Regenerate to try again.");
+        try {
+          const ch = new BroadcastChannel("dm-notes");
+          ch.postMessage({ type: "notes-saved", id, status: "draft" });
+          ch.close();
+        } catch { /* the badge updates on the next reload */ }
+      } else {
+        // Only the transcript changes: any unsaved edits to the notes stay as they are
+        Object.assign(current.data, {
+          "Full Raw Transcript": res.html, "Transcript Edited At": res.editedAt,
+          "Transcript Edited By": (staff && staff.name) || "",
+          "Original Raw Transcript": current.data["Original Raw Transcript"] || raw,
+        });
+        const rb = panel.querySelector(".sp-raw-body");
+        if (rb) rb.innerHTML = transcriptHtml(res.html, escapeHtml);
+        showToast("Transcript saved. Press Regenerate to write the notes again from it.");
+      }
+    } catch (ex) {
+      console.error("Edit transcript failed:", ex.code || "(no code)", ex);
+      busy = false;
+      buttons.forEach((x) => { x.disabled = false; });
+      b.textContent = label;
+      err.textContent = TX_EDIT_ERRORS[ex.code] || ex.message || "Couldn't save the transcript. Try again.";
+      err.hidden = false;
+    }
+  });
+  dlg.showModal();
+  ta.focus();
+  ta.setSelectionRange(0, 0);
+}
+
 /* ===================== Update email from plan ===================== */
 
 async function emailFromPlan(btn) {

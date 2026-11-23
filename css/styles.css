@@ -14424,3 +14424,12 @@ body.scan-full { overflow: hidden; }
 .rf-resend:hover { color: var(--primary-hover); }
 .rf-resend:disabled { color: var(--muted); text-decoration: none; cursor: default; }
 a.md-tcheck { color: var(--primary); text-decoration: none; font-weight: 800; }
+
+
+/* Notes → Edit transcript */
+.sp-raw-acts { margin-left: auto; display: inline-flex; gap: 6px; }
+.sp-raw-acts .sp-secbtn svg { width: 13px; height: 13px; margin-right: 4px; vertical-align: -2px; }
+.sp-tx-dlg { width: min(880px, 96vw); }
+.sp-tx-text { width: 100%; min-height: 52vh; resize: vertical; font-family: inherit; font-size: 14px; line-height: 1.6; white-space: pre-wrap; }
+.sp-tx-who { margin: 0 0 8px; font-size: 13px; color: var(--muted, #64748b); }
+.sp-tx-who code { padding: 1px 6px; border-radius: 6px; background: var(--surface-2, #f1f5f9); font-size: 12px; }

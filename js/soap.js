@@ -104,6 +104,34 @@ export function transcriptHtml(raw, escapeHtml) {
   }).join("");
 }
 
+// The transcript as editable text: one "Speaker: words" turn per paragraph
+export function transcriptToText(raw) {
+  const str = String(raw || "").trim();
+  if (!str || !/<\w/.test(str)) return str;
+  const doc = new DOMParser().parseFromString(`<div id="root">${str}</div>`, "text/html");
+  const blocks = [...doc.getElementById("root").children].filter((el) => el.tagName === "DIV");
+  if (!blocks.length) return doc.body.textContent.trim();
+  return blocks.map((div) => {
+    const b = div.querySelector("b");
+    if (!b) return div.textContent.replace(/\s+/g, " ").trim();
+    const label = b.textContent.replace(/:\s*$/, "").trim();
+    const span = div.querySelector("span");
+    if (!span && /next recording/i.test(label)) return "— Next recording —";
+    const text = (span ? span.textContent : div.textContent.replace(b.textContent, "")).replace(/\s+/g, " ").trim();
+    return `${label}: ${text}`;
+  }).filter(Boolean).join("\n\n");
+}
+
+// Who speaks in the transcript (for the hint in the Edit transcript window)
+export function transcriptSpeakers(raw) {
+  const str = String(raw || "");
+  if (!/<\w/.test(str)) return [];
+  const doc = new DOMParser().parseFromString(`<div id="root">${str}</div>`, "text/html");
+  return [...new Set([...doc.querySelectorAll("#root b")]
+    .map((b) => b.textContent.replace(/:\s*$/, "").trim())
+    .filter((l) => l && !/next recording/i.test(l)))];
+}
+
 // Hides lines that are ONLY a placeholder ("Nil", "Not discussed", "N/A"…).
 // Real answers such as "Smoking: None" are kept.
 const PLACEHOLDER_RE = /^(?:nil|none|n\/?a|nkda|nkfa|unknown|not (?:discussed|mentioned|stated|applicable|recorded|provided|specified)|no (?:known )?(?:drug )?(?:allergies|medications?|(?:medical )?conditions?)(?: reported| known)?|nothing (?:to report|recorded|discussed|noted))\.?$/i;
