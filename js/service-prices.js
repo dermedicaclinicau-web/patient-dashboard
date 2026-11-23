@@ -42,26 +42,60 @@ export function priceLookup(list) {
   return (name) => m.get(priceKey(name)) || null;
 }
 
-// Rows pasted from a spreadsheet: "Name <tab> Price <tab> Category" or "Name, Price, Category"
-function parseList(text) {
-  const rows = new Map();
+// A CSV file, or rows pasted from a spreadsheet → rows of cells. Handles quotes, commas inside names,
+// a byte-order mark, Windows line ends, and tab or semicolon separators.
+function csvRows(text) {
+  const t = String(text || "").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+  const first = t.split("\n").find((l) => l.trim()) || "";
+  const sep = first.includes("\t") ? "\t" : first.split(";").length > first.split(",").length ? ";" : ",";
+  const rows = [];
+  let row = [], cell = "", inQ = false;
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (inQ) {
+      if (c === '"') { if (t[i + 1] === '"') { cell += '"'; i++; } else inQ = false; }
+      else cell += c;
+    } else if (c === '"' && cell.trim() === "") { inQ = true; cell = ""; }
+    else if (c === sep) { row.push(cell.trim()); cell = ""; }
+    else if (c === "\n") { row.push(cell.trim()); rows.push(row); row = []; cell = ""; }
+    else cell += c;
+  }
+  if (cell !== "" || row.length) { row.push(cell.trim()); rows.push(row); }
+  return rows.filter((r) => r.some((x) => x !== ""));
+}
+
+const isMoney = (x) => /^\$?\s*[0-9][0-9,]*(\.[0-9]+)?$/.test(String(x || "").trim());
+
+// Which column is the name, the price and the category. Headings if there are any, otherwise name, price, category.
+function guessCols(rows) {
+  const h = rows[0] || [];
+  let name = h.findIndex((x) => /^(service|services|service name|name|treatment|item|description)$/i.test(x));
+  if (name === -1) name = h.findIndex((x) => /service|name|treatment/i.test(x));
+  const prices = h.map((x, i) => i).filter((i) => i !== name && /price|cost|fee|amount|rate/i.test(h[i]) && !isMoney(h[i]));
+  const price = prices.length ? (prices.find((i) => /inc/i.test(h[i])) ?? prices[0]) : -1;
+  if (name !== -1 && price !== -1) {
+    return { header: true, name, price, category: h.findIndex((x, i) => i !== name && i !== price && /category|group|type/i.test(x)) };
+  }
+  const width = Math.max(...rows.slice(0, 50).map((r) => r.length));
+  const p = (rows[0] || []).findIndex((x, i) => i > 0 && isMoney(x));
+  const pi = p === -1 ? 1 : p;
+  const ci = width > 2 ? [...Array(width).keys()].find((i) => i !== 0 && i !== pi) : -1;
+  return { header: false, name: 0, price: pi, category: ci ?? -1 };
+}
+
+// Rows → services { name, price (inc GST), category }. The same name twice: the last one wins.
+function toItems(rows, cols, addGst) {
+  const out = new Map();
   let bad = 0;
-  String(text || "").replace(/\r/g, "").split("\n").forEach((line) => {
-    const l = line.replace(/"/g, "").trim();
-    if (!l) return;
-    let name = "", price = "", category = "";
-    if (l.includes("\t")) {
-      [name = "", price = "", category = ""] = l.split("\t").map((x) => x.trim());
-    } else {
-      const m = /^(.*?)\s*,\s*\$?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*(?:,\s*(.*))?$/.exec(l);
-      if (m) { name = m[1]; price = m[2]; category = m[3] || ""; }
-    }
-    const n = Number(String(price).replace(/[$,\s]/g, ""));
-    name = clean(name, 150);
-    if (!name || !String(price).trim() || !Number.isFinite(n) || n < 0 || n > 100000) { bad++; return; }
-    rows.set(priceKey(name), { name, price: round2(n), category: clean(category, 60) });
+  rows.slice(cols.header ? 1 : 0).forEach((r) => {
+    const name = clean(r[cols.name], 150);
+    const raw = String(r[cols.price] ?? "").replace(/[^0-9.]/g, "");
+    let n = raw ? Number(raw) : NaN;
+    if (!name || !Number.isFinite(n) || n < 0 || n > 100000) { bad++; return; }
+    if (addGst) n *= 1.1;
+    out.set(priceKey(name), { name, price: round2(n), category: cols.category >= 0 ? clean(r[cols.category], 60) : "" });
   });
-  return { rows: [...rows.values()], bad };
+  return { rows: [...out.values()], bad };
 }
 
 function openDialog(html, cls = "") {
@@ -99,7 +133,7 @@ export async function mountServicePrices(container, { staff = null } = {}) {
       <div><h3>Services and pricing</h3>
         <p class="muted">Each service's regular price, including GST. When a package is refunded, the visits already used are charged at these prices.
           Use the names exactly as they are in Timely.</p></div>
-      ${edit ? `<div class="svp-acts"><button type="button" class="btn-ghost" data-act="paste">Paste a list</button>
+      ${edit ? `<div class="svp-acts"><button type="button" class="btn-ghost" data-act="paste">Import a CSV</button>
         <button type="button" class="btn-primary" data-act="add">+ Add a service</button></div>` : ""}
     </div>
     <div class="svp-tools">
@@ -127,7 +161,7 @@ export async function mountServicePrices(container, { staff = null } = {}) {
     root.querySelector('[data-role="count"]').textContent =
       `${live} service${live === 1 ? "" : "s"}${list.length > live ? ` · ${list.length - live} hidden` : ""}`;
     tableEl.innerHTML = !list.length
-      ? `<div class="rf-empty"><strong>No services yet</strong>${edit ? "Add them one at a time, or paste a list from a spreadsheet." : "An Admin adds them here."}</div>`
+      ? `<div class="rf-empty"><strong>No services yet</strong>${edit ? "Add them one at a time, or import a CSV file." : "An Admin adds them here."}</div>`
       : !rows.length ? '<p class="muted rf-wait">No services match.</p>'
       : `<table class="inv-table svp-table"><thead><tr><th>Service</th><th>Category</th><th class="svp-num">Price</th><th>Last changed</th>${edit ? "<th></th>" : ""}</tr></thead>
         <tbody>${rows.map((s) => `<tr class="${s.active === false ? "is-hidden" : ""}">
@@ -213,59 +247,125 @@ export async function mountServicePrices(container, { staff = null } = {}) {
     });
   }
 
-  /* ---------- Paste a list from a spreadsheet ---------- */
+  /* ---------- Import: a CSV file, or rows pasted from a spreadsheet ---------- */
   function openPaste() {
     const dlg = openDialog(`<form class="lh-form" novalidate>
-      <div class="lh-dialog-head"><h3>Paste a list</h3>
-        <p>Copy the rows from a spreadsheet: service name, price, and category if you have it. One service per line. Nothing is saved until you press Import.</p></div>
-      <textarea class="fe-input" name="text" rows="8" placeholder="Brightening peel&#9;330&#9;Peels&#10;Clear Complexion Lite, 450, Peels"></textarea>
+      <div class="lh-dialog-head"><h3>Import services</h3>
+        <p>Choose a CSV file, or copy rows from a spreadsheet and paste them below. Excel files: save them as CSV first.
+          Nothing is saved until you press Import.</p></div>
+      <div class="svp-file">
+        <label class="btn-ghost svp-filebtn">Choose a CSV file<input type="file" name="file" accept=".csv,.tsv,.txt,text/csv" hidden></label>
+        <span class="muted" data-role="fname">or paste below</span>
+      </div>
+      <textarea class="fe-input" name="text" rows="6" placeholder="Service,Price,Category&#10;Brightening peel,330,Peels&#10;Clear Complexion Lite,450,Peels"></textarea>
+      <div data-role="cols"></div>
+      <div class="svp-opts">
+        <label class="fe-check"><input type="checkbox" name="head"> The first row is headings</label>
+        <label class="fe-check"><input type="checkbox" name="gst"> The prices don't include GST (add 10%)</label>
+        <label class="fe-check"><input type="checkbox" name="upd" checked> Change the price of services already in the list</label>
+      </div>
       <div data-role="prev"></div>
-      <label class="fe-check"><input type="checkbox" name="upd" checked> Change the price of services already in the list</label>
       <p class="lh-error" hidden></p>
       <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="close">Cancel</button>
         <button type="submit" class="btn-primary" disabled>Import</button></div>
     </form>`, "is-wide");
     const f = dlg.querySelector("form");
     const prev = f.querySelector('[data-role="prev"]');
+    const colsEl = f.querySelector('[data-role="cols"]');
+    const err = f.querySelector(".lh-error");
     const btn = f.querySelector('[type="submit"]');
-    let items = [];
+    const say = (m) => { err.textContent = m; err.hidden = false; };
+    const st = { rows: [], cols: null, items: [] };
     const TAGS = { new: "New", change: "Price changes", same: "Already the same", alias: "Another name of a service" };
 
+    function drawCols() {
+      if (!st.rows.length || !st.cols) { colsEl.innerHTML = ""; return; }
+      const width = Math.max(...st.rows.slice(0, 50).map((r) => r.length));
+      const label = (i) => (st.cols.header && st.rows[0][i] ? st.rows[0][i] : `Column ${i + 1}`);
+      const opts = (cur, none) => (none ? `<option value="-1"${cur === -1 ? " selected" : ""}>None</option>` : "")
+        + Array.from({ length: width }, (_, i) => `<option value="${i}"${i === cur ? " selected" : ""}>${esc(label(i))}</option>`).join("");
+      colsEl.innerHTML = `<div class="svp-cols">
+        <label class="lh-field"><span class="lh-label">Service name</span><select class="fb-select" data-col="name">${opts(st.cols.name)}</select></label>
+        <label class="lh-field"><span class="lh-label">Price</span><select class="fb-select" data-col="price">${opts(st.cols.price)}</select></label>
+        <label class="lh-field"><span class="lh-label">Category</span><select class="fb-select" data-col="category">${opts(st.cols.category, true)}</select></label>
+      </div>`;
+    }
+
     function check() {
-      const { rows, bad } = parseList(f.elements.text.value);
+      err.hidden = true;
+      const { rows, bad } = st.rows.length && st.cols ? toItems(st.rows, st.cols, f.elements.gst.checked) : { rows: [], bad: 0 };
       const byName = new Map(list.map((s) => [s.nameKey || priceKey(s.name), s]));
       const byAlias = new Map();
       list.forEach((s) => (s.aliasKeys || []).forEach((k) => byAlias.set(k, s)));
-      items = rows.map((r) => {
+      st.items = rows.map((r) => {
         const k = priceKey(r.name);
         const ex = byName.get(k) || null;
         const al = !ex ? byAlias.get(k) || null : null;
-        const st = al ? "alias" : !ex ? "new"
+        const state = al ? "alias" : !ex ? "new"
           : round2(ex.price) !== r.price || (r.category && r.category !== (ex.category || "")) ? "change" : "same";
-        return { ...r, ex, al, st };
+        return { ...r, ex, al, st: state };
       });
-      const n = (st) => items.filter((x) => x.st === st).length;
-      const upd = f.elements.upd.checked;
-      const todo = n("new") + (upd ? n("change") : 0);
+      const n = (s) => st.items.filter((x) => x.st === s).length;
+      const todo = n("new") + (f.elements.upd.checked ? n("change") : 0);
       btn.disabled = !todo;
       btn.textContent = todo ? `Import ${todo}` : "Import";
-      prev.innerHTML = !items.length && !bad ? "" : `
+      prev.innerHTML = !st.items.length && !bad ? "" : `
         <p class="svp-sum">${[n("new") && `${n("new")} new`, n("change") && `${n("change")} with a new price`, n("same") && `${n("same")} already the same`,
           n("alias") && `${n("alias")} matching another name of a service (skipped)`,
-          bad && `${bad} line${bad === 1 ? "" : "s"} couldn't be read (a heading row is fine)`].filter(Boolean).join(" · ")}</p>
-        ${items.length ? `<div class="svp-prev"><table class="inv-table"><tbody>${items.slice(0, 300).map((x) => `<tr>
+          bad && `${bad} row${bad === 1 ? "" : "s"} without a name or price (skipped)`].filter(Boolean).join(" · ")}</p>
+        ${st.items.length ? `<div class="svp-prev"><table class="inv-table"><tbody>${st.items.slice(0, 300).map((x) => `<tr>
           <td>${esc(x.name)}${x.al ? `<small class="svp-sub">Another name of ${esc(x.al.name)}</small>` : ""}</td>
           <td>${esc(x.category || (x.ex && x.ex.category) || "")}</td>
           <td class="svp-num">${x.st === "change" ? `<small class="svp-sub">${money(x.ex.price)} →</small>` : ""}${money(x.price)}</td>
-          <td><span class="svp-tag is-${x.st}">${TAGS[x.st]}</span></td></tr>`).join("")}</tbody></table></div>` : ""}`;
+          <td><span class="svp-tag is-${x.st}">${TAGS[x.st]}</span></td></tr>`).join("")}</tbody></table>
+          ${st.items.length > 300 ? `<p class="svp-sum">and ${st.items.length - 300} more</p>` : ""}</div>` : ""}`;
     }
-    f.addEventListener("input", check);
-    f.addEventListener("change", check);
+
+    function readText() {
+      st.rows = csvRows(f.elements.text.value);
+      st.cols = st.rows.length ? guessCols(st.rows) : null;
+      f.elements.head.checked = !!(st.cols && st.cols.header);
+      f.elements.gst.checked = !!(st.cols && st.cols.header && /\bex\.?\s*gst|\bexcl/i.test(st.rows[0][st.cols.price] || ""));
+      drawCols();
+      check();
+    }
+
+    let tmr = 0;
+    f.addEventListener("input", (e) => {
+      if (e.target.name === "text") { clearTimeout(tmr); tmr = setTimeout(readText, 250); }
+    });
+    f.addEventListener("change", async (e) => {
+      const t = e.target;
+      if (t.name === "file") {
+        const file = t.files && t.files[0];
+        t.value = "";
+        if (!file) return;
+        if (/\.xlsx?$/i.test(file.name)) { say("That's an Excel file. In Excel, use File → Save As → CSV, then choose the CSV."); return; }
+        if (file.size > 3000000) { say("That file is too big. Save just the services and prices as a CSV."); return; }
+        try {
+          f.elements.text.value = await file.text();
+          f.querySelector('[data-role="fname"]').textContent = file.name;
+          readText();
+        } catch (ex) {
+          console.warn("File not read:", ex);
+          say("That file couldn't be read. Save it as CSV and try again.");
+        }
+      } else if (t.dataset.col && st.cols) {
+        st.cols[t.dataset.col] = Number(t.value);
+        check();
+      } else if (t.name === "head" && st.cols) {
+        st.cols.header = t.checked;
+        drawCols();
+        check();
+      } else if (t.name === "gst" || t.name === "upd") {
+        check();
+      }
+    });
 
     f.addEventListener("submit", async (e) => {
       e.preventDefault();
       const upd = f.elements.upd.checked;
-      const todo = items.filter((x) => x.st === "new" || (upd && x.st === "change"));
+      const todo = st.items.filter((x) => x.st === "new" || (upd && x.st === "change"));
       if (!todo.length) return;
       btn.disabled = true;
       btn.textContent = "Importing…";
@@ -281,7 +381,7 @@ export async function mountServicePrices(container, { staff = null } = {}) {
                 active: true, history: [], ...stamp, createdAt: serverTimestamp(), createdBy: by, createdByUid: myUid(),
               });
             } else {
-              const history = (Array.isArray(x.ex.history) ? x.ex.history.slice(-19) : []);
+              const history = Array.isArray(x.ex.history) ? x.ex.history.slice(-19) : [];
               if (round2(x.ex.price) !== x.price) history.push({ from: round2(x.ex.price), to: x.price, at: now, by });
               b.set(doc(db, COL, x.ex.id), { price: x.price, category: x.category || x.ex.category || "", history, ...stamp }, { merge: true });
             }
@@ -296,14 +396,11 @@ export async function mountServicePrices(container, { staff = null } = {}) {
         console.error("Price list not imported:", ex);
         btn.disabled = false;
         btn.textContent = "Import";
-        const er = f.querySelector(".lh-error");
-        er.textContent = ex.code === "permission-denied" ? "Only Admins and Refunds managers can change prices." : "Couldn't import. Some rows may have saved: close this and check the list.";
-        er.hidden = false;
+        say(ex.code === "permission-denied" ? "Only Admins and Refunds managers can change prices."
+          : "Couldn't import. Some rows may have saved: close this and check the list.");
       }
     });
-    f.elements.text.focus();
   }
-
   root.addEventListener("input", (e) => {
     if (e.target.dataset.role === "q") { ui.q = e.target.value; drawTable(); }
   });
