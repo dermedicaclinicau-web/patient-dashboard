@@ -130,6 +130,42 @@ const justAdded = new Map();
 // It's refreshed in the background each time, and saves update it straight away.
 let boardCache = null;   // { at, list }
 const COL_MAX = 50;      // cards drawn per board column before "Show more"
+
+// The board's filters and scroll position, kept while a prospect is open (and for this tab after a refresh)
+const BOARD_KEY = "pr_board_v1";
+const BOARD_KEYS = ["view", "q", "qRaw", "source", "who", "show", "range", "from", "to", "showLost", "old", "more"];
+let boardState = null;
+let boardScroll = null;
+function readBoardState() {
+  if (boardState) return boardState;
+  try { boardState = JSON.parse(sessionStorage.getItem(BOARD_KEY) || "null"); } catch { boardState = null; }
+  return boardState;
+}
+function saveBoardState(st) {
+  boardState = {};
+  BOARD_KEYS.forEach((k) => { boardState[k] = st[k]; });
+  try { sessionStorage.setItem(BOARD_KEY, JSON.stringify(boardState)); } catch { /* private browsing: kept for this visit only */ }
+}
+function boardScrollOf(root) {
+  const b = root.querySelector(".pr-board");
+  if (!b) return null;
+  const cols = {};
+  b.querySelectorAll(".pr-col").forEach((c) => { const body = c.querySelector(".pr-col-body"); if (body) cols[c.dataset.stage] = body.scrollTop; });
+  return { x: b.scrollLeft, cols };
+}
+function applyBoardScroll(root, s) {
+  const b = s && root.querySelector(".pr-board");
+  if (!b) return;
+  b.scrollLeft = s.x || 0;
+  Object.entries(s.cols || {}).forEach(([k, top]) => {
+    const body = b.querySelector(`.pr-col[data-stage="${k}"] .pr-col-body`);
+    if (body) body.scrollTop = top;
+  });
+}
+function rememberBoardScroll(root) {
+  const ct = document.getElementById("content");
+  boardScroll = { ...(boardScrollOf(root) || {}), y: window.scrollY, ct: ct ? ct.scrollTop : 0, at: Date.now() };
+}
 function cacheUpsert(p) {
   if (!boardCache || !p || !p.id) return;
   const i = boardCache.list.findIndex((x) => x.id === p.id);
@@ -487,23 +523,34 @@ async function mountBoard(container, { view, staff }) {
   container.replaceChildren(root);
   const me = auth.currentUser && auth.currentUser.uid;
   const work = can("prospects.work") || can("prospects.manage");
-  const st = { view, q: "", source: "", who: "all", show: "", range: "", from: "", to: "", showLost: false, old: false, more: {} };
+  const st = { view, q: "", qRaw: "", source: "", who: "all", show: "", range: "", from: "", to: "", showLost: false, old: false, more: {} };
+  const saved = readBoardState();
+  if (saved) {
+    BOARD_KEYS.forEach((k) => { if (k in saved && saved[k] != null) st[k] = saved[k]; });
+    st.view = view;
+    // Back to the plain Prospects address: the view you were using (List or Follow-ups)
+    if (view === "board" && ["list", "followups"].includes(saved.view)) {
+      st.view = saved.view;
+      history.replaceState(null, "", `#/prospects/${st.view}`);
+    }
+    if (!st.more || typeof st.more !== "object") st.more = {};
+  }
   let all = [];
   let set = {};
-  const cached = boardCache && Date.now() - boardCache.at < 10 * 60000 ? boardCache : null;
+  const cached = !st.old && boardCache && Date.now() - boardCache.at < 10 * 60000 ? boardCache : null;
   if (cached) {
     all = cached.list;
     set = await loadSettings();
   } else {
     root.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
-    try { [all, set] = await Promise.all([loadAll(), loadSettings()]); }
+    try { [all, set] = await Promise.all([loadAll(st.old), loadSettings()]); }
     catch (err) {
       console.error("Prospects failed:", err);
       root.innerHTML = `<div class="state"><strong>Couldn't load prospects</strong>${esc(err && err.code === "permission-denied"
         ? "Check the prospects Firestore rule has been published, and your Prospect access in Staff." : "Check your connection and try again.")}</div>`;
       return;
     }
-    boardCache = { at: Date.now(), list: all };
+    boardCache = { at: Date.now(), list: st.old ? all.filter((p) => !p.historic) : all };
   }
   if (!root.isConnected) return;
   staffList();   // ready for New prospect and Settings
@@ -550,7 +597,8 @@ async function mountBoard(container, { view, staff }) {
         <input type="date" class="fe-input" data-role="to" max="${t}" aria-label="To" /></span>
       <select class="fe-input" data-role="source"><option value="">All sources</option>${opts(srcList, "")}</select>
       <select class="fe-input" data-role="who"><option value="all">Everyone's</option><option value="me">Mine</option><option value="none">Not given to anyone</option></select>
-      <button type="button" class="lh-btn is-quiet" data-act="old">Show older enquiries</button>
+      <button type="button" class="lh-btn is-quiet" data-act="old">${st.old ? "Hide" : "Show"} older enquiries</button>
+      <button type="button" class="lh-btn is-quiet" data-act="clear" hidden>Clear filters</button>
     </div>
     <div class="pr-show" data-role="show" role="group" aria-label="Show"></div>
     <div data-role="body"></div>`;
@@ -611,6 +659,10 @@ async function mountBoard(container, { view, staff }) {
   };
 
   function drawBody() {
+    saveBoardState(st);
+    const clr = root.querySelector('[data-act="clear"]');
+    if (clr) clr.hidden = !(st.q || st.source || st.who !== "all" || st.show || st.range);
+    const prevScroll = boardScrollOf(root);   // a background refresh redraws the board: keep its scroll
     root.querySelector('[data-role="tiles"]').innerHTML = tilesOf().map(tileHtml).join("");
     const pool = all.filter(base);
     root.querySelector('[data-role="show"]').innerHTML = SHOW.map(([k, l, f]) => {
@@ -660,8 +712,30 @@ async function mountBoard(container, { view, staff }) {
     }).join("")}</div>
     <button type="button" class="lh-btn is-quiet pr-lost-btn" data-act="lost">${st.showLost ? "Hide lost" : `Show lost (${lostN})`}</button>
     ${work ? '<p class="muted pr-hint">Drag a card to another column to move it along.</p>' : ""}`;
+    applyBoardScroll(root, prevScroll);
   }
+  // The remembered filters, back in their boxes
+  const setVal = (role, v) => { const el = root.querySelector(`[data-role="${role}"]`); if (el) el.value = v ?? ""; return el; };
+  setVal("q", st.qRaw || st.q);
+  setVal("range", st.range);
+  setVal("who", st.who);
+  const srcSel = setVal("source", st.source);
+  if (srcSel && srcSel.value !== st.source) st.source = "";   // that source isn't on the list any more
+  root.querySelector('[data-role="dates"]').hidden = st.range !== "custom";
+  setVal("from", st.from);
+  setVal("to", st.to);
   drawBody();
+  // Back from a prospect: the same place on the page
+  if (boardScroll && Date.now() - boardScroll.at < 30 * 60000) {
+    const s = boardScroll;
+    boardScroll = null;
+    requestAnimationFrame(() => {
+      applyBoardScroll(root, s);
+      window.scrollTo(0, s.y || 0);
+      const ct = document.getElementById("content");
+      if (ct) ct.scrollTop = s.ct || 0;
+    });
+  }
   const reload = () => loadAll().then((list) => {
     if (!root.isConnected || st.old) return;
     all = list;
@@ -765,11 +839,13 @@ async function mountBoard(container, { view, staff }) {
   let qTimer = 0;
   root.addEventListener("input", (e) => {
     if (e.target.dataset.role !== "q") return;
+    st.qRaw = e.target.value;
     st.q = e.target.value.trim().toLowerCase();
     clearTimeout(qTimer);
     qTimer = setTimeout(drawBody, 150);   // redraws once typing pauses, not on every key
   });
   root.addEventListener("click", (e) => {
+    if (e.target.closest('a[href^="#/prospects/"], tr[data-href]')) rememberBoardScroll(root);
     const tr = e.target.closest("tr[data-href]");
     if (tr && !e.target.closest("a")) { location.hash = tr.dataset.href; return; }
     const fb = e.target.closest("[data-fu]");
@@ -791,6 +867,14 @@ async function mountBoard(container, { view, staff }) {
     }
     const a = e.target.closest("[data-act]");
     if (!a) return;
+    if (a.dataset.act === "clear") {
+      Object.assign(st, { q: "", qRaw: "", source: "", who: "all", show: "", range: "", from: "", to: "" });
+      ["q", "source", "range", "from", "to"].forEach((r) => { const el = root.querySelector(`[data-role="${r}"]`); if (el) el.value = ""; });
+      root.querySelector('[data-role="who"]').value = "all";
+      syncDates();
+      drawBody();
+      return;
+    }
     if (a.dataset.act === "lost") { st.showLost = !st.showLost; drawBody(); }
     if (a.dataset.act === "refresh") { refreshNow(a); return; }
     if (a.dataset.act === "old") setOld(!st.old);
