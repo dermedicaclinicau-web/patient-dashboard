@@ -12,6 +12,7 @@ import { confirmDialog } from "./dialog.js";
 import { can, isAdmin } from "./perms.js";
 import { findPatientsById, getPatient } from "./patients.js";
 import { searchPatients, warmPatients } from "./patient-list.js";
+import { loadServicePrices, priceLookup } from "./service-prices.js";
 import {
   listProducts, appointmentsBetween, dayKey, listLotsForProduct, listSuppliers, recordPatientReturn, createRequest,
   isKitProduct, isSharedProduct, batchName, reqNumber,
@@ -179,6 +180,16 @@ function itemSub(it) {
   const back = (RETURNED.find(([k]) => k === it.returned) || [, ""])[1];
   return [cond, back, it.invoiceId && `Invoice ${it.invoiceId}`, it.note].filter(Boolean).join(" · ");
 }
+// How a package refund was worked out (saved on the refund, so later price changes don't alter it)
+function calcHtml(it) {
+  const c = it && it.calc;
+  if (!c || !c.method) return "";
+  const byHand = c.worked !== null && c.worked !== undefined && round2(c.worked) !== round2(it.amount)
+    ? ` · worked out as ${money(c.worked)}, changed by hand` : "";
+  if (c.method === "share") return `<small class="rf-calc">Paid ${money(c.paid)} · a share for the visits left${byHand}</small>`;
+  return `<small class="rf-calc">Paid ${money(c.paid)}${(c.used || []).map((u) =>
+    ` · less ${u.used} × ${esc(u.service)} at ${money(u.price)}`).join("")}${byHand}</small>`;
+}
 
 /* ===================== Page ===================== */
 export async function mountRefunds(container, { param = "", staff = null } = {}) {
@@ -344,10 +355,15 @@ async function mountForm(container, { staff, patientId }) {
   root.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
   container.replaceChildren(root);
   warmPatients();   // the Patient List's search: ready by the time someone types
-  const set = await loadSettings();
+  const [set, prices] = await Promise.all([
+    loadSettings(),
+    loadServicePrices().catch((err) => { console.warn("Service prices not read:", err); return []; }),
+  ]);
   if (!root.isConnected) return;
+  const lookupPrice = priceLookup(prices);   // Settings → Services and pricing
 
-  const blank = () => ({ name: "", amount: "", reason: "", note: "", srcKey: "", invoiceId: "", date: "", left: 0, of: 0, paid: 0 });
+  const blank = () => ({ name: "", amount: "", reason: "", note: "", srcKey: "", invoiceId: "", date: "", left: 0, of: 0, paid: 0,
+    method: "", used: [], auto: false });
   const st = { patient: null, hits: [], sales: null, visits: null, src: null, prodList: null, tried: false,
     kinds: { service: false, package: false, product: false }, services: [], packages: [], products: [],
     total: null, method: "", cashGiven: "", cashAmount: "", bank: { name: "", bsb: "", acct: "" }, note: "",
@@ -396,6 +412,71 @@ async function mountForm(container, { staff, patientId }) {
       autocomplete="off" aria-label="Find the patient"></label><div class="rf-hits" data-role="presults"></div>`;
   }
 
+  // Package refunds: what they paid, less each used visit at its regular price (Settings → Services and pricing),
+  // or a share of what they paid (visits left ÷ all visits)
+  const usedRowsOf = (x) => (x.lines || []).filter((l) => l.used > 0).map((l) => {
+    const sp = lookupPrice(l.service);
+    return { service: l.service, used: l.used, price: sp ? round2(sp.price).toFixed(2) : "", known: !!sp };
+  });
+  function pkgCalc(s) {
+    const paid = round2(s.paid);
+    if (s.method === "share") return { ok: true, usedTotal: null, refund: s.of > 0 ? round2((paid * s.left) / s.of) : 0, over: false };
+    const missing = (s.used || []).filter((u) => String(u.price ?? "").trim() === "").length;
+    const usedTotal = round2((s.used || []).reduce((a, u) => a + u.used * num(u.price), 0));
+    return { ok: !missing, missing, usedTotal, refund: round2(Math.max(0, paid - usedTotal)), over: !missing && usedTotal > paid };
+  }
+  const pkgSave = (s) => {
+    const c = pkgCalc(s);
+    return {
+      method: s.method, paid: round2(s.paid),
+      used: s.method === "regular" ? (s.used || []).map((u) => ({ service: String(u.service || "").slice(0, 150), used: Number(u.used) || 0, price: num(u.price) })) : [],
+      usedTotal: c.usedTotal === null ? null : round2(c.usedTotal), worked: c.ok ? c.refund : null,
+    };
+  };
+  function pkgSumHtml(s, i) {
+    const c = pkgCalc(s);
+    const rows = [["Paid", money(s.paid)],
+      s.method === "share" ? [`Share for ${s.left} of ${s.of} visits left`, money(c.refund)]
+        : ["Used visits at the regular price", c.ok ? `− ${money(c.usedTotal)}` : "Price needed"]];
+    return `<dl class="rf-pk-sum">${rows.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("")}
+        <div class="is-total"><dt>Refund</dt><dd>${c.ok ? money(c.refund) : "—"}</dd></div></dl>
+      ${c.over ? "<p class=\"rf-warn\">The visits used cost more than they paid, so there's nothing to refund at the regular price.</p>" : ""}
+      ${!s.auto ? `<p class="rf-hint">The amount to refund was changed by hand.
+        <button type="button" class="rf-linkbtn" data-act="pkgauto" data-i="${i}">Use ${c.ok ? money(c.refund) : "the worked-out amount"}</button></p>` : ""}`;
+  }
+  function pkgHtml(s, i) {
+    if (!s.srcKey || !s.method) return "";
+    const used = s.used || [];
+    const table = used.length ? `<table class="rf-pk-used"><thead><tr><th>Used</th><th>Regular price</th><th>Total</th></tr></thead><tbody>${used.map((u, j) => `<tr>
+        <td>${u.used} × ${esc(u.service || "Visit")}${u.known ? "" : '<small class="rf-pk-need">Not in Services and pricing</small>'}</td>
+        <td>${moneyIn(`packages.${i}.used.${j}.price`, u.price)}</td>
+        <td class="rf-pk-num" data-role="pkline-${i}-${j}">${String(u.price ?? "").trim() === "" ? "—" : money(u.used * num(u.price))}</td></tr>`).join("")}</tbody></table>`
+      : '<p class="rf-hint">No visits used yet.</p>';
+    return `<div class="rf-pk">
+      <div class="rf-q"><span>Work out the refund</span>${seg(`packages.${i}.method`,
+        [["regular", "Used visits at the regular price"], ["share", "Share of what they paid"]], s.method)}</div>
+      ${s.method === "regular" ? table : ""}
+      <div data-role="pkgsum-${i}">${pkgSumHtml(s, i)}</div>
+      ${s.method === "regular" && used.some((u) => !u.known)
+        ? '<p class="rf-hint">Add the missing services in Settings → Services and pricing, so their prices fill in next time.</p>' : ""}
+    </div>`;
+  }
+  // A price or the method changed: the refund is worked out again (unless the amount was typed by hand)
+  function recalcPkg(i) {
+    const s = st.packages[i];
+    if (!s || !s.srcKey || !s.method) return;
+    const c = pkgCalc(s);
+    if (s.auto) s.amount = c.ok ? c.refund.toFixed(2) : "";
+    const a = main.querySelector(`[data-f="packages.${i}.amount"]`);
+    if (a && document.activeElement !== a) a.value = s.amount;
+    (s.used || []).forEach((u, j) => {
+      const td = main.querySelector(`[data-role="pkline-${i}-${j}"]`);
+      if (td) td.textContent = String(u.price ?? "").trim() === "" ? "—" : money(u.used * num(u.price));
+    });
+    const box = main.querySelector(`[data-role="pkgsum-${i}"]`);
+    if (box) box.innerHTML = pkgSumHtml(s, i);
+  }
+
   // Their paid services and packages from Timely: ticking one fills in a row
   const srcFor = (list) => (st.src && st.src[list]) || [];
   function srcRow(list, x, on) {
@@ -414,7 +495,8 @@ async function mountForm(container, { staff, patientId }) {
       sub = [`${x.left} of ${x.left + x.used} visits left`, x.expires ? `${x.expired ? "Expired" : "Expires"} ${niceKey(x.expires)}` : "No expiry",
         `Paid ${money(x.paid)}${x.paidFrom === "price" ? " (list price)" : ""}`, x.invoiceId && `Invoice ${x.invoiceId}`].filter(Boolean).join(" · ");
       if (off) tags += tag("All used", true); else if (x.expired) tags += tag("Expired", true);
-      right = `<b>${money(x.suggested)}<small>suggested</small></b>`;
+      const wc = pkgCalc({ method: "regular", paid: x.paid, left: x.left, of: x.left + x.used, used: usedRowsOf(x) });
+      right = wc.ok ? `<b>${money(wc.refund)}<small>to refund</small></b>` : "<b>—<small>price needed</small></b>";
     }
     if (was) tags += tag(`Already in ${was}`);
     const lines = list === "packages" && (x.lines || []).length > 1
@@ -437,7 +519,7 @@ async function mountForm(container, { staff, patientId }) {
         : "No packages found for them in Timely."} Type it in below.</p>`;
     }
     return `${probs}<p class="rf-hint">Tick what's being refunded. ${list === "services" ? "Amounts are what they paid, after any discount."
-      : "The suggested amount is what they paid for the visits they haven't used."}</p>
+      : "The refund is what they paid, less the visits already used at their regular price."}</p>
       <ul class="rf-buys">${rows.slice(0, 40).map((x) => srcRow(list, x, on.has(x.key))).join("")}</ul>${when}`;
   }
   const refreshSrc = () => ["services", "packages"].forEach((l) => {
@@ -465,7 +547,7 @@ async function mountForm(container, { staff, patientId }) {
       <label class="rf-f"><span>Reason</span>${reasonSelect(`${list}.${i}.reason`, list === "services" ? "service" : "package", s.reason)}</label>
       <label class="rf-f rf-span2"><span>Details <small>(needed for "Other")</small></span>
         <input class="fe-input" data-f="${list}.${i}.note" value="${esc(s.note)}" placeholder="What happened, in a few words"></label>
-    </div></div>`;
+    </div>${list === "packages" ? pkgHtml(s, i) : ""}</div>`;
 
   const productCard = (p, i) => `<div class="rf-item">
     <div class="rf-item-head"><strong>${I.product}${esc(p.name)}</strong>
@@ -556,7 +638,8 @@ async function mountForm(container, { staff, patientId }) {
     const plain = (kind, s) => ({ kind, name: s.name.trim().slice(0, 150), amount: num(s.amount), reason: s.reason || "", note: s.note.trim().slice(0, 300),
       ...(s.srcKey ? { srcKey: String(s.srcKey).slice(0, 200), source: kind === "service" ? "invoice" : "package",
         invoiceId: String(s.invoiceId || "").slice(0, 40), date: String(s.date || "").slice(0, 10),
-        ...(kind === "package" ? { visitsLeft: Number(s.left) || 0, visitsAll: Number(s.of) || 0, paid: round2(s.paid) } : {}) } : {}) });
+        ...(kind === "package" ? { visitsLeft: Number(s.left) || 0, visitsAll: Number(s.of) || 0, paid: round2(s.paid),
+          ...(s.method ? { calc: pkgSave(s) } : {}) } : {}) } : {}) });
     if (st.kinds.service) st.services.forEach((s) => items.push(plain("service", s)));
     if (st.kinds.package) st.packages.forEach((s) => items.push(plain("package", s)));
     if (st.kinds.product) st.products.forEach((p) => items.push({
@@ -591,6 +674,9 @@ async function mountForm(container, { staff, patientId }) {
       if (it.condition === "faulty" && !it.action) out.push(`${lbl}: choose what happens to it.`);
       if (it.condition === "ok" && !it.reason) out.push(`${lbl}: choose why it's being returned.`);
       if (it.reason === "Other" && !it.note) out.push(`${lbl}: add the details for "Other".`);
+    });
+    if (st.kinds.package) st.packages.forEach((s) => {
+      if (s.srcKey && s.method === "regular" && !pkgCalc(s).ok) out.push(`${s.name || "Package"}: enter the regular price of each used visit.`);
     });
     if (r.items.length && !(r.total > 0)) out.push("Enter the total to refund.");
     if (!st.method) out.push("Choose how they get the money back.");
@@ -742,6 +828,11 @@ async function mountForm(container, { staff, patientId }) {
         if (a) a.value = p.amount;
       }
     }
+    const pk = /^packages\.(\d+)\.(amount|used\.\d+\.price)$/.exec(f);
+    if (pk && st.packages[+pk[1]] && st.packages[+pk[1]].srcKey) {
+      if (pk[2] === "amount") st.packages[+pk[1]].auto = false;
+      recalcPkg(+pk[1]);
+    }
     drawSum();
   });
 
@@ -754,8 +845,12 @@ async function mountForm(container, { staff, patientId }) {
       if (t.checked) {
         const row = list === "services"
           ? { name: x.name, amount: round2(x.net).toFixed(2), srcKey: x.key, invoiceId: x.invoiceId || "", date: x.date || "" }
-          : { name: x.name, amount: round2(x.suggested).toFixed(2), srcKey: x.key, invoiceId: x.invoiceId || "", date: x.boughtOn || "",
-            left: x.left, of: x.left + x.used, paid: x.paid };
+          : (() => {
+            const p = { name: x.name, srcKey: x.key, invoiceId: x.invoiceId || "", date: x.boughtOn || "",
+              left: x.left, of: x.left + x.used, paid: x.paid, method: "regular", auto: true, used: usedRowsOf(x) };
+            const c = pkgCalc(p);
+            return { ...p, amount: c.ok ? c.refund.toFixed(2) : "" };
+          })();
         const i = st[list].findIndex((s) => !s.srcKey && !s.name.trim() && !String(s.amount).trim());
         if (i !== -1) st[list][i] = { ...st[list][i], ...row };
         else st[list].push({ ...blank(), ...row });
@@ -814,8 +909,14 @@ async function mountForm(container, { staff, patientId }) {
       st[a.dataset.list].splice(+a.dataset.i, 1);
       if (a.dataset.list === "products") refreshProd(); else draw();
       drawSum();
+    } else if (act === "pkgauto") {
+      const i = +a.dataset.i;
+      if (st.packages[i]) { st.packages[i].auto = true; recalcPkg(i); }
+      drawSum();
     } else if (act === "set") {
       setPath(a.dataset.f, a.dataset.v);
+      const pm = /^packages\.(\d+)\.method$/.exec(a.dataset.f);
+      if (pm && st.packages[+pm[1]]) { st.packages[+pm[1]].auto = true; recalcPkg(+pm[1]); }
       if (a.dataset.f.startsWith("products.")) refreshProd(); else draw();
       drawSum();
     } else if (act === "resettotal") {
@@ -1126,7 +1227,7 @@ async function mountRefund(container, { id, staff }) {
         <aside class="rf-side">
           <section class="rf-box2"><h4>What's refunded</h4>
             <ul class="rf-items">${(r.items || []).map((it) => `<li><span class="rf-ik">${KINDS[it.kind].icon}</span>
-              <span><strong>${it.qty > 1 ? `${it.qty} × ` : ""}${esc(it.name)}</strong><small>${esc(itemSub(it))}</small></span><b>${money(it.amount)}</b></li>`).join("")}</ul>
+              <span><strong>${it.qty > 1 ? `${it.qty} × ` : ""}${esc(it.name)}</strong><small>${esc(itemSub(it))}</small>${calcHtml(it)}</span><b>${money(it.amount)}</b></li>`).join("")}</ul>
             ${r.itemsTotal !== undefined && round2(r.itemsTotal) !== round2(r.total) ? `<p class="rf-note">The items add up to ${money(r.itemsTotal)}.</p>` : ""}
             <div class="rf-totalrow"><span>Total</span><b>${money(r.total)}</b></div>
             <p class="rf-methodline">${(METHODS[r.method] || {}).icon || ""}<span>${esc(methodText(r))}</span></p>
