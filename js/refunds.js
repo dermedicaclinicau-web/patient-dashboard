@@ -1608,6 +1608,8 @@ function mailPage(inner, look, lh) {
 const SAMPLE = {
   "first name": "Sarah", "full name": "Sarah Smith", "refund number": "RF-TEST01", amount: "$120.00",
   items: "• Product: ZO Daily Power Defense ($120.00)", "refund method": "Bank transfer", reference: "123456789", "clinic phone": "(08) 9000 0000",
+  "refund breakdown": "Package: Skin Peel Course x4\nPaid $1,998.00\nLess 1 × Clear Complexion Lite (regular price $450.00): −$450.00\n"
+    + "Less 2 × Brightening peel (regular price $330.00 each): −$660.00\nRefund: $888.00",
 };
 const sampleOf = (k) => SAMPLE[String(k).replace(/&nbsp;|\s+/g, " ").trim().toLowerCase()];
 const fillSampleHtml = (html) => String(html).replace(/\{([^{}<>]{1,40})\}/g, (m, k) => { const v = sampleOf(k); return v === undefined ? "" : esc(v).replace(/\n/g, "<br>"); });
