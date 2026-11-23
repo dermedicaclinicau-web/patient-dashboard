@@ -9,7 +9,8 @@ import {
 import { callApi } from "./appointments.js";
 import { showToast } from "./utils.js";
 import { can, isAdmin } from "./perms.js";
-import { fetchPatients, findPatientsById, searchPatientsByPhone, getPatient } from "./patients.js";
+import { findPatientsById, getPatient } from "./patients.js";
+import { searchPatients, warmPatients } from "./patient-list.js";
 import {
   listProducts, appointmentsBetween, dayKey, listLotsForProduct, listSuppliers, recordPatientReturn, createRequest,
   isKitProduct, isSharedProduct, batchName, reqNumber,
@@ -259,33 +260,18 @@ function cardHtml(r) {
 }
 
 /* ===================== The request form ===================== */
-// Name search that forgives case, surname-only and "first last" in any order.
-// Tries a few spellings of what was typed, then keeps patients whose name has every word.
+// The same search as the Patient List: name in any order, part words, email or mobile,
+// plus an exact patient ID
 async function findPatientsAny(q) {
-  const t = q.trim().replace(/\s+/g, " ");
-  if (/^\+?[\d\s]{6,}$/.test(t)) return (await searchPatientsByPhone(t)).filter((p) => !p.mergedInto).slice(0, 12);
-
-  const title = (s) => s.toLowerCase().replace(/(^|[\s'-])([a-z])/g, (m, a, c) => a + c.toUpperCase());
-  const words = normName(t).split(" ").filter((w) => w.length >= 2);
-  const terms = [...new Set([t, title(t), t.toLowerCase(), ...(words.length > 1 ? words.map(title) : [])])].slice(0, 8);
-
-  const runs = terms.map((term) => fetchPatients({ mode: "name", term }).then((r) => (r && r.patients) || []).catch(() => []));
-  const [byId, ...byName] = await Promise.all([findPatientsById(t).catch(() => []), ...runs]);
-
-  const seen = new Map();
-  [...byId, ...byName.flat()].forEach((p) => { if (p && p.id && !p.mergedInto && !seen.has(p.id)) seen.set(p.id, p); });
-  const idHits = new Set(byId.map((p) => p.id));
-  const nameOfP = (p) => normName(p.name);
-  const all = [...seen.values()];
-
-  // Every word in the name first; if nothing has them all, any word
-  let list = all.filter((p) => idHits.has(p.id) || words.every((w) => nameOfP(p).includes(w)));
-  if (!list.length) list = all.filter((p) => words.some((w) => nameOfP(p).includes(w)));
-
-  const score = (p) => (idHits.has(p.id) ? 0 : nameOfP(p).startsWith(words[0] || "") ? 1 : 2);
-  return list.sort((a, b) => score(a) - score(b) || String(a.name).localeCompare(String(b.name), "en-AU")).slice(0, 12);
+  const t = q.trim();
+  const [byName, byId] = await Promise.all([
+    searchPatients(t, 12).catch((err) => { console.warn("Patient search failed:", err); return []; }),
+    findPatientsById(t).catch(() => []),
+  ]);
+  const m = new Map();
+  [...byId, ...byName].forEach((p) => { if (p && p.id && !p.mergedInto) m.set(p.id, p); });
+  return [...m.values()].slice(0, 12);
 }
-
 async function salesFor(p) {
   try {
     const snap = await getDocs(query(collection(db, "inv_sales"), where("patientName", "==", p.name)));
@@ -327,6 +313,7 @@ async function mountForm(container, { staff, patientId }) {
   root.className = "page wide rf";
   root.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
   container.replaceChildren(root);
+  warmPatients();   // the Patient List's search: ready by the time someone types
   const set = await loadSettings();
   if (!root.isConnected) return;
 
