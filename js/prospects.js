@@ -7,7 +7,7 @@ import { collection, getDocs, getDoc, doc, query, orderBy, limit, where, onSnaps
 import { callApi } from "./appointments.js";
 import { can } from "./perms.js";
 import { showToast } from "./utils.js";
-import { openProspectCompose } from "./prospect-compose.js?v=1";
+import { openProspectCompose } from "./prospect-compose.js?v=2";
 import { fetchPatients, searchPatientsByPhone } from "./patients.js";
 
 
@@ -1022,6 +1022,15 @@ function settingsDialog(set, onSaved, onImported) {
         + toggle("cancelFollow", set.cancelFollow !== false, "Add a follow-up when someone cancels",
           "When a prospect cancels or doesn't come and hasn't rebooked, a follow-up is set for that day to call them. Turn off if these are filling up the daily email."))}
 
+      ${sec("text", "teal", "SMS and email templates", "Ready-made messages for each situation, like booked then cancelled, or consulted but no treatment.",
+        `<div class="prs-block prs-inline">
+           <div><span class="prs-label">Templates</span>
+             <p class="prs-help" data-role="tplcount">${(set.templates || []).length
+               ? `${set.templates.length} saved. They show in the Send text and Send email windows.`
+               : "None yet, so the three built-in ones are used."}</p></div>
+           <button type="button" class="lh-btn" data-act="templates">Edit templates</button>
+         </div>`)}
+
       ${sec("text", "sky", "Online chat (Tawk.to)", "Chats from the website come in as prospects.",
         `<div class="prs-block"><label class="prs-toggle"><input type="checkbox" name="tawkSkip"${set.tawkSkipPatients ? " checked" : ""} />
             <span class="prs-sw" aria-hidden="true"></span>
@@ -1081,6 +1090,13 @@ function settingsDialog(set, onSaved, onImported) {
       c.addReason = addReason;
 
       f.addEventListener("click", (e) => {
+        if (e.target.closest('[data-act="templates"]')) {
+          templatesDialog((n) => {
+            const el = f.querySelector('[data-role="tplcount"]');
+            if (el) el.textContent = n ? `${n} saved. They show in the Send text and Send email windows.` : "None yet, so the three built-in ones are used.";
+          });
+          return;
+        }
         const pk = e.target.closest("[data-pick]");
         if (pk) { f.querySelectorAll(`[name="${pk.dataset.pick}"]`).forEach((x) => { x.checked = !!pk.dataset.on; }); counts(); return; }
         const stp = e.target.closest("[data-step]");
@@ -1178,7 +1194,226 @@ function settingsDialog(set, onSaved, onImported) {
   });
 }
 
+/* ===================== Prospect settings → SMS and email templates ===================== */
+// Saved through Apps Script (op "saveTemplates"). Situations and blanks come from Apps Script (op "templateList").
 
+function prtCssOnce() {
+  if (document.getElementById("prt-css")) return;
+  const s = document.createElement("style");
+  s.id = "prt-css";
+  s.textContent = `.prt-dlg{width:min(1000px,96vw)}
+    .prt-wrap{display:grid;grid-template-columns:260px 1fr;gap:16px;min-height:440px}
+    @media(max-width:720px){.prt-wrap{grid-template-columns:1fr}}
+    .prt-side{display:flex;flex-direction:column;gap:8px}
+    .prt-list{display:flex;flex-direction:column;gap:6px;max-height:470px;overflow:auto}
+    .prt-item{text-align:left;border:1px solid #e2e8f0;border-radius:10px;padding:8px 10px;background:#fff;cursor:pointer;display:grid;gap:2px}
+    .prt-item.is-on{border-color:#0f766e;box-shadow:0 0 0 2px #ccfbf1}
+    .prt-item.is-off{opacity:.55}
+    .prt-item small{color:#64748b;font-size:12px}
+    .prt-ch{font-size:11px;font-weight:600;padding:1px 7px;border-radius:999px;width:max-content}
+    .prt-ch.is-sms{background:#e0f2fe;color:#075985}.prt-ch.is-email{background:#ede9fe;color:#5b21b6}
+    .prt-new{display:flex;gap:6px}
+    .prt-edit{display:flex;flex-direction:column;gap:10px}
+    .prt-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+    .prt-seg{display:inline-flex;border:1px solid #cbd5e1;border-radius:8px;overflow:hidden}
+    .prt-seg button{border:0;background:#fff;padding:5px 14px;cursor:pointer}
+    .prt-seg button.is-on{background:#0f766e;color:#fff}
+    .prt-sits{display:flex;flex-wrap:wrap;gap:6px}
+    .prt-sit{display:flex;align-items:center;gap:6px;border:1px solid #e2e8f0;border-radius:999px;padding:4px 10px;font-size:13px;cursor:pointer}
+    .prt-sit:has(input:checked){background:#f0fdfa;border-color:#5eead4}
+    .prt-tools{display:flex;gap:4px}
+    .prt-tools button{border:1px solid #cbd5e1;background:#fff;border-radius:6px;padding:3px 9px;cursor:pointer}
+    .prt-html{min-height:180px;max-height:340px;overflow:auto;line-height:1.5}
+    .prt-tokens{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+    .prt-del{align-self:flex-start;color:#b91c1c}
+    .prt-empty{padding:40px 0;text-align:center}`;
+  document.head.appendChild(s);
+}
+
+async function templatesDialog(onSaved) {
+  let data;
+  try { data = await api("templateList"); }
+  catch (err) { showToast(errText(err, "Couldn't load the templates. Check the new Code.gs is deployed.")); return; }
+  prtCssOnce();
+  const sits = data.situations || {};
+  const sitKeys = Object.keys(sits);
+  const tokens = data.tokens || [];
+  const list = (data.templates || []).map((t) => ({ ...t, situations: [...(t.situations || ["any"])] }));
+  let cur = list.length ? 0 : -1;
+  let lastField = null;
+  const ui = {};
+
+  openDialog({
+    title: "SMS and email templates",
+    sub: "Staff choose these in the Send text and Send email windows. The ones for the prospect's situation are shown first.",
+    submit: "Save templates",
+    body: `<div class="prt-wrap">
+        <div class="prt-side"><div class="prt-list" data-role="tlist"></div>
+          <div class="prt-new"><button type="button" class="lh-btn" data-tnew="sms">${I(IC.plus)} SMS</button>
+            <button type="button" class="lh-btn" data-tnew="email">${I(IC.plus)} Email</button></div></div>
+        <div class="prt-edit" data-role="tedit"></div>
+      </div>`,
+    onOpen: (c) => {
+      c.dlg.classList.add("prt-dlg");
+      const f = c.form;
+      const listEl = f.querySelector('[data-role="tlist"]');
+      const editEl = f.querySelector('[data-role="tedit"]');
+      const q = (s) => editEl.querySelector(s);
+      const sitText = (t) => (t.situations.includes("any") ? "Any prospect" : t.situations.map((k) => sits[k] || k).join(", "));
+
+      function drawList() {
+        listEl.innerHTML = list.length ? list.map((t, i) => `<button type="button" class="prt-item${i === cur ? " is-on" : ""}${
+            t.on === false ? " is-off" : ""}" data-tpick="${i}">
+            <span class="prt-ch is-${t.channel}">${t.channel === "email" ? "Email" : "SMS"}${t.on === false ? " · off" : ""}</span>
+            <strong>${esc(t.name || "Untitled")}</strong><small>${esc(sitText(t))}</small></button>`).join("")
+          : '<p class="muted">No templates yet. Add an SMS or email template.</p>';
+      }
+      function commit() {
+        const t = list[cur];
+        if (!t || !q('[data-t="name"]')) return;
+        t.name = q('[data-t="name"]').value.replace(/\s+/g, " ").trim().slice(0, 60);
+        t.on = q('[data-t="on"]').checked;
+        const ticked = [...editEl.querySelectorAll('[data-t="sit"]:checked')].map((x) => x.value);
+        t.situations = ticked.length ? ticked : ["any"];
+        if (t.channel === "email") { t.subject = q('[data-t="subject"]').value; t.body = q('[data-t="html"]').innerHTML; }
+        else t.body = q('[data-t="text"]').value;
+      }
+      function countSms() {
+        const ta = q('[data-t="text"]');
+        const out = q('[data-role="smscount"]');
+        if (ta && out) out.textContent = `${ta.value.length} / 560 characters · about ${Math.max(1, Math.ceil(ta.value.length / 153))} SMS (before blanks are filled)`;
+      }
+      function drawEdit() {
+        const t = list[cur];
+        lastField = null;
+        if (!t) { editEl.innerHTML = '<p class="muted prt-empty">Choose a template on the left, or add one.</p>'; return; }
+        const isE = t.channel === "email";
+        editEl.innerHTML = `
+          <label class="lh-field"><span class="lh-label">Name</span>
+            <input class="fe-input" data-t="name" maxlength="60" value="${esc(t.name || "")}" placeholder="e.g. Cancelled – call to rebook" /></label>
+          <div class="prt-row"><span class="lh-label">Type</span>
+            <span class="prt-seg"><button type="button" data-tch="sms" class="${isE ? "" : "is-on"}">SMS</button>
+              <button type="button" data-tch="email" class="${isE ? "is-on" : ""}">Email</button></span>
+            <label class="fe-check"><input type="checkbox" data-t="on"${t.on !== false ? " checked" : ""} /> Show it to staff</label></div>
+          <span class="lh-label">Suggest it when the prospect is</span>
+          <div class="prt-sits">${sitKeys.map((k) => `<label class="prt-sit"><input type="checkbox" data-t="sit" value="${esc(k)}"${
+            t.situations.includes(k) ? " checked" : ""} /><span>${esc(sits[k])}</span></label>`).join("")}</div>
+          ${isE ? `<label class="lh-field"><span class="lh-label">Subject</span>
+              <input class="fe-input" data-t="subject" maxlength="200" value="${esc(t.subject || "")}" /></label>
+            <span class="lh-label">Message</span>
+            <div class="prt-tools"><button type="button" data-tcmd="bold"><b>B</b></button><button type="button" data-tcmd="italic"><i>I</i></button>
+              <button type="button" data-tcmd="insertUnorderedList">• List</button><button type="button" data-tcmd="link">Link</button></div>
+            <div class="prt-html fe-input" contenteditable="true" data-t="html">${t.body || ""}</div>`
+          : `<label class="lh-field"><span class="lh-label">Message</span>
+              <textarea class="fe-input" data-t="text" rows="5" maxlength="560">${esc(t.body || "")}</textarea></label>
+            <small class="muted" data-role="smscount"></small>`}
+          <div class="prt-tokens"><span class="lh-label">Insert</span>${tokens.map((x) =>
+            `<button type="button" class="prs-chip" data-token="${esc(x)}">{${esc(x)}}</button>`).join("")}</div>
+          <p class="prs-help">Blanks are filled in for each prospect. In a text, a blank with nothing to fill is left out.
+            For an offer or promotion, end with "Reply STOP to opt out".</p>
+          <button type="button" class="lh-btn is-quiet prt-del" data-tdel>Delete this template</button>`;
+        if (!isE) countSms();
+      }
+      function insertToken(tok) {
+        const txt = `{${tok}}`;
+        const el = lastField || q('[data-t="text"], [data-t="html"]');
+        if (!el) return;
+        if (el.isContentEditable) { el.focus(); document.execCommand("insertText", false, txt); return; }
+        const s = el.selectionStart ?? el.value.length;
+        const e2 = el.selectionEnd ?? s;
+        el.value = el.value.slice(0, s) + txt + el.value.slice(e2);
+        el.focus();
+        el.setSelectionRange(s + txt.length, s + txt.length);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      Object.assign(ui, { commit, drawList, drawEdit, pick: (i) => { cur = i; drawList(); drawEdit(); } });
+
+      f.addEventListener("mousedown", (e) => { if (e.target.closest("[data-tcmd], [data-token]")) e.preventDefault(); });   // keeps the cursor where it was
+      f.addEventListener("focusin", (e) => { if (e.target.matches('[data-t="subject"], [data-t="text"], [data-t="html"]')) lastField = e.target; });
+      f.addEventListener("input", (e) => {
+        if (e.target.matches('[data-t="text"]')) countSms();
+        if (e.target.matches('[data-t="name"]') && list[cur]) { list[cur].name = e.target.value; drawList(); }
+      });
+      f.addEventListener("change", (e) => { if (e.target.matches('[data-t="sit"], [data-t="on"]')) { commit(); drawList(); } });
+      f.addEventListener("paste", (e) => {
+        if (!e.target.closest('[data-t="html"]')) return;
+        e.preventDefault();
+        document.execCommand("insertText", false, (e.clipboardData || window.clipboardData).getData("text/plain"));
+      });
+      f.addEventListener("click", (e) => {
+        const pk = e.target.closest("[data-tpick]");
+        if (pk) { commit(); ui.pick(Number(pk.dataset.tpick)); return; }
+        const nw = e.target.closest("[data-tnew]");
+        if (nw) {
+          commit();
+          list.push({ id: "", name: "", channel: nw.dataset.tnew, situations: ["any"], subject: "", body: "", on: true });
+          ui.pick(list.length - 1);
+          q('[data-t="name"]').focus();
+          return;
+        }
+        const ch = e.target.closest("[data-tch]");
+        if (ch && list[cur] && list[cur].channel !== ch.dataset.tch) {
+          commit();
+          const t = list[cur];
+          if (ch.dataset.tch === "email") {   // the text becomes paragraphs
+            t.body = String(t.body || "").split(/\n{2,}/).filter((x) => x.trim())
+              .map((x) => `<p>${esc(x.trim()).replace(/\n/g, "<br>")}</p>`).join("");
+          } else {                            // the email becomes plain text
+            const tmp = document.createElement("div");
+            tmp.innerHTML = t.body || "";
+            t.body = tmp.innerText.replace(/\n{3,}/g, "\n\n").trim().slice(0, 560);
+          }
+          t.channel = ch.dataset.tch;
+          drawList(); drawEdit();
+          return;
+        }
+        if (e.target.closest("[data-tdel]")) {
+          if (!confirm(`Delete "${list[cur].name || "this template"}"? It goes when you press Save templates.`)) return;
+          list.splice(cur, 1);
+          ui.pick(Math.min(cur, list.length - 1));
+          return;
+        }
+        const cmd = e.target.closest("[data-tcmd]");
+        if (cmd) {
+          const ed = q('[data-t="html"]');
+          ed.focus();
+          if (cmd.dataset.tcmd === "link") {
+            let url = prompt("Link address (https://…)", "https://");
+            if (!url) return;
+            url = url.trim();
+            if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+            document.execCommand("createLink", false, url);
+          } else document.execCommand(cmd.dataset.tcmd, false, null);
+          return;
+        }
+        const tk = e.target.closest("[data-token]");
+        if (tk) insertToken(tk.dataset.token);
+      });
+      drawList();
+      drawEdit();
+    },
+    onSubmit: async (c) => {
+      ui.commit();
+      const empty = (t) => !(t.channel === "email" ? String(t.body || "").replace(/<[^>]*>/g, "").trim() : String(t.body || "").trim());
+      const bad = list.findIndex((t) => !t.name || empty(t) || (t.channel === "email" && !String(t.subject || "").trim()));
+      if (bad >= 0) {
+        const t = list[bad];
+        ui.pick(bad);
+        c.fail(!t.name ? "Give this template a name." : t.channel === "email" && !String(t.subject || "").trim()
+          ? `Add a subject to "${t.name}".` : `Write the message for "${t.name}".`);
+        return;
+      }
+      const r = await api("saveTemplates", {
+        templates: list.map(({ id, name, channel, situations, subject, body, on }) => ({ id, name, channel, situations, subject, body, on })),
+      });
+      await loadSettings(true);
+      c.close();
+      const n = (r.templates || []).length;
+      showToast(`${n} template${n === 1 ? "" : "s"} saved`);
+      if (onSaved) onSaved(n);
+    },
+  });
+}
 /* ===================== One prospect ===================== */
 
 async function mountProspect(container, id, staff) {
@@ -1459,6 +1694,7 @@ async function mountProspect(container, id, staff) {
       },
       onSent: (np) => { if (np) { p = np; render(); } },
       toast: showToast,
+      loadTemplates: () => api("templates", { id: p.id }),
     });
   }
 

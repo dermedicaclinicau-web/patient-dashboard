@@ -6,7 +6,16 @@ const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ESC[c]);
 const SMS_MAX = 612;
 const GSM_RE = /^[\n\r A-Za-z0-9@£$¥èéùìòÇØøÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ!"#¤%&'()*+,\-./:;<=>?¡ÄÖÑÜ§¿äöñüà^{}\\[~\]|€]*$/;
-
+(function pcTplCss() {
+  if (typeof document === "undefined" || document.getElementById("pc-tpl-css")) return;
+  const s = document.createElement("style");
+  s.id = "pc-tpl-css";
+  s.textContent = `.pc-tpl{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+    .pc-chip.is-sug{border-color:#f59e0b;background:#fffbeb}
+    .pc-tpl-more{max-width:240px;padding:4px 8px;font-size:13px}
+    .pc-tpl-note{flex-basis:100%;color:#64748b;font-size:12px}`;
+  document.head.appendChild(s);
+})();
 const TEMPLATES = {
   email: [
     { label: "Thanks for enquiring", subject: "Your enquiry with Dermedica",
@@ -61,7 +70,7 @@ function smsMeter(text) {
 }
 
 /* ---------- The window ---------- */
-export function openProspectCompose({ prospect, kind = "email", myName = "", send, onSent, toast } = {}) {
+export function openProspectCompose({ prospect, kind = "email", myName = "", send, onSent, toast, loadTemplates = null } = {}) {
   const p = prospect || {};
   const isEmail = kind === "email";
   const concern = String(p.concern || "").trim();
@@ -90,10 +99,7 @@ export function openProspectCompose({ prospect, kind = "email", myName = "", sen
       </header>
 
       <div class="pc-body">
-        <div class="pc-tpl">
-          <span class="pc-lbl">Start from</span>
-          ${TEMPLATES[isEmail ? "email" : "text"].map((t, i) => `<button type="button" class="pc-chip" data-tpl="${i}">${esc(t.label)}</button>`).join("")}
-        </div>
+        <div class="pc-tpl" data-role="tpls"></div>
 
         ${isEmail ? `
           <label class="pc-field"><span class="pc-lbl">Subject</span>
@@ -166,21 +172,54 @@ export function openProspectCompose({ prospect, kind = "email", myName = "", sen
   if (!isEmail && quiet()) showErr("Texts can only be sent between 8 am and 8 pm (Perth time).");
 
   /* ---- Templates ---- */
-  root.querySelectorAll("[data-tpl]").forEach((b) => b.addEventListener("click", () => {
-    const t = TEMPLATES[isEmail ? "email" : "text"][Number(b.dataset.tpl)];
+  // From Prospect settings → Templates, already filled in for this prospect by Apps Script.
+  // The built-in ones are used until any are set up (or if they can't be loaded).
+  const builtIn = TEMPLATES[isEmail ? "email" : "text"].map((t) => ({
+    name: t.label, subject: fill(t.subject, vals, false), body: fill(t.body, vals, isEmail), suggested: false, fits: true,
+  }));
+  let tpls = builtIn;
+  let usedTpl = "";
+  let sitNote = "";
+  const tplBox = $('[data-role="tpls"]');
+  function drawTpls(note = sitNote ? `This prospect: ${sitNote}. ★ = suggested for them.` : "") {
+    const top = tpls.filter((t) => t.fits);
+    const rest = tpls.filter((t) => !t.fits);
+    tplBox.innerHTML = `<span class="pc-lbl">Start from</span>
+      ${top.map((t) => `<button type="button" class="pc-chip${t.suggested ? " is-sug" : ""}${usedTpl === t.name ? " is-on" : ""}"
+        data-tpl="${tpls.indexOf(t)}"${t.suggested ? ' title="Suggested for this prospect"' : ""}>${t.suggested ? "★ " : ""}${esc(t.name)}</button>`).join("")}
+      ${rest.length ? `<select class="fe-input pc-tpl-more" data-role="tplmore" aria-label="Other templates">
+        <option value="">Other templates…</option>${rest.map((t) => `<option value="${tpls.indexOf(t)}">${esc(t.name)}</option>`).join("")}</select>` : ""}
+      ${note ? `<small class="pc-tpl-note">${esc(note)}</small>` : ""}`;
+  }
+  function useTpl(i) {
+    const t = tpls[i];
+    if (!t) return;
     const has = isEmail ? editor.innerText.trim() || subjectEl.value.trim() : sms.value.trim();
-    if (has && dirty && !confirm("Replace what you've written with this template?")) return;
+    if (has && dirty && !confirm("Replace what you've written with this template?")) { drawTpls(); return; }
     if (isEmail) {
-      subjectEl.value = fill(t.subject, vals, false);
-      editor.innerHTML = fill(t.body, vals, true);
+      if (t.subject) subjectEl.value = t.subject;
+      editor.innerHTML = t.body || "";
     } else {
-      sms.value = fill(t.body, vals, false);
+      sms.value = String(t.body || "").slice(0, SMS_MAX);
       updateSms();
     }
-    root.querySelectorAll("[data-tpl]").forEach((x) => x.classList.toggle("is-on", x === b));
+    usedTpl = t.name;
+    drawTpls();
     dirty = true;
     (isEmail ? editor : sms).focus();
-  }));
+  }
+  tplBox.addEventListener("click", (e) => { const b = e.target.closest("[data-tpl]"); if (b) useTpl(Number(b.dataset.tpl)); });
+  tplBox.addEventListener("change", (e) => { if (e.target.dataset.role === "tplmore" && e.target.value !== "") useTpl(Number(e.target.value)); });
+  drawTpls(loadTemplates ? "Loading your templates…" : "");
+  if (loadTemplates) {
+    Promise.resolve().then(loadTemplates).then((r) => {
+      if (!root.isConnected) return;
+      const mine = ((r && r.templates) || []).filter((t) => t.channel === (isEmail ? "email" : "sms"));
+      sitNote = ((r && r.situations) || []).map((x) => x.label).join(" · ");
+      if (mine.length) tpls = mine;
+      drawTpls();
+    }).catch((err) => { console.warn("Prospect templates:", err); if (root.isConnected) drawTpls(""); });
+  }
 
   /* ---- Email editor ---- */
   if (isEmail) {
@@ -260,6 +299,7 @@ export function openProspectCompose({ prospect, kind = "email", myName = "", sen
     const fu = followUp();
     if (!fu) return;
     Object.assign(body, fu);
+    if (usedTpl) body.templateName = usedTpl;
 
     busy = true;
     const label = sendBtn.textContent;
