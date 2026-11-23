@@ -14385,3 +14385,11 @@ body.scan-full { overflow: hidden; }
 .rf-mail-on { display: inline-flex; align-items: center; gap: .4rem; font-size: .88rem; font-weight: 600; }
 .rf-mail-f { display: grid; gap: .3rem; font-size: .84rem; font-weight: 600; color: var(--muted); }
 .rf-mail-f textarea { min-height: 200px; font-family: inherit; line-height: 1.5; resize: vertical; }
+
+/* Refunds: the summary card keeps everything inside it */
+.rf-sum-card { grid-template-columns: minmax(0, 1fr); }
+.rf-sum-card > * { min-width: 0; }
+.rf-sum-items li { align-items: flex-start; }
+.rf-sum-items li span { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+.rf-sum-items li b { flex: none; white-space: nowrap; }
+.rf-money.is-big input { min-width: 0; }
