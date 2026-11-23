@@ -9,12 +9,14 @@ import { renderPlanCopySettings } from "./plan-copy-settings.js";
 import { mountServicePrices } from "./service-prices.js";
 import { mountSodSettings } from "./sod-settings.js";
 import { mountEndOfDaySettings } from "./end-of-day-admin.js";
+import { mountTabSettings } from "./tab-settings.js";
 import { can } from "./perms.js";
 const TABS = [
   ["recording", "Recording rules"],
   ["plans", "Treatment plans"],
   ["workflow", "Plan workflow"],
   ["wording", "Wording"],
+  ["tabs", "Browser tabs"],
   ["pricing", "Services and pricing"],
   ["sod", "Start of Day"],
   ["eod", "End of Day"],
@@ -92,5 +94,6 @@ export function mountSettings(container, { param = "", staff = null } = {}) {
   else if (tab === "pricing") mountServicePrices(body, { staff });
   else if (tab === "sod") mountSodSettings(body, { staff });
   else if (tab === "eod") mountEndOfDaySettings(body, { staff });
+  else if (tab === "tabs") mountTabSettings(body, { staff });
   else mountRecordingSettings(body, { staff, embedded: true });
 }
