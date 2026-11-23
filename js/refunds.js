@@ -171,7 +171,10 @@ const valueText = (s) => (!s.value ? "" : s.need === "ref" ? `Reference ${s.valu
 const methodText = (r) => (r.method === "cash" ? (r.cashGiven ? `Cash, ${money(r.cashAmount)} already given` : "Cash, not given yet")
   : r.method === "bank" ? `Bank transfer to the account ending ${r.bankLast3 || "…"}` : "Account credit in Timely");
 function itemSub(it) {
-  if (it.kind !== "product") return [it.reason, it.note].filter(Boolean).join(" · ");
+  if (it.kind !== "product") {
+    return [it.reason, it.kind === "package" && it.visitsAll ? `${it.visitsLeft} of ${it.visitsAll} visits left` : "",
+      it.invoiceId && `Invoice ${it.invoiceId}`, it.note].filter(Boolean).join(" · ");
+  }
   const cond = it.condition === "faulty" ? `Faulty · ${it.action === "supplier" ? "back to the supplier" : "keep as a tester"}` : it.reason;
   const back = (RETURNED.find(([k]) => k === it.returned) || [, ""])[1];
   return [cond, back, it.invoiceId && `Invoice ${it.invoiceId}`, it.note].filter(Boolean).join(" · ");
@@ -309,6 +312,32 @@ async function visitsFor(p) {
   } catch (err) { console.warn("Visits not read:", err); return []; }
 }
 
+// Paid services (SALES RECORD) and packages (Customer Packages), from Refunds.gs
+async function sourcesFor(p) {
+  try {
+    const res = await callApi({ action: "refunds", op: "sources", patientId: p.id });
+    if (!res || res.ok === false) throw new Error((res && res.error) || "No answer");
+    return { services: res.services || [], packages: res.packages || [], problem: res.problem || "",
+      problems: res.problems || [], salesAt: res.salesAt || "", packagesAt: res.packagesAt || "" };
+  } catch (err) {
+    console.warn("Services and packages not read:", err);
+    return { services: [], packages: [], problem: "Their invoices and packages couldn't be loaded.", problems: [], salesAt: "", packagesAt: "" };
+  }
+}
+// What's already in one of their refunds (not cancelled): source key → refund number
+async function refundedKeys(p) {
+  try {
+    const snap = await getDocs(query(collection(db, "refunds"), where("patientId", "==", p.id)));
+    const m = new Map();
+    snap.docs.forEach((d) => {
+      const r = d.data() || {};
+      if (r.status === "cancelled") return;
+      (r.items || []).forEach((it) => { if (it && it.srcKey) m.set(it.srcKey, refundNo({ id: d.id })); });
+    });
+    return m;
+  } catch (err) { console.warn("Earlier refunds not read:", err); return new Map(); }
+}
+
 async function mountForm(container, { staff, patientId }) {
   const root = document.createElement("section");
   root.className = "page wide rf";
@@ -318,8 +347,8 @@ async function mountForm(container, { staff, patientId }) {
   const set = await loadSettings();
   if (!root.isConnected) return;
 
-  const blank = () => ({ name: "", amount: "", reason: "", note: "" });
-  const st = { patient: null, hits: [], sales: null, visits: null, prodList: null, tried: false,
+  const blank = () => ({ name: "", amount: "", reason: "", note: "", srcKey: "", invoiceId: "", date: "", left: 0, of: 0, paid: 0 });
+  const st = { patient: null, hits: [], sales: null, visits: null, src: null, prodList: null, tried: false,
     kinds: { service: false, package: false, product: false }, services: [], packages: [], products: [],
     total: null, method: "", cashGiven: "", cashAmount: "", bank: { name: "", bsb: "", acct: "" }, note: "",
     notifyPatient: true, notifyStaff: true };
@@ -367,9 +396,67 @@ async function mountForm(container, { staff, patientId }) {
       autocomplete="off" aria-label="Find the patient"></label><div class="rf-hits" data-role="presults"></div>`;
   }
 
+  // Their paid services and packages from Timely: ticking one fills in a row
+  const srcFor = (list) => (st.src && st.src[list]) || [];
+  function srcRow(list, x, on) {
+    const was = st.src.was && st.src.was.get(x.key);
+    const tag = (t, grey) => `<span class="rf-tag${grey ? " is-grey" : ""}">${esc(t)}</span>`;
+    let sub, right, off, dim = false, tags = "";
+    if (list === "services") {
+      off = !(x.net > 0);
+      sub = [niceKey(x.date), x.staff, x.invoiceId && `Invoice ${x.invoiceId}`, x.qty > 1 && `${x.qty} ×`].filter(Boolean).join(" · ");
+      if (off) tags += tag("Paid with a package: refund the package", true);
+      else if (x.net < x.paid) tags += tag(x.byPackage ? "Part paid with a package" : "Discounted", true);
+      right = `<b>${money(x.net)}${x.net < x.paid ? `<small>was ${money(x.paid)}</small>` : ""}</b>`;
+    } else {
+      off = !(x.left > 0);
+      dim = !!x.expired;
+      sub = [`${x.left} of ${x.left + x.used} visits left`, x.expires ? `${x.expired ? "Expired" : "Expires"} ${niceKey(x.expires)}` : "No expiry",
+        `Paid ${money(x.paid)}${x.paidFrom === "price" ? " (list price)" : ""}`, x.invoiceId && `Invoice ${x.invoiceId}`].filter(Boolean).join(" · ");
+      if (off) tags += tag("All used", true); else if (x.expired) tags += tag("Expired", true);
+      right = `<b>${money(x.suggested)}<small>suggested</small></b>`;
+    }
+    if (was) tags += tag(`Already in ${was}`);
+    const lines = list === "packages" && (x.lines || []).length > 1
+      ? `<small>${esc(x.lines.map((l) => `${l.service || "Visit"}: ${l.left} left`).join(" · "))}</small>` : "";
+    return `<li><label class="rf-buy${on ? " is-on" : ""}${off ? " is-off" : dim ? " is-dim" : ""}">
+      <input type="checkbox" data-act="src" data-list="${list}" data-key="${esc(x.key)}"${on ? " checked" : ""}${off && !on ? " disabled" : ""}>
+      <span><strong>${esc(x.name)}${tags}</strong><small>${esc(sub)}</small>${lines}</span>${right}</label></li>`;
+  }
+  function srcHtml(list) {
+    if (!st.patient) return "";
+    const what = list === "services" ? "paid services" : "packages";
+    if (st.src === null) return `<p class="muted rf-wait">Loading their ${what} from Timely…</p>`;
+    const rows = srcFor(list);
+    const on = new Set(st[list].map((s) => s.srcKey).filter(Boolean));
+    const probs = [st.src.problem, ...(st.src.problems || [])].filter(Boolean).map((p) => `<p class="rf-warn">${esc(p)}</p>`).join("");
+    const at = new Date(list === "services" ? st.src.salesAt : st.src.packagesAt);
+    const when = !isNaN(at) ? `<p class="rf-srcwhen">From the Timely upload on ${esc(niceDay(at))}. Anything newer isn't here yet: type it in below.</p>` : "";
+    if (!rows.length) {
+      return `${probs}<p class="rf-hint">${list === "services" ? "No paid services found on their Timely invoices in the last 18 months."
+        : "No packages found for them in Timely."} Type it in below.</p>`;
+    }
+    return `${probs}<p class="rf-hint">Tick what's being refunded. ${list === "services" ? "Amounts are what they paid, after any discount."
+      : "The suggested amount is what they paid for the visits they haven't used."}</p>
+      <ul class="rf-buys">${rows.slice(0, 40).map((x) => srcRow(list, x, on.has(x.key))).join("")}</ul>${when}`;
+  }
+  const refreshSrc = () => ["services", "packages"].forEach((l) => {
+    const w = main.querySelector(`[data-role="src-${l}"]`);
+    if (w) w.innerHTML = srcHtml(l);
+  });
+  const fromHtml = (list, s) => (!s.srcKey ? "" : `<p class="rf-from">${esc(list === "services"
+    ? [`From invoice ${s.invoiceId}`, niceKey(s.date)].filter(Boolean).join(" · ")
+    : [`${s.left} of ${s.of} visits left`, `paid ${money(s.paid)}`, s.invoiceId && `invoice ${s.invoiceId}`].filter(Boolean).join(" · "))}</p>`);
+  // Another patient chosen: rows ticked from the last one's lists go
+  const dropSrc = () => ["services", "packages"].forEach((l) => {
+    st[l] = st[l].filter((s) => !s.srcKey);
+    if (!st[l].length && st.kinds[l === "services" ? "service" : "package"]) st[l].push(blank());
+  });
+
   const itemHtml = (list, label, s, i) => `<div class="rf-item">
     <div class="rf-item-head"><strong>${KINDS[list === "services" ? "service" : "package"].icon}${label}${st[list].length > 1 ? ` ${i + 1}` : ""}</strong>
       ${st[list].length > 1 ? `<button type="button" class="rf-x" data-act="rm" data-list="${list}" data-i="${i}" aria-label="Remove">×</button>` : ""}</div>
+    ${fromHtml(list, s)}
     <div class="rf-grid">
       <label class="rf-f rf-span2"><span>Which ${label.toLowerCase()}?</span><input class="fe-input" data-f="${list}.${i}.name" value="${esc(s.name)}"
         ${list === "services" ? 'list="rf-visits"' : ""} autocomplete="off" placeholder="${list === "services"
@@ -453,9 +540,9 @@ async function mountForm(container, { staff, patientId }) {
       ${sec(2, "What's being refunded?", `<div class="rf-kinds">${Object.entries(KINDS).map(([k, v]) =>
         `<button type="button" class="rf-kind${st.kinds[k] ? " is-on" : ""}" data-act="kind" data-k="${k}" aria-pressed="${st.kinds[k]}">
           ${v.icon}<strong>${v.label}</strong><small>${v.blurb}</small><span class="rf-tick">${I.check}</span></button>`).join("")}</div>
-        ${st.kinds.service ? `<div class="rf-group">${st.services.map((s, i) => itemHtml("services", "Service", s, i)).join("")}
+        ${st.kinds.service ? `<div class="rf-group"><div data-role="src-services">${srcHtml("services")}</div>${st.services.map((s, i) => itemHtml("services", "Service", s, i)).join("")}
           <button type="button" class="rf-add" data-act="addrow" data-list="services">+ Another service</button></div>` : ""}
-        ${st.kinds.package ? `<div class="rf-group">${st.packages.map((s, i) => itemHtml("packages", "Package", s, i)).join("")}
+        ${st.kinds.package ? `<div class="rf-group"><div data-role="src-packages">${srcHtml("packages")}</div>${st.packages.map((s, i) => itemHtml("packages", "Package", s, i)).join("")}
           <button type="button" class="rf-add" data-act="addrow" data-list="packages">+ Another package</button></div>` : ""}
         ${st.kinds.product ? `<div class="rf-group" data-role="prodwrap">${productInner()}</div>` : ""}`, "Tick everything that applies.")}
       ${sec(3, "How do they want the money back?", methodHtml())}
@@ -466,7 +553,10 @@ async function mountForm(container, { staff, patientId }) {
 
   function draftRefund() {
     const items = [];
-    const plain = (kind, s) => ({ kind, name: s.name.trim().slice(0, 150), amount: num(s.amount), reason: s.reason || "", note: s.note.trim().slice(0, 300) });
+    const plain = (kind, s) => ({ kind, name: s.name.trim().slice(0, 150), amount: num(s.amount), reason: s.reason || "", note: s.note.trim().slice(0, 300),
+      ...(s.srcKey ? { srcKey: String(s.srcKey).slice(0, 200), source: kind === "service" ? "invoice" : "package",
+        invoiceId: String(s.invoiceId || "").slice(0, 40), date: String(s.date || "").slice(0, 10),
+        ...(kind === "package" ? { visitsLeft: Number(s.left) || 0, visitsAll: Number(s.of) || 0, paid: round2(s.paid) } : {}) } : {}) });
     if (st.kinds.service) st.services.forEach((s) => items.push(plain("service", s)));
     if (st.kinds.package) st.packages.forEach((s) => items.push(plain("package", s)));
     if (st.kinds.product) st.products.forEach((p) => items.push({
@@ -539,9 +629,19 @@ async function mountForm(container, { staff, patientId }) {
     probsEl.innerHTML = probs.map((p) => `<li>${esc(p)}</li>`).join("");
   }
 
+  async function loadSources(p) {
+    st.src = null;
+    refreshSrc();
+    const [src, was] = await Promise.all([sourcesFor(p), refundedKeys(p)]);
+    if (st.patient !== p || !root.isConnected) return;
+    st.src = { ...src, was };
+    refreshSrc();
+  }
+
   async function loadPatientBits() {
     const p = st.patient;
     if (!p) return;
+    loadSources(p);
     const [sales, visits] = await Promise.all([salesFor(p), visitsFor(p)]);
     if (st.patient !== p || !root.isConnected) return;
     st.sales = sales;
@@ -647,6 +747,25 @@ async function mountForm(container, { staff, patientId }) {
 
   root.addEventListener("change", (e) => {
     const t = e.target;
+    if (t.dataset.act === "src") {
+      const list = t.dataset.list;
+      const x = srcFor(list).find((y) => y.key === t.dataset.key);
+      if (!x) return;
+      if (t.checked) {
+        const row = list === "services"
+          ? { name: x.name, amount: round2(x.net).toFixed(2), srcKey: x.key, invoiceId: x.invoiceId || "", date: x.date || "" }
+          : { name: x.name, amount: round2(x.suggested).toFixed(2), srcKey: x.key, invoiceId: x.invoiceId || "", date: x.boughtOn || "",
+            left: x.left, of: x.left + x.used, paid: x.paid };
+        const i = st[list].findIndex((s) => !s.srcKey && !s.name.trim() && !String(s.amount).trim());
+        if (i !== -1) st[list][i] = { ...st[list][i], ...row };
+        else st[list].push({ ...blank(), ...row });
+      } else {
+        st[list] = st[list].filter((s) => s.srcKey !== x.key);
+        if (!st[list].length) st[list].push(blank());
+      }
+      draw(); drawSum();
+      return;
+    }
     if (t.dataset.act === "buy") {
       const b = (st.sales || []).find((x) => x.key === t.dataset.key);
       if (!b) return;
@@ -668,13 +787,13 @@ async function mountForm(container, { staff, patientId }) {
 
   root.addEventListener("click", (e) => {
     const a = e.target.closest("[data-act]");
-    if (!a || a.dataset.act === "buy") return;
+    if (!a || a.dataset.act === "buy" || a.dataset.act === "src") return;
     const act = a.dataset.act;
     if (act === "pick") {
-      st.patient = st.hits[+a.dataset.i] || null; st.sales = null; st.visits = null;
+      st.patient = st.hits[+a.dataset.i] || null; st.sales = null; st.visits = null; st.src = null; dropSrc();
       draw(); drawSum(); loadPatientBits();
     } else if (act === "unpick") {
-      st.patient = null; st.sales = null; st.visits = null;
+      st.patient = null; st.sales = null; st.visits = null; st.src = null; dropSrc();
       draw(); drawSum();
       const q = main.querySelector('[data-role="pq"]'); if (q) q.focus();
     } else if (act === "kind") {
