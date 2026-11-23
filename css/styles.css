@@ -14483,3 +14483,33 @@ a.md-tcheck { color: var(--primary); text-decoration: none; font-weight: 800; }
 .rf-buy > span > small + small { margin-top: 2px; }
 .rf-from { margin: -2px 0 10px; font-size: 12px; color: #64748b; }
 .rf-srcwhen { margin: 6px 0 12px; font-size: 12px; color: #94a3b8; }
+
+/* Settings → Services and pricing */
+.svp-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
+.svp-head h3 { margin: 0 0 4px; }
+.svp-head p { margin: 0; max-width: 640px; }
+.svp-acts { display: flex; gap: 8px; flex-wrap: wrap; }
+.svp-tools { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.svp-tools input[type="search"] { flex: 1 1 240px; max-width: 360px; }
+.svp-tools .fb-select { flex: 0 1 220px; }
+.svp-count { margin-left: auto; font-size: 13px; }
+.svp-table td { vertical-align: top; }
+.svp-table td small, .svp-sub { display: block; margin-top: 2px; font-size: 12px; color: #64748b; }
+.svp-num { text-align: right; white-space: nowrap; }
+.svp-table tr.is-hidden td { opacity: .55; }
+.svp-table .svp-hid { color: #b45309; font-weight: 600; }
+.svp-dlg { width: min(560px, calc(100vw - 32px)); }
+.svp-dlg.is-wide { width: min(780px, calc(100vw - 32px)); }
+.svp-dlg textarea.fe-input { width: 100%; font-family: inherit; }
+.svp-two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 560px) { .svp-two { grid-template-columns: 1fr; } }
+.svp-hist summary { cursor: pointer; font-size: 13px; color: #0f766e; }
+.svp-hist ul { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
+.svp-hist small { display: block; color: #64748b; }
+.svp-sum { margin: 10px 0 0; font-size: 13px; color: #475569; }
+.svp-prev { max-height: 280px; overflow: auto; margin: 8px 0 10px; border: 1px solid #e2e8f0; border-radius: 10px; }
+.svp-prev table { width: 100%; margin: 0; }
+.svp-tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.svp-tag.is-new { background: #dcfce7; color: #166534; }
+.svp-tag.is-change { background: #fef3c7; color: #92400e; }
+.svp-tag.is-same, .svp-tag.is-alias { background: #f1f5f9; color: #64748b; }

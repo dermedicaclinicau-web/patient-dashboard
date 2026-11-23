@@ -1930,6 +1930,32 @@ match /inv_count_drafts/{id} {
       allow write: if can('refunds.manage');
     }
 
+    // ===================== Services and pricing (Settings) =====================
+    // Regular prices inc GST, used to work out package refunds. Hidden, never deleted.
+    match /service_prices/{id} {
+      function okPrice(d) {
+        return d.keys().hasOnly(['name', 'nameKey', 'category', 'price', 'aliases', 'aliasKeys', 'note', 'active', 'history',
+                                 'createdAt', 'createdBy', 'createdByUid', 'updatedAt', 'updatedBy', 'updatedByUid'])
+          && d.name is string && d.name.size() > 0 && d.name.size() <= 150
+          && d.nameKey is string && d.nameKey.size() > 0 && d.nameKey.size() <= 150
+          && d.category is string && d.category.size() <= 60
+          && d.price is number && d.price >= 0 && d.price <= 100000
+          && d.aliases is list && d.aliases.size() <= 10
+          && d.aliasKeys is list && d.aliasKeys.size() <= 10
+          && d.note is string && d.note.size() <= 300
+          && d.active is bool
+          && d.history is list && d.history.size() <= 20;
+      }
+      allow read: if isStaff();
+      allow create: if (isAdmin() || can('refunds.manage')) && okPrice(request.resource.data)
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.updatedByUid == request.auth.uid;
+      allow update: if (isAdmin() || can('refunds.manage')) && okPrice(request.resource.data)
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.updatedByUid == request.auth.uid;
+      allow delete: if false;
+    }
+
     // ===================== Safety net =====================
     // Anything not allowed by a rule above stays locked
     // (this includes staff_roles and staff_audit, which only Apps Script writes)
