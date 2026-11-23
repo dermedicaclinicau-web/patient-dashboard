@@ -14410,3 +14410,9 @@ body.scan-full { overflow: hidden; }
 
 /* Bank details: numbers stay plain text (no phone-link underline) */
 .rf-bankrow b a, .rf-bankrow a[x-apple-data-detectors] { color: inherit !important; text-decoration: none !important; pointer-events: none; }
+
+/* Refunds: email switches */
+.rf-notify { display: grid; gap: .6rem; margin-bottom: .9rem; padding: .8rem .9rem; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); }
+.rf-notify .prs-toggle.is-off { opacity: .55; cursor: not-allowed; }
+.rf-notify .prs-toggle small { line-height: 1.4; }
+.rf-mailline { margin: .3rem 0 0; font-size: .78rem; color: var(--muted); }

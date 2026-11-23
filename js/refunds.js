@@ -320,7 +320,8 @@ async function mountForm(container, { staff, patientId }) {
   const blank = () => ({ name: "", amount: "", reason: "", note: "" });
   const st = { patient: null, hits: [], sales: null, visits: null, prodList: null, tried: false,
     kinds: { service: false, package: false, product: false }, services: [], packages: [], products: [],
-    total: null, method: "", cashGiven: "", cashAmount: "", bank: { name: "", bsb: "", acct: "" }, note: "" };
+    total: null, method: "", cashGiven: "", cashAmount: "", bank: { name: "", bsb: "", acct: "" }, note: "",
+    notifyPatient: true, notifyStaff: true };
 
   root.innerHTML = `
     <a class="tm-back" href="#/tasks/new">${I.back}<span>Task Manager</span></a>
@@ -441,7 +442,7 @@ async function mountForm(container, { staff, patientId }) {
           <button type="button" class="rf-add" data-act="addrow" data-list="packages">+ Another package</button></div>` : ""}
         ${st.kinds.product ? `<div class="rf-group" data-role="prodwrap">${productInner()}</div>` : ""}`, "Tick everything that applies.")}
       ${sec(3, "How do they want the money back?", methodHtml())}
-      ${sec(4, "Anything else?", `<textarea class="fe-input rf-notein" rows="3" maxlength="1000" data-f="note"
+      ${sec(4, "Anything else?", `${notifyHtml()}<textarea class="fe-input rf-notein" rows="3" maxlength="1000" data-f="note"
         placeholder="Optional. Anything the team should know.">${esc(st.note)}</textarea>`)}
       <datalist id="rf-visits">${(st.visits || []).map((v) => `<option value="${esc(v.name)}">${esc(niceKey(v.date))}${v.staff ? ` · ${esc(v.staff)}` : ""}</option>`).join("")}</datalist>`;
   }
@@ -464,6 +465,7 @@ async function mountForm(container, { staff, patientId }) {
       cashGiven: st.method === "cash" && st.cashGiven === "yes",
       cashAmount: st.method === "cash" && st.cashGiven === "yes" ? num(st.cashAmount) || total : 0,
       bankLast3: st.method === "bank" ? st.bank.acct.slice(-3) : "", note: st.note.trim().slice(0, 1000),
+      notifyPatient: !!patientEmail() && st.notifyPatient, notifyStaff: !!st.notifyStaff,
     };
   }
 
@@ -505,8 +507,10 @@ async function mountForm(container, { staff, patientId }) {
     if (document.activeElement !== t) t.value = r.total > 0 ? r.total.toFixed(2) : "";
     sum.querySelector('[data-role="total-note"]').innerHTML = st.total !== null && round2(st.total) !== r.itemsTotal
       ? `The items add up to ${money(r.itemsTotal)}. <button type="button" data-act="resettotal">Use that</button>` : "";
-    sum.querySelector('[data-role="sum-method"]').innerHTML = st.method
-      ? `<p class="rf-methodline">${METHODS[st.method].icon}<span>${esc(methodText({ ...r, cashGiven: st.cashGiven === "yes" }))}</span></p>` : "";
+    sum.querySelector('[data-role="sum-method"]').innerHTML = (st.method
+      ? `<p class="rf-methodline">${METHODS[st.method].icon}<span>${esc(methodText({ ...r, cashGiven: st.cashGiven === "yes" }))}</span></p>` : "")
+      + (st.patient ? `<p class="rf-mailline">${r.notifyPatient ? "Patient is emailed" : "No emails to the patient"} · ${
+        r.notifyStaff ? "staff are emailed now" : "staff not emailed"}</p>` : "");
     const steps = r.items.length && st.method ? buildSteps(r, set) : [];
     sum.querySelector('[data-role="sum-next"]').innerHTML = steps.length ? `<h4>What happens next</h4><ol>${steps.map((s) =>
       `<li class="${waiting(steps, s) ? "is-wait" : ""}">${avatar(s.whoName || "?")}<span><strong>${esc(s.title)}</strong>
@@ -561,6 +565,7 @@ async function mountForm(container, { staff, patientId }) {
     btn.textContent = "Sending…";
     try {
       const id = await saveRefund(draftRefund());
+      Promise.resolve(callApi({ action: "refunds", op: "notify", id })).catch(() => {});   // emails now, not at the next 5-minute check
       showToast("Refund request sent");
       location.hash = `#/refunds/r/${encodeURIComponent(id)}`;
     } catch (err) {
@@ -587,7 +592,8 @@ async function mountForm(container, { staff, patientId }) {
     });
     batch.set(ref, {
       ...base, items: r.items, itemsTotal: r.itemsTotal, method: r.method, cashGiven: r.cashGiven, cashAmount: r.cashAmount,
-      bankLast3: r.bankLast3, note: r.note, steps, ...recompute(steps), status: "open",
+      bankLast3: r.bankLast3, note: r.note, notifyPatient: r.notifyPatient, notifyStaff: r.notifyStaff,
+      steps, ...recompute(steps), status: "open",
       events: [{ at: new Date().toISOString(), by, action: "Requested", note: `${money(r.total)} · ${METHODS[r.method].label}` }],
       createdAt: serverTimestamp(), createdBy: by, createdByUid: myUid(), updatedAt: serverTimestamp(),
     });
@@ -632,6 +638,8 @@ async function mountForm(container, { staff, patientId }) {
       refreshProd(); drawSum();
       return;
     }
+    if (t.dataset.act === "np") { st.notifyPatient = t.checked; drawSum(); return; }
+    if (t.dataset.act === "ns") { st.notifyStaff = t.checked; drawSum(); return; }
     if (t.dataset.act === "addprod") {
       const p = (st.prodList || []).find((x) => x.id === t.value);
       if (p) st.products.push(newProduct({ key: `p_${p.id}_${Date.now()}`, productId: p.id, name: p.name, unit: p.price }));
@@ -958,6 +966,21 @@ async function mountRefund(container, { id, staff }) {
 
   const canCancel = () => r.status === "open" && (boss() || r.createdByUid === myUid()
     || (r.steps || []).some((s) => s.key === "approve" && !s.done && s.whoId === myUid()));
+  const patientEmail = () => String((st.patient && st.patient.email) || "").trim();
+  function notifyHtml() {
+    const email = patientEmail();
+    const onP = !!email && st.notifyPatient;
+    const pNote = !st.patient ? "Choose the patient first."
+      : !email ? "No email on file for this patient. Add one on their patient page to email them."
+      : st.method === "cash" && st.cashGiven === "yes" ? `To ${email}. Cash was already given, so there's no "request received" email.`
+      : `To ${email}. One now, and one when the money is sent or the credit is added.`;
+    return `<div class="rf-notify">
+      <label class="prs-toggle${email ? "" : " is-off"}"><input type="checkbox" data-act="np"${onP ? " checked" : ""}${email ? "" : " disabled"}>
+        <span class="prs-sw"></span><span><b>Email the patient</b><small>${esc(pNote)}</small></span></label>
+      <label class="prs-toggle"><input type="checkbox" data-act="ns"${st.notifyStaff ? " checked" : ""}>
+        <span class="prs-sw"></span><span><b>Email the staff now</b><small>Each person gets an email with their step. Their task is on their dashboard either way.</small></span></label>
+    </div>`;
+  }
 
   function draw() {
     root.querySelectorAll("[data-sv]").forEach((i) => { drafts[i.dataset.sv] = i.value; });
@@ -985,6 +1008,8 @@ async function mountRefund(container, { id, staff }) {
             <div class="rf-totalrow"><span>Total</span><b>${money(r.total)}</b></div>
             <p class="rf-methodline">${(METHODS[r.method] || {}).icon || ""}<span>${esc(methodText(r))}</span></p>
             ${r.note ? `<p class="rf-note">${esc(r.note)}</p>` : ""}
+            <p class="rf-mailline">${r.notifyPatient === false ? "No emails to the patient" : "The patient is emailed"} · ${
+              r.notifyStaff === false ? "staff weren't emailed when it was made" : "staff were emailed their steps"}</p>
           </section>
           ${r.method === "bank" ? bankCard() : ""}
           <section class="rf-box2"><h4>History</h4><ul class="rf-tl">${[...(r.events || [])].reverse().map((ev) =>
