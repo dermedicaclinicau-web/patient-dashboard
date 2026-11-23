@@ -1,7 +1,9 @@
 import { fetchDayAppointments } from "./appointments.js";
 import { escapeHtml, getInitials, toDateKey, showToast } from "./utils.js";
 import { listProducts, isKitProduct, getMyKitDay, saveKitDayStart, saveDayStart, plural, unitPlural,
-  getServiceLinks, serviceKey, listOpenContainers } from "./inventory-api.js";
+  getServiceLinks, serviceKey, listOpenContainers, listAllLots, listRequests, lowAt, batchText, locLabel,
+  reqNumber, awaitingApproval } from "./inventory-api.js";
+import { loadSodLayout, sodBands, sodColumnsCss } from "./sod-settings.js";
 import { can } from "./perms.js";
 import { db } from "./firebase-config.js";
 import { collection, getDocs, query, where, FieldPath, doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -96,7 +98,10 @@ async function checkStartOfDay(staff) {
   try {
     if (await isStartOfDayOff()) { startedKey = today; return; }   // turned off for them: no more checks today
     const mine = session;
-    const st = await dayState(staff).catch((err) => { console.warn("Day check failed:", err); return undefined; });
+    const [st] = await Promise.all([
+      dayState(staff).catch((err) => { console.warn("Day check failed:", err); return undefined; }),
+      getLayout(staff),   // the welcome's layout, ready before it opens (so it doesn't change size)
+    ]);
     if (mine !== session || current || watchStaff !== staff) return;
     if (st === null) { startedKey = today; return; }   // started today
     if (st === undefined) return;                        // couldn't check: try again later
@@ -289,22 +294,16 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
       <h2 id="sod-title" class="sod-title serif">Welcome, ${esc(name)}</h2>
       <p class="sod-sub">${preview ? "Preview · nothing is saved" : "Have a great day today!"}</p>
 
-      <div class="sod-stats">
-        <div class="sod-stat"><strong data-stat="appts">–</strong><span>appointments today</span></div>
-        <div class="sod-stat"><strong data-stat="staff">–</strong><span>clinicians on</span></div>
-      </div>
-
-      <div class="sod-you" data-role="foryou">
-        <p class="sod-you-h">For you today</p>
-        <div class="skeleton" style="height:48px;border-radius:10px"></div>
-      </div>
-
       <div data-role="kit"></div>
+
+      <div class="sod-cards" data-role="cards"><div class="skeleton" style="height:96px;border-radius:14px"></div></div>
 
       <button type="button" class="sod-btn" data-act="start">Start my day</button>
       ${preview ? "" : `<button type="button" class="sod-later" data-act="later">Remind me in ${SNOOZE_MIN} minutes</button>`}
     </div>`;
 
+  const lay0 = !kitOnly && layoutCache.uid === staff.uid ? layoutCache.value : null;   // already loaded: open at the right size
+  if (lay0) { dlg.dataset.size = lay0.size; dlg.classList.add(`size-${lay0.size}`); }
   document.body.appendChild(dlg);
   current = dlg;
   let kitMode = false;    // the kit count is on screen: clicking outside doesn't close it (nothing typed is lost)
@@ -428,7 +427,7 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
     localStorage.setItem(seenKey(staff), "1");
   } catch { /* ignore */ }
 
-  loadStats(dlg, staff);
+  renderLayout(dlg, staff);
 }
 /* ---------- Your kit: "How many units remaining?" (blind: nothing is filled in) ---------- */
 // Every clinician ticked as carrying a kit counts it, every day, whether or not they're injecting.
@@ -498,14 +497,14 @@ function renderKit(dlg, staff, kit, close) {
 /* ---------- The welcome: the clinic today, and what's waiting for you ---------- */
 
 // My open tasks due today or earlier, oldest first
-async function myTasksDue(staff, key) {
+async function myTasksDue(staff, key, all = false) {
   const snap = await getDocs(query(collection(db, "staff-task-list"), where("status", "==", "Open")));
   const ids = [staff.uid, staff.id, staff.staffId].filter(Boolean).map(String);
   const nm = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
     .filter((t) => (t.assignedToId && ids.includes(String(t.assignedToId))) || (t.assignedToName && nm(t.assignedToName) === nm(staff.name)))
-    .filter((t) => t.dueDate && t.dueDate <= key)
-    .sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)));
+    .filter((t) => all || (t.dueDate && t.dueDate <= key))
+    .sort((a, b) => String(a.dueDate || "9999").localeCompare(String(b.dueDate || "9999")));
 }
 
 // A note's date, from whichever date field it has (YYYY-MM-DD, DD/MM/YYYY, a Firestore Timestamp or a number)
@@ -582,79 +581,222 @@ async function stockForToday(appts) {
     return {
       name: ps.length === 1 ? ps[0].name : [...g.services][0],
       bookings: g.bookings, shelf, jt, unit: ps[0].stockUnit, doseUnit: ps[0].doseUnit || "units",
-      kit, vialUnits, low: !kit && shelf + jt < g.bookings,
+      kit, vialUnits, low: !kit && shelf + jt < g.bookings, cats: [...new Set(ps.map((p) => p.category))],
     };
   }).filter(Boolean).sort((a, b) => (b.low - a.low) || b.bookings - a.bookings);
 }
-async function loadStats(dlg, staff) {
-  const wrap = dlg.querySelector(".sod-stats");
-  const you = dlg.querySelector('[data-role="foryou"]');
-  const key = toDateKey();
-  const [apR, tkR, ntR] = await Promise.allSettled([fetchDayAppointments(key), myTasksDue(staff, key), myDraftNotes(staff)]);
-  if (!dlg.isConnected) return;
+/* ---------- The welcome: the cards set up in Settings → Start of Day ---------- */
+// Each person's preset (or Everyone's). Kept for 10 minutes, so it's ready before the welcome opens.
+const LAYOUT_TTL = 10 * 60000;
+let layoutCache = { uid: "", at: 0, p: null, value: null };
+function getLayout(staff) {
+  const id = (staff && staff.uid) || "";
+  if (layoutCache.p && layoutCache.uid === id && Date.now() - layoutCache.at < LAYOUT_TTL) return layoutCache.p;
+  const entry = { uid: id, at: Date.now(), p: null, value: null };
+  entry.p = loadSodLayout(staff).then((l) => { entry.value = l; return l; });
+  layoutCache = entry;
+  return entry.p;
+}
 
-  // The clinic today
-  const appts = apR.status === "fulfilled" ? (apR.value.appointments || []) : null;
-  if (wrap && wrap.isConnected) {
-    if (!appts) { console.warn("Start of Day stats failed:", apR.reason); wrap.hidden = true; }
-    else if (!appts.length) wrap.innerHTML = `<p class="sod-note">No appointments are scheduled today.</p>`;
+const CARD_ICO = {
+  clinic: svg('<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>'),
+  appts: ICO.cal, tasks: ICO.task, notes: ICO.note, inventory: ICO.box,
+  announcements: svg('<path d="M3 11v2a1 1 0 0 0 1 1h3l5 4V6L7 10H4a1 1 0 0 0-1 1z"/><path d="M16 9a3 3 0 0 1 0 6"/><path d="M19 6a7 7 0 0 1 0 12"/>'),
+  links: svg('<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>'),
+  message: svg('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>'),
+};
+const sodNone = (t) => `<p class="sod-c-none">${esc(t)}</p>`;
+const sodRow = (inner, href = "") => (href ? `<a class="sod-row" href="${href}">${inner}</a>` : `<div class="sod-row">${inner}</div>`);
+const sodMore = (n, href, where) => (n > 0 ? `<a class="sod-c-more" href="${href}">${n} more on ${where} →</a>` : "");
+const sodS = (n) => (n === 1 ? "" : "s");
+const daysUntil = (k) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(k || "");
+  if (!m) return null;
+  const t = new Date();
+  t.setHours(0, 0, 0, 0);
+  return Math.round((new Date(+m[1], +m[2] - 1, +m[3]) - t) / 864e5);
+};
+
+function clinicBody({ appts }) {
+  if (!appts) return sodNone("Couldn't load today's appointments.");
+  if (!appts.length) return sodNone("No appointments are scheduled today.");
+  const clin = new Set(appts.map((a) => a.staff).filter(Boolean)).size;
+  return `<div class="sod-stats">
+    <div class="sod-stat"><strong>${appts.length}</strong><span>appointments today</span></div>
+    <div class="sod-stat"><strong>${clin}</strong><span>clinicians on</span></div></div>`;
+}
+
+function apptsBody(c, { appts, staff }) {
+  if (!appts) return sodNone("Couldn't load your appointments.");
+  const mine = appts.filter((a) => sameStaff(a.staff, staff.name) && !NOT_SEEN.test(String(a.status || "")))
+    .sort((a, b) => (Number(a.sortMinutes) || 0) - (Number(b.sortMinutes) || 0));
+  if (!mine.length) return sodNone("No appointments with you today.");
+  const rows = mine.slice(0, c.cfg.max).map((a) => sodRow(
+    `<b>${esc(a.time || "")}</b><span>${esc(a.patientName || "Patient")}<small>${esc((a.services || []).join(", "))}</small></span>`,
+    a.patientId ? `#/patient/${encodeURIComponent(a.patientId)}` : ""));
+  return `<div class="sod-rows">${rows.join("")}</div>${sodMore(mine.length - c.cfg.max, "#/calendar", "the Calendar")}`;
+}
+
+function tasksBody(c, { tasks, key }) {
+  if (!tasks) return sodNone("Couldn't load your tasks.");
+  if (!tasks.length) return sodNone(c.cfg.show === "all" ? "No open tasks." : "Nothing due today.");
+  const when = (t) => (!t.dueDate ? "No due date" : t.dueDate < key ? `Overdue (${niceDate(t.dueDate)})`
+    : t.dueDate === key ? "Due today" : `Due ${niceDate(t.dueDate)}`);
+  const rows = tasks.slice(0, c.cfg.max).map((t) => sodRow(
+    `<span>${esc(t.taskText || "Reminder")}<small>${esc([t.patientName, when(t)].filter(Boolean).join(" · "))}</small></span>${
+      t.dueDate && t.dueDate < key ? '<em class="is-bad">Overdue</em>' : ""}`,
+    t.patientId ? `#/patient/${encodeURIComponent(t.patientId)}` : ""));
+  return `<div class="sod-rows">${rows.join("")}</div>${sodMore(tasks.length - c.cfg.max, "#/home", "My dashboard")}`;
+}
+
+function notesBody({ notes }) {
+  if (!notes) return sodNone("Couldn't load your consultation notes.");
+  if (!notes.recent && !notes.older) return sodNone("No consultation notes waiting for review.");
+  return `<div class="sod-rows">${sodRow(`<span>${notes.recent
+    ? `${notes.recent} consultation note${sodS(notes.recent)} from the last week` : "None from the last week"}${
+    notes.older ? `<small>and ${notes.older} older</small>` : ""}</span>`, "#/home")}</div>`;
+}
+
+function linksBody(c) {
+  const list = c.cfg.links || [];
+  if (!list.length) return "";
+  return `<div class="sod-links">${list.map((l) => (/^https:/i.test(l.href)
+    ? `<a class="sod-link" href="${esc(l.href)}" target="_blank" rel="noopener">${esc(l.label)}</a>`
+    : `<a class="sod-link" href="${esc(l.href)}">${esc(l.label)}</a>`)).join("")}</div>`;
+}
+
+const messageBody = (c) => {
+  const t = String(c.cfg.text || "").trim();
+  return t ? `<div class="sod-msg">${esc(t).replace(/\n/g, "<br>")}</div>` : "";
+};
+
+// Inventory highlights: only what the card is set to show, in its categories and place
+async function inventoryBody(cfg, appts) {
+  const want = new Set(cfg.show);
+  const locs = cfg.loc === "any" ? ["shelf", "jt"] : [cfg.loc];
+  const catOk = (cat) => !cfg.cats.length || cfg.cats.includes(cat);
+  const quiet = (what) => (err) => { console.warn(`Start of Day ${what} failed:`, err); return undefined; };
+  const [products, lots, reqs, today] = await Promise.all([
+    want.has("low") || want.has("expiring") ? listProducts().catch(quiet("products")) : null,
+    want.has("expiring") ? listAllLots().catch(quiet("batches")) : null,
+    want.has("requests") ? listRequests().catch(quiet("order requests")) : null,
+    want.has("today") && appts ? stockForToday(appts).catch(quiet("stock for today")) : null,
+  ]);
+  const byId = new Map((products || []).map((p) => [p.id, p]));
+  const secs = [];
+  const fail = (what) => sodNone(`Couldn't load ${what}.`);
+
+  if (want.has("today")) {
+    if (!appts || today === undefined) secs.push({ title: "Stock for today", body: fail("stock for today") });
+    else if (today === null) secs.push({ title: "Stock for today", body: sodNone("Link services to products in Inventory → Service links to see this.") });
     else {
-      wrap.querySelector('[data-stat="appts"]').textContent = appts.length;
-      wrap.querySelector('[data-stat="staff"]').textContent = new Set(appts.map((a) => a.staff).filter(Boolean)).size;
+      const list = today.filter((s) => !s.cats || !s.cats.length || s.cats.some(catOk));
+      if (list.length) {
+        const rows = list.slice(0, cfg.max).map((s) => {
+          const where = locs.map((l) => (l === "shelf" ? s.shelf && `${plural(s.shelf, s.unit)} on the Shelf`
+            : s.jt && `${plural(s.jt, s.unit)} in JT storage`)).filter(Boolean).join(", ") || `No ${unitPlural(s.unit)} in stock`;
+          const vial = s.kit && s.vialUnits ? `Opened vial ${s.vialUnits} ${s.doseUnit} · ` : "";
+          return sodRow(`<span>${esc(s.name)}<small>${esc(vial + where)}</small></span><em class="${s.low ? "is-bad" : ""}">${
+            s.bookings} booking${sodS(s.bookings)}</em>`);
+        });
+        secs.push({ title: "Stock for today", body: `<div class="sod-rows">${rows.join("")}</div>${sodMore(list.length - cfg.max, "#/inventory", "Inventory")}` });
+      }
     }
   }
-
-  // For you today
-  if (!you || !you.isConnected) return;
-  const stock = can("inventory.manage") && appts
-    ? await stockForToday(appts).catch((err) => { console.warn("Start of Day stock failed:", err); return []; })
-    : [];
-  if (!you.isConnected) return;
-  if (tkR.status === "rejected") console.warn("Start of Day tasks failed:", tkR.reason);
-  if (ntR.status === "rejected") console.warn("Start of Day notes failed:", ntR.reason);
-  const lines = [];
-
-  const mine = (appts || []).filter((a) => sameStaff(a.staff, staff.name))
-    .sort((a, b) => (Number(a.sortMinutes) || 0) - (Number(b.sortMinutes) || 0));
-  if (mine.length) {
-    lines.push(`<li>${ICO.cal}<span><strong>${mine.length} appointment${mine.length === 1 ? "" : "s"}</strong> with you${
-      mine[0].time ? ` · first at ${esc(mine[0].time)}` : ""}</span></li>`);
+  if (want.has("low")) {
+    if (!products) secs.push({ title: "Low stock", body: fail("stock levels") });
+    else {
+      const low = products.filter((p) => p.active && catOk(p.category))
+        .flatMap((p) => locs.filter((l) => lowAt(p, l)).map((l) => ({ p, l })));
+      if (low.length) {
+        const rows = low.slice(0, cfg.max).map(({ p, l }) => sodRow(
+          `<span>${esc(p.name)}<small>${esc(locLabel(l))}</small></span><em class="is-bad">${esc(plural(p.stock[l], p.stockUnit))} left</em>`));
+        secs.push({ title: `Low stock · ${low.length}`, body: `<div class="sod-rows">${rows.join("")}</div>${sodMore(low.length - cfg.max, "#/inventory", "Inventory")}` });
+      }
+    }
   }
+  if (want.has("expiring")) {
+    if (!products || !lots) secs.push({ title: "Expiring soon", body: fail("expiry dates") });
+    else {
+      const soon = lots.filter((l) => locs.includes(l.loc) && l.qty > 0 && l.expiry)
+        .map((l) => ({ l, p: byId.get(l.productId), d: daysUntil(l.expiry) }))
+        .filter((x) => x.p && x.p.active && catOk(x.p.category) && x.d !== null && x.d <= cfg.days)
+        .sort((a, b) => a.d - b.d);
+      if (soon.length) {
+        const rows = soon.slice(0, cfg.max).map(({ l, p, d }) => sodRow(
+          `<span>${esc(p.name)}<small>${esc([batchText(p, l.batch), plural(l.qty, p.stockUnit), locLabel(l.loc)].filter(Boolean).join(" · "))}</small></span>`
+          + `<em class="${d < 0 ? "is-bad" : "is-warn"}">${d < 0 ? "Expired" : d === 0 ? "Today" : `${d} day${sodS(d)}`}</em>`));
+        secs.push({ title: `Expiring soon · ${soon.length}`, body: `<div class="sod-rows">${rows.join("")}</div>${sodMore(soon.length - cfg.max, "#/inventory", "Inventory")}` });
+      }
+    }
+  }
+  if (want.has("requests")) {
+    if (!reqs) secs.push({ title: "Order requests", body: fail("order requests") });
+    else {
+      const open = reqs.filter((r) => r.status === "open");
+      if (open.length) {
+        const rows = open.slice(0, cfg.max).map((r) => {
+          const tag = r.urgency === "urgent" ? ["is-bad", "Urgent"] : awaitingApproval(r) ? ["is-warn", "Needs approval"] : ["", "Open"];
+          const names = r.items.map((i) => i.name);
+          return sodRow(`<span>${esc(reqNumber(r))}${r.requestedBy ? ` · ${esc(r.requestedBy)}` : ""}<small>${
+            esc(names.slice(0, 3).join(", ") + (names.length > 3 ? "…" : ""))}</small></span><em class="${tag[0]}">${tag[1]}</em>`);
+        });
+        secs.push({ title: `Order requests · ${open.length}`, body: `<div class="sod-rows">${rows.join("")}</div>${sodMore(open.length - cfg.max, "#/inventory", "Inventory")}` });
+      }
+    }
+  }
+  if (!secs.length) return sodNone("Nothing to flag. Stock looks fine.");
+  const heads = want.size > 1;
+  return secs.map((s) => `${heads ? `<p class="sod-c-h">${esc(s.title)}</p>` : ""}${s.body}`).join("");
+}
 
-  const tasks = tkR.status === "fulfilled" ? tkR.value : [];
-  if (tasks.length) {
-    const overdue = tasks.filter((t) => t.dueDate < key).length;
-    const item = (t) => {
-      const inner = `${esc(t.taskText || "Reminder")}<small>${esc(t.patientName || "")}${t.patientName ? " · " : ""}${
-        t.dueDate < key ? `Overdue (${esc(niceDate(t.dueDate))})` : "Due today"}</small>`;
-      return t.patientId ? `<a href="#/patient/${encodeURIComponent(t.patientId)}">${inner}</a>` : `<span>${inner}</span>`;
-    };
-    lines.push(`<li class="${overdue ? "is-bad" : ""}">${ICO.task}<span><strong>${tasks.length} task${tasks.length === 1 ? "" : "s"} due</strong>${
-      overdue ? ` · ${overdue} overdue` : ""}
-      <span class="sod-you-tasks">${tasks.slice(0, 3).map(item).join("")}${tasks.length > 3 ? `<small>and ${tasks.length - 3} more</small>` : ""}</span></span></li>`);
-  }
-  if (stock === null) {
-    lines.push(`<li>${ICO.box}<span><strong>Stock for today</strong><small>Link services to products in Inventory → Service links to see this.</small></span></li>`);
-  } else if (stock.length) {
-    const low = stock.filter((s) => s.low).length;
-    const row = (s) => {
-      const where = [s.shelf && `${plural(s.shelf, s.unit)} on the Shelf`, s.jt && `${plural(s.jt, s.unit)} in JT storage`]
-        .filter(Boolean).join(", ") || `No ${unitPlural(s.unit)} in stock`;
-      const vial = s.kit && s.vialUnits ? `Opened vial ${s.vialUnits} ${s.doseUnit} · ` : "";
-      return `<span class="sod-stock${s.low ? " is-low" : ""}">${esc(s.name)} · ${s.bookings} booking${s.bookings === 1 ? "" : "s"}<small>${esc(vial + where)}</small></span>`;
-    };
-    lines.push(`<li class="${low ? "is-bad" : ""}">${ICO.box}<span><strong>Stock for today</strong>${low ? ` · ${low} may run short` : ""}
-      <span class="sod-you-tasks">${stock.slice(0, 4).map(row).join("")}${stock.length > 4 ? `<small>and ${stock.length - 4} more</small>` : ""}</span></span></li>`);
-  }
-  const notes = ntR.status === "fulfilled" ? ntR.value : { recent: 0, older: 0 };
-  if (notes.recent) {
-    lines.push(`<li>${ICO.note}<span><strong>${notes.recent} consultation note${notes.recent === 1 ? "" : "s"}</strong> from the last week to review${
-      notes.older ? `<small>and ${notes.older} older on My dashboard</small>` : ""}</span></li>`);
-  }
+async function renderLayout(dlg, staff) {
+  const box = dlg.querySelector('[data-role="cards"]');
+  if (!box) return;
+  const lay = await getLayout(staff);
+  if (!box.isConnected) return;
+  if (!dlg.dataset.size) { dlg.dataset.size = lay.size; dlg.classList.add(`size-${lay.size}`); }
 
-  you.innerHTML = `<p class="sod-you-h">For you today</p>
-    ${lines.length ? `<ul>${lines.join("")}</ul>` : '<p class="sod-note">Nothing waiting for you. Enjoy your day!</p>'}
-    <a class="sod-you-more" href="#/home">Open My dashboard →</a>`;
+  const cards = lay.cards.filter((c) => c.type !== "inventory" || !c.cfg.stockOnly || can("menu.inventory"));
+  const has = (t) => cards.some((c) => c.type === t);
+  const inv = cards.find((c) => c.type === "inventory");
+  const tasksCard = cards.find((c) => c.type === "tasks");
+  const key = toDateKey();
+  const [apR, tkR, ntR] = await Promise.allSettled([
+    has("clinic") || has("appts") || (inv && inv.cfg.show.includes("today")) ? fetchDayAppointments(key) : Promise.resolve(null),
+    tasksCard ? myTasksDue(staff, key, tasksCard.cfg.show === "all") : Promise.resolve(null),
+    has("notes") ? myDraftNotes(staff) : Promise.resolve(null),
+  ]);
+  [apR, tkR, ntR].forEach((r) => { if (r.status === "rejected") console.warn("Start of Day card failed:", r.reason); });
+  const val = (r) => (r.status === "fulfilled" ? r.value : null);
+  const appts = val(apR) ? val(apR).appointments || [] : null;
+  const invHtml = inv ? await inventoryBody(inv.cfg, appts) : "";
+  if (!box.isConnected) return;
+
+  const ctx = { staff, key, appts, tasks: val(tkR), notes: val(ntR) };
+  const body = (c) => {
+    switch (c.type) {
+      case "clinic": return clinicBody(ctx);
+      case "appts": return apptsBody(c, ctx);
+      case "tasks": return tasksBody(c, ctx);
+      case "notes": return notesBody(ctx);
+      case "inventory": return invHtml;
+      case "links": return linksBody(c);
+      case "message": return messageBody(c);
+      default: return "";   // Announcements: Stage 3
+    }
+  };
+  const cardHtml = (c) => {
+    const b = body(c);
+    return b ? `<section class="sod-c is-${c.type}${c.type === "message" ? ` tone-${c.cfg.tone}` : ""}">
+      <header><span class="sod-c-ic">${CARD_ICO[c.type] || ""}</span><h3>${esc(c.title)}</h3></header>${b}</section>` : "";
+  };
+  const n = lay.arrange === "grid" ? 3 : lay.arrange === "split" ? 2 : 1;
+  box.innerHTML = sodBands(cards, n).map((band) => (band.full
+    ? `<div class="sod-band">${cardHtml(band.cards[0])}</div>`
+    : `<div class="sod-band${n > 1 ? " is-cols" : ""}" style="--sod-cols:${sodColumnsCss(lay.arrange, lay.split)}">${
+      Array.from({ length: n }, (_, i) => `<div class="sod-col">${
+        band.cards.filter((c) => n === 1 || c.col === i + 1).map(cardHtml).join("")}</div>`).join("")}</div>`)).join("");
 }
 
 /* ---------- The top bar: "Start my day" until started, and "Edit start of day" until ended ---------- */

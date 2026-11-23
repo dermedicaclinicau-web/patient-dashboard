@@ -14724,3 +14724,41 @@ a.md-tcheck { color: var(--primary); text-decoration: none; font-weight: 800; }
 .sds-setacts { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; border-top: 1px solid #f1f5f9; padding-top: 10px; }
 .sds-btn.is-dangertext { color: #b91c1c; }
 .sds-reset { margin-left: auto; }
+
+/* ---------- Start of Day welcome: the cards from Settings → Start of Day ---------- */
+.sod.size-wide { width: min(920px, calc(100vw - 2rem)); }
+.sod.size-full { width: min(1240px, calc(100vw - 2rem)); }
+.sod-cards { display: grid; gap: .8rem; margin-top: 1.25rem; text-align: left; }
+.sod-cards:empty { display: none; }
+.sod-band { display: grid; grid-template-columns: minmax(0, 1fr); gap: .8rem; min-width: 0; }
+.sod-band.is-cols { grid-template-columns: var(--sod-cols, minmax(0, 1fr)); }
+.sod-col { display: grid; gap: .8rem; align-content: start; min-width: 0; }
+.sod-c { min-width: 0; padding: .85rem 1rem; border: 1px solid var(--border); border-radius: 16px; background: var(--surface-2); }
+.sod-c > header { display: flex; align-items: center; gap: .55rem; margin-bottom: .55rem; }
+.sod-c > header h3 { margin: 0; font-size: .78rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--primary); }
+.sod-c-ic svg { display: block; width: 16px; height: 16px; color: var(--primary); }
+.sod-c .sod-stats { margin-top: 0; }
+.sod-c-none { margin: 0; font-size: .88rem; color: var(--muted); }
+.sod-c-h { margin: .7rem 0 .3rem; font-size: .74rem; font-weight: 700; color: #475569; }
+.sod-c-h:first-child { margin-top: 0; }
+.sod-rows { display: grid; gap: .3rem; }
+.sod-row { display: flex; align-items: flex-start; gap: .6rem; min-width: 0; padding: .45rem .6rem; border-radius: 10px;
+  background: #fff; color: var(--text); font-size: .88rem; text-decoration: none; }
+a.sod-row:hover { color: var(--primary); }
+.sod-row > b { flex: none; min-width: 4.4rem; font-variant-numeric: tabular-nums; }
+.sod-row > span { flex: 1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.sod-row small { display: block; font-size: .76rem; font-weight: 400; color: var(--muted); }
+.sod-row > em { flex: none; font-size: .74rem; font-style: normal; font-weight: 600; color: var(--muted); white-space: nowrap; }
+.sod-row > em.is-bad { color: var(--danger); }
+.sod-row > em.is-warn { color: #b45309; }
+.sod-c-more { display: inline-block; margin-top: .45rem; font-size: .8rem; font-weight: 600; color: var(--primary); text-decoration: none; }
+.sod-c-more:hover { text-decoration: underline; }
+.sod-links { display: flex; flex-wrap: wrap; gap: .4rem; }
+.sod-link { display: inline-flex; align-items: center; min-height: 36px; padding: 0 .9rem; border: 1px solid #99d5cf; border-radius: 999px;
+  background: #fff; color: var(--primary-hover); font-size: .85rem; font-weight: 600; text-decoration: none; }
+.sod-link:hover { background: var(--primary-soft); }
+.sod-msg { font-size: .92rem; line-height: 1.55; overflow-wrap: anywhere; }
+.sod-c.is-message.tone-highlight { border-color: #99f6e4; background: #f0fdfa; }
+.sod-c.is-message.tone-warning { border-color: #fde68a; background: #fffbeb; }
+.sod-c.is-message.tone-warning .sod-msg { color: #78350f; }
+@media (max-width: 760px) { .sod-band.is-cols { grid-template-columns: minmax(0, 1fr); } }

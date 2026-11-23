@@ -9,7 +9,7 @@ import { doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/fi
 import { getAuth } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { escapeHtml, showToast } from "./utils.js";
 import { can } from "./perms.js";
-import { listProducts } from "./inventory-api.js";
+import { listProducts, catLabel } from "./inventory-api.js";
 import { callApi } from "./appointments.js";
 import { confirmDialog } from "./dialog.js";
 
@@ -348,7 +348,7 @@ export async function mountSodSettings(host, { staff = null } = {}) {
       case "tasks": return `${f.show === "all" ? "All open" : "Due and overdue"} · up to ${f.max}`;
       case "announcements": return `Up to ${f.max}`;
       case "inventory": return [f.show.map((k) => INV_SHOW.find((x) => x[0] === k)[1]).join(", "),
-        f.cats.length ? f.cats.join(", ") : "", f.loc === "shelf" ? "Shelf" : f.loc === "jt" ? "JT storage" : "",
+        f.cats.length ? f.cats.map(catLabel).join(", ") : "", f.loc === "shelf" ? "Shelf" : f.loc === "jt" ? "JT storage" : "",
         f.stockOnly ? "stock staff only" : "everyone"].filter(Boolean).join(" · ");
       case "links": return `${f.links.length} link${f.links.length === 1 ? "" : "s"}`;
       case "message": return TONES.find((t) => t[0] === f.tone)[1];
@@ -396,7 +396,7 @@ export async function mountSodSettings(host, { staff = null } = {}) {
           `<label class="sds-chk"><input type="checkbox" data-show="${k}"${f.show.includes(k) ? " checked" : ""}> ${esc(l)}</label>`).join("")}</fieldset>
         ${f.show.includes("expiring") ? num("days", 7, 365, "Expiring within (days)") : ""}
         <fieldset class="sds-fs"><legend>Categories <small>(none ticked = all)</small></legend>${st.cats.length
-          ? st.cats.map((k) => `<label class="sds-chk"><input type="checkbox" data-cat="${esc(k)}"${f.cats.includes(k) ? " checked" : ""}> ${esc(k)}</label>`).join("")
+          ? st.cats.map((k) => `<label class="sds-chk"><input type="checkbox" data-cat="${esc(k)}"${f.cats.includes(k) ? " checked" : ""}> ${esc(catLabel(k))}</label>`).join("")
           : '<em class="sds-muted">No product categories found.</em>'}</fieldset>
         <label class="sds-f"><span>Where</span><select data-k="loc">
           <option value="any"${f.loc === "any" ? " selected" : ""}>Shelf and JT storage</option>
