@@ -430,6 +430,22 @@ async function mountForm(container, { staff, patientId }) {
       ${st.method === "credit" ? `<div class="rf-box"><p class="rf-hint">${esc(set.timelyName || "The Timely team")} adds the credit to their Timely account.</p></div>` : ""}`;
   }
 
+  const patientEmail = () => String((st.patient && st.patient.email) || "").trim();
+  function notifyHtml() {
+    const email = patientEmail();
+    const onP = !!email && st.notifyPatient;
+    const pNote = !st.patient ? "Choose the patient first."
+      : !email ? "No email on file for this patient. Add one on their patient page to email them."
+      : st.method === "cash" && st.cashGiven === "yes" ? `To ${email}. Cash was already given, so there's no "request received" email.`
+      : `To ${email}. One now, and one when the money is sent or the credit is added.`;
+    return `<div class="rf-notify">
+      <label class="prs-toggle${email ? "" : " is-off"}"><input type="checkbox" data-act="np"${onP ? " checked" : ""}${email ? "" : " disabled"}>
+        <span class="prs-sw"></span><span><b>Email the patient</b><small>${esc(pNote)}</small></span></label>
+      <label class="prs-toggle"><input type="checkbox" data-act="ns"${st.notifyStaff ? " checked" : ""}>
+        <span class="prs-sw"></span><span><b>Email the staff now</b><small>Each person gets an email with their step. Their task is on their dashboard either way.</small></span></label>
+    </div>`;
+  }
+
   function draw() {
     main.innerHTML = `
       ${sec(1, "Patient", patientHtml())}
@@ -648,24 +664,6 @@ async function mountForm(container, { staff, patientId }) {
     }
     if (t.tagName === "SELECT" && t.dataset.f) { setPath(t.dataset.f, t.value); drawSum(); }
   });
-
-    async function resend(key, btn) {
-    const label = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = "Sending…";
-    try {
-      const res = await callApi({ action: "refunds", op: "resendStep", id, key });
-      if (!res || res.problem) throw new Error((res && res.problem) || "Not sent.");
-      showToast(`Emailed ${res.to}`);
-      btn.textContent = "Sent ✓";
-    } catch (ex) {
-      console.warn("Resend failed:", ex);
-      showToast(ex.code === "FORBIDDEN" ? "Only the person who asked for the refund, or an Admin, can resend it."
-        : ex.message || "Couldn't send. Try again.");
-      btn.disabled = false;
-      btn.textContent = label;
-    }
-  }
 
   root.addEventListener("click", (e) => {
     const a = e.target.closest("[data-act]");
@@ -986,21 +984,6 @@ async function mountRefund(container, { id, staff }) {
 
   const canCancel = () => r.status === "open" && (boss() || r.createdByUid === myUid()
     || (r.steps || []).some((s) => s.key === "approve" && !s.done && s.whoId === myUid()));
-  const patientEmail = () => String((st.patient && st.patient.email) || "").trim();
-  function notifyHtml() {
-    const email = patientEmail();
-    const onP = !!email && st.notifyPatient;
-    const pNote = !st.patient ? "Choose the patient first."
-      : !email ? "No email on file for this patient. Add one on their patient page to email them."
-      : st.method === "cash" && st.cashGiven === "yes" ? `To ${email}. Cash was already given, so there's no "request received" email.`
-      : `To ${email}. One now, and one when the money is sent or the credit is added.`;
-    return `<div class="rf-notify">
-      <label class="prs-toggle${email ? "" : " is-off"}"><input type="checkbox" data-act="np"${onP ? " checked" : ""}${email ? "" : " disabled"}>
-        <span class="prs-sw"></span><span><b>Email the patient</b><small>${esc(pNote)}</small></span></label>
-      <label class="prs-toggle"><input type="checkbox" data-act="ns"${st.notifyStaff ? " checked" : ""}>
-        <span class="prs-sw"></span><span><b>Email the staff now</b><small>Each person gets an email with their step. Their task is on their dashboard either way.</small></span></label>
-    </div>`;
-  }
 
   function draw() {
     root.querySelectorAll("[data-sv]").forEach((i) => { drafts[i.dataset.sv] = i.value; });
@@ -1125,6 +1108,24 @@ async function mountRefund(container, { id, staff }) {
     } catch (ex) {
       console.error("Refund not cancelled:", ex);
       showToast(ex.code === "permission-denied" ? "Only the person who asked, the approver or an Admin can cancel it." : ex.message || "Couldn't cancel. Try again.");
+    }
+  }
+
+  async function resend(key, btn) {
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Sending…";
+    try {
+      const res = await callApi({ action: "refunds", op: "resendStep", id, key });
+      if (!res || res.problem) throw new Error((res && res.problem) || "Not sent.");
+      showToast(`Emailed ${res.to}`);
+      btn.textContent = "Sent ✓";
+    } catch (ex) {
+      console.warn("Resend failed:", ex);
+      showToast(ex.code === "FORBIDDEN" ? "Only the person who asked for the refund, or an Admin, can resend it."
+        : ex.message || "Couldn't send. Try again.");
+      btn.disabled = false;
+      btn.textContent = label;
     }
   }
 
