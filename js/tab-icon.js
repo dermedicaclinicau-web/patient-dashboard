@@ -53,6 +53,23 @@ export const TAB_RECORD_KINDS = [
     sample: { patient: "Jane Smith", form: "Prescription" }, def: { icon: "letters", text: "Rx", bg: "#DB2777", bg2: "", title: "Rx · {Patient}" } },
   { key: "ssp", label: "Skin Script", desc: "The Skin Script builder", vars: ["Patient"],
     sample: { patient: "Jane Smith" }, def: { icon: "drop", text: "", bg: "#E11D48", bg2: "", title: "Skin Script · {Patient}" } },
+  // The Consultation tab, and notes opened in their own tab (the standard: the dots and names the portal has always used)
+  { key: "consult", group: "consult", label: "Consultation", desc: "The Consultation tab, before recording starts", vars: ["Patient"],
+    sample: { patient: "Jane Smith" }, def: { icon: "dot", text: "", bg: "#16A34A", bg2: "", title: "Consultation · {Patient}" } },
+  { key: "rec", group: "consult", label: "Recording", desc: "While an appointment is being recorded", vars: ["Patient", "Time"],
+    sample: { patient: "Jane Smith", time: "12:34" }, def: { icon: "dot", text: "", bg: "#DC2626", bg2: "", title: "● {Time} · {Patient}" } },
+  { key: "recPaused", group: "consult", label: "Recording paused", desc: "A recording on pause", vars: ["Patient", "Time"],
+    sample: { patient: "Jane Smith", time: "12:34" }, def: { icon: "dot", text: "", bg: "#D97706", bg2: "", title: "⏸ {Time} · {Patient}" } },
+  { key: "writing", group: "consult", label: "Writing notes", desc: "After Complete appointment, while the notes are written", vars: ["Patient"],
+    sample: { patient: "Jane Smith" }, def: { icon: "dot", text: "", bg: "#16A34A", bg2: "", title: "Writing notes… · {Patient}" } },
+  { key: "attention", group: "consult", label: "Needs attention", desc: "The upload or the notes didn't work", vars: ["Patient"],
+    sample: { patient: "Jane Smith" }, def: { icon: "dot", text: "", bg: "#16A34A", bg2: "", title: "⚠ Needs attention · {Patient}" } },
+  { key: "ready", group: "consult", label: "Notes ready", desc: "The notes are written, in the Consultation tab", vars: ["Patient"],
+    sample: { patient: "Jane Smith" }, def: { icon: "dot", text: "", bg: "#16A34A", bg2: "", title: "✓ Notes ready · {Patient}" } },
+  { key: "notesDraft", group: "consult", label: "Notes: draft", desc: "Notes in their own tab, not reviewed yet", vars: ["Patient"],
+    sample: { patient: "Jane Smith" }, def: { icon: "dot", text: "", bg: "#EAB308", bg2: "", title: "Draft · {Patient}" } },
+  { key: "notesReviewed", group: "consult", label: "Notes: reviewed", desc: "Notes in their own tab, saved as Reviewed", vars: ["Patient"],
+    sample: { patient: "Jane Smith" }, def: { icon: "dot", text: "", bg: "#16A34A", bg2: "", title: "✓ Reviewed · {Patient}" } },
 ];
 const REC_LABEL = { tx: "TxR", consent: "Consent", rx: "Rx", ssp: "Skin Script" };
 
@@ -60,7 +77,7 @@ const REC_LABEL = { tx: "TxR", consent: "Consent", rx: "Rx", ssp: "Skin Script" 
 const MENU_BG = { calendar: "#DC2626" };
 const TEAL = "#0F766E";
 const HEX = /^#[0-9a-f]{6}$/i;
-const KEY_OK = /^(menu:[a-z0-9-]{1,40}|patient|tx|consent|rx|ssp)$/;
+const KEY_OK = /^(menu:[a-z0-9-]{1,40}|patient|tx|consent|rx|ssp|consult|rec|recPaused|writing|attention|ready|notesDraft|notesReviewed)$/;
 
 // The standard look of a kind of tab
 export function tabDefault(key) {
@@ -72,7 +89,7 @@ export function tabDefault(key) {
 
 function cleanSpec(s, def) {
   s = s && typeof s === "object" ? s : {};
-  const icon = s.icon === "menu" || s.icon === "letters" || TAB_PRESETS[s.icon] ? s.icon : def.icon;
+  const icon = ["menu", "letters", "dot"].includes(s.icon) || TAB_PRESETS[s.icon] ? s.icon : def.icon;
   return {
     icon,
     text: String(s.text ?? def.text ?? "").replace(/\s+/g, "").slice(0, 3),
@@ -168,6 +185,19 @@ function letters(g, text) {
   g.textAlign = "center";
   g.textBaseline = "middle";
   g.fillText(text, 32, 35);
+}
+
+// A soft halo with a solid dot inside (the notes and recording tabs), so it's still clear at 16px
+function dot(g, colour) {
+  g.save();
+  g.fillStyle = colour;
+  g.globalAlpha = 0.25;
+  g.beginPath(); g.arc(32, 32, 31, 0, Math.PI * 2); g.fill();
+  g.globalAlpha = 1;
+  g.beginPath(); g.arc(32, 32, 22, 0, Math.PI * 2); g.fill();
+  g.fillStyle = "rgba(255, 255, 255, .35)";        // a small highlight
+  g.beginPath(); g.arc(25, 25, 7, 0, Math.PI * 2); g.fill();
+  g.restore();
 }
 
 // The bold built-in icons
@@ -289,10 +319,12 @@ export function tabIconUrl(s, menuSvg = null, menuKey = "") {
   const c = document.createElement("canvas");
   c.width = c.height = 64;
   const g = c.getContext("2d");
-  square(g, s.bg || TEAL, s.bg2 || "");
+  if (s.icon === "dot") dot(g, s.bg || TEAL);
+  else square(g, s.bg || TEAL, s.bg2 || "");
   g.fillStyle = "#fff";
   g.strokeStyle = "#fff";
-  if (s.icon === "letters") letters(g, s.text || "?");
+  if (s.icon === "dot") { /* nothing on top */ }
+  else if (s.icon === "letters") letters(g, s.text || "?");
   else if (s.icon === "menu") { if (menuSvg) svgShapes(g, menuSvg); else letters(g, "?"); }
   else if (!special(g, s.icon)) {
     const p = TAB_PRESETS[s.icon];
@@ -404,15 +436,37 @@ export function setPatientTab(svg, name = "") {
   catch (err) { shown = ""; console.warn("Patient tab icon not set:", err); }
 }
 
+/* ---------- The Consultation tab, and notes in their own tab ---------- */
+
+const STATE_KEYS = ["consult", "rec", "recPaused", "writing", "attention", "ready", "notesDraft", "notesReviewed"];
+// The names other files use for these dots, and the kind in Settings each one now follows
+const STATE_OF = { recording: "rec", recPaused: "recPaused", notesDraft: "notesDraft", notes: "notesReviewed" };
+let noteState = "";   // the notes' real status ("notesDraft" or "notes"), so the colour never depends on the tab's name
+
+// kind: one of STATE_KEYS. vals: { patient, time }
+export function setStateTab(kind, vals = {}) {
+  if (!STATE_KEYS.includes(kind)) return;
+  lastCall = () => setStateTab(kind, vals);
+  if (kind === "notesDraft") noteState = "notesDraft";
+  else if (kind === "notesReviewed") noteState = "notes";
+  asked = "";
+  const s = tabSpecOf(kind);
+  const label = (TAB_RECORD_KINDS.find((k) => k.key === kind) || {}).label || "";
+  setTabTitle(fillTabTitle(s.title, vals, vals.patient ? `${label} · ${vals.patient}` : label));
+  try { show(tabIconKey(s), tabIconUrl(s)); }
+  catch (err) { shown = ""; console.warn("Tab icon not set:", err); }
+}
+
 /* ---------- Other pages ---------- */
 
 export function setTabIcon(kind) {
   const rec = RECORD_KEYS.includes(kind);
   if (!KINDS[kind] && !rec) { resetTabIcon(); return; }
   asked = kind;
-  const real = kind === "notes" ? notesKind() : kind;
+  const real = kind === "notes" ? (noteState || notesKind()) : kind;
+  const key = rec ? real : STATE_OF[real] || "";
   try {
-    if (rec) { const s = tabSpecOf(real); show(tabIconKey(s), tabIconUrl(s)); }
+    if (key) { const s = tabSpecOf(key); show(tabIconKey(s), tabIconUrl(s)); }
     else show(real, drawIcon(real));
   } catch (err) {
     shown = "";
@@ -423,6 +477,7 @@ export function setTabIcon(kind) {
 export function resetTabIcon() {
   asked = "";
   lastCall = null;
+  noteState = "";
   if (!shown) return;
   shown = "";
   putIcon("");

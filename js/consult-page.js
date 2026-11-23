@@ -6,7 +6,7 @@ import {
 import { setRecordingPatient } from "./recording-bar.js";
 import { getPatient } from "./patients.js";
 import { showSoapPanel, detachSoapPanel } from "./soap-panel.js";
-import { setTabIcon, setTabTitle } from "./tab-icon.js";
+import { setStateTab } from "./tab-icon.js";
 import { SECTIONS } from "./soap.js";
 import { confirmDialog } from "./dialog.js";
 import { auth, db } from "./firebase-config.js";
@@ -217,22 +217,21 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
   }
 
   // Only the numbers that change every second (the page isn't redrawn for these)
+  // The tab's icon and name for each stage (System configuration → Browser tabs → Consultation and notes)
   function tick(s, v) {
-    const name = (patient && patient.name) || "Consultation";
-    const rec = v.kind === "live" && s.live.status !== "stopping";
-    setTabIcon(rec ? (s.live.status === "paused" ? "recPaused" : "recording") : "notes");   // red recording, amber paused
+    const name = (patient && patient.name) || "Patient";
     if (v.kind === "live") {
       const txt = fmt(s.live.elapsedMs);
       const t = root.querySelector('[data-role="time"]');
       if (t) t.textContent = txt;
-      setTabTitle(`${s.live.status === "paused" ? "⏸" : "●"} ${txt} · ${name}`);
+      if (s.live.status === "stopping") setStateTab("writing", { patient: name });
+      else setStateTab(s.live.status === "paused" ? "recPaused" : "rec", { patient: name, time: txt });
       return;
     }
     const pct = root.querySelector('[data-role="pct"]');
     if (pct && v.j) pct.textContent = `${Math.round((v.j.progress || 0) * 100)}%`;
-    setTabTitle(!v.j ? `Consultation · ${name}`
-      : v.j.status === "ready" ? `✓ Notes ready · ${name}`
-      : BAD.includes(v.j.status) ? `⚠ Needs attention · ${name}` : `Writing notes… · ${name}`);
+    setStateTab(!v.j ? "consult" : v.j.status === "ready" ? "ready" : BAD.includes(v.j.status) ? "attention" : "writing",
+      { patient: name });
   }
 
   function draw(s) {

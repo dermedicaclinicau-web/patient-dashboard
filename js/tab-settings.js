@@ -11,7 +11,8 @@ import { TAB_PRESETS, TAB_COLOURS, TAB_RECORD_KINDS, tabSpecOf, tabIconUrl, fill
   from "./tab-icon.js";
 
 const esc = (s) => escapeHtml(String(s ?? ""));
-const VAR_LABEL = { Page: "Page name", Patient: "Patient's name", Form: "Form name" };
+const VAR_LABEL = { Page: "Page name", Patient: "Patient's name", Form: "Form name", Time: "Recording time" };
+const SYMBOLS = ["●", "✓", "⚠", "⏸", "★", "📝", "🎙"];
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 // A darker shade, for "Blend into a second colour"
 function darker(hex) {
@@ -36,8 +37,10 @@ export async function mountTabSettings(host, { staff = null } = {}) {
       vars: ["Page"], sample: { page: label }, group: "menu" };
   }).filter((x) => x.label && x.svg && /^menu:[a-z0-9-]{1,40}$/.test(x.key) && !seen.has(x.key) && seen.add(x.key));
   const patientsSvg = (menu.find((m) => m.key === "menu:patients") || {}).svg || null;
-  const records = TAB_RECORD_KINDS.map((k) => ({ ...k, group: "records", svg: k.menuIcon === "patients" ? patientsSvg : null }));
-  const items = [...menu, ...records];
+  const kinds = TAB_RECORD_KINDS.map((k) => ({ ...k, group: k.group || "records", svg: k.menuIcon === "patients" ? patientsSvg : null }));
+  const records = kinds.filter((k) => k.group === "records");
+  const consults = kinds.filter((k) => k.group === "consult");
+  const items = [...menu, ...records, ...consults];
 
   const st = { kinds: {}, open: "", dirty: false, saving: false, savedBy: "", savedAt: null };
   try {
@@ -98,6 +101,7 @@ export async function mountTabSettings(host, { staff = null } = {}) {
           <div class="tbs-icons">
             ${it.svg ? tile("menu", it.group === "menu" ? "Menu icon" : "Patients icon") : ""}
             ${tile("letters", "Letters")}
+            ${tile("dot", "Dot")}
             ${Object.entries(TAB_PRESETS).map(([k, p]) => tile(k, p.label)).join("")}
           </div>
           ${s.icon === "letters" ? `<label class="sds-f tbs-letters"><span>Letters (up to 3)</span>
@@ -110,14 +114,15 @@ export async function mountTabSettings(host, { staff = null } = {}) {
                 data-colour="${c}" style="--c:${c}" aria-label="Colour ${c}" aria-pressed="${s.bg === c}"></button>`).join("")}
               <label class="tbs-custom"><input type="color" data-f="bg" value="${s.bg.toLowerCase()}"> Custom</label>
             </div>
-            <label class="tbs-chk"><input type="checkbox" data-f="grad"${s.bg2 ? " checked" : ""}> Blend into a second colour</label>
-            ${s.bg2 ? `<label class="tbs-custom tbs-second"><input type="color" data-f="bg2" value="${s.bg2.toLowerCase()}"> Second colour</label>` : ""}
+            ${s.icon === "dot" ? "" : `<label class="tbs-chk"><input type="checkbox" data-f="grad"${s.bg2 ? " checked" : ""}> Blend into a second colour</label>
+            ${s.bg2 ? `<label class="tbs-custom tbs-second"><input type="color" data-f="bg2" value="${s.bg2.toLowerCase()}"> Second colour</label>` : ""}`}
           </section>
           <section>
             <h4>Tab name</h4>
             <label class="sds-f"><span class="sr-only">Tab name</span>
               <input type="text" maxlength="80" data-f="title" value="${esc(s.title)}" placeholder="${esc(it.label)}"></label>
-            <div class="tbs-vars">${it.vars.map((v) => `<button type="button" class="tbs-var" data-var="${v}">+ ${VAR_LABEL[v]}</button>`).join("")}</div>
+            <div class="tbs-vars">${it.vars.map((v) => `<button type="button" class="tbs-var" data-var="${v}">+ ${VAR_LABEL[v]}</button>`).join("")}${
+              SYMBOLS.map((sym) => `<button type="button" class="tbs-var is-sym" data-sym="${sym}" title="Add ${sym}" aria-label="Add ${sym}">${sym}</button>`).join("")}</div>
             <small class="sds-muted">Staff will see: <b data-pv-example>${esc(titleOf(it, s))}</b></small>
           </section>
         </div>
@@ -159,6 +164,7 @@ export async function mountTabSettings(host, { staff = null } = {}) {
       </div>
       ${groupHtml("Menu pages", "The pages in the menu on the left.", menu)}
       ${groupHtml("Patients and records", "A patient's page, and records that open in their own tab.", records)}
+      ${groupHtml("Consultation and notes", "The Consultation tab while it records and writes the notes, and notes opened in their own tab.", consults)}
     </div>`;
     status();
     window.scrollTo(0, y);
@@ -235,10 +241,10 @@ export async function mountTabSettings(host, { staff = null } = {}) {
       return;
     }
     if (b.dataset.colour) { set(key, { bg: b.dataset.colour }); render(); return; }
-    if (b.dataset.var) {
+    if (b.dataset.var || b.dataset.sym) {
       const inp = row.querySelector('[data-f="title"]');
       if (!inp) return;
-      const tok = `{${b.dataset.var}}`;
+      const tok = b.dataset.var ? `{${b.dataset.var}}` : b.dataset.sym;
       const a = inp.selectionStart ?? inp.value.length;
       const z = inp.selectionEnd ?? a;
       const sep = a > 0 && !/\s$/.test(inp.value.slice(0, a)) ? " " : "";

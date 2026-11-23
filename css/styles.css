@@ -14889,3 +14889,6 @@ a.sds-btn { display: inline-flex; align-items: center; text-decoration: none; }
   .tbs-list, .tbs-grid { grid-template-columns: minmax(0, 1fr); }
   .tbs-chrome { display: none; }
 }
+
+.tbs-var.is-sym { min-width: 34px; border-style: solid; border-color: var(--border); background: #fff; color: #334155; font-size: .9rem; }
+.tbs-var.is-sym:hover { border-color: #99d5cf; }

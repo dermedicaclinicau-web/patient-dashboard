@@ -18,7 +18,7 @@ import { confirmDialog } from "./dialog.js";
 import { openFixTranscript } from "./fix-transcript.js";
 import { escapeHtml, showToast, toDateKey } from "./utils.js";
 import { openPlanReview } from "./master-plan-review.js";
-import { setTabTitle } from "./tab-icon.js";
+import { setStateTab } from "./tab-icon.js";
 import { fetchPreconsult } from "./appointments.js";
 import { visitsFrom, lastVisitOf, afterMatch, fromAnchor, dayLabel, dateKeyOf, addMonths, thisMonth } from "./plan-track.js";
 import { getPlanSettings } from "./plan-api.js";
@@ -485,7 +485,7 @@ function render() {
   if (!panel.hidden) requestAnimationFrame(autosizeAll);
   // Own tab: its title says whose notes, and whether they're reviewed
   if (mode === "page" && !document.body.classList.contains("is-consult")) {
-    setTabTitle(`${reviewed ? "✓ Reviewed" : "Draft"} · ${d["Patient Name"] || "Patient"}`);
+    setStateTab(reviewed ? "notesReviewed" : "notesDraft", { patient: d["Patient Name"] || "Patient" });
   }
 }
 
