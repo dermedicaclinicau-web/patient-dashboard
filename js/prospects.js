@@ -475,7 +475,7 @@ export function mountMyFollowUps(el, { bare = false, onCount = null, alive = nul
 
 export function mountProspects(container, { param = "", staff = null } = {}) {
   const parts = String(param || "").split("/").filter(Boolean);
-  if (parts[0] === "reports") { mountReports(container); return; }
+  if (parts[0] === "reports") { mountReports(container, parts[1] || ""); return; }
   if (parts[0] && !["list", "followups"].includes(parts[0])) { mountProspect(container, decodeURIComponent(parts[0]), staff); return; }
   mountBoard(container, { view: ["list", "followups"].includes(parts[0]) ? parts[0] : "board", staff });
 }
@@ -1923,9 +1923,142 @@ function heatHtml(list) {
       `<i title="${DOW[d]} ${hr(i * 2)} to ${hr((i * 2 + 2) % 24)}: ${n} enquir${n === 1 ? "y" : "ies"}" style="--a:${n ? (0.15 + 0.85 * n / max).toFixed(2) : 0}"></i>`).join("")}`).join("")}</div>`;
 }
 
-async function mountReports(container) {
+/* ---------- Better reports: helpers ---------- */
+const REP_TABS = [["overview", "Overview"], ["conversion", "Conversion"], ["sources", "Sources & interests"],
+  ["team", "Team & speed"], ["templates", "Templates"]];
+// Clinic opening hours (Perth time), Monday to Sunday: [from hour, to hour], or null when closed. Change to match the clinic.
+const CLINIC_OPEN = [[8, 18], [8, 18], [8, 18], [8, 18], [8, 18], [9, 14], null];
+const BANDS = [["open", "During clinic hours"], ["evening", "Weekday evenings & early mornings"], ["weekend", "Weekends, outside opening hours"]];
+function bandOf(iso) {
+  const w = whenParts(iso);
+  if (w.d < 0) return "";
+  const o = CLINIC_OPEN[w.d];
+  if (o && w.h >= o[0] && w.h < o[1]) return "open";
+  return w.d >= 5 ? "weekend" : "evening";
+}
+// "Interested in" is typed freely: these group it (first match wins, so the order matters)
+const INTERESTS = [
+  ["Body sculpting", /\bfat\b|body|coolsculpt|trusculpt|vanquish|double chin/i],
+  ["Wrinkle relaxer", /wrinkle|botox|dysport|xeomin|frown|crow'?s|forehead|\bwr\b|relaxer|masseter|jaw ?slim|grind/i],
+  ["Filler", /filler|\blips?\b|cheek|\bchin\b|tear ?trough|radiesse|sculptra|volume/i],
+  ["Skin boosters", /booster|profhilo|rejuran|polynucle|hydrat|skin quality/i],
+  ["Acne & scarring", /acne|pimple|breakout|scar/i],
+  ["Pigmentation", /pigment|melasma|sun ?spots?|freckle|age spots?|brown spots?/i],
+  ["Redness & vascular", /\bred(ness)?\b|rosacea|vascular|\bveins?\b|capillar|flush/i],
+  ["Skin tightening", /ulthera|tighten|\bsag|hifu|skin lift|laxity|jowl|loose skin/i],
+  ["Laser & light", /laser|\bipl\b|\bbbl\b|\bopl\b|genesis|resurfac/i],
+  ["Peels", /\bpeels?\b/i],
+  ["Skin needling", /needl|dermaglow|restoraglow|collagen|\bprp\b/i],
+  ["Hair", /\bhair\b|thinning/i],
+  ["Skincare", /skin ?care|serum|cream|sunscreen|products?|skin script/i],
+  ["General enquiry", /consult|general|other|query|enquir|not sure|advice|price|cost/i],
+];
+const interestOf = (p) => {
+  const c = String(p.concern || "").trim();
+  if (!c) return "Not given";
+  const hit = INTERESTS.find(([, re]) => re.test(c));
+  return hit ? hit[0] : "Other";
+};
+// The date they reached a stage: the appointment book's date, or when staff moved them there
+function reachDate(p, k) {
+  const m = p.milestones || {};
+  if (m[k]) return m[k];
+  const i = ORDER.indexOf(k);
+  const cur = p.stage === "lost" ? -1 : ORDER.indexOf(p.stage);
+  return i >= 0 && cur >= i && p.stageAt ? keyOf(p.stageAt) : "";
+}
+const money = (n) => (n == null || !isFinite(n) ? "–" : `$${Math.round(n).toLocaleString("en-AU")}`);
+
+// Messages sent from a template (the Timeline notes 'Text sent (template "…")'), and what happened next
+function templateStats(list) {
+  const m = new Map();
+  list.forEach((p) => {
+    const log = p.log || [];
+    log.forEach((l, i) => {
+      if (!l || !["text", "email"].includes(l.kind)) return;
+      const mt = /\(template "([^"]+)"\)/.exec(l.what || "");
+      const at = Date.parse(l.at || "");
+      if (!mt || !at) return;
+      const key = `${l.kind}|${mt[1]}`;
+      if (!m.has(key)) m.set(key, { name: mt[1], kind: l.kind, sent: 0, people: new Set(), replied: 0, booked: 0, last: 0 });
+      const x = m.get(key);
+      x.sent++;
+      x.people.add(p.id);
+      x.last = Math.max(x.last, at);
+      const later = log.slice(i + 1);
+      const inWin = (r, days) => { const t = Date.parse(r.at || ""); return t > at && t <= at + days * 864e5; };
+      if (later.some((r) => (r.kind === "enquiry" && /^(Replied|Another enquiry)/.test(r.what || "") && inWin(r, 7))
+        || (r.kind === "contact" && /Spoke to them|Met in clinic/.test(r.what || "") && inWin(r, 7)))) x.replied++;
+      if (later.some((r) => r.kind === "stage" && /(Consultation booked|Treatment booked|Consulted|Treated|Active patient)/.test(r.what || "")
+        && inWin(r, 14))) x.booked++;
+    });
+  });
+  return [...m.values()].sort((a, b) => b.sent - a.sent);
+}
+
+function prrCss() {
+  if (document.getElementById("prr-css")) return;
+  const s = document.createElement("style");
+  s.id = "prr-css";
+  s.textContent = `.prr{--prr-b:#e2e8f0;--prr-m:#64748b}
+  .prr-head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin:6px 0 14px}
+  .prr-head h2{margin:0;font-family:Fraunces,Georgia,serif;font-weight:500;font-size:30px;color:#0f172a}
+  .prr-head p{margin:4px 0 0;color:var(--prr-m);font-size:14px}
+  .prr-bar{position:sticky;top:0;z-index:5;background:rgba(248,250,252,.94);backdrop-filter:blur(8px);border:1px solid var(--prr-b);
+    border-radius:16px;padding:10px 12px;display:flex;flex-direction:column;gap:10px;margin-bottom:18px}
+  .prr-filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .prr-filters .fe-input{width:auto;min-width:140px}
+  .prr-tabs{display:flex;gap:4px;overflow-x:auto;padding-bottom:2px}
+  .prr-tab{border:0;background:transparent;padding:7px 15px;border-radius:999px;color:#475569;font-weight:600;font-size:14px;cursor:pointer;white-space:nowrap}
+  .prr-tab:not(.is-on):hover{background:#e2e8f0}
+  .prr-tab.is-on{background:#0f766e;color:#fff}
+  .prr-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:18px}
+  .prr-kpi{background:#fff;border:1px solid var(--prr-b);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:4px;
+    box-shadow:0 1px 2px rgba(15,23,42,.04)}
+  .prr-kpi-top{display:flex;align-items:center;gap:8px;color:var(--prr-m);font-size:13px;font-weight:600}
+  .prr-kpi-ic{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;flex:none}
+  .prr-kpi-ic .pr-ic{width:16px;height:16px}
+  .prr-kpi strong{font-size:30px;line-height:1.1;color:#0f172a;letter-spacing:-.01em}
+  .prr-kpi small{color:var(--prr-m);font-size:12px}
+  .prr-t-sky{background:#e0f2fe;color:#0369a1}.prr-t-amber{background:#fef3c7;color:#b45309}.prr-t-green{background:#dcfce7;color:#15803d}
+  .prr-t-teal{background:#ccfbf1;color:#0f766e}.prr-t-violet{background:#ede9fe;color:#6d28d9}.prr-t-slate{background:#f1f5f9;color:#475569}
+  .prr-t-rose{background:#ffe4e6;color:#be123c}
+  .prr-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+  @media(max-width:900px){.prr-grid{grid-template-columns:1fr}}
+  .prr-card{background:#fff;border:1px solid var(--prr-b);border-radius:16px;padding:16px 18px;box-shadow:0 1px 2px rgba(15,23,42,.04);min-width:0}
+  .prr-card.is-wide{grid-column:1/-1}
+  .prr-card h3{margin:0 0 2px;font-size:16px;color:#0f172a}
+  .prr-sub{margin:0 0 12px;color:var(--prr-m);font-size:13px}
+  .prr-note{margin:10px 0 0;color:var(--prr-m);font-size:12px}
+  .prr-winrow{display:grid;grid-template-columns:190px 1fr;gap:12px;align-items:center;margin-bottom:12px}
+  @media(max-width:640px){.prr-winrow{grid-template-columns:1fr}}
+  .prr-winlbl{font-weight:600;color:#334155}
+  .prr-wins{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  .prr-win{border:1px solid var(--prr-b);border-radius:12px;padding:10px 12px;text-align:center;background:#f8fafc}
+  .prr-win b{display:block;font-size:26px;color:#0f766e;line-height:1.15}
+  .prr-win span{font-size:12px;color:#475569}
+  .prr-win em{display:block;font-style:normal;font-size:11px;margin-top:2px;color:var(--prr-m)}
+  .prr-curve{width:100%;height:auto;display:block}
+  .prr-curve .ax{fill:#94a3b8;font-size:11px}.prr-curve .gr{stroke:#e2e8f0}
+  .prr-curve .l1{fill:none;stroke:#38bdf8;stroke-width:2.5;stroke-linejoin:round}
+  .prr-curve .l2{fill:none;stroke:#0f766e;stroke-width:2.5;stroke-linejoin:round}
+  .prr-curve .t1{fill:#0369a1;font-size:12px;font-weight:700}.prr-curve .t2{fill:#0f766e;font-size:12px;font-weight:700}
+  .prr-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--prr-m);margin:0 0 8px;padding:0;list-style:none}
+  .prr-legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+  .prr-pipe{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:4px 0 12px}
+  .prr-pipe b{font-size:34px;color:#0f766e;line-height:1}
+  .prr-pipe span{color:#334155}
+  .prr-empty{padding:28px 10px;text-align:center;color:var(--prr-m);margin:0}
+  .prr-ch{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600}
+  .prr-ch.is-text{background:#e0f2fe;color:#075985}.prr-ch.is-email{background:#ede9fe;color:#5b21b6}`;
+  document.head.appendChild(s);
+}
+
+/* ---------- The reports page ---------- */
+async function mountReports(container, tabParam = "") {
+  prrCss();
   const root = document.createElement("section");
-  root.className = "page wide pr-page pr-rep";
+  root.className = "page wide pr-page pr-rep prr";
   container.replaceChildren(root);
   const back = '<a class="back-link" href="#/prospects">← Prospects</a>';
   root.innerHTML = `${back}<div class="skeleton" style="height:420px;border-radius:14px"></div>`;
@@ -1940,19 +2073,36 @@ async function mountReports(container) {
   if (!root.isConnected) return;
 
   const today = todayKey();
-  all.forEach((p) => { p._day = keyOf(p.createdAt); p._reach = reachOf(p); p._imp = wasImported(p); });
+  all.forEach((p) => {
+    p._day = keyOf(p.createdAt);
+    p._reach = reachOf(p);
+    p._imp = wasImported(p);
+    p._int = interestOf(p);
+    p._band = p.createdAt ? bandOf(p.createdAt) : "";
+  });
   const firstDay = all.map((p) => p._day).filter(Boolean).sort()[0] || today;
   const sources = [...new Set(all.map((p) => p.source || "Other"))].sort();
   const people = [...new Set(all.map((p) => p.assignedToName).filter(Boolean))].sort();
-  const st = { range: "90", from: "", to: "", source: "", who: "", kind: "" };
+  const st = { tab: REP_TABS.some(([k]) => k === tabParam) ? tabParam : "overview",
+    range: "90", from: "", to: "", source: "", who: "", kind: "" };
+
+  // Spend: from the patient records of prospects who became patients (loaded after the page shows)
+  const spend = new Map();
+  let spendState = "loading";
 
   const span = () => (st.range === "custom" ? [st.from || firstDay, st.to || today]
     : st.range === "all" ? [firstDay, today] : [addDays(today, -(Number(st.range) - 1)), today]);
   const keep = (p) => (!st.source || (p.source || "Other") === st.source)
     && (!st.who || (st.who === "-" ? !p.assignedToName : p.assignedToName === st.who))
-        && showOf(st.kind)(p, set) && !isJunk(p, set);
+    && showOf(st.kind)(p, set) && !isJunk(p, set);
   const cohort = (a, b) => all.filter((p) => p._day && p._day >= a && p._day <= b && keep(p));
 
+  // Of those who enquired at least n days ago, how many reached the stage within n days
+  function within(list, key, n) {
+    const el = list.filter((p) => p._day && dayDiff(p._day, today) >= n);
+    const hit = el.filter((p) => { const d = reachDate(p, key); if (!d) return false; const x = dayDiff(p._day, d); return x >= 0 && x <= n; }).length;
+    return { n: el.length, hit, pct: el.length ? pct(hit, el.length) : null };
+  }
   function stats(list) {
     const live = list.filter((p) => !p._imp && !p.fromBook);
     const hrs = live.map(hoursToContact).filter((h) => h != null && h >= 0);
@@ -1969,7 +2119,13 @@ async function mountReports(container) {
       cancelOpen: list.filter((p) => p.cancelOpen === true).length,
     };
   }
-  // ▲ / ▼ against the same length of time before. pts: a change in percentage points.
+  const spendOfList = (l) => {
+    const x = l.filter((p) => p._reach >= 5 && !isPast(p) && p.patientId && spend.has(p.patientId));
+    return { n: x.length, total: x.reduce((t, p) => t + spend.get(p.patientId).all, 0) };
+  };
+  const spendCell = (l) => (spendState === "ok" ? money(spendOfList(l).total)
+    : spendState === "loading" ? '<span class="muted">…</span>' : "–");
+
   const delta = (now, was, kind, upGood = true) => {
     if (now == null || was == null) return "";
     const d = kind === "pts" ? now - was : was ? ((now - was) / was) * 100 : null;
@@ -1977,21 +2133,81 @@ async function mountReports(container) {
     if (Math.round(d) === 0) return '<span class="pr-delta">No change</span>';
     return `<span class="pr-delta ${(d > 0) === upGood ? "is-up" : "is-down"}">${d > 0 ? "▲" : "▼"} ${Math.abs(Math.round(d))}${kind === "pts" ? " pts" : "%"}</span>`;
   };
-  const kpi = (label, big, sub, d = "") => `<div class="pr-kpi"><span>${esc(label)}</span><strong>${big}</strong>
-    <small>${sub}</small>${d}</div>`;
+  const kpi = (ic, tone, label, big, sub, d = "") => `<div class="prr-kpi">
+    <div class="prr-kpi-top"><span class="prr-kpi-ic prr-t-${tone}">${I(IC[ic])}</span>${esc(label)}</div>
+    <strong>${big}</strong><small>${sub}</small>${d}</div>`;
+  const card = (title, sub, inner, wide = false) => `<section class="prr-card${wide ? " is-wide" : ""}">
+    <h3>${esc(title)}</h3>${sub ? `<p class="prr-sub">${sub}</p>` : ""}${inner}</section>`;
 
-  function draw() {
-    const [a, b] = span();
-    const len = dayDiff(a, b) + 1;
-    const list = cohort(a, b);
-    const junkN = all.filter((p) => p._day && p._day >= a && p._day <= b && isJunk(p, set)).length;
-    const s = stats(list);
-    const ps = st.range === "all" ? null : stats(cohort(addDays(a, -len), addDays(a, -1)));
-    const rate = (x, n) => pct(x, n);
-    const prev = (k) => (ps ? rate(ps[k], ps.n) : null);
+  function convTable(groups, first) {
+    if (!groups.length) return '<p class="prr-empty">Nothing in this period.</p>';
+    return `<div class="pr-rt-wrap"><table class="pr-rtable"><thead><tr><th>${esc(first)}</th><th>Enquiries</th>
+      <th>Booked a consult</th><th>Treated within 90 days</th><th>Became patients</th><th>Lost</th><th>Spend (new patients)</th>
+      </tr></thead><tbody>${groups.map(({ k, l }) => {
+        const x = stats(l);
+        const w = within(l, "treated", 90);
+        return `<tr><td data-label="${esc(first)}"><strong>${esc(k)}</strong></td><td data-label="Enquiries">${x.n}</td>
+          <td data-label="Booked a consult">${cellBar(pct(x.booked, x.n))}</td>
+          <td data-label="Treated within 90 days">${w.n ? `${cellBar(w.pct)} <small class="muted">of ${w.n}</small>` : '<span class="muted">Too recent</span>'}</td>
+          <td data-label="Became patients">${cellBar(pct(x.treated, x.n))}</td>
+          <td data-label="Lost">${pct(x.lost, x.n)}%</td>
+          <td data-label="Spend (new patients)">${spendCell(l)}</td></tr>`;
+      }).join("")}</tbody></table></div>`;
+  }
+
+  // What the open prospects should bring, from what happened to people who enquired over 4 months ago
+  function pipeline() {
+    const settled = all.filter((p) => p._day && dayDiff(p._day, today) >= 120 && !isJunk(p, set));
+    const rate = ORDER.slice(0, 5).map((k, i) => {
+      const reached = settled.filter((p) => p._reach >= i);
+      return reached.length >= 10 ? reached.filter((p) => p._reach >= 5).length / reached.length : null;
+    });
+    const open = all.filter((p) => !p.historic && ORDER.slice(0, 5).includes(p.stage) && keep(p));
+    let exp = 0;
+    const rows = ORDER.slice(0, 5).map((k, i) => {
+      const n = open.filter((p) => p.stage === k).length;
+      if (rate[i] != null) exp += n * rate[i];
+      return { k, n, r: rate[i] };
+    });
+    const newPts = all.filter((p) => p._reach >= 5 && !isPast(p) && p.patientId && spend.has(p.patientId));
+    const avg = newPts.length >= 5 ? newPts.reduce((t, p) => t + spend.get(p.patientId).m12, 0) / newPts.length : null;
+    return { rows, exp, avg, open: open.length, settled: settled.length };
+  }
+
+  function curveSvg(list) {
+    const W = 640, H = 240, L = 42, R = 16, T = 14, B = 30, STEP = 5, MAXD = 180;
+    const lines = [[], []];
+    for (let d = 0; d <= MAXD; d += STEP) {
+      const el = list.filter((p) => p._day && dayDiff(p._day, today) >= d);
+      if (el.length < 8) break;
+      ["consulted", "treated"].forEach((k, j) => {
+        const hit = el.filter((p) => { const x = reachDate(p, k); const dd = x ? dayDiff(p._day, x) : -1; return dd >= 0 && dd <= d; }).length;
+        lines[j].push([d, (hit / el.length) * 100]);
+      });
+    }
+    if (lines[0].length < 3) return '<p class="prr-empty">Not enough enquiries old enough yet. Choose a longer date range.</p>';
+    const lastD = lines[0][lines[0].length - 1][0];
+    const top = Math.min(100, Math.max(10, Math.ceil(Math.max(...lines.flat().map((v) => v[1])) / 10) * 10));
+    const x = (d) => L + ((W - L - R) * d) / lastD;
+    const y = (v) => T + (H - T - B) * (1 - v / top);
+    const grid = [0, top / 2, top].map((v) => `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" class="gr"/>
+      <text x="${L - 6}" y="${y(v) + 4}" text-anchor="end" class="ax">${Math.round(v)}%</text>`).join("");
+    const xs = [];
+    for (let d = 0; d <= lastD; d += 30) xs.push(`<text x="${x(d)}" y="${H - 8}" text-anchor="middle" class="ax">${d ? `${d} days` : "Enquired"}</text>`);
+    const path = (pts, cls) => `<polyline class="${cls}" points="${pts.map(([d, v]) => `${x(d).toFixed(1)},${y(v).toFixed(1)}`).join(" ")}"/>`;
+    const end = (pts, cls) => { const [d, v] = pts[pts.length - 1]; return `<text x="${x(d) - 4}" y="${y(v) - 8}" text-anchor="end" class="${cls}">${Math.round(v)}%</text>`; };
+    return `<svg class="prr-curve" viewBox="0 0 ${W} ${H}" role="img" aria-label="How conversion builds up after an enquiry">
+      ${grid}${xs.join("")}${path(lines[0], "l1")}${path(lines[1], "l2")}${end(lines[0], "t1")}${end(lines[1], "t2")}</svg>`;
+  }
+
+  /* ---------- The tabs ---------- */
+  function tabOverview(c) {
+    const { list, s, ps, prevList, a, b } = c;
+    const w90 = within(list, "treated", 90);
+    const pw90 = prevList ? within(prevList, "treated", 90) : null;
+    const sp = spendOfList(list);
     const lostTop = groupBy(list.filter((p) => p.stage === "lost"), (p) => p.lostReason || "No reason")[0];
 
-    // Months: the range (at least 6, at most 36)
     let m0 = a.slice(0, 7);
     const m1 = b.slice(0, 7);
     if (addMonths(m0, 5) > m1) m0 = addMonths(m1, -5);
@@ -2002,7 +2218,6 @@ async function mountReports(container) {
       return { m, n: l.length, booked: l.filter((p) => p._reach >= 2).length, treated: l.filter((p) => p._reach >= 5).length };
     });
 
-    // Now (not the date range): open prospects on the board
     const open = all.filter((p) => !p.historic && OPEN.includes(p.stage) && keep(p));
     const nowMs = Date.now();
     const pipe = STAGES.filter((x) => OPEN.includes(x.key)).map((x) => {
@@ -2010,115 +2225,195 @@ async function mountReports(container) {
       const stuck = l.filter((p) => nowMs - Date.parse(p.stageAt || p.createdAt || "") > 14 * 864e5).length;
       return { label: x.name, n: l.length, tone: x.tone, text: `${l.length}${stuck ? ` <small class="is-warn">${stuck} over 14 days</small>` : ""}` };
     });
+    const pl = pipeline();
+    const plHtml = `<div class="prr-pipe"><b>${Math.round(pl.exp)}</b><span>new patients expected from ${pl.open} open prospect${pl.open === 1 ? "" : "s"}${
+        pl.avg != null && spendState === "ok" ? `, worth about <strong>${money(pl.exp * pl.avg)}</strong> a year` : ""}</span></div>
+      ${hbars(pl.rows.filter((x) => x.n).map((x) => ({ label: stageOf(x.k).name, n: x.n, tone: stageOf(x.k).tone,
+        text: `${x.n} <small>${x.r == null ? "not enough history yet" : `${Math.round(x.r * 100)}% usually become patients`}</small>` })), "No open prospects.")}
+      <p class="prr-note">Based on what happened to the ${pl.settled} people who enquired over 4 months ago${
+        pl.avg != null && spendState === "ok" ? `. A new patient spends about ${money(pl.avg)} a year` : ""}.</p>`;
 
-    const live = list.filter((p) => !p._imp && !p.fromBook);
-    const speed = SPEED.map(([label, max], i) => ({
-      label, n: live.filter((p) => { const h = hoursToContact(p); return h != null && h >= 0 && h <= max && (i === 0 || h > SPEED[i - 1][1]); }).length,
-    })).concat([{ label: "No contact logged", n: live.filter((p) => hoursToContact(p) == null).length, tone: "slate" }]);
+    return `<div class="prr-kpis">
+        ${kpi("inbox", "sky", "Enquiries", s.n, `${s.live} since the dashboard started`, delta(s.n, ps && ps.n, "%"))}
+        ${kpi("clock", "amber", "Booked a consultation", `${pct(s.booked, s.n)}%`, `${s.booked} people`,
+          delta(pct(s.booked, s.n), ps ? pct(ps.booked, ps.n) : null, "pts"))}
+        ${kpi("trophy", "green", "Treated within 90 days", w90.n ? `${w90.pct}%` : "–",
+          w90.n ? `${w90.hit} of ${w90.n} who enquired 90+ days ago` : "These enquiries are too recent", delta(w90.pct, pw90 && pw90.pct, "pts"))}
+        ${kpi("chart", "teal", "Spend from new patients", spendState === "ok" ? money(sp.total) : spendState === "loading" ? "…" : "–",
+          spendState === "ok" ? `${sp.n} new patient${sp.n === 1 ? "" : "s"} · all time` : spendState === "denied" ? "Needs Patient List access" : "Loading…")}
+        ${kpi("phone", "violet", "First contact", hrsText(s.hrs), `${pct(s.fast, s.live)}% within ${hoursOf(set)} hours`, delta(s.hrs, ps && ps.hrs, "%", false))}
+        ${kpi("flag", "slate", "Lost", `${pct(s.lost, s.n)}%`, lostTop ? `Mostly: ${esc(lostTop.k)}` : "None lost",
+          delta(pct(s.lost, s.n), ps ? pct(ps.lost, ps.n) : null, "pts", false))}
+      </div>
+      <div class="prr-grid">
+        ${card("Enquiries by month", "", `<ul class="pr-legend"><li><i class="is-all"></i>Enquiries</li><li><i class="is-won"></i>Became patients</li>
+          <li><i class="is-line"></i>Booked a consultation (%)</li></ul>${trendSvg(trend)}`, true)}
+        ${card("From enquiry to patient", "Everyone who enquired in this period, and how far they've got.", funnelHtml(list))}
+        ${card("Expected from the open prospects", "Today's board, whatever dates are chosen.", plHtml)}
+        ${card("Open prospects now", "", `${hbars(pipe, "No open prospects.")}
+          <p class="prr-note">${open.filter((p) => notContacted(p, set)).length} not contacted in ${hoursOf(set)} hours ·
+          ${open.filter((p) => followState(p) === "overdue").length} follow-ups overdue.</p>`, true)}
+      </div>`;
+  }
 
+  function tabConversion(c) {
+    const { list, s, ps } = c;
+    const winsHtml = [["consulted", "Came in for a first visit"], ["treated", "Had a first treatment"]].map(([k, l]) =>
+      `<div class="prr-winrow"><span class="prr-winlbl">${l}</span><div class="prr-wins">${[30, 60, 90].map((n) => {
+        const w = within(list, k, n);
+        return `<div class="prr-win"><b>${w.n ? `${w.pct}%` : "–"}</b><span>within ${n} days</span>
+          <em>${w.n ? `${w.hit} of ${w.n}` : "too recent"}</em></div>`;
+      }).join("")}</div></div>`).join("");
     const linked = list.filter((p) => p.patientId);
     const oldPt = linked.filter((p) => p.wasPatient).length;
     const newPt = linked.length - oldPt;
     const none = list.length - linked.length;
     const seg = (n, cls, label) => (n ? `<i class="${cls}" style="flex:${n}" title="${esc(label)}: ${n}"></i>` : "");
-
-    const srcRows = groupBy(list, (p) => p.source || "Other").map(({ k, l }) => { const x = stats(l); return `<tr>
-      <td data-label="Source"><strong>${esc(k)}</strong></td><td data-label="Enquiries">${x.n}</td>
-      <td data-label="Booked a consult">${cellBar(rate(x.booked, x.n))}</td><td data-label="Became patients">${cellBar(rate(x.treated, x.n))}</td>
-      <td data-label="Lost">${rate(x.lost, x.n)}%</td><td data-label="Days to 1st appointment">${x.appt == null ? "–" : Math.round(x.appt)}</td></tr>`; }).join("");
-    const teamRows = groupBy(list, (p) => p.assignedToName || "Nobody yet").map(({ k, l }) => {
-      const x = stats(l);
-      const lv = l.filter((p) => !p._imp && !p.fromBook);
-      return `<tr><td data-label="Team member"><strong>${esc(k)}</strong></td><td data-label="Prospects">${x.n}</td>
-        <td data-label="Contacted">${lv.length ? cellBar(rate(lv.filter((p) => Number(p.contacts) > 0).length, lv.length)) : "–"}</td>
-        <td data-label="First contact">${hrsText(x.hrs)}</td>
-        <td data-label="Booked a consult">${cellBar(rate(x.booked, x.n))}</td><td data-label="Became patients">${cellBar(rate(x.treated, x.n))}</td>
-        <td data-label="Lost">${rate(x.lost, x.n)}%</td></tr>`;
-    }).join("");
-    const concerns = groupBy(list, (p) => String(p.concern || "Not given").split(/[,;]/)[0].trim() || "Not given").slice(0, 8)
-      .map(({ k, l }) => ({ label: k, n: l.length, text: `${l.length} <small>${rate(l.filter((p) => p._reach >= 5).length, l.length)}% became patients</small>` }));
     const lost = groupBy(list.filter((p) => p.stage === "lost"), (p) => p.lostReason || "No reason").map(({ k, l }) => ({ label: k, n: l.length, tone: "slate" }));
-    const found = groupBy(list.filter((p) => viaOfP(p)), (p) => viaOfP(p).name).map(({ k, l }) => ({
-      label: k, n: l.length, tone: k === "Google search" ? "green" : "",
-      text: `${l.length} <small>${rate(l.filter((p) => p._reach >= 5).length, l.length)}% became patients</small>` }));
-    const optsR = (list2, cur) => list2.map(([v, l]) => `<option value="${esc(v)}"${v === cur ? " selected" : ""}>${esc(l)}</option>`).join("");
-
-    root.innerHTML = `${back}
-      <div class="pr-top"><div><h2>Prospect reports</h2><p class="muted">Enquiries from ${esc(repDay(a))} to ${esc(repDay(b))}${
-        ps ? ` · ▲▼ compared with the ${len} days before` : ""}${junkN ? ` · ${junkN} spam or test entr${junkN === 1 ? "y" : "ies"} left out` : ""}</p></div>
-        <div class="pr-top-acts"><button type="button" class="lh-btn is-quiet" data-act="csv">Download CSV</button></div></div>
-      <div class="pr-rep-tools">
-        <select class="fe-input" data-r="range" aria-label="Dates">${optsR(REP_RANGES, st.range)}</select>
-        ${st.range === "custom" ? `<input type="date" class="fe-input" data-r="from" value="${esc(st.from || a)}" max="${today}" aria-label="From" />
-          <input type="date" class="fe-input" data-r="to" value="${esc(st.to || b)}" max="${today}" aria-label="To" />` : ""}
-        <select class="fe-input" data-r="source" aria-label="Source"><option value="">All sources</option>${optsR(sources.map((x) => [x, x]), st.source)}</select>
-        <select class="fe-input" data-r="who" aria-label="Team member"><option value="">Everyone</option>
-          <option value="-"${st.who === "-" ? " selected" : ""}>Nobody yet</option>${optsR(people.map((x) => [x, x]), st.who)}</select>
-        <select class="fe-input" data-r="kind" aria-label="Who">${optsR(REP_KINDS, st.kind)}</select>
+    return `<div class="prr-kpis">
+        ${kpi("clock", "amber", "Enquiry to first appointment", s.appt == null ? "–" : `${Math.round(s.appt)} days`, "Middle value",
+          delta(s.appt, ps && ps.appt, "%", false))}
+        ${kpi("alert", "rose", "Cancelled after booking", `${pct(s.cancelled, s.everBooked)}%`, `${s.cancelOpen} not rebooked`,
+          delta(pct(s.cancelled, s.everBooked), ps ? pct(ps.cancelled, ps.everBooked) : null, "pts", false))}
+        ${kpi("trophy", "green", "Became patients", `${pct(s.treated, s.n)}%`, `${s.treated} treated so far`,
+          delta(pct(s.treated, s.n), ps ? pct(ps.treated, ps.n) : null, "pts"))}
+        ${kpi("user", "teal", "Active patients", `${pct(s.active, s.n)}%`, `${s.active} came back again`,
+          delta(pct(s.active, s.n), ps ? pct(ps.active, ps.n) : null, "pts"))}
       </div>
-      <div class="pr-kpis">
-        ${kpi("Enquiries", s.n, `${s.live} since the dashboard started`, delta(s.n, ps && ps.n, "%"))}
-        ${kpi("Booked a consultation", `${rate(s.booked, s.n)}%`, `${s.booked} people`, delta(rate(s.booked, s.n), prev("booked"), "pts"))}
-        ${kpi("Became patients", `${rate(s.treated, s.n)}%`, `${s.treated} treated`, delta(rate(s.treated, s.n), prev("treated"), "pts"))}
-        ${kpi("Active patients", `${rate(s.active, s.n)}%`, `${s.active} came back again`, delta(rate(s.active, s.n), prev("active"), "pts"))}
-        ${kpi("First contact", hrsText(s.hrs), `${rate(s.fast, s.live)}% within ${hoursOf(set)} hours`, delta(s.hrs, ps && ps.hrs, "%", false))}
-        ${kpi("Enquiry to first appointment", s.appt == null ? "–" : `${Math.round(s.appt)} days`, "Middle value", delta(s.appt, ps && ps.appt, "%", false))}
-        ${kpi("Lost", `${rate(s.lost, s.n)}%`, lostTop ? `Mostly: ${esc(lostTop.k)}` : "None lost", delta(rate(s.lost, s.n), prev("lost"), "pts", false))}
-        ${kpi("Cancelled after booking", `${rate(s.cancelled, s.everBooked)}%`, `${s.cancelOpen} not rebooked`,
-          delta(rate(s.cancelled, s.everBooked), ps ? rate(ps.cancelled, ps.everBooked) : null, "pts", false))}
-        </div>
-      <div class="pr-rep-grid">
-        <section class="pr-panel is-wide"><h3>Enquiries by month</h3>
-          <ul class="pr-legend"><li><i class="is-all"></i>Enquiries</li><li><i class="is-won"></i>Became patients</li><li><i class="is-line"></i>Booked a consultation (%)</li></ul>
-          ${trendSvg(trend)}</section>
-        <section class="pr-panel"><h3>From enquiry to patient</h3>${funnelHtml(list)}
-          <p class="pr-note">Enquiries imported from before the dashboard only count as contacted once they've booked.
-            Recent enquiries may still book, so their rates can look lower.</p></section>
-        <section class="pr-panel"><h3>Open prospects now</h3>${hbars(pipe, "No open prospects.")}
-          <p class="pr-note">${open.filter((p) => notContacted(p, set)).length} not contacted in ${hoursOf(set)} hours ·
-            ${open.filter((p) => followState(p) === "overdue").length} follow-ups overdue · this part isn't affected by the dates.</p></section>
-        <section class="pr-panel is-wide"><h3>By source</h3>${srcRows ? `<div class="pr-rt-wrap"><table class="pr-rtable"><thead><tr>
-          <th>Source</th><th>Enquiries</th><th>Booked a consult</th><th>Became patients</th><th>Lost</th><th>Days to 1st appointment</th>
-          </tr></thead><tbody>${srcRows}</tbody></table></div>` : '<p class="muted">Nothing in this period.</p>'}</section>
-        <section class="pr-panel is-wide"><h3>By team member</h3>${teamRows ? `<div class="pr-rt-wrap"><table class="pr-rtable"><thead><tr>
-          <th>Team member</th><th>Prospects</th><th>Contacted</th><th>First contact</th><th>Booked a consult</th><th>Became patients</th><th>Lost</th>
-          </tr></thead><tbody>${teamRows}</tbody></table></div>` : '<p class="muted">Nothing in this period.</p>'}</section>
-        <section class="pr-panel"><h3>How quickly they're contacted</h3>${hbars(speed.filter((x) => x.n), "No enquiries since the dashboard started.")}
-          <p class="pr-note">Enquiries since the dashboard started, from the first call, text or email logged. Booked directly isn't counted: they booked themselves.</p></section>
-        <section class="pr-panel"><h3>Why they were lost</h3>${hbars(lost, "Nobody lost in this period. 👍")}</section>
-        <section class="pr-panel"><h3>Booked, then cancelled</h3>${hbars([
+      <div class="prr-grid">
+        ${card("Fair conversion", "Each figure only counts people who enquired long enough ago, so recent enquiries don't pull it down.", winsHtml, true)}
+        ${card("How conversion builds up after an enquiry", "", `<ul class="prr-legend">
+          <li><i style="background:#38bdf8"></i>Came in for a first visit</li><li><i style="background:#0f766e"></i>Had a first treatment</li></ul>
+          ${curveSvg(list)}<p class="prr-note">Where the lines flatten is roughly when people stop converting, a good time for a last follow-up.</p>`, true)}
+        ${card("Booked, then cancelled", "", `${hbars([
           { label: "Cancelled, then rebooked", n: list.filter((p) => Number(p.cancels) > 0 && !p.cancelOpen).length, tone: "green" },
           { label: "Cancelled, not rebooked", n: list.filter((p) => p.cancelOpen === true && !(p.lastCancel && p.lastCancel.kind === "noshow")).length, tone: "orange" },
           { label: "Didn't come, not rebooked", n: list.filter((p) => p.cancelOpen === true && p.lastCancel && p.lastCancel.kind === "noshow").length, tone: "slate" },
         ].filter((x) => x.n), "No cancellations in this period. 👍")}
-          <p class="pr-note">Consultations and treatments cancelled, or not attended, after they enquired.
-            ${list.filter((p) => cancelOpen(p)).length} still open on the board to call.</p></section>
-        <section class="pr-panel"><h3>What they're interested in</h3>${hbars(concerns)}</section>
-        <section class="pr-panel"><h3>How they found the website</h3>${hbars(found, "No tracked web enquiries in this period yet.")}
-          <p class="pr-note">Web form enquiries since visit tracking started. See SEO → Pages for which pages they came in on.</p></section>
-        <section class="pr-panel"><h3>New or existing patients</h3>
-          <div class="pr-stack">${seg(newPt, "is-new", "New to the clinic")}${seg(oldPt, "is-old", "Already patients")}${seg(none, "is-none", "Not linked to a patient yet")}</div>
+          <p class="prr-note">${list.filter((p) => cancelOpen(p)).length} still open on the board to call.</p>`)}
+        ${card("New or existing patients", "", `<div class="pr-stack">${seg(newPt, "is-new", "New to the clinic")}${seg(oldPt, "is-old", "Already patients")}${seg(none, "is-none", "Not linked yet")}</div>
           <ul class="pr-legend"><li><i class="is-new"></i>New to the clinic: ${newPt}</li><li><i class="is-old"></i>Already patients: ${oldPt}</li>
-            <li><i class="is-none"></i>Not linked yet: ${none}</li></ul>
-          <p class="pr-note">Already patients: they'd been in before they enquired.</p></section>
-        <section class="pr-panel is-wide"><h3>When enquiries come in</h3>${heatHtml(list)}
-          <p class="pr-note">Perth time. Darker means more enquiries, which helps with who's on to reply.</p></section>
+            <li><i class="is-none"></i>Not linked yet: ${none}</li></ul>`)}
+        ${card("Why they were lost", "", hbars(lost, "Nobody lost in this period. 👍"), true)}
       </div>`;
+  }
+
+  function tabSources(c) {
+    const { list } = c;
+    const found = groupBy(list.filter((p) => viaOfP(p)), (p) => viaOfP(p).name).map(({ k, l }) => ({
+      label: k, n: l.length, tone: k === "Google search" ? "green" : "",
+      text: `${l.length} <small>${pct(l.filter((p) => p._reach >= 5).length, l.length)}% became patients</small>` }));
+    return `<div class="prr-grid">
+      ${card("By source", "How they got in touch, and what that turned into.", convTable(groupBy(list, (p) => p.source || "Other"), "Source"), true)}
+      ${card("By interest", "What they were interested in, grouped (e.g. Botox, anti-wrinkle and WR all count as Wrinkle relaxer).",
+        convTable(groupBy(list, (p) => p._int), "Interest"), true)}
+      ${card("How they found the website", "Web form enquiries since visit tracking started.", hbars(found, "No tracked web enquiries in this period yet."), true)}
+    </div>`;
+  }
+
+  function tabTeam(c) {
+    const { list } = c;
+    const teamRows = groupBy(list, (p) => p.assignedToName || "Nobody yet").map(({ k, l }) => {
+      const x = stats(l);
+      const lv = l.filter((p) => !p._imp && !p.fromBook);
+      return `<tr><td data-label="Team member"><strong>${esc(k)}</strong></td><td data-label="Prospects">${x.n}</td>
+        <td data-label="Contacted">${lv.length ? cellBar(pct(lv.filter((p) => Number(p.contacts) > 0).length, lv.length)) : "–"}</td>
+        <td data-label="First contact">${hrsText(x.hrs)}</td>
+        <td data-label="Booked a consult">${cellBar(pct(x.booked, x.n))}</td><td data-label="Became patients">${cellBar(pct(x.treated, x.n))}</td>
+        <td data-label="Lost">${pct(x.lost, x.n)}%</td><td data-label="Spend (new patients)">${spendCell(l)}</td></tr>`;
+    }).join("");
+    const live = list.filter((p) => !p._imp && !p.fromBook);
+    const speed = SPEED.map(([label, max], i) => ({
+      label, n: live.filter((p) => { const h = hoursToContact(p); return h != null && h >= 0 && h <= max && (i === 0 || h > SPEED[i - 1][1]); }).length,
+    })).concat([{ label: "No contact logged", n: live.filter((p) => hoursToContact(p) == null).length, tone: "slate" }]);
+    const bandRows = BANDS.map(([k, l]) => {
+      const lv = live.filter((p) => p._band === k);
+      const hrs = lv.map(hoursToContact).filter((h) => h != null && h >= 0);
+      return `<tr><td data-label="When they enquired"><strong>${esc(l)}</strong></td><td data-label="Enquiries">${lv.length}</td>
+        <td data-label="First contact">${hrsText(median(hrs))}</td>
+        <td data-label="Contacted in time">${lv.length ? cellBar(pct(hrs.filter((h) => h <= hoursOf(set)).length, lv.length)) : "–"}</td>
+        <td data-label="Became patients">${lv.length ? cellBar(pct(lv.filter((p) => p._reach >= 5).length, lv.length)) : "–"}</td></tr>`;
+    }).join("");
+    return `<div class="prr-grid">
+      ${card("By team member", "", teamRows ? `<div class="pr-rt-wrap"><table class="pr-rtable"><thead><tr><th>Team member</th><th>Prospects</th>
+        <th>Contacted</th><th>First contact</th><th>Booked a consult</th><th>Became patients</th><th>Lost</th><th>Spend (new patients)</th>
+        </tr></thead><tbody>${teamRows}</tbody></table></div>` : '<p class="prr-empty">Nothing in this period.</p>', true)}
+      ${card("How quickly they're contacted", "From the first call, text or email logged. Booked directly isn't counted.",
+        hbars(speed.filter((x) => x.n), "No enquiries since the dashboard started."))}
+      ${card("Contact speed by when they enquired", `"Contacted in time" means within ${hoursOf(set)} hours.`,
+        `<div class="pr-rt-wrap"><table class="pr-rtable"><thead><tr><th>When they enquired</th><th>Enquiries</th><th>First contact</th>
+          <th>Contacted in time</th><th>Became patients</th></tr></thead><tbody>${bandRows}</tbody></table></div>
+          <p class="prr-note">Opening hours are set at the top of the reports code (CLINIC_OPEN).</p>`)}
+      ${card("When enquiries come in", "Perth time. Darker means more enquiries, which helps decide who's on to reply.", heatHtml(list), true)}
+    </div>`;
+  }
+
+  function tabTemplates(c) {
+    const rows = templateStats(c.list);
+    const body = rows.length ? `<div class="pr-rt-wrap"><table class="pr-rtable"><thead><tr><th>Template</th><th>Type</th><th>Sent</th>
+        <th>People</th><th>Responded within 7 days</th><th>Booked within 14 days</th><th>Last used</th></tr></thead><tbody>${rows.map((x) => `<tr>
+        <td data-label="Template"><strong>${esc(x.name)}</strong></td>
+        <td data-label="Type"><span class="prr-ch is-${x.kind}">${x.kind === "email" ? "Email" : "SMS"}</span></td>
+        <td data-label="Sent">${x.sent}</td><td data-label="People">${x.people.size}</td>
+        <td data-label="Responded within 7 days">${cellBar(pct(x.replied, x.sent))}</td>
+        <td data-label="Booked within 14 days">${cellBar(pct(x.booked, x.sent))}</td>
+        <td data-label="Last used">${esc(repDay(keyOf(new Date(x.last).toISOString())))}</td></tr>`).join("")}</tbody></table></div>`
+      : '<p class="prr-empty">No messages have been sent from a template in this period yet. Template use is recorded from now on.</p>';
+    return `<div class="prr-grid">${card("How each template does",
+      "Responded: they replied, enquired again, or a call was logged as spoken to them. Booked: they moved to a booked stage.", body, true)}</div>`;
+  }
+
+  /* ---------- Drawing ---------- */
+  function draw() {
+    const [a, b] = span();
+    const len = dayDiff(a, b) + 1;
+    const list = cohort(a, b);
+    const prevList = st.range === "all" ? null : cohort(addDays(a, -len), addDays(a, -1));
+    const s = stats(list);
+    const ps = prevList ? stats(prevList) : null;
+    const junkN = all.filter((p) => p._day && p._day >= a && p._day <= b && isJunk(p, set)).length;
+    const c = { list, s, ps, prevList, a, b };
+    const optsR = (l2, cur) => l2.map(([v, l]) => `<option value="${esc(v)}"${v === cur ? " selected" : ""}>${esc(l)}</option>`).join("");
+    const body = st.tab === "conversion" ? tabConversion(c) : st.tab === "sources" ? tabSources(c)
+      : st.tab === "team" ? tabTeam(c) : st.tab === "templates" ? tabTemplates(c) : tabOverview(c);
+
+    root.innerHTML = `${back}
+      <div class="prr-head">
+        <div><h2>Prospect reports</h2>
+          <p>Enquiries from ${esc(repDay(a))} to ${esc(repDay(b))} · ${s.n} ${s.n === 1 ? "person" : "people"}${
+            ps ? ` · ▲▼ compared with the ${len} days before` : ""}${junkN ? ` · ${junkN} spam or test entr${junkN === 1 ? "y" : "ies"} left out` : ""}</p></div>
+        <button type="button" class="lh-btn is-quiet" data-act="csv">Download CSV</button>
+      </div>
+      <div class="prr-bar">
+        <div class="prr-filters">
+          <select class="fe-input" data-r="range" aria-label="Dates">${optsR(REP_RANGES, st.range)}</select>
+          ${st.range === "custom" ? `<input type="date" class="fe-input" data-r="from" value="${esc(st.from || a)}" max="${today}" aria-label="From" />
+            <input type="date" class="fe-input" data-r="to" value="${esc(st.to || b)}" max="${today}" aria-label="To" />` : ""}
+          <select class="fe-input" data-r="source" aria-label="Source"><option value="">All sources</option>${optsR(sources.map((x) => [x, x]), st.source)}</select>
+          <select class="fe-input" data-r="who" aria-label="Team member"><option value="">Everyone</option>
+            <option value="-"${st.who === "-" ? " selected" : ""}>Nobody yet</option>${optsR(people.map((x) => [x, x]), st.who)}</select>
+          <select class="fe-input" data-r="kind" aria-label="Who">${optsR(REP_KINDS, st.kind)}</select>
+        </div>
+        <nav class="prr-tabs" role="tablist">${REP_TABS.map(([k, l]) =>
+          `<button type="button" role="tab" class="prr-tab${st.tab === k ? " is-on" : ""}" aria-selected="${st.tab === k}" data-tab="${k}">${esc(l)}</button>`).join("")}</nav>
+      </div>
+      ${body}`;
   }
 
   function downloadCsv() {
     const [a, b] = span();
     const list = cohort(a, b);
-    const head = ["Name", "Enquired", "Source", "Interested in", "Stage", "Given to", "Contacts", "First contact",
+    const head = ["Name", "Enquired", "Source", "Interested in", "Interest group", "Stage", "Given to", "Contacts", "First contact",
       "First appointment", "First treatment", "Active from", "Lost reason", "Cancelled", "Already a patient",
-      "Past patient", "On recall", "Found us"];
-    const rows = list.map((p) => { const m = p.milestones || {}; return [p.name, p._day, p.source, p.concern, stageOf(p.stage).name,
+      "Past patient", "On recall", "Found us", "Spend (all time)"];
+    const rows = list.map((p) => { const m = p.milestones || {}; return [p.name, p._day, p.source, p.concern, p._int, stageOf(p.stage).name,
       p.assignedToName, p.contacts || 0, p.firstContactAt ? keyOf(p.firstContactAt) : "", m.consult_booked || "", m.treated || "",
       m.active || "", p.lostReason || "", p.cancels ? `${p.cancels}${p.cancelOpen ? " (not rebooked)" : ""}` : "",
       p.wasPatient ? "Yes" : p.patientId ? "No" : "",
       p.prev ? `Yes, last visit ${p.prev.last}` : "",
       p.recall ? `${p.recall.category} (due ${p.recall.due})` : "",
-      (() => { const v = viaOfP(p); return v ? `${v.name}${v.land ? ` → ${v.land}` : ""}` : ""; })()]; });
+      (() => { const v = viaOfP(p); return v ? `${v.name}${v.land ? ` → ${v.land}` : ""}` : ""; })(),
+      p.patientId && spend.has(p.patientId) ? Math.round(spend.get(p.patientId).all) : ""]; });
     const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
     const blob = new Blob(["\ufeff" + [head, ...rows].map((r) => r.map(q).join(",")).join("\r\n")], { type: "text/csv" });
     const link = document.createElement("a");
@@ -2131,13 +2426,41 @@ async function mountReports(container) {
   root.addEventListener("change", (e) => {
     const k = e.target.dataset.r;
     if (!k) return;
-    st[k] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+    st[k] = e.target.value;
     if (k === "range" && st.range === "custom" && !st.from) { st.from = addDays(today, -89); st.to = today; }
     if ((k === "from" || k === "to") && st.from && st.to && st.from > st.to) {   // dates the wrong way round
       if (k === "from") st.to = st.from; else st.from = st.to;
     }
     draw();
   });
-  root.addEventListener("click", (e) => { if (e.target.closest('[data-act="csv"]')) downloadCsv(); });
+  root.addEventListener("click", (e) => {
+    const tb = e.target.closest("[data-tab]");
+    if (tb) {
+      st.tab = tb.dataset.tab;
+      history.replaceState(null, "", `#/prospects/reports/${st.tab}`);
+      draw();
+      return;
+    }
+    if (e.target.closest('[data-act="csv"]')) downloadCsv();
+  });
   draw();
+
+  // Spend for prospects who became patients, then draw again with it
+  try {
+    const ids = [...new Set(all.filter((p) => p.patientId && p._reach >= 5).map((p) => p.patientId))].slice(0, 800);
+    for (let i = 0; i < ids.length; i += 40) {
+      const snaps = await Promise.all(ids.slice(i, i + 40).map((id) => getDoc(doc(db, "patient_list", id))));
+      snaps.forEach((sn) => {
+        if (!sn.exists()) return;
+        const sp = sn.data().Spend || {};
+        spend.set(sn.id, { m12: Number(sp.m12) || 0, all: Number(sp.all) || 0 });
+      });
+      if (!root.isConnected) return;
+    }
+    spendState = "ok";
+  } catch (err) {
+    console.warn("Prospect reports: spend not read:", err);
+    spendState = err && err.code === "permission-denied" ? "denied" : "failed";
+  }
+  if (root.isConnected) draw();
 }
