@@ -1702,7 +1702,6 @@ async function mountEmails(container) {
   };
   window.addEventListener("beforeunload", onUnload);
 }
-async function mountEmails(container) {
   const root = document.createElement("section");
   root.className = "page rf";
   container.replaceChildren(root);
