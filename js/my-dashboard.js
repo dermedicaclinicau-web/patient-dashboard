@@ -17,7 +17,7 @@ import { parseRecordDate } from "./transcripts.js";
 import { callApi } from "./appointments.js";
 import { showToast } from "./utils.js";
 import { renderDayCard } from "./staff-days.js";
-import { openStartOfDayKit } from "./start-of-day.js";
+import { openStartOfDayKit, isStartOfDayOff } from "./start-of-day.js";
 import { mountMyNotes } from "./my-notes.js";
 import { mountRecordingJobs } from "./recording-bar.js";
 import { mountMyVisits } from "./my-visits.js";
@@ -388,7 +388,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     const hidden = readSet(hideKey(me0));
     const show = (k) => allowedCard(k) && !hidden.has(k);
     const todayKey = dayKey();
-    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts, notes, formsT, invs, unrec, countCfg, myDay, myCreated, callBacks, refunds] = await Promise.all([
+    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts, notes, formsT, invs, unrec, countCfg, myDay, myCreated, callBacks, refunds, sodOff] = await Promise.all([
       safe(listProducts(), []),
       safe(listAllLots(), []),
       safe(listKits(), []),
@@ -416,6 +416,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
       show("tasks") ? safe(myCreatedTasks(me0), []) : [],
       show("attention") && (can("recall.work") || can("recall.manage")) ? safe(myCallBacks(me0), []) : [],
       safe(openRefunds(), []),
+      safe(isStartOfDayOff(), false),
     ]);
     if (!root.isConnected) return;
 
@@ -550,7 +551,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     if (myOverdue) att.push({ tone: "bad", ttab: "mine",
       text: `${myOverdue} of your task${myOverdue === 1 ? " is" : "s are"} overdue`, act: "View" });
     // Start of Day: injectors holding a kit who haven't done today's count (e.g. pressed "Remind me later")
-    const sodPending = canKit && !(myDay && (myDay.start || myDay.end))
+    const sodPending = canKit && !sodOff && !(myDay && (myDay.start || myDay.end))
       && myKits.some((k) => { const p = byId.get(k.productId); return p && p.active && isKitProduct(p); });
     if (sodPending) att.unshift({ tone: "warn", sod: true, text: "Start of Day: your kit count isn't done yet", act: "Count my kit" });
     // My kit: lots due today that nobody has counted yet (not repeated while the Start of Day count is waiting)

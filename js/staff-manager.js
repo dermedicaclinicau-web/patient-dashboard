@@ -20,6 +20,7 @@ const ERR = {
   FORBIDDEN: "Only Admins can manage staff.",
   NOT_FOUND: "That staff member couldn't be found. Refresh and try again.",
   INVALID_PIN: "The server hasn't been updated yet. In Apps Script, deploy a new version.",
+  BAD_REQUEST: "The server hasn't been updated yet. In Apps Script, deploy a new version.",
   UNAUTHORIZED: "Your session has ended. Log out and back in.",
   BAD_PROVIDER: "Check the provider number: 6 digits, then a location character and a letter (e.g. 2345671A).",
   BAD_PRESCRIBER: "Check the prescriber number: 6 or 7 digits.",
@@ -199,6 +200,9 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
           <button type="button" class="lh-btn is-quiet st-pop${s.eodPopup === false ? " is-off" : ""}" data-pop="${esc(s.id)}"
             aria-pressed="${s.eodPopup !== false}" title="Whether End of day pops up by itself before they finish">${
             s.eodPopup === false ? "Pop-up: Off" : "Pop-up: On"}</button>
+          <button type="button" class="lh-btn is-quiet st-pop${s.sodOn === false ? " is-off" : ""}" data-sod="${esc(s.id)}"
+            aria-pressed="${s.sodOn !== false}" title="Whether they're asked to start their day (and injectors to count their kit)">${
+            s.sodOn === false ? "Start of Day: Off" : "Start of Day: On"}</button>
           <button type="button" class="lh-btn ${s.active ? "st-danger" : "is-primary"}" data-toggle="${esc(s.id)}">${s.active ? "Turn off" : "Turn on"}</button>
         </div>
       </div>`).join("")}</div>
@@ -492,6 +496,9 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
         <label class="fe-check"><input type="checkbox" name="eodPopup"${!s || s.eodPopup !== false ? " checked" : ""} />
           Pop up End of day before they finish</label>
         <small class="fe-note">Off: End of day doesn't open by itself. They still have the End my day button in the top bar.</small>
+        <label class="fe-check"><input type="checkbox" name="sodOn"${!s || s.sodOn !== false ? " checked" : ""} />
+          Ask them to start their day</label>
+        <small class="fe-note">Off: no Start of Day window, no Start my day button, and injectors aren't asked for a morning kit count. End my day still works.</small>
         <label class="lh-field"><span class="lh-label">Email (optional)</span><input type="email" name="email" maxlength="254" value="${esc(s ? s.email : "")}" /></label>
         <div class="lh-field"><span class="lh-label">Photo (optional)</span>
           <div class="st-photo-pick">
@@ -654,7 +661,7 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
       const payload = {
         id: s ? s.id : "", name: f.name.value, role: f.role.value,
         email: f.email.value, photo: f.photo.value, pin: isNew ? readPin(form) : "", access,
-        injector: f.injector.checked, eodPopup: f.eodPopup.checked,
+        injector: f.injector.checked, eodPopup: f.eodPopup.checked, sodOn: f.sodOn.checked,
         providerNo: f.providerNo.value, prescriberNo: f.prescriberNo.value,
         ahpraNo: f.ahpraNo.value, quals: f.quals.value,schedule: sr.schedule,
       };
@@ -769,6 +776,21 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
       showToast(errText(ex));
     }
   }
+  // Start of Day on or off for one person: changes straight away, put back if the save fails
+  async function toggleSod(s, btn) {
+    if (!s || btn.disabled) return;
+    const on = s.sodOn === false;
+    const set = (v) => { list = list.map((x) => (x.id === s.id ? { ...x, sodOn: v } : x)); renderStaff(); };
+    set(on);
+    try {
+      await api("setSod", { id: s.id, on });
+      showToast(`Start of Day ${on ? "on" : "off"} for ${s.name}. It applies the next time they open or refresh the portal.`);
+    } catch (ex) {
+      set(!on);
+      showToast(errText(ex));
+    }
+  }
+
   /* ---------- Events ---------- */
   root.addEventListener("click", async (e) => {
     const t = e.target;
@@ -780,6 +802,8 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
     if (pn) { resetPin(find(pn.dataset.pin)); return; }
     const pp = t.closest("[data-pop]");
     if (pp) { togglePopup(find(pp.dataset.pop), pp); return; }
+    const sd = t.closest("[data-sod]");
+    if (sd) { toggleSod(find(sd.dataset.sod), sd); return; }
     const tg = t.closest("[data-toggle]");
     if (tg) { if (!tg.disabled) toggle(find(tg.dataset.toggle), tg); return; }
     if (t.closest('[data-act="add-role"]')) { addRole(); return; }

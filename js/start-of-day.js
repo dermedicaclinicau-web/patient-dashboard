@@ -6,6 +6,17 @@ import { can } from "./perms.js";
 import { db } from "./firebase-config.js";
 import { collection, getDocs, query, where, FieldPath, doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { kitCountHtml, wireKitCount, readKitCount, kitBatchOptions } from "./kit-count.js";
+import { getAuth } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+// Staff → Start of Day Off: the login token says so (applies after the next refresh)
+export async function isStartOfDayOff() {
+  try {
+    const u = getAuth().currentUser;
+    if (!u) return false;
+    const r = await u.getIdTokenResult();
+    return r.claims.sodOff === true;
+  } catch { return false; }
+}
 
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July",
@@ -83,6 +94,7 @@ async function checkStartOfDay(staff) {
   if (checking || current || startedKey === today || snoozedNow(staff)) return;
   checking = true;
   try {
+    if (await isStartOfDayOff()) { startedKey = today; return; }   // turned off for them: no more checks today
     const mine = session;
     const st = await dayState(staff).catch((err) => { console.warn("Day check failed:", err); return undefined; });
     if (mine !== session || current || watchStaff !== staff) return;
@@ -184,6 +196,7 @@ export async function maybeShowStartOfDay(staff) {
   if (!staff) return;
   refreshStartOfDayButton(staff);
   if (new URLSearchParams(location.search).get("sod") === "preview") { previewStartOfDay(staff); return; }
+  if (await isStartOfDayOff()) return;   // Staff → Start of Day Off
   watchStartOfDay(staff);
   checkStartOfDay(staff);
 }
@@ -199,6 +212,10 @@ export function closeStartOfDay() {
 // Opens the kit count on demand (My dashboard → Needs my attention). Returns false if there's nothing to count.
 export async function openStartOfDayKit(staff) {
   if (current) return true;   // already open
+  if (await isStartOfDayOff()) {
+    showToast("Start of Day is turned off for you.");
+    return false;
+  }
   const kit = await kitToday(staff).catch((err) => { console.warn("Kit check failed:", err); return null; });
   if (!kit) {
     showToast("Nothing to count: today's kit count is done, or your kit is empty.");
@@ -663,6 +680,7 @@ async function dayState(staff) {
 // The top bar button: the kit count for injectors with a kit, otherwise the welcome
 export async function openStartOfDay(staff) {
   if (current || !staff) return;
+  if (await isStartOfDayOff()) { showToast("Start of Day is turned off for you."); return; }
   const st = await dayState(staff).catch((err) => { console.warn("Day check failed:", err); return undefined; });
   if (current) return;
   if (st === undefined) { showToast("Couldn't check your day. Check your connection and try again."); return; }
@@ -752,9 +770,12 @@ export async function refreshStartOfDayButton(staff) {
   btnStaff = staff || null;
   const mine = ++btnCheck;
   if (!staff) { setPending(false); setEditable(false); return; }
-  const info = await dayInfo(staff).catch((err) => { console.warn("Day check failed:", err); return null; });
+  const [info, off] = await Promise.all([
+    dayInfo(staff).catch((err) => { console.warn("Day check failed:", err); return null; }),
+    isStartOfDayOff(),
+  ]);
   if (mine !== btnCheck || btnStaff !== staff) return;
-  setPending(!!info && !info.started);
+  setPending(!off && !!info && !info.started);   // off: no "Start my day", and "End my day" shows straight away
   setEditable(!!info && info.canEdit);
 }
 
