@@ -14824,3 +14824,9 @@ a.sds-btn { display: inline-flex; align-items: center; text-decoration: none; }
 /* ---------- Settings → End of Day ---------- */
 .eod-admin > .sds { margin-bottom: 1rem; }
 .eod-qcard .eod-presets { margin: .75rem 0 1rem; }
+
+/* ---------- Top bar: My day ---------- */
+.tb-pill .tb-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px;
+  margin-left: .1rem; padding: 0 5px; border-radius: 999px; background: #f59e0b; color: #fff;
+  font-size: .68rem; font-style: normal; font-weight: 700; line-height: 1; }
+.tb-pill .tb-badge[hidden] { display: none; }

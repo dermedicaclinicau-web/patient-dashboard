@@ -93,7 +93,7 @@ function tellOthers(type, staff) {
   try { chan.postMessage({ type, uid: staff.uid, day: toDateKey() }); } catch { /* ignore */ }
 }
 // The welcome is on screen (not the preview, and not "Edit start of day")
-const welcomeUp = () => !!current && !current.dataset.preview && !current.dataset.edit;
+const welcomeUp = () => !!current && !current.dataset.preview && !current.dataset.edit && !current.dataset.recap;
 function dayStartedHere(staff) {
   startedKey = `${staff.uid}:${toDateKey()}`;
   if (welcomeUp()) closeStartOfDay();
@@ -827,14 +827,18 @@ async function inventoryBody(cfg, appts) {
   return secs.map((s) => `${heads ? `<p class="sod-c-h">${esc(s.title)}</p>` : ""}${s.body}`).join("");
 }
 
-async function renderLayout(dlg, staff, { preview = false } = {}) {
+async function renderLayout(dlg, staff, { preview = false, recap = false } = {}) {
   const box = dlg.querySelector('[data-role="cards"]');
   if (!box) return;
   const lay = await getLayout(staff);
   if (!box.isConnected) return;
   if (!dlg.dataset.size) { dlg.dataset.size = lay.size; dlg.classList.add(`size-${lay.size}`); }
 
-  const cards = lay.cards.filter((c) => c.type !== "inventory" || !c.cfg.stockOnly || can("menu.inventory"));
+  let cards = lay.cards.filter((c) => c.type !== "inventory" || !c.cfg.stockOnly || can("menu.inventory"));
+  // My day: announcements always show (first, if their preset has no Announcements card), with no limit
+  if (recap && !cards.some((c) => c.type === "announcements")) {
+    cards = [{ id: "c_ann_day", type: "announcements", title: "Announcements", col: 1, full: true, cfg: { max: 20 } }, ...cards];
+  }
   const has = (t) => cards.some((c) => c.type === t);
   const inv = cards.find((c) => c.type === "inventory");
   const tasksCard = cards.find((c) => c.type === "tasks");
@@ -861,9 +865,9 @@ async function renderLayout(dlg, staff, { preview = false } = {}) {
     else {
       const must = anns.filter((a) => a.confirm && !a.confirmed);
       const rest = anns.filter((a) => !(a.confirm && !a.confirmed));
-      annShown = [...must, ...rest.slice(0, Math.max(0, annCard.cfg.max - must.length))];
+      annShown = recap ? anns : [...must, ...rest.slice(0, Math.max(0, annCard.cfg.max - must.length))];
       annHtml = annShown.length ? annShown.map(annCardHtml).join("") + manage
-        : manage ? sodNone("No announcements right now.") + manage : "";
+        : manage || recap ? sodNone("No announcements right now.") + manage : "";
     }
   }
   if (!box.isConnected) return;
@@ -1007,6 +1011,98 @@ function setEditable(on) {
   it.hidden = !on;
 }
 
+/* ---------- My day: the welcome's cards again, any time after starting (top bar) ---------- */
+export function openMyDay(staff) {
+  if (!staff || current) return;   // one window at a time
+  const now = new Date();
+  const hour = now.getHours();
+  const part = hour < 12 ? "morning" : hour < 17 ? "afternoon" : "evening";
+  const dateText = `${WEEKDAYS[now.getDay()]}, ${now.getDate()} ${MONTHS[now.getMonth()]}`;
+
+  const dlg = document.createElement("dialog");
+  dlg.className = "sod";
+  dlg.dataset.recap = "1";
+  dlg.setAttribute("aria-labelledby", "sod-title");
+  const lay0 = layoutCache.uid === staff.uid ? layoutCache.value : null;   // already loaded: open at the right size
+  if (lay0) { dlg.dataset.size = lay0.size; dlg.classList.add(`size-${lay0.size}`); }
+  dlg.innerHTML = `
+    <div class="sod-card">
+      <div class="sod-hero ${part === "evening" ? "evening" : ""}">
+        <span class="sod-sky">${part === "evening" ? MOON : SUN}</span>
+      </div>
+      <div class="sod-avatar">
+        <span>${esc(getInitials(staff.name))}</span>
+        ${staff.photo ? `<img src="${esc(staff.photo)}" alt="" referrerpolicy="no-referrer" />` : ""}
+      </div>
+      <p class="sod-eyebrow">Good ${part} · ${esc(dateText)}</p>
+      <h2 id="sod-title" class="sod-title serif">Your day, ${esc(friendlyName(staff.name))}</h2>
+      <p class="sod-sub">Announcements, tasks and today at a glance.</p>
+      <div class="sod-cards" data-role="cards"><div class="skeleton" style="height:96px;border-radius:14px"></div></div>
+      <button type="button" class="sod-btn" data-act="close">Close</button>
+    </div>`;
+  document.body.appendChild(dlg);
+  current = dlg;
+
+  const img = dlg.querySelector(".sod-avatar img");
+  if (img) img.addEventListener("error", () => img.remove());
+  const close = () => {
+    if (dlg.classList.contains("closing")) return;
+    dlg.classList.add("closing");
+    setTimeout(() => { if (current === dlg) closeStartOfDay(); refreshDayBadge(staff); }, 180);
+  };
+  dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(); });
+  dlg.addEventListener("click", (e) => {
+    if (e.target === dlg || e.target.closest('[data-act="close"]') || e.target.closest('a[href^="#/"]')) close();
+  });
+  dlg.showModal();
+  setTimeout(() => dlg.querySelector('[data-act="close"]').focus(), 50);
+  renderLayout(dlg, staff, { recap: true });
+}
+
+// The pill beside "End my day": shown once the day has started (or Start of Day is off for them)
+function dayPill() {
+  let b = document.getElementById("sod-day-btn");
+  if (!b) {
+    const host = document.querySelector(".tb-day");
+    if (!host) return null;
+    b = document.createElement("button");
+    b.type = "button";
+    b.id = "sod-day-btn";
+    b.hidden = true;
+    host.insertBefore(b, document.getElementById("eod-btn"));
+  }
+  if (!b.dataset.wired) {
+    b.dataset.wired = "1";
+    b.className = "tb-pill is-day";
+    b.title = "Your announcements, tasks and today at a glance";
+    b.innerHTML = `${SUN}<span>My day</span><em class="tb-badge" hidden></em>`;
+    b.addEventListener("click", () => { if (btnStaff) openMyDay(btnStaff); });
+  }
+  return b;
+}
+
+function setDayPill(on, staff = null) {
+  const b = dayPill();
+  if (!b) return;
+  b.hidden = !on;
+  if (on && staff) refreshDayBadge(staff);
+}
+
+// The number on the pill: announcements not seen yet, or still to confirm
+let badgeCheck = 0;
+async function refreshDayBadge(staff) {
+  const b = document.getElementById("sod-day-btn");
+  if (!b || b.hidden || !staff) return;
+  const mine = ++badgeCheck;
+  const list = await listMyAnnouncements(staff).catch(() => null);
+  if (mine !== badgeCheck || !list) return;
+  const n = list.filter((a) => !a.seen || (a.confirm && !a.confirmed)).length;
+  const em = b.querySelector(".tb-badge");
+  if (em) { em.hidden = !n; em.textContent = n > 9 ? "9+" : String(n); }
+  b.title = n ? `${n} announcement${n === 1 ? "" : "s"} for you · your tasks and today at a glance`
+    : "Your announcements, tasks and today at a glance";
+}
+
 // Shows "Start my day" until this person has started today, and "Edit start of day" until they've ended it
 export async function refreshStartOfDayButton(staff) {
   btnStaff = staff || null;
@@ -1019,6 +1115,7 @@ export async function refreshStartOfDayButton(staff) {
   if (mine !== btnCheck || btnStaff !== staff) return;
   setPending(!off && !!info && !info.started);   // off: no "Start my day", and "End my day" shows straight away
   setEditable(!!info && info.canEdit);
+  setDayPill(!!info && (info.started || off), staff);
 }
 
 // On logout
@@ -1030,9 +1127,14 @@ export function hideStartOfDayButton() {
   btnCheck++;
   setPending(false);
   setEditable(false);
+  setDayPill(false);
   // Until the next person's day has been checked, "End my day" stays hidden
   const dayBar = document.querySelector(".tb-day");
   if (dayBar) dayBar.classList.add("sod-pending");
 }
 // Started, corrected or ended: refresh the top bar
 window.addEventListener("kitday:changed", () => { if (btnStaff) refreshStartOfDayButton(btnStaff); });
+// The number on My day: when announcements are read or confirmed, every 5 minutes, and on coming back to the window
+window.addEventListener("sod:announcements", () => { if (btnStaff) refreshDayBadge(btnStaff); });
+setInterval(() => { if (btnStaff && document.visibilityState === "visible") refreshDayBadge(btnStaff); }, 5 * 60000);
+document.addEventListener("visibilitychange", () => { if (btnStaff && document.visibilityState === "visible") refreshDayBadge(btnStaff); });

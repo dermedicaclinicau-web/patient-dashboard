@@ -87,6 +87,7 @@ export async function markSeen(list, staff) {
       uid: u.uid, name: nameOf(staff), round: a.round, seenAt: serverTimestamp(), confirmedAt: null,
     }, { merge: true }).catch((err) => console.warn("Announcement not marked as seen:", err));
   }));
+  window.dispatchEvent(new Event("sod:announcements"));   // the number on My day follows
 }
 
 export async function confirmRead(a, staff) {
@@ -121,6 +122,7 @@ export function wireAnnouncements(root, list, staff, { preview = false } = {}) {
     try {
       await confirmRead(a, staff);
       a.seen = a.confirmed = true;
+      window.dispatchEvent(new Event("sod:announcements"));
       b.outerHTML = '<p class="sda-done">Thanks. You\'ve confirmed you read this.</p>';
     } catch (err) {
       console.warn("Announcement not confirmed:", err);
