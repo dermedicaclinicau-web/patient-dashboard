@@ -94,6 +94,8 @@ const PROSPECTS_V = 11;
 const REFUNDS_V = 10;
 // Raise this each time prescriptions.js changes, so browsers don't keep using an old copy
 const RX_V = 7;
+// Raise this each time scan-inbox.js changes, so browsers don't keep using an old copy
+const SCANINBOX_V = 1;
 let currentStaff = null;
 initFormPicker(els.content, { getStaff: () => currentStaff });
 initTopbar();
@@ -418,6 +420,8 @@ const PAGES = {
   scanner: lazyPage("./scanner.js", "The Scanner", (m, el) => m.mountScanner(el, { staff: currentStaff })),
   paper: lazyPage(`./paper-records.js?v=${PAPER_V}`, "Paper records",
     (m, el) => m.mountPaperRecords(el, { staff: currentStaff })),
+  "scan-inbox": lazyPage(`./scan-inbox.js?v=${SCANINBOX_V}`, "The Scan Inbox",
+    (m, el, param) => m.mountScanInbox(el, { param, staff: currentStaff })),
   seo: lazyPage("./seo.js", "SEO", (m, el, param) => m.mountSeo(el, { param, staff: currentStaff, can: (k) => can(k) })),
 };
 // Which permission each page needs ("admin" = Admins only)
@@ -433,6 +437,7 @@ const PAGE_PERM = {
 // Email flow builders who aren't Admins can open System configuration, but only its Email flows
 const pageAllowed = (p, param = "") => {
   if (p === "recall") return can("recall.work") || can("recall.manage");
+  if (p === "scan-inbox") return can("scans.view") || can("scans.file") || can("scans.book") || can("scans.all");
   if (p === "seo") return can("menu.seo") || can("social.plan") || can("social.approve");
   if (p === "settings" && String(param).split("/")[0] === "recall") return can("recall.manage");
   if (p === "settings" && can("flows.build") && (!param || String(param).split("/")[0] === "flows")) return true;
@@ -442,7 +447,7 @@ const pageAllowed = (p, param = "") => {
   if (!need) return true;
   return need === "admin" ? isAdminNow() : can(need);
 };
-const firstAllowedPage = () => ["calendar", "patients", "tasks", "recall", "prospects", "inventory", "scanner", "reports", "seo", "forms", "staff", "help"].find(pageAllowed) || "";
+const firstAllowedPage = () => ["calendar", "patients", "tasks", "recall", "prospects", "inventory", "scanner", "scan-inbox", "reports", "seo", "forms", "staff", "help"].find(pageAllowed) || "";
 const currentPage = () => location.hash.split("/")[1] || "";
 const currentParam = () => { try { return decodeURIComponent(location.hash.split("/").slice(2).join("/")); } catch { return ""; } };
 
