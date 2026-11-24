@@ -1,6 +1,8 @@
 // Scan Inbox: everything scanned on the ScanSnap from the switch-on date, read and filed by itself.
-// The ones it couldn't file wait for someone with "File scans the portal couldn't match".
-// Everything goes through Apps Script (ScanInbox.gs, action "scanInbox"). Route: #/scan-inbox[/mine|/all]
+// Scans it couldn't file wait for someone with "File scans the portal couldn't match".
+// Billing sheets become follow-ups (book the next appointments, do the handwritten jobs).
+// Everything goes through Apps Script (ScanInbox.gs, ScanFollowups.gs; action "scanInbox").
+// Route: #/scan-inbox[/mine|/followups|/all]
 import { callApi } from "./appointments.js";
 import { escapeHtml as esc, showToast } from "./utils.js";
 import { confirmDialog } from "./dialog.js";
@@ -11,12 +13,12 @@ const KINDS = [
   ["billing", "Billing sheet"], ["consent", "Consent"], ["rx", "Prescription"], ["treatment", "Treatment record"],
 ];
 const NOT_RECORD = ["Blank page", "Scanned twice", "Not a patient record", "Other"];
+const TABS = ["today", "mine", "followups", "all"];
 
 const svg = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const IC = {
   inbox: svg('<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>'),
   alert: svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="12" x2="12" y2="15"/><line x1="12" y1="18" x2="12.01" y2="18"/>'),
-  users: svg('<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'),
   check: svg('<polyline points="20 6 9 17 4 12"/>'),
   doc: svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/>'),
   refresh: svg('<polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>'),
@@ -27,6 +29,10 @@ const IC = {
   right: svg('<polyline points="9 18 15 12 9 6"/>'),
   drive: svg('<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>'),
   cal: svg('<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>'),
+  calPlus: svg('<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="12" y1="14" x2="12" y2="19"/><line x1="9.5" y1="16.5" x2="14.5" y2="16.5"/>'),
+  list: svg('<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'),
+  more: svg('<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>'),
+  ext: svg('<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>'),
 };
 
 /* ---------- Small helpers ---------- */
@@ -35,7 +41,7 @@ const keyOf = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDat
 const todayKey = () => keyOf(new Date());
 const shiftDay = (k, n) => { const [y, m, d] = k.split("-").map(Number); return keyOf(new Date(y, m - 1, d + n)); };
 const fmtTime = (iso) => { const d = new Date(iso); return isNaN(d) ? "" : d.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }).replace(/\s/g, "").toLowerCase(); };
-const fmtDay = (k) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(k || ""); if (!m) return ""; const d = new Date(+m[1], +m[2] - 1, +m[3]); return d.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" }); };
+const fmtDay = (k) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(k || ""); if (!m) return ""; return new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" }); };
 const fmtLong = (k) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(k || ""); if (!m) return ""; return new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" }); };
 const dayOfIso = (iso) => { const d = new Date(iso); return isNaN(d) ? todayKey() : keyOf(d); };
 const greeting = () => { const h = new Date().getHours(); return h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening"; };
@@ -43,13 +49,23 @@ const first = (n) => String(n || "").trim().split(/\s+/)[0] || "";
 const api = (op, body = {}) => callApi({ action: "scanInbox", op, ...body });
 const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
+let staffMemo = null;
+async function staffList() {
+  if (staffMemo) return staffMemo;
+  try { const r = await callApi({ action: "staffList" }); staffMemo = (r.staff || []).filter((s) => s.name); }
+  catch { staffMemo = []; }
+  return staffMemo;
+}
+
 /* ---------- Entry ---------- */
 
 export async function mountScanInbox(container, { param = "", staff = null } = {}) {
   injectStyles();
   const canFile = can("scans.file");
   const canAll = can("scans.all") || canFile;
+  const canBook = can("scans.book") || can("scans.all");
   const admin = isAdmin();
+  const me = staff && staff.uid ? staff.uid : "";
   const root = document.createElement("section");
   root.className = "page wide si";
   root.innerHTML = '<div class="si-wrap"><div class="skeleton sm"></div></div>';
@@ -57,14 +73,13 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
 
   const sub = String(param || "").split("/")[0];
   const st = {
-    tab: sub === "mine" || sub === "all" ? sub : "today",
-    day: todayKey(), data: null, error: "", checking: false,
+    tab: TABS.includes(sub) ? sub : "today", day: todayKey(), data: null, error: "", checking: false,
+    fuScope: "mine", fuMore: "", busyFu: "",
   };
   if (st.tab === "all" && !canAll) st.tab = "today";
-  const thumbs = new Map();   // id → data URL ("" none, null asked)
+  const thumbs = new Map();
   let thumbBusy = false;
 
-  /* ---- Loading ---- */
   async function load() {
     try {
       const res = await api("list", { day: st.day });
@@ -82,16 +97,13 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
   }
   const timer = setInterval(() => {
     if (!root.isConnected) { clearInterval(timer); return; }
-    if (document.visibilityState === "visible") load();
+    if (document.visibilityState === "visible" && !st.busyFu) load();
   }, POLL_MS);
 
+  const fu = () => (st.data && st.data.followUps) || { mine: [], all: [], canAll: false };
+  const myOpen = (type) => fu().mine.filter((f) => f.status === "open" && f.type === type);
+
   /* ---- The page ---- */
-  function listFor() {
-    const d = st.data || {};
-    if (st.tab === "mine") return d.mine || [];
-    if (st.tab === "all") return d.all || [];
-    return d.items || [];
-  }
   function render() {
     const d = st.data;
     if (!d && !st.error) return;
@@ -99,6 +111,9 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
     const mine = (d && d.mine) || [];
     const last = d && d.lastCheck ? fmtTime(d.lastCheck) : "";
     const isToday = st.day === todayKey();
+    const nBook = myOpen("book").length, nTask = myOpen("task").length;
+    const tabs = [["today", "Today", 0], ["mine", "To file", mine.length], ["followups", "Follow-ups", nBook + nTask],
+      ...(canAll ? [["all", "Everyone", c.needsAll || 0]] : [])];
     root.innerHTML = `<div class="si-wrap">
       <header class="si-head">
         <span class="si-logo">${IC.inbox}</span>
@@ -118,34 +133,42 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
       <p class="si-sec">Needs you</p>
       <div class="si-tiles">
         <button type="button" class="si-tile ${mine.length ? "is-warn" : ""}" data-tab="mine">
-          <span class="si-ti is-warn">${IC.alert}</span><strong>${mine.length}</strong><span>${mine.length === 1 ? "Scan" : "Scans"} for you to file</span></button>
-        ${canAll ? `<button type="button" class="si-tile" data-tab="all">
-          <span class="si-ti is-acc">${IC.users}</span><strong>${c.needsAll || 0}</strong><span>Waiting for anyone</span></button>` : ""}
+          <span class="si-ti is-warn">${IC.alert}</span><strong>${mine.length}</strong><span>${mine.length === 1 ? "Scan" : "Scans"} to file</span></button>
+        <button type="button" class="si-tile ${nBook ? "is-hot" : ""}" data-tab="followups">
+          <span class="si-ti is-acc">${IC.calPlus}</span><strong>${nBook}</strong><span>${nBook === 1 ? "Appointment" : "Appointments"} to book</span></button>
+        <button type="button" class="si-tile" data-tab="followups">
+          <span class="si-ti is-mut">${IC.list}</span><strong>${nTask}</strong><span>${nTask === 1 ? "Task" : "Tasks"}</span></button>
         <button type="button" class="si-tile" data-tab="today" data-today="1">
           <span class="si-ti is-ok">${IC.check}</span><strong>${isToday ? c.filed || 0 : "–"}</strong><span>Filed by itself today</span></button>
       </div>
       <div class="si-bar">
-        <div class="si-seg" role="tablist">
-          ${[["today", "Today"], ["mine", "My list"], ...(canAll ? [["all", "Everyone"]] : [])].map(([k, l]) =>
-            `<button type="button" role="tab" aria-selected="${st.tab === k}" class="${st.tab === k ? "is-on" : ""}" data-tab="${k}">${l}${
-              k === "mine" && mine.length ? `<em>${mine.length}</em>` : ""}</button>`).join("")}
-        </div>
+        <div class="si-seg" role="tablist">${tabs.map(([k, l, n]) =>
+          `<button type="button" role="tab" aria-selected="${st.tab === k}" class="${st.tab === k ? "is-on" : ""}" data-tab="${k}">${l}${n ? `<em>${n}</em>` : ""}</button>`).join("")}</div>
         ${st.tab === "today" ? `<div class="si-day">
           <button type="button" class="si-icon" data-day="-1" aria-label="Day before">${IC.left}</button>
           <span>${isToday ? "Today" : esc(fmtDay(st.day))}</span>
           <button type="button" class="si-icon" data-day="1" aria-label="Day after" ${isToday ? "disabled" : ""}>${IC.right}</button>
           ${isToday ? "" : '<button type="button" class="si-link" data-day="0">Back to today</button>'}</div>` : ""}
+        ${st.tab === "followups" && fu().canAll ? `<div class="si-seg is-sm">${[["mine", "Mine"], ["all", "Everyone's"]].map(([k, l]) =>
+          `<button type="button" class="${st.fuScope === k ? "is-on" : ""}" data-scope="${k}">${l}</button>`).join("")}</div>` : ""}
         <span class="si-sp"></span>
         ${st.tab === "today" ? `<span class="si-stat">${plural(c.scanned || 0, "scan")} · ${c.filed || 0} filed by itself${
-          c.followUps ? ` · ${plural(c.followUps, "follow-up")} read` : ""}</span>` : ""}
+          c.followUps ? ` · ${plural(c.followUps, "follow-up")}` : ""}</span>` : ""}
       </div>
-      <div class="si-list">${rowsHtml()}</div>` : ""}
+      ${st.tab === "followups" ? fuHtml() : `<div class="si-list">${rowsHtml()}</div>`}` : ""}
     </div>`;
     loadThumbs();
   }
 
+  /* ---- Scans ---- */
+  function scanList() {
+    const d = st.data || {};
+    if (st.tab === "mine") return d.mine || [];
+    if (st.tab === "all") return d.all || [];
+    return d.items || [];
+  }
   function rowsHtml() {
-    const list = listFor();
+    const list = scanList();
     if (!list.length) {
       const msg = st.tab === "mine" ? ["All clear", "There's nothing for you to file."]
         : st.tab === "all" ? ["All clear", "Every scan has been filed."]
@@ -176,7 +199,7 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
       if (r.nextAppts && r.nextAppts.length) chips.push(`${r.nextAppts.length} to book`);
       if (r.tasks && r.tasks.length) chips.push(plural(r.tasks.length, "task"));
       if (r.quotes && r.quotes.length) chips.push("Quote");
-      subline = chips.length ? chips.map((c) => `<span class="si-chip">${esc(c)}</span>`).join("")
+      subline = chips.length ? chips.map((x) => `<span class="si-chip">${esc(x)}</span>`).join("")
         : `${esc(it.kindName)}${it.filedBy && it.filedBy !== "Scan Inbox" ? ` · filed by ${esc(first(it.filedBy))}` : ""}`;
       right = '<span class="si-pill is-ok">Filed</span>';
     } else if (it.status === "paper") {
@@ -184,12 +207,10 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
       subline = `${esc(it.kindName || "Scan")} · in Paper records, for the products used`;
       right = '<span class="si-pill is-acc">Paper records</span>';
     } else if (it.status === "notrecord") {
-      title = esc(name || it.name);
-      subline = "Not a patient record";
+      title = esc(name || it.name); subline = "Not a patient record";
       right = '<span class="si-pill is-mut">Not a record</span>';
     } else {
-      title = esc(it.name);
-      subline = "Removed from Google Drive";
+      title = esc(it.name); subline = "Removed from Google Drive";
       right = '<span class="si-pill is-mut">Removed</span>';
     }
     return `<button type="button" class="si-row" data-open="${esc(it.id)}">
@@ -199,11 +220,87 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
       ${right}</button>`;
   }
 
-  /* ---- Thumbnails, 12 at a time ---- */
+  /* ---- Follow-ups ---- */
+  function fuHtml() {
+    const all = st.fuScope === "all" && fu().canAll;
+    const list = all ? fu().all : fu().mine;
+    const open = list.filter((f) => f.status === "open");
+    const book = open.filter((f) => f.type === "book").sort((a, b) => String(a.sheetDate).localeCompare(String(b.sheetDate)));
+    const tasks = open.filter((f) => f.type === "task").sort((a, b) => String(a.sheetDate).localeCompare(String(b.sheetDate)));
+    const done = all ? [] : list.filter((f) => f.status !== "open").sort((a, b) => String(b.closedAt).localeCompare(String(a.closedAt)));
+    if (!open.length && !done.length) {
+      return `<div class="si-list"><div class="si-empty">${IC.calPlus}<strong>No follow-ups${all ? "" : " for you"}</strong>
+        <span>Next appointments and jobs written on billing sheets show up here once the sheet is filed.</span></div></div>`;
+    }
+    const sec = (title, items, hint) => (items.length ? `<div class="si-fu-sec"><div class="si-fu-h"><h3>${title}</h3><span>${items.length}</span>${hint ? `<small>${hint}</small>` : ""}</div>
+      <div class="si-list">${items.map((f) => fuRow(f, all)).join("")}</div></div>` : "");
+    return sec("To book", book, "Booked ones close by themselves when they show up in the calendar")
+      + sec("Tasks", tasks, "")
+      + (done.length ? `<details class="si-fu-sec si-done"><summary><h3>Done lately</h3><span>${done.length}</span></summary>
+          <div class="si-list">${done.map((f) => fuRow(f, false)).join("")}</div></details>` : "");
+  }
+  function fuRow(f, showWho) {
+    const open = f.status === "open";
+    const mineFu = f.assignedToId === me;
+    const may = mineFu || canBook;
+    const meta = [
+      f.sheetDate && `From the sheet on ${fmtDay(f.sheetDate)}`,
+      f.prefers && `Prefers ${f.prefers}`,
+      f.price && f.type === "book" && f.price,
+      f.attempts && `Tried ${f.attempts}×${f.lastTryAt ? `, last ${fmtDay(dayOfIso(f.lastTryAt))}` : ""}`,
+      showWho && f.assignedToName && `With ${first(f.assignedToName)}`,
+    ].filter(Boolean);
+    let state = "";
+    if (f.status === "booked") state = `<span class="si-pill is-ok">${f.foundBy === "calendar" ? `Found in calendar${f.bookedFor ? ` · ${esc(fmtDay(f.bookedFor))}` : ""}` : `Booked${f.bookedFor ? ` · ${esc(fmtDay(f.bookedFor))}` : ""}`}</span>`;
+    else if (f.status === "done") state = '<span class="si-pill is-ok">Done</span>';
+    else if (f.status === "notneeded") state = '<span class="si-pill is-mut">Not needed</span>';
+    const busy = st.busyFu === f.id;
+    const acts = !may ? "" : open ? `${f.type === "book"
+        ? `<button type="button" class="si-fbtn is-pri" data-fu="booked" data-id="${esc(f.id)}" ${busy ? "disabled" : ""}>Booked</button>
+           <button type="button" class="si-fbtn" data-fu="noanswer" data-id="${esc(f.id)}" ${busy ? "disabled" : ""}>Couldn't reach</button>`
+        : `<button type="button" class="si-fbtn is-pri" data-fu="done" data-id="${esc(f.id)}" ${busy ? "disabled" : ""}>Done</button>`}
+        <button type="button" class="si-icon" data-fumore="${esc(f.id)}" aria-label="More" title="More">${IC.more}</button>`
+      : `${state}${f.closedBy !== "Calendar" ? `<button type="button" class="si-link" data-fu="reopen" data-id="${esc(f.id)}">Reopen</button>` : ""}`;
+    const moreOpen = st.fuMore === f.id;
+    return `<div class="si-fu ${open ? "" : "is-closed"}">
+      <span class="si-fu-ic ${f.type === "book" ? "is-book" : "is-task"}">${f.type === "book" ? IC.calPlus : IC.list}</span>
+      <div class="si-fu-main">
+        <div class="si-fu-top"><a href="#/patient/${encodeURIComponent(f.patientId)}" target="_blank" rel="noopener">${esc(f.patientName || "Patient")}${IC.ext}</a>
+          ${f.checkSheet && open ? '<span class="si-chip is-warn">Check the sheet</span>' : ""}</div>
+        <strong>${esc(f.title)}</strong>
+        ${meta.length ? `<small>${meta.map(esc).join(" · ")}</small>` : ""}
+      </div>
+      <div class="si-fu-acts">${acts}</div>
+      ${moreOpen ? `<div class="si-fu-more">
+        <button type="button" class="si-fbtn" data-fu="notneeded" data-id="${esc(f.id)}">Not needed</button>
+        <button type="button" class="si-fbtn" data-sheet="${esc(f.scanId)}">See the sheet</button>
+        <label class="si-f si-inline-sel"><select data-give="${esc(f.id)}"><option value="">Give to…</option></select></label>
+      </div>` : ""}
+    </div>`;
+  }
+  async function fuAct(id, outcome) {
+    if (st.busyFu) return;
+    st.busyFu = id; render();
+    try {
+      const res = await api("fuAct", { id, outcome });
+      if (res && res.problem) showToast(res.problem);
+      else showToast({ booked: "Marked as booked", noanswer: "Noted. It stays on your list.", done: "Done", notneeded: "Taken off the list", reopen: "Back on the list" }[outcome] || "Saved");
+    } catch (err) { console.error("Follow-up not saved:", err); showToast("That didn't save. Try again."); }
+    st.busyFu = ""; st.fuMore = "";
+    load();
+  }
+  async function fillGive() {
+    const sel = root.querySelector("[data-give]");
+    if (!sel) return;
+    const list = await staffList();
+    if (!sel.isConnected) return;
+    sel.innerHTML = '<option value="">Give to…</option>' + list.map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join("");
+  }
+
+  /* ---- Thumbnails ---- */
   async function loadThumbs() {
     if (thumbBusy || !root.isConnected) return;
-    const want = [...new Set([...root.querySelectorAll("[data-thumb]")].map((e) => e.dataset.thumb))]
-      .filter((id) => !thumbs.has(id)).slice(0, 12);
+    const want = [...new Set([...root.querySelectorAll("[data-thumb]")].map((e) => e.dataset.thumb))].filter((id) => !thumbs.has(id)).slice(0, 12);
     if (!want.length) return;
     thumbBusy = true;
     want.forEach((id) => thumbs.set(id, null));
@@ -219,9 +316,31 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
     loadThumbs();
   }
 
+  async function openById(id) {
+    const d = st.data || {};
+    let it = [...(d.items || []), ...(d.mine || []), ...(d.all || [])].find((x) => x.id === id);
+    if (!it) {
+      try { const res = await api("item", { fileId: id }); if (res.problem) { showToast(res.problem); return; } it = res.item; }
+      catch { showToast("The sheet couldn't be opened."); return; }
+    }
+    openScan(it, { canFile, canBook, me, onDone: load });
+  }
+
   /* ---- Taps ---- */
+  root.addEventListener("change", async (e) => {
+    const g = e.target.closest("[data-give]");
+    if (!g || !g.value) return;
+    try {
+      const res = await api("fuAssign", { id: g.dataset.give, toId: g.value });
+      if (res && res.problem) showToast(res.problem);
+      else showToast("Passed on");
+    } catch { showToast("That didn't save. Try again."); }
+    st.fuMore = "";
+    load();
+  });
   root.addEventListener("click", async (e) => {
     const t = e.target;
+    if (t.closest("a[href]")) return;
     const tab = t.closest("[data-tab]");
     if (tab) {
       st.tab = tab.dataset.tab;
@@ -230,21 +349,26 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
       if (tab.dataset.today) load(); else render();
       return;
     }
+    const sc = t.closest("[data-scope]");
+    if (sc) { st.fuScope = sc.dataset.scope; render(); return; }
     const day = t.closest("[data-day]");
     if (day) {
       const n = Number(day.dataset.day);
       st.day = n === 0 ? todayKey() : shiftDay(st.day, n);
       if (st.day > todayKey()) st.day = todayKey();
-      root.querySelector(".si-list").innerHTML = '<div class="si-empty"><span class="si-spin"></span></div>';
+      const list = root.querySelector(".si-list");
+      if (list) list.innerHTML = '<div class="si-empty"><span class="si-spin"></span></div>';
       load();
       return;
     }
+    const fa = t.closest("[data-fu]");
+    if (fa) { fuAct(fa.dataset.id, fa.dataset.fu); return; }
+    const fm = t.closest("[data-fumore]");
+    if (fm) { st.fuMore = st.fuMore === fm.dataset.fumore ? "" : fm.dataset.fumore; render(); fillGive(); return; }
+    const sh = t.closest("[data-sheet]");
+    if (sh) { openById(sh.dataset.sheet); return; }
     const open = t.closest("[data-open]");
-    if (open) {
-      const it = [...(st.data.items || []), ...(st.data.mine || []), ...(st.data.all || [])].find((x) => x.id === open.dataset.open);
-      if (it) openScan(it, { canFile, admin, onDone: load });
-      return;
-    }
+    if (open) { openById(open.dataset.open); return; }
     const a = t.closest("[data-act]");
     if (!a) return;
     if (a.dataset.act === "settings") openSettings(load);
@@ -267,16 +391,6 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
 
 /* ===================== One scan, full screen ===================== */
 
-let staffMemo = null;
-async function staffList() {
-  if (staffMemo) return staffMemo;
-  try {
-    const r = await callApi({ action: "staffList" });
-    staffMemo = (r.staff || []).filter((s) => s.name);
-  } catch { staffMemo = []; }
-  return staffMemo;
-}
-
 function readHtml(r) {
   if (!r) return '<p class="si-muted">Not read yet.</p>';
   const row = (k, v) => (v ? `<div class="si-kv"><span>${k}</span><strong>${v}</strong></div>` : "");
@@ -294,17 +408,17 @@ function readHtml(r) {
     ${r.notes ? `<div class="si-kv-h">Notes</div><p class="si-p">${esc(r.notes)}</p>` : ""}`;
 }
 
-function openScan(it, { canFile, admin, onDone }) {
+const FU_STATE = { open: ["Open", "is-warn"], booked: ["Booked", "is-ok"], done: ["Done", "is-ok"], notneeded: ["Not needed", "is-mut"],
+  cancelled: ["Cancelled", "is-mut"], info: ["Saved", "is-acc"] };
+
+function openScan(it, { canFile, onDone }) {
   injectStyles();
   const r = it.read || {};
   const s = {
     pt: it.patientId ? { id: it.patientId, name: it.patientName, note: it.apptTime ? `Booked ${it.apptTime}${it.staff ? ` with ${it.staff}` : ""}` : "" } : null,
     kind: KINDS.some(([k]) => k === it.kind) ? it.kind : "",
-    date: it.recordDate || r.date || dayOfIso(it.created),
-    clin: it.staff || r.provider || "",
-    title: r.title || "",
-    meds: [""],
-    mode: "", results: null, bookings: null, busy: false,
+    date: it.recordDate || r.date || dayOfIso(it.created), clin: it.staff || r.provider || "", title: r.title || "",
+    meds: [""], mode: "", results: null, bookings: null, busy: false, fus: null,
   };
   const dlg = document.createElement("dialog");
   dlg.className = "si si-dlg";
@@ -321,7 +435,6 @@ function openScan(it, { canFile, admin, onDone }) {
   const close = () => { if (blobUrl) URL.revokeObjectURL(blobUrl); if (dlg.open) dlg.close(); dlg.remove(); };
   dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(); });
 
-  // The scan itself
   api("file", { fileId: it.id }).then((res) => {
     if (!dlg.isConnected) return;
     if (!res || res.problem || !res.data) {
@@ -341,6 +454,24 @@ function openScan(it, { canFile, admin, onDone }) {
     if (dlg.isConnected) view.innerHTML = '<div class="si-view-msg">The scan couldn\'t be shown. Check your connection.</div>';
   });
 
+  // The follow-ups made from a filed billing sheet
+  if (it.status === "filed" && it.kind === "billing") {
+    api("scanFollowups", { fileId: it.id }).then((res) => {
+      s.fus = (res && res.followUps) || [];
+      if (dlg.isConnected) paint();
+    }).catch(() => { s.fus = []; if (dlg.isConnected) paint(); });
+  }
+  function fusHtml() {
+    if (it.status !== "filed" || it.kind !== "billing") return "";
+    if (s.fus === null) return '<div class="si-loading"><span class="si-spin"></span>Loading the follow-ups…</div>';
+    if (!s.fus.length) return '<p class="si-hint">Nothing to follow up was written on this sheet.</p>';
+    return `<div class="si-kv-h">Follow-ups from this sheet</div><div class="si-fus">${s.fus.map((f) => {
+      const [label, cls] = FU_STATE[f.status] || ["", "is-mut"];
+      return `<div class="si-fus-row"><span>${esc(f.title)}${f.type !== "quote" && f.assignedToName ? `<small>${esc(f.assignedToName)}</small>` : ""}</span>
+        <span class="si-pill ${cls}">${esc(f.foundBy === "calendar" ? "Found in calendar" : label)}</span></div>`;
+    }).join("")}</div>`;
+  }
+
   function sideHtml() {
     const reason = it.status === "needs" ? `<div class="si-banner is-warn">${IC.alert}<div><strong>${esc(it.reasonText || "Needs filing")}</strong>
         ${it.help ? `<span>Help asked: “${esc(it.help)}”</span>` : ""}${it.assignedToName ? `<span>With ${esc(it.assignedToName)}</span>` : ""}</div></div>` : "";
@@ -350,16 +481,14 @@ function openScan(it, { canFile, admin, onDone }) {
     const putBack = canFile ? '<button type="button" class="si-ghost" data-a="undo">Put it back to file again</button>' : "";
 
     if (it.status === "reading") {
-      return `<div class="si-banner">${'<span class="si-spin"></span>'}<div><strong>Reading the scan…</strong><span>${esc(it.error || "Usually about a minute.")}</span></div></div>
+      return `<div class="si-banner"><span class="si-spin"></span><div><strong>Reading the scan…</strong><span>${esc(it.error || "Usually about a minute.")}</span></div></div>
         ${canFile && it.error ? '<button type="button" class="si-ghost" data-a="retry">Read it again now</button>' : ""}${hist}`;
     }
     if (it.status === "filed") {
       return `<div class="si-banner is-ok">${IC.check}<div><strong>Filed for ${esc(it.patientName)}</strong>
         <span>${esc(it.kindName)} · ${esc(fmtLong(it.recordDate))} · ${it.filedBy === "Scan Inbox" ? "by itself" : `by ${esc(it.filedBy)}`}</span></div></div>
         <div class="si-acts"><a class="si-primary" href="#/patient/${encodeURIComponent(it.patientId)}" target="_blank" rel="noopener">Open the patient's page</a>${putBack}</div>
-        ${it.read && it.kind === "billing" && ((it.read.nextAppts || []).length || (it.read.tasks || []).length)
-          ? '<p class="si-hint">The next appointments and tasks below are saved. Booking them from here comes in the next update.</p>' : ""}
-        ${readBox}${hist}`;
+        ${fusHtml()}${readBox}${hist}`;
     }
     if (it.status === "paper") {
       return `<div class="si-banner is-acc">${IC.doc}<div><strong>In Paper records</strong><span>Treatment records are filed there, where the products used are entered.</span></div></div>
@@ -369,7 +498,6 @@ function openScan(it, { canFile, admin, onDone }) {
       return `<div class="si-banner">${IC.doc}<div><strong>${it.status === "gone" ? "Removed from Google Drive" : "Not a patient record"}</strong></div></div>
         ${it.status === "notrecord" ? `<div class="si-acts">${putBack}</div>` : ""}${readBox}${hist}`;
     }
-    // Needs filing
     if (!canFile) return `${reason}<p class="si-hint">Someone with "File scans the portal couldn't match" sorts this one out.</p>${readBox}${hist}`;
     const sugg = (it.suggestions || []).filter((x) => x.patientId || x.ptt);
     const treat = s.kind === "treatment";
@@ -395,7 +523,9 @@ function openScan(it, { canFile, admin, onDone }) {
         ${s.kind === "rx" ? `<div class="si-f si-wide"><span>What was prescribed</span>${s.meds.map((m, i) =>
           `<input data-med="${i}" value="${esc(m)}" placeholder="Medicine ${i + 1}">`).join("")}
           <button type="button" class="si-link" data-a="addmed">+ Another medicine</button></div>` : ""}
-      </div>`}
+      </div>
+      ${s.kind === "billing" && ((r.nextAppts || []).length || (r.tasks || []).length)
+        ? `<p class="si-hint">Filing it makes ${plural((r.nextAppts || []).length + (r.tasks || []).length, "follow-up")} from what's written on it.</p>` : ""}`}
       <div class="si-acts">
         <button type="button" class="si-primary" data-a="${treat ? "topaper" : "file"}" ${s.busy ? "disabled" : ""}>${s.busy ? "Saving…" : treat ? "Send to Paper records" : "File it"}</button>
       </div>
@@ -433,7 +563,7 @@ function openScan(it, { canFile, admin, onDone }) {
     try {
       const res = await api(op, { fileId: it.id, ...body });
       if (res && res.problem) { showToast(res.problem); return; }
-      if (done) showToast(done);
+      showToast(op === "fileIt" && res.followUps ? `${done} · ${plural(res.followUps, "follow-up")} made` : done || "Saved");
       close();
       onDone();
     } catch (err) {
@@ -538,7 +668,7 @@ function openScan(it, { canFile, admin, onDone }) {
     else if (op === "assign") act("assign", { toId: side.querySelector('[data-f="to"]').value }, "Done");
     else if (op === "undo") {
       if (!(await confirmDialog({ title: "Put it back to file again?",
-        message: it.status === "filed" ? "It's taken off the patient's page and goes back on the list to file." : "It goes back on the list to file.",
+        message: it.status === "filed" ? "It's taken off the patient's page, its open follow-ups are cancelled, and it goes back on the list to file." : "It goes back on the list to file.",
         confirmLabel: "Put it back", tone: "warning" }))) return;
       act("undo", {}, "Back on the list");
     }
@@ -603,9 +733,10 @@ async function openSettings(onDone) {
 /* ===================== Styles ===================== */
 
 function injectStyles() {
-  if (document.getElementById("si-styles-1")) return;
+  if (document.getElementById("si-styles-2")) return;
+  document.getElementById("si-styles-1")?.remove();
   const s = document.createElement("style");
-  s.id = "si-styles-1";
+  s.id = "si-styles-2";
   s.textContent = `
 .si{--t:#0f766e;--t2:#14b8a6;--tl:#f0fdfa;--ink:#0f172a;--mut:#64748b;--line:#e2e8f0;--warn:#b45309;--warnl:#fffbeb;--ok:#047857;--okl:#ecfdf5}
 .si svg{width:18px;height:18px;flex:none}
@@ -628,22 +759,25 @@ function injectStyles() {
 .si-primary:disabled{opacity:.6;cursor:progress}
 .si-primary.sm{height:40px;padding:0 16px;font-size:14px;box-shadow:none}
 .si-sec{margin:0 0 10px;font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#94a3b8}
-.si-tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:24px}
+.si-tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:24px}
 .si-tile{display:flex;flex-direction:column;align-items:flex-start;gap:6px;padding:16px;border:1px solid var(--line);border-radius:16px;background:#fff;text-align:left;font-family:inherit;cursor:pointer;transition:.15s;box-shadow:0 1px 2px rgba(15,23,42,.04)}
 .si-tile:hover{border-color:#99f6e4;transform:translateY(-1px);box-shadow:0 6px 16px rgba(15,23,42,.06)}
 .si-tile.is-warn{border-color:#fde68a;background:linear-gradient(#fff,#fffdf5)}
+.si-tile.is-hot{border-color:#99f6e4;background:linear-gradient(#fff,#f7fefc)}
 .si-tile strong{font-size:30px;line-height:1;color:var(--ink);font-weight:600}
 .si-tile>span:last-child{font-size:13.5px;color:var(--mut)}
 .si-ti{width:36px;height:36px;border-radius:11px;display:grid;place-items:center}
-.si-ti.is-warn{background:var(--warnl);color:var(--warn)}.si-ti.is-acc{background:var(--tl);color:var(--t)}.si-ti.is-ok{background:var(--okl);color:var(--ok)}
-.si-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px}
+.si-ti.is-warn{background:var(--warnl);color:var(--warn)}.si-ti.is-acc{background:var(--tl);color:var(--t)}
+.si-ti.is-ok{background:var(--okl);color:var(--ok)}.si-ti.is-mut{background:#f1f5f9;color:#475569}
+.si-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px}
 .si-seg{display:inline-flex;padding:3px;border-radius:12px;background:#f1f5f9}
 .si-seg button{display:inline-flex;align-items:center;gap:6px;border:0;background:transparent;padding:8px 16px;border-radius:9px;font-family:inherit;font-size:13.5px;font-weight:600;color:var(--mut);cursor:pointer}
+.si-seg.is-sm button{padding:6px 12px;font-size:12.5px}
 .si-seg button.is-on{background:#fff;color:var(--ink);box-shadow:0 1px 2px rgba(15,23,42,.1)}
 .si-seg em{font-style:normal;font-size:11px;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:#f59e0b;color:#fff;display:grid;place-items:center}
 .si-day{display:flex;align-items:center;gap:4px;font-size:13.5px;font-weight:600;color:var(--ink)}
 .si-day>span{min-width:92px;text-align:center}
-.si-icon{width:34px;height:34px;display:grid;place-items:center;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--mut);cursor:pointer}
+.si-icon{width:34px;height:34px;display:grid;place-items:center;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--mut);cursor:pointer;flex:none}
 .si-icon:hover:not(:disabled){color:var(--t);border-color:var(--t2)}
 .si-icon:disabled{opacity:.35;cursor:default}
 .si-link{display:inline-flex;align-items:center;gap:6px;border:0;background:none;padding:6px 0;color:var(--t);font-family:inherit;font-size:13.5px;font-weight:600;cursor:pointer}
@@ -664,6 +798,7 @@ function injectStyles() {
 .si-muted{color:var(--mut)!important;font-weight:500!important}
 .si-warn{color:var(--warn)}.si-bad{color:#b91c1c}
 .si-chip{font-size:11.5px;padding:2px 9px;border-radius:999px;background:#f1f5f9;color:#475569}
+.si-chip.is-warn{background:var(--warnl);color:var(--warn);font-weight:600}
 .si-pill{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;padding:5px 12px;border-radius:999px;white-space:nowrap}
 .si-pill.is-ok{background:var(--okl);color:var(--ok)}.si-pill.is-warn{background:var(--warnl);color:var(--warn)}
 .si-pill.is-acc{background:var(--tl);color:var(--t)}.si-pill.is-mut{background:#f1f5f9;color:var(--mut)}
@@ -678,6 +813,41 @@ function injectStyles() {
 .si-off{display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:20px;margin-bottom:22px;border-radius:16px;background:var(--tl);border:1px solid #99f6e4;color:#134e4a;font-size:14px}
 .si-note{padding:12px 14px;border-radius:12px;margin-bottom:16px;font-size:13.5px}
 .si-note.is-bad{background:#fef2f2;color:#991b1b}
+/* Follow-ups */
+.si-fu-sec{margin-bottom:20px}
+.si-fu-h{display:flex;align-items:baseline;gap:8px;margin:0 2px 8px;flex-wrap:wrap}
+.si-fu-h h3{margin:0;font-size:15px;color:var(--ink)}
+.si-fu-h>span{font-size:12px;font-weight:700;color:var(--t);background:var(--tl);border-radius:999px;padding:1px 8px}
+.si-fu-h small{font-size:12px;color:var(--mut)}
+.si-done summary{list-style:none;cursor:pointer;display:flex;align-items:baseline;gap:8px;margin:0 2px 8px}
+.si-done summary::-webkit-details-marker{display:none}
+.si-done summary h3{margin:0;font-size:15px;color:var(--mut)}
+.si-done summary>span{font-size:12px;font-weight:700;color:var(--mut);background:#f1f5f9;border-radius:999px;padding:1px 8px}
+.si-fu{display:grid;grid-template-columns:40px minmax(0,1fr) auto;gap:14px;align-items:center;padding:14px 16px;border-top:1px solid var(--line);background:#fff}
+.si-list>.si-fu:first-child{border-top:0}
+.si-fu.is-closed{background:#fbfcfd}
+.si-fu.is-closed strong{color:var(--mut)}
+.si-fu-ic{width:40px;height:40px;border-radius:12px;display:grid;place-items:center}
+.si-fu-ic.is-book{background:var(--tl);color:var(--t)}.si-fu-ic.is-task{background:#f1f5f9;color:#475569}
+.si-fu-main{display:flex;flex-direction:column;gap:3px;min-width:0}
+.si-fu-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px}
+.si-fu-top a{display:inline-flex;align-items:center;gap:4px;color:var(--mut);font-weight:600;text-decoration:none}
+.si-fu-top a:hover{color:var(--t)}
+.si-fu-top a svg{width:12px;height:12px}
+.si-fu-main strong{font-size:15px;color:var(--ink);font-weight:600;line-height:1.35}
+.si-fu-main small{font-size:12.5px;color:var(--mut);line-height:1.45}
+.si-fu-acts{display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.si-fbtn{height:38px;padding:0 14px;border:1px solid var(--line);border-radius:10px;background:#fff;font-family:inherit;font-size:13.5px;font-weight:600;color:#334155;cursor:pointer;white-space:nowrap}
+.si-fbtn:hover:not(:disabled){border-color:var(--t2);color:var(--t)}
+.si-fbtn.is-pri{background:var(--t);border-color:var(--t);color:#fff}
+.si-fbtn.is-pri:hover:not(:disabled){background:#115e59;color:#fff}
+.si-fbtn:disabled{opacity:.55;cursor:progress}
+.si-fu-more{grid-column:2/-1;display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 12px;border-radius:12px;background:#f8fafc}
+.si-inline-sel select{min-height:38px}
+.si-fus{display:grid;gap:6px;margin-top:6px}
+.si-fus-row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;font-size:13.5px}
+.si-fus-row>span:first-child{display:flex;flex-direction:column;min-width:0}
+.si-fus-row small{font-size:12px;color:var(--mut)}
 /* The scan, full screen */
 .si-dlg{width:min(1240px,calc(100vw - 24px));max-width:none;height:min(860px,calc(100vh - 24px));max-height:none;padding:0;border:0;border-radius:20px;overflow:hidden;box-shadow:0 24px 60px rgba(15,23,42,.35);color:var(--ink)}
 .si-dlg[open]{position:fixed;inset:0;margin:auto;display:flex;flex-direction:column}
@@ -771,9 +941,11 @@ function injectStyles() {
 .si-switch>span:last-child{display:flex;flex-direction:column;gap:1px;font-size:14px}
 .si-switch small{font-size:12.5px;color:var(--mut)}
 .si [hidden]{display:none!important}
-@media (max-width:900px){.si-dlg-b{grid-template-columns:1fr;grid-template-rows:40vh auto}.si-dlg-b{overflow:auto}.si-side{overflow:visible}}
-@media (max-width:640px){.si-tiles{grid-template-columns:1fr}.si-tile{flex-direction:row;align-items:center}.si-tile strong{font-size:24px}
+@media (max-width:1000px){.si-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:900px){.si-dlg-b{grid-template-columns:1fr;grid-template-rows:40vh auto;overflow:auto}.si-side{overflow:visible}}
+@media (max-width:640px){.si-tile{flex-direction:row;align-items:center}.si-tile strong{font-size:24px}
   .si-row{grid-template-columns:44px minmax(0,1fr) auto}.si-time{display:none}.si-th{width:44px;height:54px}
+  .si-fu{grid-template-columns:36px minmax(0,1fr)}.si-fu-acts{grid-column:1/-1;justify-content:flex-start}.si-fu-more{grid-column:1/-1}
   .si-head{flex-wrap:wrap}.si-ghost span{display:none}.si-dlg{width:100vw;height:100vh;border-radius:0}
   .si-fields,.si-kinds{grid-template-columns:1fr}.si input,.si select,.si textarea{font-size:16px!important}}`;
   document.head.appendChild(s);

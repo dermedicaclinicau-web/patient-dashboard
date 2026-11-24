@@ -359,10 +359,19 @@ export function injectableReferralSectionHtml() {
 
 export function interestsCommsSectionHtml() {
   const open = isOpenSaved("interests-comms", true) ? "open" : "";
+  // Treatment Interested In: filled in by patient-interests.js (quotes from billing sheets, and ones added by hand)
   return `
     <div class="ph-grid">
-      ${placeholderCard("interests-comms", open, "star", "interest", "Treatment Interested In",
-        "Treatments the patient is interested in will appear here once connected.", "Add treatment interest")}
+      <details class="rc-card bp-card bp-interest" data-key="interests-comms" ${open}>
+        <summary>
+          <span class="rc-title">${ICONS.chev}<span class="bp-icon interest">${ICONS.star}</span>Treatment Interested In</span>
+          <span class="sk-tools">
+            <button type="button" class="rc-link" data-pi="add">+ Add</button>
+            <span class="sk-badge pi-count">–</span>
+          </span>
+        </summary>
+        <div class="rc-body"><div class="pi-host"><div class="skeleton sm"></div></div></div>
+      </details>
       ${placeholderCard("interests-comms", open, "message", "comms", "Communication Log",
         "Calls, emails and SMS with this patient will appear here once connected.", "Log communication")}
     </div>`;

@@ -95,7 +95,7 @@ const REFUNDS_V = 10;
 // Raise this each time prescriptions.js changes, so browsers don't keep using an old copy
 const RX_V = 7;
 // Raise this each time scan-inbox.js changes, so browsers don't keep using an old copy
-const SCANINBOX_V = 1;
+const SCANINBOX_V = 2;
 let currentStaff = null;
 initFormPicker(els.content, { getStaff: () => currentStaff });
 initTopbar();

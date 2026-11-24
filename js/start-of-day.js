@@ -573,16 +573,18 @@ function renderKit(dlg, staff, kit, close) {
 
 /* ---------- The welcome: the clinic today, and what's waiting for you ---------- */
 
-// My open tasks due today or earlier, oldest first
-async function myTasksDue(staff, key, all = false) {
+// My open tasks, oldest due first. Read once for the Tasks card and the follow-ups from billing sheets.
+async function myOpenTasks(staff) {
   const snap = await getDocs(query(collection(db, "staff-task-list"), where("status", "==", "Open")));
   const ids = [staff.uid, staff.id, staff.staffId].filter(Boolean).map(String);
   const nm = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
     .filter((t) => (t.assignedToId && ids.includes(String(t.assignedToId))) || (t.assignedToName && nm(t.assignedToName) === nm(staff.name)))
-    .filter((t) => all || (t.dueDate && t.dueDate <= key))
     .sort((a, b) => String(a.dueDate || "9999").localeCompare(String(b.dueDate || "9999")));
 }
+const dueBy = (list, key, all) => list.filter((t) => all || (t.dueDate && t.dueDate <= key));
+// A reminder made by the Scan Inbox from a billing sheet
+const isFollowUp = (t) => t.source === "scan" && !!t.followUpId;
 
 // A note's date, from whichever date field it has (YYYY-MM-DD, DD/MM/YYYY, a Firestore Timestamp or a number)
 function noteDate(x) {
@@ -688,6 +690,7 @@ const CARD_ICO = {
   announcements: svg('<path d="M3 11v2a1 1 0 0 0 1 1h3l5 4V6L7 10H4a1 1 0 0 0-1 1z"/><path d="M16 9a3 3 0 0 1 0 6"/><path d="M19 6a7 7 0 0 1 0 12"/>'),
   links: svg('<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>'),
   message: svg('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>'),
+  followups: svg('<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="12" y1="14" x2="12" y2="19"/><line x1="9.5" y1="16.5" x2="14.5" y2="16.5"/>'),
 };
 const sodNone = (t) => `<p class="sod-c-none">${esc(t)}</p>`;
 const sodRow = (inner, href = "") => (href ? `<a class="sod-row" href="${href}">${inner}</a>` : `<div class="sod-row">${inner}</div>`);
@@ -721,16 +724,37 @@ function apptsBody(c, { appts, staff }) {
   return `<div class="sod-rows">${rows.join("")}</div>${sodMore(mine.length - c.cfg.max, "#/calendar", "the Calendar")}`;
 }
 
-function tasksBody(c, { tasks, key }) {
+function tasksBody(c, ctx) {
+  const { tasks, key } = ctx;
   if (!tasks) return sodNone("Couldn't load your tasks.");
-  if (!tasks.length) return sodNone(c.cfg.show === "all" ? "No open tasks." : "Nothing due today.");
+  const fu = followUpsHtml(ctx, 4);
+  if (!tasks.length) return fu || sodNone(c.cfg.show === "all" ? "No open tasks." : "Nothing due today.");
   const when = (t) => (!t.dueDate ? "No due date" : t.dueDate < key ? `Overdue (${niceDate(t.dueDate)})`
     : t.dueDate === key ? "Due today" : `Due ${niceDate(t.dueDate)}`);
   const rows = tasks.slice(0, c.cfg.max).map((t) => sodRow(
     `<span>${esc(t.taskText || "Reminder")}<small>${esc([t.patientName, when(t)].filter(Boolean).join(" · "))}</small></span>${
       t.dueDate && t.dueDate < key ? '<em class="is-bad">Overdue</em>' : ""}`,
     t.patientId ? `#/patient/${encodeURIComponent(t.patientId)}` : ""));
-  return `<div class="sod-rows">${rows.join("")}</div>${sodMore(tasks.length - c.cfg.max, "#/home", "My dashboard")}`;
+  return `<div class="sod-rows">${rows.join("")}</div>${sodMore(tasks.length - c.cfg.max, "#/home", "My dashboard")}${fu}`;
+}
+
+// Follow-ups from billing sheets (Scan Inbox): their reminders, overdue first
+const scanInboxOn = () => ["scans.view", "scans.file", "scans.book", "scans.all"].some((p) => can(p));
+function followUpsHtml({ fus, key }, max = 4, own = false) {
+  if (!fus || !fus.length) return "";
+  const late = fus.filter((t) => t.dueDate && t.dueDate < key);
+  const list = [...late, ...fus.filter((t) => !late.includes(t))].slice(0, max);
+  const inbox = scanInboxOn();
+  const waited = (t) => { const d = daysUntil(t.dueDate); return d !== null && d < 0 ? `Waiting ${-d} day${sodS(-d)}` : "From the latest sheets"; };
+  const rows = list.map((t) => sodRow(
+    `<span>${esc(t.taskText || "Follow-up")}<small>${esc([t.patientName, waited(t)].filter(Boolean).join(" · "))}</small></span>${
+      t.dueDate && t.dueDate < key ? '<em class="is-bad">Overdue</em>' : ""}`,
+    inbox ? "#/scan-inbox/followups" : t.patientId ? `#/patient/${encodeURIComponent(t.patientId)}` : ""));
+  const count = `${fus.length} to do${late.length ? ` · ${late.length} overdue` : ""}`;
+  const extra = fus.length - list.length;
+  return `<p class="sod-c-h">${own ? esc(count) : `From billing sheets · ${esc(count)}`}</p><div class="sod-rows">${rows.join("")}</div>${
+    inbox ? `<a class="sod-c-more" href="#/scan-inbox/followups">${extra > 0 ? `${extra} more · ` : ""}Open my follow-ups →</a>`
+      : sodMore(extra, "#/home", "My dashboard")}`;
 }
 
 function notesBody({ notes }) {
@@ -852,12 +876,19 @@ async function renderLayout(dlg, staff, { preview = false, recap = false } = {})
   const key = toDateKey();
   const [apR, tkR, ntR] = await Promise.allSettled([
     has("clinic") || has("appts") || (inv && inv.cfg.show.includes("today")) ? fetchDayAppointments(key) : Promise.resolve(null),
-    tasksCard ? myTasksDue(staff, key, tasksCard.cfg.show === "all") : Promise.resolve(null),
+    myOpenTasks(staff),   // the Tasks card, and follow-ups from billing sheets (shown even without a Tasks card)
     has("notes") ? myDraftNotes(staff) : Promise.resolve(null),
   ]);
   [apR, tkR, ntR].forEach((r) => { if (r.status === "rejected") console.warn("Start of Day card failed:", r.reason); });
   const val = (r) => (r.status === "fulfilled" ? r.value : null);
   const appts = val(apR) ? val(apR).appointments || [] : null;
+  const openTasks = val(tkR);
+  const fus = openTasks ? openTasks.filter(isFollowUp) : [];
+  const tasks = openTasks && tasksCard ? dueBy(openTasks.filter((t) => !isFollowUp(t)), key, tasksCard.cfg.show === "all") : null;
+  // No Tasks card in their layout: the follow-ups get a card of their own (only when there are some)
+  if (fus.length && !tasksCard) {
+    cards = [{ id: "c_fu_day", type: "followups", title: "Follow-ups from billing sheets", col: 1, full: true, cfg: {} }, ...cards];
+  }
   const invHtml = inv ? await inventoryBody(inv.cfg, appts) : "";
   // Announcements: still to confirm always show, then the newest up to the card's limit
   const annCard = cards.find((c) => c.type === "announcements");
@@ -879,7 +910,7 @@ async function renderLayout(dlg, staff, { preview = false, recap = false } = {})
   }
   if (!box.isConnected) return;
 
-  const ctx = { staff, key, appts, tasks: val(tkR), notes: val(ntR) };
+  const ctx = { staff, key, appts, tasks, fus, notes: val(ntR) };
   const body = (c) => {
     switch (c.type) {
       case "clinic": return clinicBody(ctx);
@@ -890,6 +921,7 @@ async function renderLayout(dlg, staff, { preview = false, recap = false } = {})
       case "links": return linksBody(c);
       case "message": return messageBody(c);
       case "announcements": return annHtml;
+      case "followups": return followUpsHtml(ctx, 6, true);
       default: return "";
     }
   };

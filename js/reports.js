@@ -16,6 +16,8 @@ import { mountRetention } from "./retention-report.js";
 import { mountVisitsReport } from "./visits-report.js";
 import { callApi } from "./appointments.js";
 import { mountKitReconciliation } from "./kit-ledger.js";
+import { db } from "./firebase-config.js";
+import { collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(2));
@@ -37,7 +39,7 @@ const daysAgoKey = (n) => { const d = new Date(); d.setDate(d.getDate() - n); re
 const SKELETON = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
 const TABS = [["variance", "Count differences"], ["investigations", "Investigations"], ["check", "Treatment check"], ["notrecorded", "Not recorded"], ["wastage", "Wastage"],
   ["kits", "Kit reconciliation"], ["usage", "Usage"], ["opened", "Opened containers"], ["short", "Saved short"], ["plans", "Treatment plans"],
-  ["retention", "Retention"]];
+  ["retention", "Retention"], ["followups", "Billing sheet follow-ups"]];
 const errText = (err, fallback) => (err && err.code === "permission-denied"
   ? "You don't have access to do this. Check the Firestore rules have been published, and your Reporting access in Staff."
   : err && err.message && !err.code ? err.message : fallback);
@@ -141,6 +143,7 @@ export function mountReports(container, { param = "", staff = null } = {}) {
     else if (tab === "visits") mountVisitsReport(body, { csv: downloadCsv });
     else if (PATIENT_TABS.some(([k]) => k === tab)) mountPatientReport(body, tab, staff);
     else if (tab === "retention") mountRetention(body);
+    else if (tab === "followups") mountFollowUpsReport(body);
     else mountShort(body, staff);
   }).catch((err) => {
     console.error("Reporting tabs not loaded:", err);
@@ -531,6 +534,8 @@ const KEY = {
   month: { of: (e) => (e.at ? dayKey(e.at).slice(0, 7) : "—"), label: (e, k) => (k === "—" ? "No date" : monthLabel(k)),
     sort: (a, b) => b.key.localeCompare(a.key) },
   type: { of: (e) => e.typeLabel, label: (e) => e.typeLabel },
+  week: { of: (e) => (e.at ? weekKey(e.at) : "—"), label: (e, k) => (k === "—" ? "No date" : `Week of ${shortDate(parseKey(k))}`),
+    sort: (a, b) => b.key.localeCompare(a.key) },
 };
 
 // "Belotero 1.2 mL · Xeomin 40 units" (names left out when every entry is the same product)
@@ -672,6 +677,79 @@ function mountRangeReport(body, cfg) {
 
   drawTools();
   load();
+}
+
+/* ===================== Billing sheet follow-ups (Scan Inbox) ===================== */
+// Next appointments read from filed billing sheets, and whether they were booked. Grouped by week to start with.
+
+const weekKey = (d) => { const x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return dayKey(x); };
+const FU_LABEL = { open: "Still open", booked: "Booked", calendar: "Found in the calendar", notneeded: "Not needed" };
+const FU_TONE = { open: "is-warn", booked: "is-ok", calendar: "is-ok", notneeded: "is-info" };
+const fuRate = (ev) => {
+  const n = ev.filter((e) => e.pick !== "notneeded").length;
+  return n ? `${Math.round((ev.filter((e) => e.pick === "booked").length / n) * 100)}%` : "—";
+};
+
+function mountFollowUpsReport(body) {
+  const count = (ev, p) => ev.filter((e) => e.pick === p).length;
+  mountRangeReport(body, {
+    name: "Billing sheet follow-ups", file: "billing-sheet-follow-ups",
+    groups: [["week", "Week"], ["clinician", "Given to"], ["product", "Treatment"], ["type", "Status"], ["month", "Month"]],
+    findPlaceholder: "Filter: patient, treatment or staff",
+    empty: "No next appointments were read from billing sheets in these dates.",
+    pickOf: (e) => e.pick,
+    pickLabel: (p) => ({ booked: "Booked", open: "Still open", notneeded: "Not needed" }[p] || p),
+    async load(r) {
+      const snap = await getDocs(query(collection(db, "scan_followups"),
+        where("sheetDate", ">=", dayKey(r.from)), where("sheetDate", "<=", dayKey(lastDay(r)))));
+      return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+        .filter((f) => f.type === "book" && f.status !== "cancelled")
+        .map((f) => {
+          const state = f.status === "open" ? "open" : f.status === "notneeded" ? "notneeded" : f.foundBy === "calendar" ? "calendar" : "booked";
+          const what = String(f.service || f.text || "Not read");
+          return {
+            id: f.id, at: parseKey(f.sheetDate), by: f.assignedToName || "Nobody", patient: f.patientName || "", patientId: f.patientId || "",
+            productId: what.toLowerCase(), productName: what, typeLabel: FU_LABEL[state], state,
+            pick: state === "calendar" ? "booked" : state, title: String(f.title || f.text || ""),
+            bookedFor: f.bookedFor || "", attempts: Number(f.attempts) || 0, checkSheet: f.checkSheet === true,
+            closedBy: f.closedBy || "", closedAt: f.closedAt ? new Date(f.closedAt) : null, value: 0,
+          };
+        })
+        .sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0));
+    },
+    searchText: (e) => [e.patient, e.productName, e.title, e.by, e.typeLabel, e.closedBy].join(" "),
+    statsHtml(ev, pick) {
+      const card = (key, cls, num, label) => `<div class="inv-stat ${cls}${pick === key ? " is-active" : ""}" data-pick="${key}"
+        role="button" tabindex="0" title="${pick === key ? "Show everything" : "Show only these"}"><strong>${num}</strong><span>${esc(label)}</span></div>`;
+      const cal = ev.filter((e) => e.state === "calendar").length;
+      const open = count(ev, "open");
+      return `<div class="inv-stats">
+        <div class="inv-stat"><strong>${ev.length}</strong><span>Next appointments read</span></div>
+        ${card("booked", "", count(ev, "booked"), `Booked${cal ? ` · ${cal} found in the calendar` : ""}`)}
+        ${card("open", open ? "is-warn" : "", open, "Still open")}
+        ${card("notneeded", "", count(ev, "notneeded"), "Not needed")}
+        <div class="inv-stat"><strong>${esc(fuRate(ev))}</strong><span>Booking rate</span></div>
+      </div>`;
+    },
+    summaryHead: (label) => `<thead><tr><th>${esc(label)}</th><th>Read</th><th>Booked</th><th>Still open</th><th>Not needed</th><th>Booking rate</th></tr></thead>`,
+    summaryRow: (g) => `<tr><td><strong>${esc(g.label)}</strong></td><td>${g.events.length}</td><td>${count(g.events, "booked") || "—"}</td>
+      <td>${count(g.events, "open") ? `<span class="rp-neg">${count(g.events, "open")}</span>` : "—"}</td>
+      <td>${count(g.events, "notneeded") || "—"}</td><td>${esc(fuRate(g.events))}</td></tr>`,
+    summaryFoot: (ev) => `<tr><th>Total</th><th>${ev.length}</th><th>${count(ev, "booked")}</th><th>${count(ev, "open")}</th>
+      <th>${count(ev, "notneeded")}</th><th>${esc(fuRate(ev))}</th></tr>`,
+    detailHead: "<thead><tr><th>Sheet date</th><th>Patient</th><th>What to book</th><th>Given to</th><th>Status</th><th>Closed</th></tr></thead>",
+    detailRow: (e) => `<tr class="${e.state === "open" ? "is-diff" : ""}">
+      <td>${esc(shortDate(e.at))}</td>
+      <td>${e.patientId ? `<a href="#/patient/${encodeURIComponent(e.patientId)}" target="_blank" rel="noopener">${esc(e.patient || "Patient")}</a>` : esc(e.patient || "—")}</td>
+      <td>${esc(e.title || e.productName)}${e.checkSheet ? ' <span class="inv-flag is-warn">Check the sheet</span>' : ""}</td>
+      <td>${esc(e.by)}</td>
+      <td><span class="inv-flag ${FU_TONE[e.state]}">${esc(e.typeLabel)}</span>${e.attempts ? `<small class="muted">Tried ${e.attempts}×</small>` : ""}</td>
+      <td>${e.closedAt ? `${esc(shortDate(e.closedAt))}${e.closedBy ? ` <small class="muted">${esc(e.closedBy)}</small>` : ""}` : "—"}${
+        e.bookedFor ? `<small class="muted">for ${esc(shortDate(parseKey(e.bookedFor)))}</small>` : ""}</td></tr>`,
+    csvHead: ["Sheet date", "Patient", "Patient ID", "What to book", "Given to", "Status", "Tries", "Booked for", "Closed on", "Closed by", "Check the sheet"],
+    csvRow: (e) => [e.at ? dayKey(e.at) : "", e.patient, e.patientId, e.title || e.productName, e.by, e.typeLabel, e.attempts || "",
+      e.bookedFor, e.closedAt ? dayKey(e.closedAt) : "", e.closedBy, e.checkSheet ? "Yes" : ""],
+  });
 }
 
 /* ===================== Investigations ===================== */

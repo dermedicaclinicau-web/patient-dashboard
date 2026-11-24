@@ -48,6 +48,7 @@ import { startPageCache, stopPageCache, clearPageCache } from "./page-cache.js";
 import { openPasteNotes } from "./paste-notes.js";
 import { loadTagLib, tagChipsHtml, openTagPicker } from "./patient-tags.js";
 import { openSspBuilder } from "./ssp-edit.js";
+import { mountPatientInterests } from "./patient-interests.js";
 /* ===================== Config ===================== */
 
 const DOC_ACTIONS = [
@@ -229,6 +230,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   let planView = null;         // the Treatment Plan overview
   let planSources = null;      // consultations already in the master plan ([] = no plan yet, null = not known)
   let recordsView = null;      // Treatment Records + Consent Records
+  let interestsView = null;    // Treatment Interested In (quotes from billing sheets, and added by hand)
   let reminderCount = 0;       // for the chips on the collapsed Pre-Consultation header
   let allergies = null;        // { known, items } from Clinical History; null until read
   let mentions = [];           // chat messages that link this patient
@@ -625,6 +627,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     mountHistory(root, patient);
     tasksView = mountPatientTasks(root, patient);
     mountBillingRx(root, patient);
+    interestsView = mountPatientInterests(root, patient, staff);
   };
   whenIdle(mountRest);
   // A form saved for this patient in another tab: refresh what it affects
@@ -738,6 +741,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       notesView ? notesView.reload() : null,
       tasksView ? tasksView.reload() : null,
       recordsView ? recordsView.reload() : null,
+      interestsView ? interestsView.reload() : null,
     ]);
     if (btn.isConnected) {
       btn.disabled = false;
