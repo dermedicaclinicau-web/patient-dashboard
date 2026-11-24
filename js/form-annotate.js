@@ -303,7 +303,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
         counts: s.values.map((x) => ({ code: x.code, name: x.name || "", n: mine.filter((o) => o.code === x.code).length })).filter((c) => c.n) };
     }
     const tags = tagsOf(s);
-    const out = { id: s.id, name: s.name, type: "number", unit: s.unit || "", n: mine.length, total: sum(mine) };
+    const out = { id: s.id, name: s.name, type: "number", unit: s.unit || "", totalLabel: s.totalLabel || "", n: mine.length, total: sum(mine) };
     if (tags.length) {
       out.byTag = {};
       tags.forEach((t, i) => { out.byTag[t] = sum(mine.filter((o) => (o.tag || 0) === i)); });
@@ -316,7 +316,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     const f = setFigures(s);
     if (!f.n) return "";
     if (f.type === "label") return s.values.length === 1 ? `× ${f.n}` : f.counts.map((c) => `${c.code} ${c.n}`).join(" · ");
-    return `${fmt(f.total)}${s.unit ? ` ${s.unit}` : ""}`;
+    return `${s.totalLabel || "Total"}: ${fmt(f.total)}${s.unit ? ` ${s.unit}` : ""}`;
   };
   // What the next tap places: "HA filler: 0.05 mL", "Cannula Entry Pt: Cannula entry point (Touch-up)"
   const placingText = () => {
@@ -334,7 +334,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     if (!primary) { headTotal.innerHTML = ""; return; }
     const f = setFigures(primary);
     const tags = f.byTag ? Object.entries(f.byTag).filter(([, n]) => n > 0).map(([t, n]) => `${t} ${fmt(n)}`) : [];
-    headTotal.innerHTML = `Total:<b class="${f.total ? "" : "is-zero"}">${esc(fmt(f.total))}</b>${esc(primary.unit || "")}${
+    headTotal.innerHTML = `${esc(primary.totalLabel || "Total")}:<b class="${f.total ? "" : "is-zero"}">${esc(fmt(f.total))}</b>${esc(primary.unit || "")}${
       tags.length > 1 ? `<small>${esc(tags.join(" · "))}</small>` : ""}`;
   }
 
@@ -622,7 +622,8 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
           };
         }),
         sets: setsOut,
-        ...(prim ? { total: prim.total, byTag: prim.byTag || {}, unit: prim.unit, setName: prim.name, setId: prim.id } : {}),
+        ...(prim ? { total: prim.total, byTag: prim.byTag || {}, unit: prim.unit, setName: prim.name, setId: prim.id,
+          totalLabel: prim.totalLabel || "" } : {}),
       };
     } : null,
   };

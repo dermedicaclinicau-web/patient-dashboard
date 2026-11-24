@@ -86,6 +86,7 @@ export function cleanSet(s = {}, i = 0) {
     name: String(s.name || "").trim().slice(0, 60),
     type,
     unit: type === "label" ? "" : String(s.unit || "").trim().slice(0, 20),
+    totalLabel: type === "label" ? "" : String(s.totalLabel || "").trim().slice(0, 40),   // e.g. "Bolus injected"
     values,
     tagMarks: type === "number" && s.tagMarks === true,
     tags: tags.length ? tags : ["Treatment", "Touch-up"],
@@ -201,7 +202,7 @@ export function markSummary(v) {
       }
       const tags = s.byTag && typeof s.byTag === "object"
         ? Object.entries(s.byTag).filter(([, x]) => Number(x) > 0).map(([t, x]) => `${t} ${fmtMark(x)}`) : [];
-      return `${s.name}: ${fmtMark(s.total)}${s.unit ? ` ${s.unit}` : ""} (${s.n} mark${s.n === 1 ? "" : "s"})${tags.length ? `, ${tags.join(", ")}` : ""}`;
+      return `${s.name}: ${s.totalLabel ? `${s.totalLabel} ` : ""}${fmtMark(s.total)}${s.unit ? ` ${s.unit}` : ""} (${s.n} mark${s.n === 1 ? "" : "s"})${tags.length ? `, ${tags.join(", ")}` : ""}`;
     }).join(" · ");
   }
   // Records saved before marking sets could be used separately
@@ -288,6 +289,8 @@ export async function openMarkingSetsDialog({ staff } = {}) {
         <div class="ms-vals">${s.values.map((x, j) => valHtml(s, x, j)).join("")}
           <button type="button" class="hx-add" data-vadd>+ ${label ? "Label" : "Value"}</button>
         </div>
+        ${label ? "" : `<label class="lh-field"><span class="lh-label">Name for the total (shown beside the set while marking)</span>
+          <input class="fe-input" data-sk="totalLabel" maxlength="40" placeholder="Total, or e.g. Bolus injected" value="${esc(s.totalLabel || "")}" /></label>`}
         ${label ? "" : `<label class="fe-check"><input type="checkbox" data-sk="tagMarks"${s.tagMarks ? " checked" : ""} /> Tag each mark (e.g. Treatment or Touch-up)</label>
         ${s.tagMarks ? `<label class="lh-field"><span class="lh-label">Tags, separated by commas (the first is the default)</span>
           <input class="fe-input" data-sk="tags" maxlength="120" placeholder="Treatment, Touch-up" value="${esc(s.tags.join(", "))}" /></label>` : ""}`}
