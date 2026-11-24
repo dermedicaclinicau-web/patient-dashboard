@@ -247,8 +247,13 @@ export async function mountPrescriptions(container, { param = "", staff = null }
 const TYPE_IT = "__type";   // "Not on the list: type the name"
 const SHEET_KEYS = ["name", "address1", "address2", "postcode", "medicare", "ref", "entitlement",
   "safetyNet", "concession", "pbs", "rpbs", "brand"];
+const LAST_KEY = "dm.rx.last";   // per product: what was written last time on this computer
+const DIRS_KEY = "dm.rx.dirs";   // directions used recently on this computer
+const DIR_PICKS = ["Apply a thin layer once daily", "Apply a thin layer at night", "Apply twice daily", "Use as directed"];
+const FIELD_LABELS = { medicare: "Medicare number", ref: "Ref no.", name: "Patient's name", address1: "Address",
+  address2: "Suburb and state", postcode: "Postcode", entitlement: "Entitlement no.", items: "Medicines", date: "Date" };
 const blankItem = (custom = false) => ({ product: "", custom, customName: "", addList: true,
-  strength: "", directions: "", qty: "", repeats: "0" });
+  strength: "", directions: "", qty: "", repeats: "0", filled: false });
 const itemName = (i) => String(i.custom ? i.customName : i.product).trim();
 const itemLine = (i) => [itemName(i), String(i.strength || "").trim()].filter(Boolean).join(" ");
 function itemsText(items) {
@@ -268,6 +273,20 @@ function splitAddress(a) {
 const cleanName = (n) => String(n || "").replace(/\s*#\d+\s*$/, "").trim();
 const initials = (n) => cleanName(n).split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "?";
 const fmtLong = (iso) => { const d = new Date(iso); return isNaN(d) ? "" : d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }); };
+const nv = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
+const readJson = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v ?? d; } catch { return d; } };
+const writeJson = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } };
+
+const wsvg = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+const IC = {
+  search: wsvg('<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>'),
+  gear: wsvg('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>'),
+  info: wsvg('<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>'),
+  check: wsvg('<polyline points="20 6 9 17 4 12"/>'),
+  trash: wsvg('<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>'),
+  print: wsvg('<polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/>'),
+  clock: wsvg('<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>'),
+};
 
 // The prescription product list (rx-products.js may still be loading it when the page opens)
 async function loadRxNames() {
@@ -284,10 +303,160 @@ async function loadRxNames() {
   return [];
 }
 
+function injectWriterStyles() {
+  if (document.getElementById("rxw-styles")) return;
+  const s = document.createElement("style");
+  s.id = "rxw-styles";
+  s.textContent = `
+.rxw{--t:#0f766e;--t2:#14b8a6;--tl:#f0fdfa;--ink:#0f172a;--mut:#64748b;--line:#e2e8f0}
+.rxw svg{width:16px;height:16px;flex:none}
+.rxw .rxw-wrap{max-width:1320px;margin:0 auto;padding:4px 4px 48px}
+.rxw-back{display:inline-flex;gap:6px;color:var(--mut);font-size:13px;text-decoration:none;margin-bottom:12px}
+.rxw-back:hover{color:var(--t)}
+.rxw-head{display:flex;align-items:center;gap:14px;margin-bottom:14px}
+.rxw-logo{width:46px;height:46px;border-radius:14px;display:grid;place-items:center;flex:none;background:linear-gradient(135deg,var(--t2),var(--t));color:#fff;font:700 22px/1 Georgia,serif;box-shadow:0 6px 16px rgba(15,118,110,.25)}
+.rxw-head-main{flex:1;min-width:0}
+.rxw-head h2{margin:0;font-size:22px;color:var(--ink)}
+.rxw-head p{margin:2px 0 0;color:var(--mut);font-size:13.5px}
+.rxw-ghost{display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink);font-size:13px;font-weight:600;text-decoration:none;white-space:nowrap}
+.rxw-ghost:hover{border-color:var(--t2);color:var(--t)}
+.rxw-steps{display:flex;flex-wrap:wrap;gap:8px;list-style:none;margin:0 0 16px;padding:0}
+.rxw-steps button{display:inline-flex;align-items:center;gap:8px;padding:5px 14px 5px 5px;border-radius:999px;border:1px solid var(--line);background:#fff;color:var(--mut);font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:.15s}
+.rxw-steps button span{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;background:#f1f5f9;font-size:12px}
+.rxw-steps .is-on button{border-color:var(--t2);color:var(--t);box-shadow:0 0 0 3px rgba(20,184,166,.12)}
+.rxw-steps .is-on button span{background:var(--t);color:#fff}
+.rxw-steps .is-done button{color:var(--t);background:var(--tl);border-color:#99f6e4}
+.rxw-steps .is-done button span{background:var(--t2);color:#fff}
+.rxw-banner{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:12px;background:#fffbeb;border:1px solid #fde68a;color:#92400e;font-size:13.5px;margin-bottom:16px}
+.rxw-banner a{margin-left:auto;font-weight:700;color:#92400e;white-space:nowrap}
+.rxw-grid{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:20px;align-items:start}
+.rxw-main{display:grid;gap:16px;min-width:0}
+.rxw-card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:18px 20px;box-shadow:0 1px 2px rgba(15,23,42,.04);scroll-margin-top:12px}
+.rxw-card-h{display:flex;gap:12px;align-items:flex-start;margin-bottom:14px}
+.rxw-card-h h3{margin:0;font-size:16px;color:var(--ink)}
+.rxw-card-h p{margin:2px 0 0;font-size:12.5px;color:var(--mut)}
+.rxw-n{width:28px;height:28px;border-radius:9px;background:var(--tl);color:var(--t);font-weight:700;font-size:13px;display:grid;place-items:center;flex:none}
+.rxw-fields{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px}
+.rxw-fields>.c1{grid-column:span 1}.rxw-fields>.c2{grid-column:span 2}.rxw-fields>.c3{grid-column:span 3}
+.rxw-fields>.c4{grid-column:span 4}.rxw-fields>.c6{grid-column:span 6}
+.rxw-f{display:flex;flex-direction:column;gap:5px;min-width:0}
+.rxw-f>span{font-size:12px;font-weight:600;color:#475569}
+.rxw-f input,.rxw-sel select,.rxw-in{width:100%;box-sizing:border-box;height:40px;padding:0 12px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;font-family:inherit;font-size:14px;color:var(--ink);transition:border-color .15s,box-shadow .15s}
+.rxw-f input:focus,.rxw-sel select:focus,.rxw-in:focus{outline:none;border-color:var(--t2);box-shadow:0 0 0 3px rgba(20,184,166,.15)}
+.rxw-f input::placeholder,.rxw-in::placeholder{color:#94a3b8}
+.rxw-fh{font-size:12px;color:var(--mut);min-height:15px}
+.rxw-fh.is-ok{color:var(--t);font-weight:600}.rxw-fh.is-warn{color:#b45309}
+.rxw-group+.rxw-group{margin-top:16px;padding-top:16px;border-top:1px dashed var(--line)}
+.rxw-group-h{font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#94a3b8;margin-bottom:10px}
+.rxw-soft{margin:0 0 14px;padding:10px 12px;border-radius:10px;background:#f8fafc;color:var(--mut);font-size:13px}
+.rxw-ticks{display:flex;flex-wrap:wrap;gap:8px}
+.rxw-tick{position:relative;display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;color:#334155;font-size:13.5px;cursor:pointer;user-select:none;transition:.15s}
+.rxw-tick input{position:absolute;opacity:0;pointer-events:none}
+.rxw-tick-box{width:18px;height:18px;border-radius:5px;border:1.5px solid #cbd5e1;display:grid;place-items:center;color:transparent}
+.rxw-tick-box svg{width:12px;height:12px}
+.rxw-tick:hover{border-color:#99f6e4}
+.rxw-tick.is-on{border-color:var(--t2);background:var(--tl);color:var(--t)}
+.rxw-tick.is-on .rxw-tick-box{background:var(--t);border-color:var(--t);color:#fff}
+.rxw-tick:focus-within{box-shadow:0 0 0 3px rgba(20,184,166,.2)}
+.rxw-search{display:flex;align-items:center;gap:10px;height:50px;padding:0 14px;border:1.5px solid #cbd5e1;border-radius:12px;background:#fff;transition:.15s}
+.rxw-search:focus-within{border-color:var(--t2);box-shadow:0 0 0 3px rgba(20,184,166,.15)}
+.rxw-search svg{width:18px;height:18px;color:#94a3b8}
+.rxw-search input{flex:1;min-width:0;height:100%;border:0;outline:0;background:transparent;font-family:inherit;font-size:15px}
+.rxw-results{display:grid;gap:6px;margin-top:10px;max-height:340px;overflow:auto}
+.rxw-res{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:#fff;text-align:left;font-family:inherit;cursor:pointer;transition:.12s}
+.rxw-res:hover,.rxw-res:focus-visible{border-color:var(--t2);background:var(--tl);outline:none}
+.rxw-res-main{flex:1;min-width:0;display:flex;flex-direction:column}
+.rxw-res strong{color:var(--ink);font-size:14px}
+.rxw-res small{color:var(--mut);font-size:12px}
+.rxw-av{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;flex:none;background:linear-gradient(135deg,#ccfbf1,#99f6e4);color:var(--t);font-weight:700}
+.rxw-av.sm{width:32px;height:32px;font-size:12px}
+.rxw-pt{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:12px;background:var(--tl);border:1px solid #99f6e4}
+.rxw-pt-main{flex:1;min-width:0;display:flex;flex-direction:column}
+.rxw-pt strong{font-size:15px;color:var(--ink)}
+.rxw-pt small{font-size:12.5px;color:var(--mut)}
+.rxw-link{font-size:13px;font-weight:600;color:var(--t);text-decoration:none;white-space:nowrap}
+.rxw-btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:36px;padding:0 14px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink);font-family:inherit;font-size:13px;font-weight:600;cursor:pointer}
+.rxw-btn:hover{border-color:var(--t2);color:var(--t)}
+.rxw-btn.sm{height:32px;padding:0 12px}
+.rxw-loading{display:flex;align-items:center;gap:10px;padding:12px 0;color:var(--mut);font-size:13.5px}
+.rxw-spin{width:16px;height:16px;border:2px solid #ccfbf1;border-top-color:var(--t);border-radius:50%;animation:rxwspin .8s linear infinite}
+@keyframes rxwspin{to{transform:rotate(360deg)}}
+.rxw-med{border:1px solid var(--line);border-radius:14px;padding:14px;background:linear-gradient(#fff,#fbfdfd)}
+.rxw-med+.rxw-med{margin-top:12px}
+.rxw-med-h{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.rxw-med-n{width:26px;height:26px;border-radius:50%;background:var(--t);color:#fff;font-size:12px;font-weight:700;display:grid;place-items:center;flex:none}
+.rxw-sel{flex:1;min-width:0}
+.rxw-sel select{height:44px;font-size:15px;font-weight:600;cursor:pointer}
+.rxw-med-h .rxw-in{flex:1;height:44px;font-size:15px;font-weight:600}
+.rxw-x{width:36px;height:36px;border-radius:10px;border:0;background:transparent;color:#94a3b8;display:grid;place-items:center;cursor:pointer;flex:none}
+.rxw-x:hover{background:#fef2f2;color:#dc2626}
+.rxw-med .rxw-fields+.rxw-fields{margin-top:12px}
+.rxw-med>.rxw-fields:first-of-type{margin-bottom:12px}
+.rxw-filled{display:flex;align-items:center;gap:6px;margin:0 0 12px;padding:7px 10px;border-radius:8px;background:#f0f9ff;color:#0369a1;font-size:12.5px}
+.rxw-step{display:flex;height:40px;border:1px solid #cbd5e1;border-radius:10px;overflow:hidden;background:#fff}
+.rxw-step:focus-within{border-color:var(--t2);box-shadow:0 0 0 3px rgba(20,184,166,.15)}
+.rxw-step button{width:38px;flex:none;border:0;background:#f8fafc;color:var(--t);font-size:18px;cursor:pointer}
+.rxw-step button:hover{background:var(--tl)}
+.rxw .rxw-step input{flex:1;min-width:0;height:100%;border:0;border-radius:0;padding:0;text-align:center;box-shadow:none}
+.rxw-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.rxw-chip{max-width:100%;padding:5px 10px;border-radius:999px;border:1px dashed #cbd5e1;background:#fff;color:#475569;font-family:inherit;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.rxw-chip:hover{border-style:solid;border-color:var(--t2);background:var(--tl);color:var(--t)}
+.rxw-add{width:100%;height:46px;margin-top:12px;border:1.5px dashed #99f6e4;border-radius:12px;background:var(--tl);color:var(--t);font-family:inherit;font-size:14px;font-weight:700;cursor:pointer}
+.rxw-add:hover{border-color:var(--t2)}
+.rxw-switch{position:relative;display:flex;align-items:center;gap:10px;font-size:13px;color:#334155;cursor:pointer}
+.rxw-switch input{position:absolute;opacity:0;pointer-events:none}
+.rxw-sw{position:relative;width:34px;height:20px;border-radius:999px;background:#cbd5e1;flex:none;transition:.15s}
+.rxw-sw::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.2);transition:.15s}
+.rxw-switch input:checked+.rxw-sw{background:var(--t2)}
+.rxw-switch input:checked+.rxw-sw::after{left:16px}
+.rxw-switch input:focus-visible+.rxw-sw{box-shadow:0 0 0 3px rgba(20,184,166,.25)}
+.rxw-aside{position:sticky;top:12px;display:grid;gap:16px;max-height:calc(100vh - 24px);overflow:auto;scrollbar-width:thin}
+.rxw-pv-h{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+.rxw-pv-h h3{margin:0;font-size:16px;color:var(--ink)}
+.rxw-pv{padding:12px;border-radius:12px;background:#e8edf3}
+.rxw-hold{position:relative;overflow:hidden;background:#fff;border-radius:2px;box-shadow:0 1px 2px rgba(15,23,42,.08),0 8px 24px rgba(15,23,42,.12)}
+.rxw .rxw-hold>.rx-paper{position:absolute;left:0;top:0;margin:0;transform-origin:0 0;box-shadow:none}
+.rxw .rxw-empty{background:rgba(20,184,166,.10);outline:1px dashed rgba(15,118,110,.4);outline-offset:-1px}
+.rxw .rxw-focus{background:rgba(245,158,11,.22)!important;outline:1.5px solid #f59e0b!important;outline-offset:-1px}
+.rxw-legend{display:flex;align-items:center;gap:6px;margin:8px 0 0;font-size:12px;color:var(--mut)}
+.rxw-legend i{width:12px;height:12px;border-radius:3px;background:rgba(20,184,166,.15);border:1px dashed rgba(15,118,110,.5)}
+.rxw-legend i.is-f{background:rgba(245,158,11,.25);border:1px solid #f59e0b;margin-left:8px}
+.rxw-warn{margin-top:10px;padding:10px 12px;border-radius:10px;background:#fef2f2;color:#991b1b;font-size:13px}
+.rxw-sum{display:grid;gap:8px;margin:14px 0;padding:12px;border-radius:12px;background:#f8fafc}
+.rxw-sum-row{display:flex;gap:12px;font-size:13px}
+.rxw-sum-row>span{width:78px;flex:none;color:var(--mut)}
+.rxw-sum-row strong{min-width:0;color:var(--ink);font-weight:600;overflow-wrap:anywhere}
+.rxw-sum-row em{color:#94a3b8;font-style:normal;font-weight:500}
+.rxw-pill{display:inline-flex;align-items:center;gap:6px;margin-bottom:10px;padding:6px 10px;border-radius:999px;background:#fff7ed;color:#9a3412;font-size:12.5px;font-weight:600}
+.rxw-pill.is-ok{background:#ecfdf5;color:#047857}
+.rxw-print{width:100%;height:52px;display:flex;align-items:center;justify-content:center;gap:10px;border:0;border-radius:14px;background:linear-gradient(135deg,var(--t2),var(--t));color:#fff;font-family:inherit;font-size:16px;font-weight:700;cursor:pointer;box-shadow:0 8px 20px rgba(15,118,110,.28);transition:transform .1s,box-shadow .15s}
+.rxw-print:hover{box-shadow:0 10px 26px rgba(15,118,110,.38)}
+.rxw-print:active{transform:translateY(1px)}
+.rxw-print:disabled{opacity:.7;cursor:progress}
+.rxw-print svg{width:20px;height:20px}
+.rxw-hint{margin:10px 0 0;font-size:12px;line-height:1.5;color:var(--mut)}
+.rxw-hint kbd{padding:1px 5px;border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;background:#fff;font-size:11px}
+.rxw-tip{display:flex;gap:10px;margin-top:12px;padding:12px;border-radius:12px;background:#f0f9ff;color:#075985;font-size:13px;line-height:1.45}
+.rxw-tip svg{margin-top:2px}
+.rxw-link-btn{display:block;margin-top:6px;padding:0;border:0;background:none;color:#0369a1;font-family:inherit;font-size:13px;font-weight:700;text-decoration:underline;cursor:pointer}
+.rxw-more{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.rxw-more summary{display:flex;align-items:center;gap:6px;list-style:none;cursor:pointer;font-size:13px;font-weight:600;color:#475569}
+.rxw-more summary::-webkit-details-marker{display:none}
+.rxw-more summary::before{content:"▸";transition:transform .15s}
+.rxw-more[open] summary::before{transform:rotate(90deg)}
+.rxw-more-in{display:grid;gap:12px;margin-top:12px}
+.rxw-date input{height:44px;font-weight:600}
+@media (max-width:1100px){.rxw-grid{grid-template-columns:1fr}.rxw-aside{position:static;max-height:none;overflow:visible}}
+@media (max-width:640px){.rxw-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.rxw-fields>*{grid-column:span 2!important}
+  .rxw-head{flex-wrap:wrap}.rxw-ghost span{display:none}.rxw input,.rxw select{font-size:16px!important}.rxw-card{padding:16px}}`;
+  document.head.appendChild(s);
+}
+
 async function mountWriter(container, { patientId = "", recordId = "", staff }) {
+  injectWriterStyles();
   const root = document.createElement("section");
-  root.className = "page wide rx";
-  root.innerHTML = '<div class="skeleton sm"></div>';
+  root.className = "page wide rx rxw";
+  root.innerHTML = '<div class="rxw-wrap"><div class="skeleton sm"></div></div>';
   container.replaceChildren(root);
 
   let info, bg, products, rec = null;
@@ -309,12 +478,12 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
   if (!root.isConnected) return;
   const L = info.L;
   const st = {
-    patient: null,
+    patient: null, loadingPt: !!(patientId && !rec),
     v: { name: "", address1: "", address2: "", postcode: "", medicare: "", ref: "", entitlement: "",
       safetyNet: false, concession: false, pbs: false, rpbs: false, brand: false },
     items: [blankItem(!products.length)],
     date: todayKey(),
-    savedId: "", savedSig: "", okTyped: new Set(), busy: false,
+    savedId: "", savedSig: "", okTyped: new Set(), busy: false, focusKey: "",
   };
   if (rec) {   // opened from Product Prescriptions: the saved prescription, ready to print again
     st.patient = { id: rec.patientId, name: rec.patientName, pttId: rec.patientPttId, dobKey: "" };
@@ -345,195 +514,284 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
   if (rec) st.savedSig = sig();
   const back = rec ? `#/patient/${encodeURIComponent(rec.patientId)}`
     : patientId ? `#/patient/${encodeURIComponent(patientId)}` : "#/tasks/new";
+  const showBg = () => !!bg && store.get(BGSHOW_KEY, true);
 
-  root.innerHTML = `
-    <a class="rx-back" href="${back}">← ${rec || patientId ? "Back to the patient" : "Back to Task Manager"}</a>
-    <div class="rx-top">
-      <div><h2>Prescription</h2><p class="muted">${rec
-        ? `Saved ${esc(fmtLong(rec.at))}${rec.by ? ` by ${esc(rec.by)}` : ""}${rec.updatedBy ? ` · last changed by ${esc(rec.updatedBy)}` : ""}. Printing it again doesn't make a copy.`
-        : "Typed onto the clinic's script paper, and saved to the patient's Product Prescriptions."}</p></div>
-      <a class="rx-btn sm" href="#/prescriptions/layout">⚙ Set up the paper</a>
-    </div>
-    ${info.saved ? "" : `<div class="rx-banner"><strong>The paper hasn't been set up yet.</strong>
-      The positions below are a starting guess. <a href="#/prescriptions/layout">Set up the paper</a> once, and every prescription prints in the right place.</div>`}
-    <div class="rx-grid">
-      <div>
-        <div class="rx-card"><h3><span class="rx-step">1</span>Patient</h3><div data-role="pt"></div></div>
-        <div class="rx-card"><h3><span class="rx-step">2</span>Details on the script</h3><div data-role="details"></div></div>
-        <div class="rx-card"><h3><span class="rx-step">3</span>Medicines</h3><div data-role="items"></div></div>
+  root.innerHTML = `<div class="rxw-wrap">
+    <a class="rxw-back" href="${back}">← ${rec || patientId ? "Back to the patient" : "Back to Task Manager"}</a>
+    <header class="rxw-head">
+      <span class="rxw-logo" aria-hidden="true">℞</span>
+      <div class="rxw-head-main"><h2>${rec ? "Prescription" : "New prescription"}</h2>
+        <p>${rec ? `Saved ${esc(fmtLong(rec.at))}${rec.by ? ` by ${esc(rec.by)}` : ""}${rec.updatedBy ? ` · last changed by ${esc(rec.updatedBy)}` : ""}. Printing it again doesn't make a copy.`
+          : "Typed onto the clinic's script paper, and saved to the patient's Product Prescriptions."}</p></div>
+      <a class="rxw-ghost" href="#/prescriptions/layout">${IC.gear}<span>Set up the paper</span></a>
+    </header>
+    <ol class="rxw-steps" data-role="steps" aria-label="Progress"></ol>
+    ${info.saved ? "" : `<div class="rxw-banner">${IC.info}<span><strong>The paper isn't set up yet.</strong> Things may print a little out of place until it is.</span>
+      <a href="#/prescriptions/layout">Set it up</a></div>`}
+    <div class="rxw-grid">
+      <div class="rxw-main">
+        <section class="rxw-card" data-step="patient">
+          <div class="rxw-card-h"><span class="rxw-n">1</span><div><h3>Patient</h3><p>Who the prescription is for. It's saved to their Product Prescriptions.</p></div></div>
+          <div data-role="pt"></div></section>
+        <section class="rxw-card" data-step="details">
+          <div class="rxw-card-h"><span class="rxw-n">2</span><div><h3>Details on the script</h3><p>Filled in from the patient's record. Change anything before printing.</p></div></div>
+          <div data-role="details"></div></section>
+        <section class="rxw-card" data-step="meds">
+          <div class="rxw-card-h"><span class="rxw-n">3</span><div><h3>Medicines</h3><p>Up to ${MAX_ITEMS} on one script.</p></div></div>
+          <div data-role="items"></div></section>
       </div>
-      <aside class="rx-side">
-        <div class="rx-card">
-          <div class="rx-card-head"><h3>Preview</h3>
-            ${bg ? `<label class="rx-switch"><input type="checkbox" data-role="showbg" ${store.get(BGSHOW_KEY, true) ? "checked" : ""}><span>Show the form behind</span></label>` : ""}</div>
-          <div class="rx-pv" data-role="pv"><div class="rx-paper" data-role="paper" style="width:${L.paper.w}mm;height:${L.paper.h}mm;font-family:${fontCss(L.font)}"></div></div>
+      <aside class="rxw-aside" data-step="print">
+        <section class="rxw-card">
+          <div class="rxw-pv-h"><h3>Preview</h3>
+            ${bg ? `<label class="rxw-switch"><input type="checkbox" data-role="showbg" ${showBg() ? "checked" : ""}><span class="rxw-sw"></span>Show the form</label>` : ""}</div>
+          <div class="rxw-pv" data-role="pv"><div class="rxw-hold" data-role="hold">
+            <div class="rx-paper" data-role="paper" style="width:${L.paper.w}mm;height:${L.paper.h}mm;font-family:${fontCss(L.font)}"></div></div></div>
+          <p class="rxw-legend"><i></i>Still empty <i class="is-f"></i>The box you're typing in</p>
           <div data-role="warn"></div>
-        </div>
-        <div class="rx-card">
-          <h3><span class="rx-step">4</span>Save and print</h3>
+        </section>
+        <section class="rxw-card">
+          <div class="rxw-card-h"><span class="rxw-n">4</span><div><h3>Save and print</h3></div></div>
+          <label class="rxw-f rxw-date"><span>Date on the script</span><input type="date" data-role="date" value="${esc(st.date)}" max="${todayKey()}"></label>
+          <div class="rxw-sum" data-role="sum"></div>
           <div data-role="saved"></div>
+          <button type="button" class="rxw-print" data-act="print" data-role="printbtn">${IC.print}<span>Save and print</span></button>
+          <p class="rxw-hint"><kbd>Ctrl</kbd> + <kbd>P</kbd> also saves and prints. In the print window choose <strong>Actual size (100%)</strong>, not "Fit to page", and turn off headers and footers.</p>
           <div data-role="first"></div>
-          ${nudgeHtml()}
-          <div class="rx-actions">
-            <button type="button" class="rx-btn is-primary" data-act="print" data-role="printbtn">🖨 Save and print</button>
-            <button type="button" class="rx-btn" data-act="test">Print a test page</button>
-          </div>
-          <p class="rx-note">In the print window choose <strong>Actual size (100%)</strong>, not "Fit to page", and turn off headers and footers.</p>
-        </div>
+          <details class="rxw-more"><summary>Printing a little off on this computer?</summary>
+            <div class="rxw-more-in">${nudgeHtml()}<button type="button" class="rxw-btn" data-act="test">Print a test page</button></div></details>
+        </section>
       </aside>
-    </div>`;
+    </div></div>`;
 
   const $ = (r) => root.querySelector(`[data-role="${r}"]`);
-  const paper = $("paper");
-  const pv = $("pv");
+  const pv = $("pv"), hold = $("hold"), paper = $("paper");
+
+  /* ---- Progress ---- */
+  function renderSteps() {
+    const s = [
+      ["patient", "Patient", !!st.patient],
+      ["details", "Details", !!(st.v.name.trim() && (!on("address1") || st.v.address1.trim()))],
+      ["meds", "Medicines", st.items.some((i) => itemName(i))],
+      ["print", "Saved and printed", !!st.savedId && sig() === st.savedSig],
+    ];
+    const cur = s.findIndex((x) => !x[2]);
+    $("steps").innerHTML = s.map(([k, label, done], i) => `<li class="${done ? "is-done" : i === cur ? "is-on" : ""}">
+      <button type="button" data-goto="${k}"><span>${done ? "✓" : i + 1}</span>${label}</button></li>`).join("");
+  }
 
   /* ---- Patient ---- */
   function renderPt() {
     const p = st.patient;
+    if (st.loadingPt) { $("pt").innerHTML = '<div class="rxw-loading"><span class="rxw-spin"></span>Loading the patient…</div>'; return; }
     if (p) {
       const dob = /^(\d{4})-(\d{2})-(\d{2})$/.exec(p.dobKey || "");
-      $("pt").innerHTML = `<div class="rx-pt"><span class="rx-av">${esc(initials(p.name))}</span>
-        <div class="rx-pt-main"><strong>${esc(cleanName(p.name))}</strong>
-          <small>${[p.pttId && `ID ${esc(p.pttId)}`, dob && `born ${dob[3]}/${dob[2]}/${dob[1]}`].filter(Boolean).join(" · ")}</small></div>
-        <button type="button" class="rx-btn sm" data-act="change-pt">Change</button></div>`;
+      $("pt").innerHTML = `<div class="rxw-pt"><span class="rxw-av">${esc(initials(p.name))}</span>
+        <div class="rxw-pt-main"><strong>${esc(cleanName(p.name))}</strong>
+          <small>${[p.pttId && `ID ${esc(p.pttId)}`, dob && `Born ${dob[3]}/${dob[2]}/${dob[1]}`].filter(Boolean).join(" · ") || "&nbsp;"}</small></div>
+        <a class="rxw-link" href="#/patient/${encodeURIComponent(p.id)}" target="_blank" rel="noopener">Patient page ↗</a>
+        <button type="button" class="rxw-btn sm" data-act="change-pt">Change</button></div>`;
       return;
     }
-    $("pt").innerHTML = `<div class="rx-search"><span>🔎</span><input type="search" data-role="search" placeholder="Search by name, mobile or date of birth" autocomplete="off"></div>
-      <div data-role="results"></div>
-      <p class="rx-note">The prescription is saved to this patient's Product Prescriptions.</p>`;
+    $("pt").innerHTML = `<div class="rxw-search">${IC.search}<input type="search" data-role="search"
+        placeholder="Search by name, mobile or date of birth" autocomplete="off" data-lpignore="true" data-1p-ignore aria-label="Search patients"></div>
+      <div data-role="results"></div>`;
     if (window.matchMedia("(pointer: fine)").matches) $("search").focus();
   }
   function fillFrom(p) {
     const a = splitAddress(p.address);
     st.patient = p;
+    st.loadingPt = false;
     Object.assign(st.v, { name: cleanName(p.name), address1: a.line1, address2: a.line2, postcode: a.postcode,
       medicare: String(p.medicare || "").replace(/\D/g, "").slice(0, 10), ref: String(p.irn || "").replace(/\D/g, "").slice(0, 1) });
     renderPt(); renderDetails(); draw();
   }
   async function pick(id) {
-    $("results").innerHTML = '<p class="rx-note">Loading…</p>';
+    const box = $("results");
+    if (box) box.innerHTML = '<div class="rxw-loading"><span class="rxw-spin"></span>Loading…</div>';
     try {
       const res = await callApi({ action: "rx", op: "patient", id });
-      if (res.problem) { showToast(res.problem); return; }
+      if (!root.isConnected) return;
+      if (res.problem) { showToast(res.problem); st.loadingPt = false; if (!st.patient) renderPt(); return; }
       fillFrom(res.patient);
-    } catch (err) { console.error("Patient not loaded:", err); showToast("Couldn't load the patient. Try again."); }
+    } catch (err) {
+      console.error("Patient not loaded:", err);
+      showToast("Couldn't load the patient. Try again.");
+      st.loadingPt = false;
+      if (root.isConnected && !st.patient) renderPt();
+    }
   }
-  let searchT = 0;
-  let searchSeq = 0;
+  let searchT = 0, searchSeq = 0;
   async function search(q) {
     const box = $("results");
     if (!box) return;
     if (q.trim().length < 2) { box.innerHTML = ""; return; }
     const seq = ++searchSeq;
-    box.innerHTML = '<p class="rx-note">Searching…</p>';
+    box.innerHTML = '<div class="rxw-loading"><span class="rxw-spin"></span>Searching…</div>';
     try {
       const res = await callApi({ action: "rx", op: "search", q });
       if (seq !== searchSeq || !box.isConnected) return;
       const list = res.results || [];
-      box.innerHTML = list.length ? `<div class="rx-results">${list.map((r) => {
+      box.innerHTML = list.length ? `<div class="rxw-results">${list.map((r) => {
         const dob = /^(\d{4})-(\d{2})-(\d{2})$/.exec(r.dob || "");
-        return `<button type="button" class="rx-res" data-pick="${esc(r.id)}"><span><strong>${esc(cleanName(r.name))}</strong>${
-          r.also && r.also.length ? `<small>also ${esc(r.also.join(", "))}</small>` : ""}</span>
+        return `<button type="button" class="rxw-res" data-pick="${esc(r.id)}"><span class="rxw-av sm">${esc(initials(r.name))}</span>
+          <span class="rxw-res-main"><strong>${esc(cleanName(r.name))}</strong>${r.also && r.also.length ? `<small>also ${esc(r.also.join(", "))}</small>` : ""}</span>
           <small>${[dob && `${dob[3]}/${dob[2]}/${dob[1]}`, r.mobile].filter(Boolean).map(esc).join(" · ")}</small></button>`;
-      }).join("")}</div>` : '<p class="rx-note">No patients found. Try part of the first or last name.</p>';
+      }).join("")}</div>` : '<p class="rxw-soft" style="margin-top:10px">No patients found. Try part of the first or last name.</p>';
     } catch (err) {
       console.error("Patient search failed:", err);
-      if (seq === searchSeq && box.isConnected) box.innerHTML = '<p class="rx-note">Search didn\'t work. Check your connection.</p>';
+      if (seq === searchSeq && box.isConnected) box.innerHTML = '<p class="rxw-soft" style="margin-top:10px">Search didn\'t work. Check your connection.</p>';
     }
   }
 
   /* ---- Details ---- */
+  const noFill = 'autocomplete="off" data-lpignore="true" data-1p-ignore';
+  function medHint() {
+    const el = $("medhint");
+    if (!el) return;
+    const d = String(st.v.medicare || "").replace(/\D/g, "");
+    el.className = `rxw-fh${d.length === 10 ? " is-ok" : d.length ? " is-warn" : ""}`;
+    el.textContent = !d ? "" : d.length === 10 ? `✓ ${d.slice(0, 4)} ${d.slice(4, 9)} ${d.slice(9)}` : `${d.length} of 10 digits`;
+  }
   function renderDetails() {
     const inp = (k, label, cls, attrs = "") => on(k)
-      ? `<label class="rx-f ${cls}"><span>${label}</span><input data-v="${k}" value="${esc(st.v[k])}" ${attrs}></label>` : "";
+      ? `<label class="rxw-f ${cls}"><span>${label}</span><input data-v="${k}" value="${esc(st.v[k])}" ${noFill} ${attrs}></label>` : "";
     const ticks = TICKS.filter((d) => on(d.key));
-    $("details").innerHTML = `<div class="rx-fields">
-        ${inp("name", "Patient's full name", "c6", 'autocomplete="off"')}
-        ${inp("address1", "Address", "c6", 'autocomplete="off"')}
-        ${inp("address2", "Suburb and state", "c4", 'autocomplete="off"')}
+    const med = on("medicare") || on("ref") || on("entitlement");
+    $("details").innerHTML = `
+      ${st.patient ? "" : '<p class="rxw-soft">Choose the patient above and these fill in by themselves.</p>'}
+      <div class="rxw-group"><div class="rxw-group-h">Name and address</div><div class="rxw-fields">
+        ${inp("name", "Full name", "c6")}
+        ${inp("address1", "Street address", "c6")}
+        ${inp("address2", "Suburb and state", "c4")}
         ${inp("postcode", "Postcode", "c2", 'inputmode="numeric" maxlength="4"')}
-        ${inp("medicare", "Medicare number", "c3", 'inputmode="numeric" maxlength="14" placeholder="10 digits"')}
+      </div></div>
+      ${med ? `<div class="rxw-group"><div class="rxw-group-h">Medicare</div><div class="rxw-fields">
+        ${on("medicare") ? `<label class="rxw-f c3"><span>Medicare number</span><input data-v="medicare" value="${esc(st.v.medicare)}" ${noFill}
+            inputmode="numeric" maxlength="14" placeholder="10 digits"><small data-role="medhint" class="rxw-fh"></small></label>` : ""}
         ${inp("ref", "Ref no.", "c1", 'inputmode="numeric" maxlength="1"')}
         ${inp("entitlement", "Entitlement no.", "c2")}
-        <label class="rx-f c2"><span>Date</span><input type="date" data-role="date" value="${esc(st.date)}" max="${todayKey()}"></label>
-      </div>
-      ${ticks.length ? `<div class="rx-sub">Tick on the script</div><div class="rx-ticks">${ticks.map((d) =>
-        `<label class="rx-tick"><input type="checkbox" data-v="${d.key}" ${st.v[d.key] ? "checked" : ""}><span>${esc(d.label)}</span></label>`).join("")}</div>` : ""}`;
+      </div></div>` : ""}
+      ${ticks.length ? `<div class="rxw-group"><div class="rxw-group-h">Tick on the script</div><div class="rxw-ticks">${ticks.map((d) =>
+        `<label class="rxw-tick${st.v[d.key] ? " is-on" : ""}"><input type="checkbox" data-v="${d.key}" ${st.v[d.key] ? "checked" : ""}>
+          <span class="rxw-tick-box">${IC.check}</span>${esc(d.label)}</label>`).join("")}</div></div>` : ""}`;
+    medHint();
   }
 
   /* ---- Medicines ---- */
+  const recentDirs = () => readJson(DIRS_KEY, []).filter((x) => typeof x === "string");
+  const dirPicks = () => [...new Set([...recentDirs(), ...DIR_PICKS])].slice(0, 4);
   function renderItems() {
-    const prodSel = (it, i) => `<select data-item="${i}" data-f="product">
+    const prodSel = (it, i) => `<select data-item="${i}" data-f="product" aria-label="Product for medicine ${i + 1}">
         <option value="">Choose the product…</option>
         ${products.map((n) => `<option${!it.custom && n === it.product ? " selected" : ""}>${esc(n)}</option>`).join("")}
         <option disabled>──────────</option>
         <option value="${TYPE_IT}"${it.custom ? " selected" : ""}>Not on the list: type the name…</option></select>`;
-    $("items").innerHTML = (products.length ? "" : '<div class="rx-warn" style="margin:0 0 10px">The prescription product list didn\'t load, so type each name. Refresh to try again.</div>') +
+    const picks = dirPicks();
+    $("items").innerHTML = (products.length ? "" : '<div class="rxw-warn" style="margin:0 0 12px">The prescription product list didn\'t load, so type each name. Refresh to try again.</div>') +
       st.items.map((it, i) => `
-      <div class="rx-item">
-        <div class="rx-item-n">Medicine ${i + 1}</div>
-        ${st.items.length > 1 ? `<button type="button" class="rx-del" data-act="del-item" data-i="${i}" aria-label="Remove medicine ${i + 1}" title="Remove">✕</button>` : ""}
-        <div class="rx-fields">
-          ${products.length ? `<label class="rx-f c6"><span>Product</span>${prodSel(it, i)}</label>` : ""}
-          ${it.custom || !products.length ? `<label class="rx-f c6"><span>Product name</span><input data-item="${i}" data-f="customName"
-              value="${esc(it.customName)}" maxlength="150" placeholder="e.g. Minomycin" autocomplete="off"></label>
-            ${products.length ? `<label class="rx-check c6"><input type="checkbox" data-item="${i}" data-f="addList" ${it.addList ? "checked" : ""}>
-              Add it to the prescription product list, so it can be chosen next time</label>` : ""}` : ""}
-          <label class="rx-f c6"><span>Strength and form</span><input data-item="${i}" data-f="strength" value="${esc(it.strength)}" placeholder="e.g. 1% cream 30 g"></label>
-          <label class="rx-f c6"><span>Directions</span><input data-item="${i}" data-f="directions" value="${esc(it.directions)}" placeholder="e.g. Apply a thin layer at night"></label>
-          <label class="rx-f c3"><span>Quantity</span><input data-item="${i}" data-f="qty" value="${esc(it.qty)}" placeholder="e.g. 1"></label>
-          <label class="rx-f c3"><span>Repeats</span><input data-item="${i}" data-f="repeats" value="${esc(it.repeats)}" inputmode="numeric"></label>
+      <div class="rxw-med" data-row="${i}">
+        <div class="rxw-med-h"><span class="rxw-med-n">${i + 1}</span>
+          ${products.length ? `<div class="rxw-sel">${prodSel(it, i)}</div>`
+            : `<input class="rxw-in" data-item="${i}" data-f="customName" value="${esc(it.customName)}" maxlength="150" placeholder="Product name" ${noFill}>`}
+          ${st.items.length > 1 ? `<button type="button" class="rxw-x" data-act="del-item" data-i="${i}" aria-label="Remove medicine ${i + 1}" title="Remove">${IC.trash}</button>` : ""}
         </div>
+        ${it.custom && products.length ? `<div class="rxw-fields">
+          <label class="rxw-f c6"><span>Product name</span><input data-item="${i}" data-f="customName" value="${esc(it.customName)}" maxlength="150" placeholder="e.g. Minomycin" ${noFill}></label>
+          <label class="rxw-switch c6"><input type="checkbox" data-item="${i}" data-f="addList" ${it.addList ? "checked" : ""}><span class="rxw-sw"></span>Add it to the prescription product list for next time</label>
+        </div>` : ""}
+        ${it.filled ? `<p class="rxw-filled">${IC.clock}Filled in from the last time it was prescribed on this computer. Check it.</p>` : ""}
+        <div class="rxw-fields">
+          <label class="rxw-f c4"><span>Strength and form</span><input data-item="${i}" data-f="strength" value="${esc(it.strength)}" placeholder="e.g. 1% cream 30 g" ${noFill}></label>
+          <label class="rxw-f c2"><span>Quantity</span><input data-item="${i}" data-f="qty" value="${esc(it.qty)}" placeholder="e.g. 1" ${noFill}></label>
+        </div>
+        <div class="rxw-fields">
+          <label class="rxw-f c4"><span>Directions</span><input data-item="${i}" data-f="directions" value="${esc(it.directions)}" list="rxw-dirs" placeholder="e.g. Apply a thin layer at night" ${noFill}></label>
+          <div class="rxw-f c2"><span>Repeats</span><div class="rxw-step">
+            <button type="button" data-act="rep" data-i="${i}" data-d="-1" aria-label="One fewer repeat">−</button>
+            <input data-item="${i}" data-f="repeats" value="${esc(it.repeats)}" inputmode="numeric" maxlength="2" aria-label="Repeats" ${noFill}>
+            <button type="button" data-act="rep" data-i="${i}" data-d="1" aria-label="One more repeat">+</button></div></div>
+        </div>
+        <div class="rxw-chips">${picks.map((t) => `<button type="button" class="rxw-chip" data-act="dir" data-i="${i}" data-t="${esc(t)}" title="${esc(t)}">${esc(t)}</button>`).join("")}</div>
       </div>`).join("") +
-      (st.items.length < MAX_ITEMS ? '<button type="button" class="rx-add" data-act="add-item">+ Add another medicine</button>' : "");
+      (st.items.length < MAX_ITEMS ? '<button type="button" class="rxw-add" data-act="add-item">+ Add another medicine</button>' : "") +
+      `<datalist id="rxw-dirs">${recentDirs().map((d) => `<option value="${esc(d)}">`).join("")}</datalist>`;
+  }
+  // Remembered on this computer after saving: what each product was written as, and recent directions
+  function remember(named) {
+    const last = readJson(LAST_KEY, {});
+    named.forEach((i) => {
+      const k = itemName(i);
+      delete last[k];
+      last[k] = { strength: i.strength, directions: i.directions, qty: i.qty, repeats: i.repeats };
+    });
+    const keys = Object.keys(last);
+    keys.slice(0, Math.max(0, keys.length - 80)).forEach((k) => delete last[k]);
+    writeJson(LAST_KEY, last);
+    writeJson(DIRS_KEY, [...new Set(named.map((i) => String(i.directions || "").trim()).filter(Boolean).concat(recentDirs()))].slice(0, 30));
   }
 
-  /* ---- Preview, and whether it's saved ---- */
+  /* ---- Preview, summary, saved ---- */
   function fit() {
     if (!pv.isConnected) return;
-    const k = pv.clientWidth / (L.paper.w * PX);
+    const w = pv.clientWidth - 24;
+    if (w <= 0) return;
+    const k = w / (L.paper.w * PX);
     paper.style.transform = `scale(${k})`;
-    pv.style.height = `${L.paper.h * PX * k}px`;
+    hold.style.width = `${w}px`;
+    hold.style.height = `${L.paper.h * PX * k}px`;
+  }
+  function markFocus() {
+    paper.querySelectorAll("[data-key]").forEach((el) => el.classList.toggle("rxw-focus", !!st.focusKey && el.dataset.key === st.focusKey));
+  }
+  function renderSum() {
+    const named = st.items.filter((i) => itemName(i));
+    $("sum").innerHTML = `
+      <div class="rxw-sum-row"><span>Patient</span>${st.patient ? `<strong>${esc(cleanName(st.v.name || st.patient.name))}</strong>` : "<em>Not chosen yet</em>"}</div>
+      <div class="rxw-sum-row"><span>Medicines</span>${named.length ? `<strong>${named.map((i) => esc(itemLine(i))).join("<br>")}</strong>` : "<em>None yet</em>"}</div>`;
   }
   function renderSaved() {
-    const box = $("saved");
-    const btn = $("printbtn");
+    const box = $("saved"), btn = $("printbtn");
     if (!box || !btn || st.busy) return;
-    const changed = sig() !== st.savedSig;
-    if (!st.savedId) {
-      box.innerHTML = `<p class="rx-note" style="margin:0 0 12px">Printing saves it to ${
-        st.patient ? `<strong>${esc(cleanName(st.patient.name))}</strong>'s` : "the patient's"} Product Prescriptions.</p>`;
-      btn.textContent = "🖨 Save and print";
-    } else if (!changed) {
-      box.innerHTML = '<p style="margin:0 0 12px"><span class="rx-pill is-ok">✓ Saved to Product Prescriptions</span></p>';
-      btn.textContent = "🖨 Print again";
+    const label = btn.querySelector("span");
+    if (!st.savedId) { box.innerHTML = ""; label.textContent = "Save and print"; }
+    else if (sig() === st.savedSig) {
+      box.innerHTML = `<span class="rxw-pill is-ok">${IC.check}Saved to Product Prescriptions</span>`;
+      label.textContent = "Print again";
     } else {
-      box.innerHTML = '<p style="margin:0 0 12px"><span class="rx-pill">Changed since it was saved. Printing saves the changes.</span></p>';
-      btn.textContent = "🖨 Save changes and print";
+      box.innerHTML = '<span class="rxw-pill">Changed since it was saved. Printing saves the changes.</span>';
+      label.textContent = "Save changes and print";
     }
   }
   function draw() {
-    const showBg = bg && store.get(BGSHOW_KEY, true);
-    paper.innerHTML = (showBg ? `<img class="rx-bg" alt="" src="${bg.data}" style="left:${num(L.bg.x)}mm;top:${num(L.bg.y)}mm;width:${num(L.bg.w, L.paper.w)}mm;opacity:${num(L.bg.opacity, 0.5)}">` : "") +
+    const B = L.bg || {};
+    paper.innerHTML = (showBg() ? `<img class="rx-bg" alt="" src="${bg.data}" style="left:${nv(B.x)}mm;top:${nv(B.y)}mm;width:${nv(B.w, L.paper.w)}mm;opacity:${nv(B.opacity, 0.5)}">` : "") +
       sheetHtml(L, values());
     const tight = [];
     paper.querySelectorAll("[data-key]").forEach((el) => {
+      el.classList.toggle("rxw-empty", !el.textContent.trim());
       const inner = el.querySelector(".rx-area-in, .rx-line-in");
       if (!inner) return;
       const over = inner.classList.contains("rx-area-in") ? inner.offsetHeight > el.clientHeight + 1 : inner.scrollWidth > el.clientWidth + 1;
-      if (over) tight.push(DEF[el.dataset.key].label);
+      if (over) tight.push(FIELD_LABELS[el.dataset.key] || "A box");
     });
-    $("warn").innerHTML = tight.length ? `<div class="rx-warn">⚠ Too long to fit: <strong>${tight.map(esc).join(", ")}</strong>.
+    markFocus();
+    $("warn").innerHTML = tight.length ? `<div class="rxw-warn">⚠ Too long to fit: <strong>${tight.map(esc).join(", ")}</strong>.
       Shorten it, or make the space bigger in <a href="#/prescriptions/layout">Set up the paper</a>.</div>` : "";
-    $("first").innerHTML = store.get(TESTED_KEY, false) ? "" :
-      '<div class="rx-banner is-soft">First time printing on this computer? Print a test page on plain paper, hold it over a script against the light, and check it lines up.</div>';
-    renderSaved();
+    $("first").innerHTML = store.get(TESTED_KEY, false) ? "" : `<div class="rxw-tip">${IC.info}<div><strong>First time printing on this computer?</strong>
+      Print a test page on plain paper and hold it over a script against the light to check it lines up.
+      <button type="button" class="rxw-link-btn" data-act="test">Print a test page</button></div></div>`;
+    renderSum(); renderSaved(); renderSteps();
   }
 
   /* ---- Save, then print ---- */
   async function doPrint(btn) {
-    if (st.busy) return;
-    if (!st.patient) { showToast("Choose the patient first, so it's saved to their Product Prescriptions."); $("search")?.focus(); return; }
+    if (st.busy || !btn) return;
+    if (!st.patient) {
+      showToast("Choose the patient first, so it's saved to their Product Prescriptions.");
+      root.querySelector('[data-step="patient"]').scrollIntoView({ behavior: "smooth", block: "start" });
+      $("search")?.focus();
+      return;
+    }
     if (!st.v.name.trim()) { showToast("Add the patient's name."); return; }
     const named = st.items.filter((i) => itemName(i));
     if (!named.length) { showToast("Choose at least one medicine."); return; }
@@ -543,11 +801,11 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     }
     if (!st.date || st.date > todayKey()) { showToast("Choose the date (it can't be in the future)."); return; }
 
-    const changed = sig() !== st.savedSig;
-    if (changed) {
+    if (sig() !== st.savedSig) {
       const typed = named.filter((i) => i.custom).map(itemName).filter((n) => !st.okTyped.has(n));
       if (typed.length) {
-        const ok = await confirmDialog({
+        const { confirmDialog: ask } = await import("./dialog.js");
+        const ok = await ask({
           title: typed.length === 1 ? "Not on the product list" : `${typed.length} items not on the product list`,
           message: `${typed.map((n) => `“${n}”`).join(", ")} ${typed.length === 1 ? "isn't" : "aren't"} on the prescription product list. Check the spelling before it's saved to the patient.`,
           confirmLabel: "Save as typed", tone: "warning",
@@ -557,7 +815,7 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
       }
       st.busy = true;
       btn.disabled = true;
-      btn.textContent = "Saving…";
+      btn.querySelector("span").textContent = "Saving…";
       const sending = sig();
       try {
         const res = await callApi({ action: "rx", op: "save", id: st.savedId, ...payload() });
@@ -565,15 +823,15 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
         const first = !st.savedId;
         st.savedId = res.id;
         st.savedSig = sending;
+        remember(named);
         const add = named.filter((i) => i.custom && i.addList).map(itemName);
         if (add.length) {
           addRxProducts(add, staff).then((added) => {
-            if (added && added.length) {
-              products.push(...added.filter((n) => !products.includes(n)));
-              st.items.forEach((i) => { if (i.custom && products.includes(i.customName)) Object.assign(i, { custom: false, product: i.customName, customName: "" }); });
-              st.savedSig = sig();
-              renderItems(); renderSaved();
-            }
+            if (!added || !added.length || !root.isConnected) return;
+            products.push(...added.filter((n) => !products.includes(n)));
+            st.items.forEach((i) => { if (i.custom && products.includes(i.customName)) Object.assign(i, { custom: false, product: i.customName, customName: "" }); });
+            st.savedSig = sig();
+            renderItems(); draw();
           }).catch((err) => console.warn("Not added to the prescription list:", err));
         }
         showToast(first ? `Saved to ${cleanName(st.patient.name)}'s Product Prescriptions` : "Changes saved");
@@ -584,27 +842,34 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
       } finally {
         st.busy = false;
         btn.disabled = false;
-        renderSaved();
+        draw();
       }
       if (sig() !== st.savedSig) return;   // changed while saving: press Print again
     }
-    const n = getNudge();
-    printSheet(L, sheetHtml(L, values(), { dx: n.x, dy: n.y }), `Prescription ${st.v.name}`);
+    const n = store.get("dm.rx.nudge", { x: 0, y: 0 }) || {};
+    printSheet(L, sheetHtml(L, values(), { dx: nv(n.x), dy: nv(n.y) }), `Prescription ${st.v.name}`);
   }
 
+  /* ---- Typing, taps and keys ---- */
   root.addEventListener("input", (e) => {
     const t = e.target;
     if (t.dataset.role === "search") { clearTimeout(searchT); searchT = setTimeout(() => search(t.value), 300); return; }
     if (t.dataset.role === "date") { st.date = t.value; draw(); return; }
     if (t.dataset.v) {
       const k = t.dataset.v;
-      st.v[k] = t.type === "checkbox" ? t.checked : (["medicare", "postcode", "ref"].includes(k) ? t.value.replace(/\D/g, "") : t.value);
+      if (t.type === "checkbox") { st.v[k] = t.checked; t.closest(".rxw-tick")?.classList.toggle("is-on", t.checked); }
+      else st.v[k] = ["medicare", "postcode", "ref"].includes(k) ? t.value.replace(/\D/g, "") : t.value;
+      if (k === "medicare") medHint();
       draw();
       return;
     }
     if (t.dataset.item !== undefined && t.dataset.f !== "product") {
-      st.items[Number(t.dataset.item)][t.dataset.f] = t.type === "checkbox" ? t.checked : t.value;
-      if (t.dataset.f !== "addList") draw(); else renderSaved();
+      const it = st.items[Number(t.dataset.item)];
+      if (!it) return;
+      it[t.dataset.f] = t.type === "checkbox" ? t.checked : t.value;
+      if (t.dataset.f === "repeats") it.repeats = t.value.replace(/\D/g, "");
+      if (it.filled && t.dataset.f !== "addList") { it.filled = false; t.closest(".rxw-med")?.querySelector(".rxw-filled")?.remove(); }
+      draw();
     }
   });
   root.addEventListener("change", (e) => {
@@ -613,45 +878,74 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     if (t.dataset.f === "product") {
       const i = Number(t.dataset.item);
       const it = st.items[i];
-      if (t.value === TYPE_IT) Object.assign(it, { custom: true, product: "" });
-      else Object.assign(it, { custom: false, product: t.value });
+      if (t.value === TYPE_IT) Object.assign(it, { custom: true, product: "", filled: false });
+      else {
+        Object.assign(it, { custom: false, product: t.value, filled: false });
+        const last = t.value && readJson(LAST_KEY, {})[t.value];
+        if (last && !it.strength.trim() && !it.directions.trim() && !it.qty.trim()) {
+          Object.assign(it, { strength: last.strength || "", directions: last.directions || "", qty: last.qty || "",
+            repeats: last.repeats ?? it.repeats, filled: true });
+        }
+      }
       renderItems(); draw();
       if (it.custom) root.querySelector(`[data-item="${i}"][data-f="customName"]`)?.focus();
     }
   });
+  root.addEventListener("focusin", (e) => {
+    const t = e.target;
+    st.focusKey = t.dataset.v || (t.dataset.item !== undefined ? "items" : t.dataset.role === "date" ? "date" : "");
+    markFocus();
+  });
+  root.addEventListener("focusout", () => { st.focusKey = ""; markFocus(); });
   root.addEventListener("click", (e) => {
     const t = e.target;
     const nb = t.closest("[data-nudge]");
     if (nb) { handleNudge(nb, root); return; }
     const pk = t.closest("[data-pick]");
     if (pk) { pick(pk.dataset.pick); return; }
+    const go = t.closest("[data-goto]");
+    if (go) { root.querySelector(`[data-step="${go.dataset.goto}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" }); return; }
     const a = t.closest("[data-act]");
     if (!a) return;
     const act = a.dataset.act;
-    if (act === "change-pt") { st.patient = null; renderPt(); renderSaved(); }
+    if (act === "change-pt") { st.patient = null; renderPt(); renderDetails(); draw(); }
     else if (act === "add-item") {
       st.items.push(blankItem(!products.length));
-      renderItems();
-      root.querySelector(`[data-item="${st.items.length - 1}"]`)?.focus();
+      renderItems(); draw();
+      root.querySelector(`[data-row="${st.items.length - 1}"] select, [data-row="${st.items.length - 1}"] input`)?.focus();
     }
     else if (act === "del-item") { st.items.splice(Number(a.dataset.i), 1); renderItems(); draw(); }
+    else if (act === "rep") {
+      const i = Number(a.dataset.i);
+      const it = st.items[i];
+      it.repeats = String(Math.max(0, Math.min(12, (parseInt(it.repeats, 10) || 0) + Number(a.dataset.d))));
+      const inp = root.querySelector(`[data-item="${i}"][data-f="repeats"]`);
+      if (inp) inp.value = it.repeats;
+      draw();
+    }
+    else if (act === "dir") {
+      const i = Number(a.dataset.i);
+      st.items[i].directions = a.dataset.t;
+      const inp = root.querySelector(`[data-item="${i}"][data-f="directions"]`);
+      if (inp) inp.value = a.dataset.t;
+      draw();
+    }
     else if (act === "print") doPrint(a);
     else if (act === "test") { printTest(L); draw(); }
   });
+  const onKey = (e) => {
+    if (!root.isConnected) { document.removeEventListener("keydown", onKey); return; }
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "p") {
+      e.preventDefault();
+      doPrint($("printbtn"));
+    }
+  };
+  document.addEventListener("keydown", onKey);
 
   renderPt(); renderDetails(); renderItems();
   new ResizeObserver(fit).observe(pv);
   fit(); draw();
-
-  if (patientId && !rec) {
-    try {
-      const p = await getPatient(patientId);
-      if (p && root.isConnected) {
-        fillFrom({ id: p.id, pttId: p.pttId || "", name: p.name, address: p.address, medicare: p.medicareNo,
-          irn: p.medicareIrn, dobKey: p.dobKey });
-      }
-    } catch (err) { console.warn("Patient not filled in:", err); }
-  }
+  if (patientId && !rec) pick(patientId);   // from the patient's page: filled in straight away
 }
 
 /* ===================== Set up the paper ===================== */
