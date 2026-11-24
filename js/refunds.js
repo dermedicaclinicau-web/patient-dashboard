@@ -368,7 +368,7 @@ async function mountForm(container, { staff, patientId }) {
   const st = { patient: null, hits: [], sales: null, visits: null, src: null, prodList: null, tried: false,
     kinds: { service: false, package: false, product: false }, services: [], packages: [], products: [],
     total: null, method: "", cashGiven: "", cashAmount: "", bank: { name: "", bsb: "", acct: "" }, note: "",
-    notifyPatient: true, notifyStaff: true, mailDates: true, mail: null };
+    notifyPatient: false, notifyStaff: true, mailDates: true, mail: null };
   const newRef = doc(collection(db, "refunds"));   // its number is known now, so the email preview can show it
 
   root.innerHTML = `
@@ -513,8 +513,7 @@ async function mountForm(container, { staff, patientId }) {
       sub = [`${x.left} of ${x.left + x.used} visits left`, x.expires ? `${x.expired ? "Expired" : "Expires"} ${niceKey(x.expires)}` : "No expiry",
         `Paid ${money(x.paid)}${x.paidFrom === "price" ? " (list price)" : ""}`, x.invoiceId && `Invoice ${x.invoiceId}`].filter(Boolean).join(" · ");
       if (off) tags += tag("All used", true); else if (x.expired) tags += tag("Expired", true);
-      const wc = pkgCalc({ method: "regular", paid: x.paid, left: x.left, of: x.left + x.used, used: usedRowsOf(x) });
-      right = wc.ok ? `<b>${money(wc.refund)}<small>to refund</small></b>` : "<b>—<small>price needed</small></b>";
+      right = `<b>${money(x.paid)}<small>paid</small></b>`;
     }
     if (was) tags += tag(`Already in ${was}`);
     const lines = list === "packages" && (x.lines || []).length > 1
@@ -537,7 +536,7 @@ async function mountForm(container, { staff, patientId }) {
         : "No packages found for them in Timely."} Type it in below.</p>`;
     }
     return `${probs}<p class="rf-hint">Tick what's being refunded. ${list === "services" ? "Amounts are what they paid, after any discount."
-      : "The refund is what they paid, less the visits already used at their regular price."}</p>
+      : "Tick the package, then type the amount to refund below."}</p>
       <ul class="rf-buys">${rows.slice(0, 40).map((x) => srcRow(list, x, on.has(x.key))).join("")}</ul>${when}`;
   }
   const refreshSrc = () => ["services", "packages"].forEach((l) => {
@@ -620,26 +619,22 @@ async function mountForm(container, { staff, patientId }) {
 
   const patientEmail = () => String((st.patient && st.patient.email) || "").trim();
   const hasUsedVisits = () => st.kinds.package && st.packages.some((s) => s.srcKey && s.method === "regular" && (s.used || []).length);
+  // Patient emails are off unless ticked: whoever pays the refund emails the patient themselves
+  // ("Copy details for an email" on the refund). Ticked: emailed when the request is made and when the money is sent.
   function notifyHtml() {
     const email = patientEmail();
     const onP = !!email && st.notifyPatient;
     const pNote = !st.patient ? "Choose the patient first."
-      : !email ? "No email on file for this patient. Add one on their patient page to email them."
-      : st.method === "cash" && st.cashGiven === "yes" ? `To ${email}. Cash was already given, so there's no "request received" email.`
-      : `To ${email}. One now, and one when the money is sent or the credit is added.`;
+      : !email ? "No email on file for this patient."
+      : onP ? `To ${email}: when the request is made, and again when the money is sent or the credit is added.`
+      : "Off: whoever pays the refund emails the patient. The refund has a button to copy the details.";
     return `<div class="rf-notify">
       <label class="prs-toggle${email ? "" : " is-off"}"><input type="checkbox" data-act="np"${onP ? " checked" : ""}${email ? "" : " disabled"}>
-        <span class="prs-sw"></span><span><b>Email the patient</b><small>${esc(pNote)}</small></span></label>
-      ${onP && !(st.method === "cash" && st.cashGiven === "yes") ? `<div class="rf-mailacts">
-        <button type="button" class="btn-ghost" data-act="mail">${st.mail ? "Check the edited email" : "Preview and edit the email"}</button>
-        ${st.mail ? '<button type="button" class="rf-linkbtn" data-act="mailreset">Use the standard email</button>' : ""}</div>` : ""}
-      ${onP && hasUsedVisits() ? `<label class="fe-check rf-mail-dates"><input type="checkbox" data-act="md"${st.mailDates ? " checked" : ""}>
-        Show the visits used, with their dates, in the email <small class="muted">({Refund breakdown})</small></label>` : ""}
+        <span class="prs-sw"></span><span><b>Email the patient automatically</b><small>${esc(pNote)}</small></span></label>
       <label class="prs-toggle"><input type="checkbox" data-act="ns"${st.notifyStaff ? " checked" : ""}>
         <span class="prs-sw"></span><span><b>Email the staff now</b><small>Each person gets an email with their step. Their task is on their dashboard either way.</small></span></label>
     </div>`;
   }
-
   function draw() {
     main.innerHTML = `
       ${sec(1, "Patient", patientHtml())}
@@ -995,12 +990,9 @@ async function mountForm(container, { staff, patientId }) {
       if (t.checked) {
         const row = list === "services"
           ? { name: x.name, amount: round2(x.net).toFixed(2), srcKey: x.key, invoiceId: x.invoiceId || "", date: x.date || "" }
-          : (() => {
-            const p = { name: x.name, srcKey: x.key, invoiceId: x.invoiceId || "", date: x.boughtOn || "",
-              left: x.left, of: x.left + x.used, paid: x.paid, method: "regular", auto: true, used: usedRowsOf(x) };
-            const c = pkgCalc(p);
-            return { ...p, amount: c.ok ? c.refund.toFixed(2) : "" };
-          })();
+          // Packages: what they paid and the visits left are shown; the refund is typed in by hand (no working out for now)
+          : { name: x.name, srcKey: x.key, invoiceId: x.invoiceId || "", date: x.boughtOn || "",
+            left: x.left, of: x.left + x.used, paid: x.paid, method: "", auto: false, used: [], amount: "" };
         const i = st[list].findIndex((s) => !s.srcKey && !s.name.trim() && !String(s.amount).trim());
         if (i !== -1) st[list][i] = { ...st[list][i], ...row };
         else st[list].push({ ...blank(), ...row });
@@ -1390,6 +1382,7 @@ async function mountRefund(container, { id, staff }) {
             <p class="rf-mailline">${r.notifyPatient === false ? "No emails to the patient" : "The patient is emailed"} · ${
               r.notifyStaff === false ? "staff weren't emailed when it was made" : "staff were emailed their steps"}${
               r.patientMail && r.patientMail.received ? ` · email wording checked by ${esc(r.patientMail.received.by || "staff")}` : ""}</p>
+            <button type="button" class="btn-ghost" data-act="copydet" style="width:100%;margin-top:10px">Copy details for an email</button>
           </section>
           ${r.method === "bank" ? bankCard() : ""}
           <section class="rf-box2"><h4>History</h4><ul class="rf-tl">${[...(r.events || [])].reverse().map((ev) =>
@@ -1488,6 +1481,20 @@ async function mountRefund(container, { id, staff }) {
     }
   }
 
+  // "Copy details for an email": the refund in plain words, to paste into an email to the patient
+  function detailsText() {
+    const first = String(r.patientName || "").trim().split(/\s+/)[0] || "there";
+    const bankStep = (r.steps || []).find((s) => s.key === "bank");
+    const ref = bankStep && bankStep.value ? String(bankStep.value) : "";
+    const lines = (r.items || []).map((it) => `• ${KINDS[it.kind] ? `${KINDS[it.kind].label}: ` : ""}${it.qty > 1 ? `${it.qty} × ` : ""}${it.name} (${money(it.amount)})`);
+    const how = r.method === "bank"
+      ? `It has been sent to your bank account${r.bankLast3 ? ` ending ${r.bankLast3}` : ""}.${ref ? ` Transfer reference: ${ref}.` : ""} It can take 1 to 2 business days to appear.`
+      : r.method === "credit" ? "It has been added to your Dermedica account as credit, and will come off your next visit or purchase."
+      : "It has been refunded in cash.";
+    return [`Hi ${first},`, "", `Your refund of ${money(r.total)} (${refundNo(r)}) has been processed.`, "",
+      ...lines, "", how, "", "Kind regards,", "The Dermedica team"].join("\n");
+  }
+
   async function resend(key, btn) {
     const label = btn.textContent;
     btn.disabled = true;
@@ -1522,6 +1529,11 @@ async function mountRefund(container, { id, staff }) {
     else if (a.dataset.act === "decline") cancel(true);
     else if (a.dataset.act === "cancel") cancel(false);
     else if (a.dataset.act === "resend") resend(a.dataset.k, a);
+    else if (a.dataset.act === "copydet") {
+      navigator.clipboard.writeText(detailsText())
+        .then(() => showToast("Copied. Paste it into your email to the patient."))
+        .catch(() => showToast("Couldn't copy. Try again."));
+    }
     else if (a.dataset.act === "copy") navigator.clipboard.writeText(a.dataset.v).then(() => showToast("Copied")).catch(() => showToast("Couldn't copy"));
   });
   // Batch typed in, or a batch chosen, for a returned product
