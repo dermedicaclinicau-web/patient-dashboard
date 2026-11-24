@@ -323,6 +323,25 @@ function stepProblems(s, depth) {
   return out;
 }
 
+// Wait for reply needs an email to the patient before it, on every way to the card
+const sendsEmail = (s) => s.type === "email" || s.type === "task";
+function pathSends(list) {
+  return (list || []).some((s) => sendsEmail(s) || (REPLY_PATHS(s) && pathSends(s.cfg.yes) && pathSends(s.cfg.no)));
+}
+// true / false once the card is found, null if it isn't in this list
+function emailBefore(list, id, had = false) {
+  for (const s of list || []) {
+    if (s.id === id) return had;
+    if (REPLY_PATHS(s)) {
+      const inner = emailBefore(s.cfg.yes, id, had) ?? emailBefore(s.cfg.no, id, had);
+      if (inner !== null) return inner;
+      if (pathSends(s.cfg.yes) && pathSends(s.cfg.no)) had = true;
+    }
+    if (sendsEmail(s)) had = true;
+  }
+  return null;
+}
+
 function flowProblems(flow, tasks) {
   const out = [];
   const t = flow.trigger;
@@ -343,7 +362,7 @@ function flowProblems(flow, tasks) {
   walk(flow.steps, (s, depth) => {
     n++;
     const p = stepProblems(s, depth);
-    if (s.type === "reply" && t.event !== "task") p.push("Only works when the flow starts from a task");
+    if (s.type === "reply" && t.event !== "task" && !emailBefore(flow.steps, s.id)) p.push("Add an email before this card, so there's something to reply to");
     if (s.type === "update" && t.event !== "form") p.push("Only works when the flow starts from an online form");
     if (s.type === "task" && s.cfg.taskId && Array.isArray(tasks)) {
       const tt = tasks.find((x) => x.id === s.cfg.taskId);
@@ -1327,10 +1346,13 @@ async function mountFlowEditor(container, { id, staff }) {
     ? { only: TASK_RULE_KEYS, lists: { "task.answer": taskFieldList() } } : {});
   const tokensFor = (forStaff) => {
     const base = forStaff ? STAFF_TOKENS : PATIENT_TOKENS;
+    let hasReply = false;
+    walk(flow.steps, (x) => { if (x.type === "reply") hasReply = true; });
+    const reply = hasReply ? [{ title: "Their reply", tokens: ["Reply"], smart: true }] : [];
     if (flow.trigger.event === "missed") return [...base, { title: "This appointment", smart: true,
-      tokens: ["Appointment date", "Appointment time", "Appointment services", "Appointment staff", "Cancelled or missed"] }];
-    if (flow.trigger.event === "form") return [...base, { title: "The form", tokens: ["Form name"], smart: true }];
-    if (flow.trigger.event !== "task") return base;
+      tokens: ["Appointment date", "Appointment time", "Appointment services", "Appointment staff", "Cancelled or missed"] }, ...reply];
+    if (flow.trigger.event === "form") return [...base, { title: "The form", tokens: ["Form name"], smart: true }, ...reply];
+    if (flow.trigger.event !== "task") return [...base, ...reply];
     const raws = [...new Set(taskFieldList().map((f) => f.raw))];
     return [...base, { title: "The task", tokens: ["Task name", ...raws.map((r) => `Task: ${r}`), "Reply"], smart: true }];
   };
@@ -1677,10 +1699,10 @@ async function mountFlowEditor(container, { id, staff }) {
               <input class="fe-input" type="number" min="1" max="365" step="1" data-k="num" value="${esc(c.num)}" />
               <select class="fb-select" data-k="unit">${opt(UNITS, c.unit)}</select>
             </div></div>
-          <p class="tb-info">Checked every hour. As soon as they reply to the task email, they go down <strong>Replied</strong>,
-            and {Reply} holds what they wrote. No reply in time: <strong>No reply</strong>.</p>
-          ${flow.trigger.event !== "task" ? '<div class="tb-problems">This only works when the flow starts from a task (When this happens → A task is sent).</div>' : ""}
-          <small class="muted">Out-of-office replies and bounces don't count. Only task emails sent from now on can be watched for replies.</small>
+          <p class="tb-info">Checked every hour. As soon as they reply to ${flow.trigger.event === "task" ? "the task email or " : ""}an email
+            this flow sent them, they go down <strong>Replied</strong>, and {Reply} holds what they wrote. No reply in time: <strong>No reply</strong>.</p>
+          ${flow.trigger.event !== "task" && !emailBefore(flow.steps, s.id) ? '<div class="tb-problems">Add a Send email card before this one, so there\'s something for them to reply to.</div>' : ""}
+          <small class="muted">Out-of-office replies and bounces don't count. Texts aren't watched: a reply to a text shows in their conversation on the patient page. Only emails sent from now on are watched.</small>
         </section>`;
     }
     if (s.type === "todo") {
@@ -1818,6 +1840,7 @@ async function mountFlowEditor(container, { id, staff }) {
     m.set("email", "jane@example.com");
     m.set("mobile", "0412 345 678");
     m.set("date of birth", "1 January 1990");
+    m.set("reply", "[What they wrote back]");
     m.set("upcoming appointments", { html: "• <strong>Thu 22 Oct 2026, 10:30 am</strong>: Skin review", text: "Thu 22 Oct 2026" });
     if (flow.trigger.event === "form") m.set("form name", (onlineForms || []).filter((x) => flow.trigger.formIds.includes(x.id)).map((x) => x.name)[0] || "Update your details");
     if (flow.trigger.event === "task") {
@@ -2591,6 +2614,11 @@ async function mountFlowEditor(container, { id, staff }) {
         <datalist id="ef-test-list">${serviceNames.map((n) => `<option value="${esc(n)}"></option>`).join("")}</datalist>`
       : ev === "form" ? '<p class="tb-info">Uses what they sent the last time they filled in the form online. Their record isn\'t changed in a test.</p>'
       : '<p class="tb-info">The patient is checked against the daily rules now, then the whole flow runs.</p>';
+    let waitsReply = false;
+    walk(flow.steps, (x) => { if (x.type === "reply") waitsReply = true; });
+    const replyField = waitsReply && ev !== "task" ? `
+        <label class="lh-field"><span class="lh-label">Pretend they replied with <small>(optional)</small></span>
+          <input type="text" name="replyText" maxlength="300" placeholder="Leave empty to try the No reply path" /></label>` : "";
     const dlg = document.createElement("dialog");
     dlg.className = "lh-dialog ef-test-dlg";
     dlg.innerHTML = `
@@ -2601,7 +2629,7 @@ async function mountFlowEditor(container, { id, staff }) {
           <input type="search" name="q" placeholder="Search by name" autocomplete="off" /></label>
         <div class="ef-test-hits" data-role="hits"></div>
         <div data-role="pick"></div>
-        ${extra}
+        ${extra}${replyField}
         <div data-role="out"></div>
         <p class="lh-error" role="alert" hidden></p>
         <div class="lh-actions">
@@ -2663,7 +2691,7 @@ async function mountFlowEditor(container, { id, staff }) {
         const res = await callApi({ action: "emailFlow", op: "test", flowId: id, patientId: chosen.id,
           product: ev === "purchase" ? extraVal : "", services: ev === "visit" || ev === "missed" ? extraVal : "",
           miss: ev === "missed" ? form.elements.miss.value : "",
-          reply: ev === "task" ? extraVal : "" });
+          reply: ev === "task" ? extraVal : (form.elements.replyText ? form.elements.replyText.value.trim() : "") });
         out.innerHTML = `<div class="tb-ready">${res.sent} test email${res.sent === 1 ? "" : "s"} sent to ${esc(res.to)}</div>
           <ol class="ef-steps">${(res.steps || []).map((s) => `<li>${esc(s)}</li>`).join("")}</ol>`;
       } catch (ex) {
