@@ -460,6 +460,7 @@ export async function mountPrescriptions(container, { param = "", staff = null }
   const parts = String(param || "").split("/").filter(Boolean);
   if (parts[0] === "layout") return mountLayout(container, { staff });
   if (parts[0] === "view" && parts[1]) return mountWriter(container, { recordId: parts[1], staff });
+  if (parts[0] === "copy" && parts[1]) return mountWriter(container, { recordId: parts[1], copyOf: true, staff });
   return mountWriter(container, { patientId: parts[0] === "new" ? (parts[1] || "") : "", staff });
 }
 
@@ -997,7 +998,7 @@ function openSignPad({ mustSave = false } = {}) {
   });
 }
 
-async function mountWriter(container, { patientId = "", recordId = "", staff }) {
+async function mountWriter(container, { patientId = "", recordId = "", copyOf = false, staff }) {
   injectWriterStyles();
   const root = document.createElement("section");
   root.className = "page wide rx rxw";
@@ -1030,7 +1031,8 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
   if (!root.isConnected) return;
   const L = info.L;
   // The prescriber printed on it: whoever wrote it (reprints keep the original doctor), otherwise the person logged in
-  const pr = rec && rec.prescriberInfo && rec.prescriberInfo.prescriberNo ? rec.prescriberInfo : me;
+  const isRec = !!rec && !copyOf;   // a saved one, opened again (a copy is a new one)
+  const pr = isRec && rec.prescriberInfo && rec.prescriberInfo.prescriberNo ? rec.prescriberInfo : me;
   const clinic = L.clinic || {};
   const drVals = {
     drHeader: [pr.name, clinic.address1, clinic.address2, clinic.phone && `Phone: ${clinic.phone}`].filter(Boolean).join("\n"),
@@ -1058,8 +1060,8 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
           addList: false, strength: it.strengths || "", directions: it.directions || "", qty: it.quantity || "", repeats: it.repeats ?? "" };
       });
     }
-    if (rec.recordDate) st.date = rec.recordDate;
-    st.savedId = rec.id;
+    if (isRec && rec.recordDate) st.date = rec.recordDate;   // a copy is dated today
+    if (isRec) st.savedId = rec.id;                          // a copy saves as a new one
   }
   const on = (k) => !!(L.fields[k] && L.fields[k].on);
   const sigData = () => (st.signing === "pad" ? st.padSig : st.signing === "saved" ? st.mySig : "");
@@ -1076,7 +1078,7 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     signing: st.signing,
   });
   const sig = () => JSON.stringify(payload());
-  if (rec) {   // as it was saved (the signature choice starts at Wet each time)
+  if (isRec) {   // as it was saved (the signature choice starts at Wet each time)
     const now = st.signing;
     st.signing = ["pad", "saved"].includes(rec.signing) ? rec.signing : "pen";
     st.savedSig = sig();
@@ -1090,8 +1092,9 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     <a class="rxw-back" href="${back}">← ${rec || patientId ? "Back to the patient" : "Back to Task Manager"}</a>
     <header class="rxw-head">
       <span class="rxw-logo" aria-hidden="true">℞</span>
-      <div class="rxw-head-main"><h2>${rec ? "Prescription" : "New prescription"}</h2>
-        <p>${rec ? `Saved ${esc(fmtLong(rec.at))}${rec.by ? ` by ${esc(rec.by)}` : ""}${rec.updatedBy ? ` · last changed by ${esc(rec.updatedBy)}` : ""}. Printing it again doesn't make a copy.`
+      <div class="rxw-head-main"><h2>${isRec ? "Prescription" : copyOf ? "New prescription (copied)" : "New prescription"}</h2>
+        <p>${isRec ? `Saved ${esc(fmtLong(rec.at))}${rec.by ? ` by ${esc(rec.by)}` : ""}${rec.updatedBy ? ` · last changed by ${esc(rec.updatedBy)}` : ""}. Printing it again doesn't make a copy.`
+          : copyOf ? `Copied from the script of ${esc(fmtLong(rec.at))}. Check everything, then save it as a new one. The original stays as it was.`
           : "Typed onto the clinic's script paper, and saved to the patient's Product Prescriptions."}</p></div>
       <a class="rxw-ghost" href="#/prescriptions/layout">${IC.gear}<span>Set up the paper</span></a>
     </header>

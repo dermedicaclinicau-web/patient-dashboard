@@ -1,7 +1,9 @@
 import { db } from "./firebase-config.js";
 import { collection, query, where, getDocs, FieldPath }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { escapeHtml } from "./utils.js";
+import { escapeHtml, showToast } from "./utils.js";
+import { callApi } from "./appointments.js";
+import { confirmDialog } from "./dialog.js";
 import { parseRecordDate } from "./transcripts.js";
 import { patientIds } from "./patients.js";
 import { listSubmissionsForPatient } from "./form-submissions.js";
@@ -26,6 +28,7 @@ const ICONS = {
   send: svg('<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>'),
   star: svg('<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>'),
   message: svg('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>'),
+  copy: svg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
 };
 
 const fmt = (it) => (it.date ? `${MONTHS[it.date.getMonth()]} ${it.date.getDate()}, ${it.date.getFullYear()}` : (it.dateText || "Undated"));
@@ -127,6 +130,7 @@ async function loadBillingAndRx(patient) {
           scanned: s.source !== "written",
           written: s.source === "written" ? s.id : "",
           copyUrl: s.source === "written" && s.copy && /^https:\/\//.test(String(s.copy.url || "")) ? String(s.copy.url) : "",
+          itemCount: Array.isArray(s.items) ? s.items.length : 1,
         })))
     : [];
   if (rxScanRes.status === "rejected") console.warn("Scanned prescriptions couldn't be loaded:", rxScanRes.reason);
@@ -296,8 +300,38 @@ export function mountBillingRx(root, patient) {
   if (irGrid) syncRow(irGrid, load);
   if (phGrid) syncRow(phGrid);
 
+  // Delete a written prescription: asks first. It leaves the patient's file; the record and its PDF are kept, marked deleted.
+  async function deleteWritten(btn) {
+    const id = btn.dataset.rxDel;
+    const n = Number(btn.dataset.n) || 1;
+    if (!(await confirmDialog({
+      title: "Delete this prescription?",
+      message: `It's removed from the patient's file${n > 1 ? `, with all ${n} medicines on that script` : ""}. ` +
+        "It's kept on record as deleted, and its PDF stays in Drive marked \"DELETED\".",
+      confirmLabel: "Delete", tone: "warning",
+    }))) return;
+    btn.disabled = true;
+    try {
+      const res = await callApi({ action: "rx", op: "delete", id });
+      if (!res || res.ok === false || res.problem) {
+        showToast((res && res.problem) || "Couldn't delete it. Try again.");
+        btn.disabled = false;
+        return;
+      }
+      if (data && data.rx) data.rx = data.rx.filter((r) => r.written !== id);
+      if (grid.isConnected) { render("rx"); renderHead(); }
+      showToast("Prescription deleted");
+    } catch (err) {
+      console.error("Prescription not deleted:", err);
+      showToast("Couldn't delete it. Check your connection.");
+      btn.disabled = false;
+    }
+  }
+
   [grid, irGrid].filter(Boolean).forEach((g) =>
     g.addEventListener("click", (e) => {
+      const del = e.target.closest("[data-rx-del]");
+      if (del) { deleteWritten(del); return; }
       const more = e.target.closest("[data-bp-more]");
       if (!more) return;
       const kind = more.dataset.bpMore;
@@ -408,9 +442,11 @@ function rxHtml(r) {
   // Every record opens in a new tab, so the patient page stays open
   // Written: View opens the copy on the form (saved when printed). Reprint is for prescribers.
   const acts = r.written
-    ? [r.copyUrl ? `<a class="rc-act" href="${escapeHtml(r.copyUrl)}" target="_blank" rel="noopener noreferrer">${ICONS.view}View</a>` : "",
+    ? [r.copyUrl ? `<a class="rc-act" href="${escapeHtml(r.copyUrl)}" target="_blank" rel="noopener noreferrer">${ICONS.view}View</a>`
+         : `<span class="rc-act is-disabled" title="Its PDF is made the next time it's printed or saved">${ICONS.view}View</span>`,
+       can("rx.write") ? `<a class="rc-act" href="#/prescriptions/copy/${encodeURIComponent(r.written)}" target="_blank" rel="noopener" title="A new script with the same medicines, dated today">${ICONS.copy}Copy &amp; new</a>` : "",
        can("rx.write") ? `<a class="rc-act" href="#/prescriptions/view/${encodeURIComponent(r.written)}" target="_blank" rel="noopener">${ICONS.edit}Reprint</a>` : "",
-       !r.copyUrl && !can("rx.write") ? `<span class="rc-act is-disabled" title="Its copy is saved the next time it's printed">${ICONS.view}View</span>` : ""].join("")
+       can("rx.write") ? `<button type="button" class="rc-act danger" data-rx-del="${escapeHtml(r.written)}" data-n="${Number(r.itemCount) || 1}">${ICONS.trash}Delete</button>` : ""].join("")
     : r.portalId
     ? `<a class="rc-act" href="#/form-record/${encodeURIComponent(r.portalId)}" target="_blank" rel="noopener">${ICONS.view}View</a>`
     : r.scanned ? viewLink(r.link)
