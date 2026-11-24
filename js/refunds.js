@@ -188,7 +188,8 @@ function calcHtml(it) {
     ? ` · worked out as ${money(c.worked)}, changed by hand` : "";
   if (c.method === "share") return `<small class="rf-calc">Paid ${money(c.paid)} · a share for the visits left${byHand}</small>`;
   return `<small class="rf-calc">Paid ${money(c.paid)}${(c.used || []).map((u) =>
-    ` · less ${u.used} × ${esc(u.service)} at ${money(u.price)}`).join("")}${byHand}</small>`;
+    ` · less ${u.used} × ${esc(u.service)} at ${money(u.price)}${(u.dates || []).length
+      ? ` (${u.dates.map(niceKey).join(", ")})` : ""}`).join("")}${byHand}</small>`;
 }
 
 /* ===================== Page ===================== */
@@ -367,7 +368,7 @@ async function mountForm(container, { staff, patientId }) {
   const st = { patient: null, hits: [], sales: null, visits: null, src: null, prodList: null, tried: false,
     kinds: { service: false, package: false, product: false }, services: [], packages: [], products: [],
     total: null, method: "", cashGiven: "", cashAmount: "", bank: { name: "", bsb: "", acct: "" }, note: "",
-    notifyPatient: true, notifyStaff: true, mail: null };
+    notifyPatient: true, notifyStaff: true, mailDates: true, mail: null };
   const newRef = doc(collection(db, "refunds"));   // its number is known now, so the email preview can show it
 
   root.innerHTML = `
@@ -415,10 +416,16 @@ async function mountForm(container, { staff, patientId }) {
 
   // Package refunds: what they paid, less each used visit at its regular price (Settings → Services and pricing),
   // or a share of what they paid (visits left ÷ all visits)
+  // Each used visit's date: from the package redemptions on their invoices, or else the appointment book
   const usedRowsOf = (x) => (x.lines || []).filter((l) => l.used > 0).map((l) => {
     const sp = lookupPrice(l.service);
-    return { service: l.service, used: l.used, price: sp ? round2(sp.price).toFixed(2) : "", known: !!sp };
+    const n = Math.max(0, Math.round(Number(l.used) || 0));
+    const dates = (l.visits || []).slice(0, n).map((v) => ({ date: String(v.date || ""), staff: String(v.staff || ""), from: String(v.from || "") }));
+    return { service: l.service, used: l.used, price: sp ? round2(sp.price).toFixed(2) : "", known: !!sp,
+      dates, extra: Array(Math.max(0, n - dates.length)).fill("") };
   });
+  const allDates = (u) => [...(u.dates || []).map((d) => d.date), ...(u.extra || []).filter((v) => /^\d{4}-\d{2}-\d{2}$/.test(v))]
+    .filter(Boolean).sort();
   function pkgCalc(s) {
     const paid = round2(s.paid);
     if (s.method === "share") return { ok: true, usedTotal: null, refund: s.of > 0 ? round2((paid * s.left) / s.of) : 0, over: false };
@@ -430,7 +437,8 @@ async function mountForm(container, { staff, patientId }) {
     const c = pkgCalc(s);
     return {
       method: s.method, paid: round2(s.paid),
-      used: s.method === "regular" ? (s.used || []).map((u) => ({ service: String(u.service || "").slice(0, 150), used: Number(u.used) || 0, price: num(u.price) })) : [],
+      used: s.method === "regular" ? (s.used || []).map((u) => ({ service: String(u.service || "").slice(0, 150), used: Number(u.used) || 0,
+        price: num(u.price), dates: allDates(u).slice(0, 40) })) : [],
       usedTotal: c.usedTotal === null ? null : round2(c.usedTotal), worked: c.ok ? c.refund : null,
     };
   };
@@ -445,11 +453,20 @@ async function mountForm(container, { staff, patientId }) {
       ${!s.auto ? `<p class="rf-hint">The amount to refund was changed by hand.
         <button type="button" class="rf-linkbtn" data-act="pkgauto" data-i="${i}">Use ${c.ok ? money(c.refund) : "the worked-out amount"}</button></p>` : ""}`;
   }
+  // The date of each used visit. One that couldn't be found can be typed in.
+  function datesHtml(u, i, j) {
+    const found = (u.dates || []).map((d) => `<li>${esc(niceKey(d.date))}${d.staff ? ` · ${esc(d.staff)}` : ""}${
+      d.from === "book" ? " <small>(appointment book)</small>" : ""}</li>`).join("");
+    const miss = (u.extra || []).map((v, k) => `<li class="rf-pk-miss"><input class="fe-input" type="date" max="${esc(dayKey())}"
+      data-f="packages.${i}.used.${j}.extra.${k}" value="${esc(v)}" aria-label="Date of this visit">
+      <small>Date not found: type it in if you know it</small></li>`).join("");
+    return found || miss ? `<ul class="rf-pk-dates">${found}${miss}</ul>` : "";
+  }
   function pkgHtml(s, i) {
     if (!s.srcKey || !s.method) return "";
     const used = s.used || [];
     const table = used.length ? `<table class="rf-pk-used"><thead><tr><th>Used</th><th>Regular price</th><th>Total</th></tr></thead><tbody>${used.map((u, j) => `<tr>
-        <td>${u.used} × ${esc(u.service || "Visit")}${u.known ? "" : '<small class="rf-pk-need">Not in Services and pricing</small>'}</td>
+        <td>${u.used} × ${esc(u.service || "Visit")}${u.known ? "" : '<small class="rf-pk-need">Not in Services and pricing</small>'}${datesHtml(u, i, j)}</td>
         <td>${moneyIn(`packages.${i}.used.${j}.price`, u.price)}</td>
         <td class="rf-pk-num" data-role="pkline-${i}-${j}">${String(u.price ?? "").trim() === "" ? "—" : money(u.used * num(u.price))}</td></tr>`).join("")}</tbody></table>`
       : '<p class="rf-hint">No visits used yet.</p>';
@@ -602,6 +619,7 @@ async function mountForm(container, { staff, patientId }) {
   }
 
   const patientEmail = () => String((st.patient && st.patient.email) || "").trim();
+  const hasUsedVisits = () => st.kinds.package && st.packages.some((s) => s.srcKey && s.method === "regular" && (s.used || []).length);
   function notifyHtml() {
     const email = patientEmail();
     const onP = !!email && st.notifyPatient;
@@ -615,6 +633,8 @@ async function mountForm(container, { staff, patientId }) {
       ${onP && !(st.method === "cash" && st.cashGiven === "yes") ? `<div class="rf-mailacts">
         <button type="button" class="btn-ghost" data-act="mail">${st.mail ? "Check the edited email" : "Preview and edit the email"}</button>
         ${st.mail ? '<button type="button" class="rf-linkbtn" data-act="mailreset">Use the standard email</button>' : ""}</div>` : ""}
+      ${onP && hasUsedVisits() ? `<label class="fe-check rf-mail-dates"><input type="checkbox" data-act="md"${st.mailDates ? " checked" : ""}>
+        Show the visits used, with their dates, in the email <small class="muted">({Refund breakdown})</small></label>` : ""}
       <label class="prs-toggle"><input type="checkbox" data-act="ns"${st.notifyStaff ? " checked" : ""}>
         <span class="prs-sw"></span><span><b>Email the staff now</b><small>Each person gets an email with their step. Their task is on their dashboard either way.</small></span></label>
     </div>`;
@@ -659,7 +679,7 @@ async function mountForm(container, { staff, patientId }) {
       cashGiven: st.method === "cash" && st.cashGiven === "yes",
       cashAmount: st.method === "cash" && st.cashGiven === "yes" ? num(st.cashAmount) || total : 0,
       bankLast3: st.method === "bank" ? st.bank.acct.slice(-3) : "", note: st.note.trim().slice(0, 1000),
-      notifyPatient: !!patientEmail() && st.notifyPatient, notifyStaff: !!st.notifyStaff,
+      notifyPatient: !!patientEmail() && st.notifyPatient, notifyStaff: !!st.notifyStaff, breakdownDates: !!st.mailDates,
     };
   }
 
@@ -774,7 +794,8 @@ async function mountForm(container, { staff, patientId }) {
   const mailSig = () => {
     const r = draftRefund();
     return JSON.stringify([st.patient && st.patient.id, r.total, r.method,
-      r.items.map((i) => [i.kind, i.name, i.qty || 1, i.amount, i.calc ? i.calc.worked : null])]);
+      r.items.map((i) => [i.kind, i.name, i.qty || 1, i.amount, i.calc ? i.calc.worked : null,
+        i.calc ? (i.calc.used || []).map((u) => u.dates) : null]), r.breakdownDates]);
   };
   async function openMail() {
     if (!st.patient) return;
@@ -795,7 +816,8 @@ async function mountForm(container, { staff, patientId }) {
     try {
       [data, lh] = await Promise.all([
         callApi({ action: "refunds", op: "draftMail", id: newRef.id, refund: {
-          patientName: st.patient.name, total: r.total, itemsTotal: r.itemsTotal, method: r.method, items: r.items } }),
+          patientName: st.patient.name, total: r.total, itemsTotal: r.itemsTotal, method: r.method, items: r.items,
+          breakdownDates: r.breakdownDates } }),
         getDoc(doc(db, "form_settings", "letterhead")).then((s) => (s.exists() ? s.data() : null)).catch(() => null),
       ]);
       if (!data || data.problem || typeof data.html !== "string") throw new Error((data && data.problem) || "");
@@ -922,7 +944,7 @@ async function mountForm(container, { staff, patientId }) {
     });
     batch.set(ref, {
       ...base, items: r.items, itemsTotal: r.itemsTotal, method: r.method, cashGiven: r.cashGiven, cashAmount: r.cashAmount,
-      bankLast3: r.bankLast3, note: r.note, notifyPatient: r.notifyPatient, notifyStaff: r.notifyStaff,
+      bankLast3: r.bankLast3, note: r.note, notifyPatient: r.notifyPatient, notifyStaff: r.notifyStaff, breakdownDates: r.breakdownDates,
       ...(st.mail && r.notifyPatient ? { patientMail: { received: { subject: st.mail.subject, html: st.mail.html, by, at: new Date().toISOString() } } } : {}),
       steps, ...recompute(steps), status: "open",
       events: [{ at: new Date().toISOString(), by, action: "Requested", note: `${money(r.total)} · ${METHODS[r.method].label}` }],
@@ -999,6 +1021,7 @@ async function mountForm(container, { staff, patientId }) {
     }
     if (t.dataset.act === "np") { st.notifyPatient = t.checked; draw(); drawSum(); return; }
     if (t.dataset.act === "ns") { st.notifyStaff = t.checked; drawSum(); return; }
+    if (t.dataset.act === "md") { st.mailDates = t.checked; drawSum(); return; }
     if (t.dataset.act === "addprod") {
       const p = (st.prodList || []).find((x) => x.id === t.value);
       if (p) st.products.push(newProduct({ key: `p_${p.id}_${Date.now()}`, productId: p.id, name: p.name, unit: p.price }));

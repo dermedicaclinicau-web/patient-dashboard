@@ -14892,3 +14892,9 @@ a.sds-btn { display: inline-flex; align-items: center; text-decoration: none; }
 
 .tbs-var.is-sym { min-width: 34px; border-style: solid; border-color: var(--border); background: #fff; color: #334155; font-size: .9rem; }
 .tbs-var.is-sym:hover { border-color: #99d5cf; }
+
+.rf-pk-dates{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:4px;font-size:13px;color:#475569}
+.rf-pk-dates small{color:#94a3b8}
+.rf-pk-miss{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.rf-pk-miss .fe-input{width:auto;padding:4px 8px;font-size:13px}
+.rf-mail-dates{margin:8px 0 0}
