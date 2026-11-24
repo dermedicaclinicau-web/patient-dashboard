@@ -236,6 +236,15 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   let mountRest = () => {};    // set once the page is drawn (sections opened early call it straight away)
   // Skin script (SSP): the tile and the Skincare section's "Create new SSP" open the builder in a new tab.
   // Caught first (capture phase), so no other click handler also opens it in this tab.
+  // Product Prescriptions → + Add: the prescription writer, patient filled in (for people who write prescriptions).
+  // Caught first (capture phase), so the form picker doesn't open as well. Everyone else keeps the usual + Add.
+  root.addEventListener("click", (e) => {
+    const b = e.target.closest('[data-create="prescription"][data-rxkind="product"]');
+    if (!b || !root.contains(b) || !patient || !can("rx.write")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    location.hash = `#/prescriptions/new/${encodeURIComponent(patient.id)}`;
+  }, true);
   root.addEventListener("click", (e) => {
     const b = e.target.closest("[data-action='create-ssp']");
     if (!b || !root.contains(b) || !patient) return;

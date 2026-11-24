@@ -11,6 +11,7 @@ import { getPatient } from "./patients.js";
 import { escapeHtml as esc, showToast } from "./utils.js";
 import { confirmDialog } from "./dialog.js";
 import { can } from "./perms.js";
+import { rxProductList, addRxProducts } from "./rx-products.js";
 
 const PX = 96 / 25.4;                       // screen px per mm
 const PAPERS = { A4: [210, 297], A5: [148, 210], Letter: [216, 279] };
@@ -233,16 +234,28 @@ export async function mountPrescriptions(container, { param = "", staff = null }
   }
   const parts = String(param || "").split("/").filter(Boolean);
   if (parts[0] === "layout") return mountLayout(container, { staff });
+  if (parts[0] === "view" && parts[1]) return mountWriter(container, { recordId: parts[1], staff });
   return mountWriter(container, { patientId: parts[0] === "new" ? (parts[1] || "") : "", staff });
 }
 
 /* ===================== Write a prescription ===================== */
+// Each prescription is saved to the patient's Product Prescriptions: the same records as scanned scripts
+// (scans/{id}, kind "rx", source "written"), saved through Apps Script (Rx.gs). Printing saves it first;
+// printing again without changes doesn't save a second copy, and changes update the same record.
+// The medicines come from the clinic's prescription product list (the same list the Scanner uses).
 
-const blankItem = () => ({ name: "", directions: "", qty: "", repeats: "0" });
+const TYPE_IT = "__type";   // "Not on the list: type the name"
+const SHEET_KEYS = ["name", "address1", "address2", "postcode", "medicare", "ref", "entitlement",
+  "safetyNet", "concession", "pbs", "rpbs", "brand"];
+const blankItem = (custom = false) => ({ product: "", custom, customName: "", addList: true,
+  strength: "", directions: "", qty: "", repeats: "0" });
+const itemName = (i) => String(i.custom ? i.customName : i.product).trim();
+const itemLine = (i) => [itemName(i), String(i.strength || "").trim()].filter(Boolean).join(" ");
 function itemsText(items) {
-  return items.filter((i) => i.name.trim()).map((i) => [
-    i.name.trim(), i.directions.trim(),
-    [i.qty.trim() && `Qty: ${i.qty.trim()}`, String(i.repeats).trim() !== "" && `Repeats: ${String(i.repeats).trim()}`].filter(Boolean).join("    "),
+  return items.filter((i) => itemName(i)).map((i) => [
+    itemLine(i), String(i.directions || "").trim(),
+    [String(i.qty || "").trim() && `Qty: ${String(i.qty).trim()}`,
+      String(i.repeats ?? "").trim() !== "" && `Repeats: ${String(i.repeats).trim()}`].filter(Boolean).join("    "),
   ].filter(Boolean).join("\n")).join("\n\n");
 }
 function splitAddress(a) {
@@ -254,19 +267,43 @@ function splitAddress(a) {
 }
 const cleanName = (n) => String(n || "").replace(/\s*#\d+\s*$/, "").trim();
 const initials = (n) => cleanName(n).split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "?";
+const fmtLong = (iso) => { const d = new Date(iso); return isNaN(d) ? "" : d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }); };
 
-async function mountWriter(container, { patientId, staff }) {
+// The prescription product list (rx-products.js may still be loading it when the page opens)
+async function loadRxNames() {
+  for (let i = 0; i < 8; i++) {
+    try {
+      let list = rxProductList();
+      if (list && typeof list.then === "function") list = await list;
+      if (Array.isArray(list) && list.length) {
+        return [...new Set(list.map((x) => String(x && x.name ? x.name : x).trim()).filter(Boolean))];
+      }
+    } catch (err) { console.warn("Prescription product list:", err); }
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  return [];
+}
+
+async function mountWriter(container, { patientId = "", recordId = "", staff }) {
   const root = document.createElement("section");
   root.className = "page wide rx";
   root.innerHTML = '<div class="skeleton sm"></div>';
   container.replaceChildren(root);
 
-  let info, bg;
-  try { [info, bg] = await Promise.all([loadLayout(true), loadBg()]); }
-  catch (err) {
-    console.error("Prescription layout failed:", err);
-    if (root.isConnected) root.innerHTML = `<div class="state error"><strong>Couldn't open prescriptions</strong>${
-      err && err.code === "permission-denied" ? "The Firestore rules don't allow it yet. Ask an Admin." : "Check your connection and try again."}</div>`;
+  let info, bg, products, rec = null;
+  try {
+    [info, bg, products] = await Promise.all([loadLayout(true), loadBg(), loadRxNames()]);
+    if (recordId) {
+      const res = await callApi({ action: "rx", op: "get", id: recordId });
+      if (res.problem) throw Object.assign(new Error(res.problem), { friendly: true });
+      rec = res.record;
+    }
+  } catch (err) {
+    console.error("Prescription page failed:", err);
+    if (root.isConnected) root.innerHTML = `<div class="state error"><strong>Couldn't open the prescription</strong>${esc(
+      err && err.friendly ? err.message
+        : err && err.code === "permission-denied" ? "The Firestore rules don't allow it yet. Ask an Admin."
+        : "Check your connection and try again.")}</div>`;
     return;
   }
   if (!root.isConnected) return;
@@ -275,17 +312,46 @@ async function mountWriter(container, { patientId, staff }) {
     patient: null,
     v: { name: "", address1: "", address2: "", postcode: "", medicare: "", ref: "", entitlement: "",
       safetyNet: false, concession: false, pbs: false, rpbs: false, brand: false },
-    items: [blankItem()],
+    items: [blankItem(!products.length)],
     date: todayKey(),
+    savedId: "", savedSig: "", okTyped: new Set(), busy: false,
   };
+  if (rec) {   // opened from Product Prescriptions: the saved prescription, ready to print again
+    st.patient = { id: rec.patientId, name: rec.patientName, pttId: rec.patientPttId, dobKey: "" };
+    SHEET_KEYS.forEach((k) => { if (rec.sheet && k in rec.sheet) st.v[k] = rec.sheet[k]; });
+    if (!st.v.name) st.v.name = cleanName(rec.patientName);
+    if (rec.items.length) {
+      st.items = rec.items.map((it) => {
+        const onList = products.includes(it.product);
+        if (!onList) st.okTyped.add(it.product);
+        return { ...blankItem(), product: onList ? it.product : "", custom: !onList, customName: onList ? "" : it.product,
+          addList: false, strength: it.strengths || "", directions: it.directions || "", qty: it.quantity || "", repeats: it.repeats ?? "" };
+      });
+    }
+    if (rec.recordDate) st.date = rec.recordDate;
+    st.savedId = rec.id;
+  }
   const on = (k) => !!(L.fields[k] && L.fields[k].on);
   const values = () => ({ ...st.v, items: itemsText(st.items), date: fmtDate(st.date) });
-  const back = patientId ? `#/patient/${encodeURIComponent(patientId)}` : "#/tasks/new";
+  const payload = () => ({
+    patientId: st.patient ? st.patient.id : "", date: st.date,
+    items: st.items.filter((i) => itemName(i)).map((i) => ({
+      product: itemName(i), custom: !!i.custom, medicine: itemLine(i), strengths: String(i.strength || "").trim(),
+      quantity: String(i.qty || "").trim(), directions: String(i.directions || "").trim(), repeats: String(i.repeats ?? "").trim(),
+    })),
+    sheet: Object.fromEntries(SHEET_KEYS.map((k) => [k, st.v[k]])),
+  });
+  const sig = () => JSON.stringify(payload());
+  if (rec) st.savedSig = sig();
+  const back = rec ? `#/patient/${encodeURIComponent(rec.patientId)}`
+    : patientId ? `#/patient/${encodeURIComponent(patientId)}` : "#/tasks/new";
 
   root.innerHTML = `
-    <a class="rx-back" href="${back}">← ${patientId ? "Back to the patient" : "Back to Task Manager"}</a>
+    <a class="rx-back" href="${back}">← ${rec || patientId ? "Back to the patient" : "Back to Task Manager"}</a>
     <div class="rx-top">
-      <div><h2>Prescription</h2><p class="muted">Typed onto the clinic's script paper. Only what you type here is printed.</p></div>
+      <div><h2>Prescription</h2><p class="muted">${rec
+        ? `Saved ${esc(fmtLong(rec.at))}${rec.by ? ` by ${esc(rec.by)}` : ""}${rec.updatedBy ? ` · last changed by ${esc(rec.updatedBy)}` : ""}. Printing it again doesn't make a copy.`
+        : "Typed onto the clinic's script paper, and saved to the patient's Product Prescriptions."}</p></div>
       <a class="rx-btn sm" href="#/prescriptions/layout">⚙ Set up the paper</a>
     </div>
     ${info.saved ? "" : `<div class="rx-banner"><strong>The paper hasn't been set up yet.</strong>
@@ -294,8 +360,7 @@ async function mountWriter(container, { patientId, staff }) {
       <div>
         <div class="rx-card"><h3><span class="rx-step">1</span>Patient</h3><div data-role="pt"></div></div>
         <div class="rx-card"><h3><span class="rx-step">2</span>Details on the script</h3><div data-role="details"></div></div>
-        <div class="rx-card"><h3><span class="rx-step">3</span>Medicines</h3><div data-role="items"></div>
-          <datalist id="rx-meds">${store.get(MEDS_KEY, []).map((m) => `<option value="${esc(m)}">`).join("")}</datalist></div>
+        <div class="rx-card"><h3><span class="rx-step">3</span>Medicines</h3><div data-role="items"></div></div>
       </div>
       <aside class="rx-side">
         <div class="rx-card">
@@ -305,11 +370,12 @@ async function mountWriter(container, { patientId, staff }) {
           <div data-role="warn"></div>
         </div>
         <div class="rx-card">
-          <h3><span class="rx-step">4</span>Print</h3>
+          <h3><span class="rx-step">4</span>Save and print</h3>
+          <div data-role="saved"></div>
           <div data-role="first"></div>
           ${nudgeHtml()}
           <div class="rx-actions">
-            <button type="button" class="rx-btn is-primary" data-act="print">🖨 Print the prescription</button>
+            <button type="button" class="rx-btn is-primary" data-act="print" data-role="printbtn">🖨 Save and print</button>
             <button type="button" class="rx-btn" data-act="test">Print a test page</button>
           </div>
           <p class="rx-note">In the print window choose <strong>Actual size (100%)</strong>, not "Fit to page", and turn off headers and footers.</p>
@@ -334,7 +400,7 @@ async function mountWriter(container, { patientId, staff }) {
     }
     $("pt").innerHTML = `<div class="rx-search"><span>🔎</span><input type="search" data-role="search" placeholder="Search by name, mobile or date of birth" autocomplete="off"></div>
       <div data-role="results"></div>
-      <p class="rx-note">Or skip this and type the details below.</p>`;
+      <p class="rx-note">The prescription is saved to this patient's Product Prescriptions.</p>`;
     if (window.matchMedia("(pointer: fine)").matches) $("search").focus();
   }
   function fillFrom(p) {
@@ -389,7 +455,7 @@ async function mountWriter(container, { patientId, staff }) {
         ${inp("medicare", "Medicare number", "c3", 'inputmode="numeric" maxlength="14" placeholder="10 digits"')}
         ${inp("ref", "Ref no.", "c1", 'inputmode="numeric" maxlength="1"')}
         ${inp("entitlement", "Entitlement no.", "c2")}
-        ${on("date") ? `<label class="rx-f c2"><span>Date</span><input type="date" data-role="date" value="${esc(st.date)}"></label>` : ""}
+        <label class="rx-f c2"><span>Date</span><input type="date" data-role="date" value="${esc(st.date)}" max="${todayKey()}"></label>
       </div>
       ${ticks.length ? `<div class="rx-sub">Tick on the script</div><div class="rx-ticks">${ticks.map((d) =>
         `<label class="rx-tick"><input type="checkbox" data-v="${d.key}" ${st.v[d.key] ? "checked" : ""}><span>${esc(d.label)}</span></label>`).join("")}</div>` : ""}`;
@@ -397,12 +463,23 @@ async function mountWriter(container, { patientId, staff }) {
 
   /* ---- Medicines ---- */
   function renderItems() {
-    $("items").innerHTML = st.items.map((it, i) => `
+    const prodSel = (it, i) => `<select data-item="${i}" data-f="product">
+        <option value="">Choose the product…</option>
+        ${products.map((n) => `<option${!it.custom && n === it.product ? " selected" : ""}>${esc(n)}</option>`).join("")}
+        <option disabled>──────────</option>
+        <option value="${TYPE_IT}"${it.custom ? " selected" : ""}>Not on the list: type the name…</option></select>`;
+    $("items").innerHTML = (products.length ? "" : '<div class="rx-warn" style="margin:0 0 10px">The prescription product list didn\'t load, so type each name. Refresh to try again.</div>') +
+      st.items.map((it, i) => `
       <div class="rx-item">
         <div class="rx-item-n">Medicine ${i + 1}</div>
         ${st.items.length > 1 ? `<button type="button" class="rx-del" data-act="del-item" data-i="${i}" aria-label="Remove medicine ${i + 1}" title="Remove">✕</button>` : ""}
         <div class="rx-fields">
-          <label class="rx-f c6"><span>Medicine, strength and form</span><input list="rx-meds" data-item="${i}" data-f="name" value="${esc(it.name)}" placeholder="e.g. Soolantra 1% cream 30 g" autocomplete="off"></label>
+          ${products.length ? `<label class="rx-f c6"><span>Product</span>${prodSel(it, i)}</label>` : ""}
+          ${it.custom || !products.length ? `<label class="rx-f c6"><span>Product name</span><input data-item="${i}" data-f="customName"
+              value="${esc(it.customName)}" maxlength="150" placeholder="e.g. Minomycin" autocomplete="off"></label>
+            ${products.length ? `<label class="rx-check c6"><input type="checkbox" data-item="${i}" data-f="addList" ${it.addList ? "checked" : ""}>
+              Add it to the prescription product list, so it can be chosen next time</label>` : ""}` : ""}
+          <label class="rx-f c6"><span>Strength and form</span><input data-item="${i}" data-f="strength" value="${esc(it.strength)}" placeholder="e.g. 1% cream 30 g"></label>
           <label class="rx-f c6"><span>Directions</span><input data-item="${i}" data-f="directions" value="${esc(it.directions)}" placeholder="e.g. Apply a thin layer at night"></label>
           <label class="rx-f c3"><span>Quantity</span><input data-item="${i}" data-f="qty" value="${esc(it.qty)}" placeholder="e.g. 1"></label>
           <label class="rx-f c3"><span>Repeats</span><input data-item="${i}" data-f="repeats" value="${esc(it.repeats)}" inputmode="numeric"></label>
@@ -411,18 +488,34 @@ async function mountWriter(container, { patientId, staff }) {
       (st.items.length < MAX_ITEMS ? '<button type="button" class="rx-add" data-act="add-item">+ Add another medicine</button>' : "");
   }
 
-  /* ---- Preview ---- */
+  /* ---- Preview, and whether it's saved ---- */
   function fit() {
     if (!pv.isConnected) return;
     const k = pv.clientWidth / (L.paper.w * PX);
     paper.style.transform = `scale(${k})`;
     pv.style.height = `${L.paper.h * PX * k}px`;
   }
+  function renderSaved() {
+    const box = $("saved");
+    const btn = $("printbtn");
+    if (!box || !btn || st.busy) return;
+    const changed = sig() !== st.savedSig;
+    if (!st.savedId) {
+      box.innerHTML = `<p class="rx-note" style="margin:0 0 12px">Printing saves it to ${
+        st.patient ? `<strong>${esc(cleanName(st.patient.name))}</strong>'s` : "the patient's"} Product Prescriptions.</p>`;
+      btn.textContent = "🖨 Save and print";
+    } else if (!changed) {
+      box.innerHTML = '<p style="margin:0 0 12px"><span class="rx-pill is-ok">✓ Saved to Product Prescriptions</span></p>';
+      btn.textContent = "🖨 Print again";
+    } else {
+      box.innerHTML = '<p style="margin:0 0 12px"><span class="rx-pill">Changed since it was saved. Printing saves the changes.</span></p>';
+      btn.textContent = "🖨 Save changes and print";
+    }
+  }
   function draw() {
     const showBg = bg && store.get(BGSHOW_KEY, true);
     paper.innerHTML = (showBg ? `<img class="rx-bg" alt="" src="${bg.data}" style="left:${num(L.bg.x)}mm;top:${num(L.bg.y)}mm;width:${num(L.bg.w, L.paper.w)}mm;opacity:${num(L.bg.opacity, 0.5)}">` : "") +
       sheetHtml(L, values());
-    // Anything that won't fit
     const tight = [];
     paper.querySelectorAll("[data-key]").forEach((el) => {
       const inner = el.querySelector(".rx-area-in, .rx-line-in");
@@ -434,18 +527,69 @@ async function mountWriter(container, { patientId, staff }) {
       Shorten it, or make the space bigger in <a href="#/prescriptions/layout">Set up the paper</a>.</div>` : "";
     $("first").innerHTML = store.get(TESTED_KEY, false) ? "" :
       '<div class="rx-banner is-soft">First time printing on this computer? Print a test page on plain paper, hold it over a script against the light, and check it lines up.</div>';
+    renderSaved();
   }
 
-  /* ---- Print ---- */
-  function doPrint() {
-    const v = values();
+  /* ---- Save, then print ---- */
+  async function doPrint(btn) {
+    if (st.busy) return;
+    if (!st.patient) { showToast("Choose the patient first, so it's saved to their Product Prescriptions."); $("search")?.focus(); return; }
     if (!st.v.name.trim()) { showToast("Add the patient's name."); return; }
-    if (!v.items) { showToast("Add at least one medicine."); return; }
-    if (on("date") && !v.date) { showToast("Choose the date."); return; }
-    const names = st.items.map((i) => i.name.trim()).filter(Boolean);
-    store.set(MEDS_KEY, [...new Set([...names, ...store.get(MEDS_KEY, [])])].slice(0, 40));
+    const named = st.items.filter((i) => itemName(i));
+    if (!named.length) { showToast("Choose at least one medicine."); return; }
+    if (st.items.some((i) => !itemName(i) && (i.strength + i.directions + i.qty).trim())) {
+      showToast("Choose the product for every medicine, or remove it.");
+      return;
+    }
+    if (!st.date || st.date > todayKey()) { showToast("Choose the date (it can't be in the future)."); return; }
+
+    const changed = sig() !== st.savedSig;
+    if (changed) {
+      const typed = named.filter((i) => i.custom).map(itemName).filter((n) => !st.okTyped.has(n));
+      if (typed.length) {
+        const ok = await confirmDialog({
+          title: typed.length === 1 ? "Not on the product list" : `${typed.length} items not on the product list`,
+          message: `${typed.map((n) => `“${n}”`).join(", ")} ${typed.length === 1 ? "isn't" : "aren't"} on the prescription product list. Check the spelling before it's saved to the patient.`,
+          confirmLabel: "Save as typed", tone: "warning",
+        });
+        if (!ok) return;
+        typed.forEach((n) => st.okTyped.add(n));
+      }
+      st.busy = true;
+      btn.disabled = true;
+      btn.textContent = "Saving…";
+      const sending = sig();
+      try {
+        const res = await callApi({ action: "rx", op: "save", id: st.savedId, ...payload() });
+        if (res.problem) { showToast(res.problem); return; }
+        const first = !st.savedId;
+        st.savedId = res.id;
+        st.savedSig = sending;
+        const add = named.filter((i) => i.custom && i.addList).map(itemName);
+        if (add.length) {
+          addRxProducts(add, staff).then((added) => {
+            if (added && added.length) {
+              products.push(...added.filter((n) => !products.includes(n)));
+              st.items.forEach((i) => { if (i.custom && products.includes(i.customName)) Object.assign(i, { custom: false, product: i.customName, customName: "" }); });
+              st.savedSig = sig();
+              renderItems(); renderSaved();
+            }
+          }).catch((err) => console.warn("Not added to the prescription list:", err));
+        }
+        showToast(first ? `Saved to ${cleanName(st.patient.name)}'s Product Prescriptions` : "Changes saved");
+      } catch (err) {
+        console.error("Prescription not saved:", err);
+        showToast("Couldn't save it, so it wasn't printed. Check your connection and try again.");
+        return;
+      } finally {
+        st.busy = false;
+        btn.disabled = false;
+        renderSaved();
+      }
+      if (sig() !== st.savedSig) return;   // changed while saving: press Print again
+    }
     const n = getNudge();
-    printSheet(L, sheetHtml(L, v, { dx: n.x, dy: n.y }), `Prescription ${st.v.name}`);
+    printSheet(L, sheetHtml(L, values(), { dx: n.x, dy: n.y }), `Prescription ${st.v.name}`);
   }
 
   root.addEventListener("input", (e) => {
@@ -458,10 +602,22 @@ async function mountWriter(container, { patientId, staff }) {
       draw();
       return;
     }
-    if (t.dataset.item !== undefined) { st.items[Number(t.dataset.item)][t.dataset.f] = t.value; draw(); }
+    if (t.dataset.item !== undefined && t.dataset.f !== "product") {
+      st.items[Number(t.dataset.item)][t.dataset.f] = t.type === "checkbox" ? t.checked : t.value;
+      if (t.dataset.f !== "addList") draw(); else renderSaved();
+    }
   });
   root.addEventListener("change", (e) => {
-    if (e.target.dataset.role === "showbg") { store.set(BGSHOW_KEY, e.target.checked); draw(); }
+    const t = e.target;
+    if (t.dataset.role === "showbg") { store.set(BGSHOW_KEY, t.checked); draw(); return; }
+    if (t.dataset.f === "product") {
+      const i = Number(t.dataset.item);
+      const it = st.items[i];
+      if (t.value === TYPE_IT) Object.assign(it, { custom: true, product: "" });
+      else Object.assign(it, { custom: false, product: t.value });
+      renderItems(); draw();
+      if (it.custom) root.querySelector(`[data-item="${i}"][data-f="customName"]`)?.focus();
+    }
   });
   root.addEventListener("click", (e) => {
     const t = e.target;
@@ -472,10 +628,14 @@ async function mountWriter(container, { patientId, staff }) {
     const a = t.closest("[data-act]");
     if (!a) return;
     const act = a.dataset.act;
-    if (act === "change-pt") { st.patient = null; renderPt(); }
-    else if (act === "add-item") { st.items.push(blankItem()); renderItems(); root.querySelector(`[data-item="${st.items.length - 1}"][data-f="name"]`)?.focus(); }
+    if (act === "change-pt") { st.patient = null; renderPt(); renderSaved(); }
+    else if (act === "add-item") {
+      st.items.push(blankItem(!products.length));
+      renderItems();
+      root.querySelector(`[data-item="${st.items.length - 1}"]`)?.focus();
+    }
     else if (act === "del-item") { st.items.splice(Number(a.dataset.i), 1); renderItems(); draw(); }
-    else if (act === "print") doPrint();
+    else if (act === "print") doPrint(a);
     else if (act === "test") { printTest(L); draw(); }
   });
 
@@ -483,7 +643,7 @@ async function mountWriter(container, { patientId, staff }) {
   new ResizeObserver(fit).observe(pv);
   fit(); draw();
 
-  if (patientId) {
+  if (patientId && !rec) {
     try {
       const p = await getPatient(patientId);
       if (p && root.isConnected) {

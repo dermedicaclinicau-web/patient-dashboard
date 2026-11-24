@@ -7,6 +7,7 @@ import { patientIds } from "./patients.js";
 import { listSubmissionsForPatient } from "./form-submissions.js";
 import { getFormVersion, rxKindOf } from "./form-templates.js";
 import { cachedRead } from "./page-cache.js";
+import { can } from "./perms.js";
 
 const PAGE = 6;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -118,12 +119,13 @@ async function loadBillingAndRx(patient) {
         .flatMap((s) => (Array.isArray(s.items) ? s.items : []).map((it) => ({
           title: String(it.product || "Prescription"),
           date: keyDate(s.recordDate), dateText: String(s.recordDate || ""),
-          staff: s.by ? `Scanned by ${s.by}` : "",
+          staff: s.source === "written" ? `Written by ${s.prescriber || s.by || "staff"}` : s.by ? `Scanned by ${s.by}` : "",
           recordId: String(s.scriptNumber || ""),
           link: s.photo && s.photo.url ? String(s.photo.url) : "",
           detail: [it.strengths, it.quantity && `Qty ${it.quantity}`, it.directions, it.repeats && `${it.repeats} repeats`]
             .filter(Boolean).join(" · "),
-          scanned: true,
+          scanned: s.source !== "written",
+          written: s.source === "written" ? s.id : "",
         })))
     : [];
   if (rxScanRes.status === "rejected") console.warn("Scanned prescriptions couldn't be loaded:", rxScanRes.reason);
@@ -390,10 +392,15 @@ function billingHtml(b) {
 }
 
 function rxHtml(r) {
-  const tag = r.scanned ? '<span class="bp-portal is-scan">Scanned</span>'
+  const tag = r.written ? '<span class="bp-portal">Written</span>'
+    : r.scanned ? '<span class="bp-portal is-scan">Scanned</span>'
     : r.portalId ? '<span class="bp-portal">Portal form</span>' : "";
   // Every record opens in a new tab, so the patient page stays open
-  const acts = r.portalId
+  const acts = r.written
+    ? (can("rx.write")
+      ? `<a class="rc-act" href="#/prescriptions/view/${encodeURIComponent(r.written)}" target="_blank" rel="noopener">${ICONS.view}View / reprint</a>`
+      : `<span class="rc-act is-disabled" title="Only people who write prescriptions can open it">${ICONS.view}View</span>`)
+    : r.portalId
     ? `<a class="rc-act" href="#/form-record/${encodeURIComponent(r.portalId)}" target="_blank" rel="noopener">${ICONS.view}View</a>`
     : r.scanned ? viewLink(r.link)
     : `${viewLink(r.link)}
