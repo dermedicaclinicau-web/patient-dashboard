@@ -98,6 +98,8 @@ const TRIG_ICON = { purchase: "cart", visit: "cal", daily: "sun", task: "doc", f
 const MISS_KINDS = [["cancelled", "Cancelled"], ["noshow", "Didn't come (no-show or DNA)"]];
 const MISS_GAP = [[0, "Every time"], [14, "Not again within 14 days"], [30, "Not again within 30 days"],
   [60, "Not again within 60 days"], [90, "Not again within 90 days"]];
+const MISS_BACK = [[0, "No, only new ones from now on"], [7, "Yes, appointments in the last 7 days"],
+  [14, "Yes, the last 14 days"], [30, "Yes, the last 30 days"]];
 const TODO_TO = [["sender", "Whoever sent the task"], ["staff", "Chosen staff"], ["roles", "Everyone in a role"]];
 const DUE_DAYS = [[0, "Today"], [1, "Tomorrow"], [2, "In 2 days"], [3, "In 3 days"], [7, "In a week"]];
 const REPLY_PATHS = (s) => (s.type === "branch" || s.type === "reply");
@@ -365,7 +367,7 @@ function snapshot(d = {}) {
     description: String(d.description || ""),
     trigger: {
       event: "purchase", scope: "any", serviceScope: "any", repeatDays: 0, dailyMax: 25, existing: false, again: "restart",
-      skipRebooked: true, missGap: 30, ...t,
+      skipRebooked: true, missGap: 30, missBack: 0, missFuture: false, ...t,
       products: cleanNames(t.products), services: cleanNames(t.services), taskIds: cleanNames(t.taskIds),
       formIds: cleanNames(t.formIds), rules: cleanGroup(t.rules),
       missKinds: Array.isArray(t.missKinds) ? cleanNames(t.missKinds).filter((k) => MISS_KINDS.some((m) => m[0] === k)) : ["cancelled", "noshow"],
@@ -1454,10 +1456,16 @@ async function mountFlowEditor(container, { id, staff }) {
           <select class="fb-select" data-f="trigger.missGap">${opt(MISS_GAP, t.missGap)}</select></label>
         <label class="tb-field"><span>If they cancel or miss again while in this flow</span>
           <select class="fb-select" data-f="trigger.again">${opt([["ignore", "Leave the flow they're already in"], ["restart", "Start the flow over"]], t.again)}</select></label>
-        <p class="tb-info">Checked after each Day Sheet upload: no-shows from the last few days, and cancellations for
-          appointments up to 60 days ahead. Rescheduled appointments, and anyone who came in or is booked at another time
-          that day, don't count. Each appointment starts the flow once. When it's turned on, cancellations already in the
-          book are only noted, so nobody gets an email about an old one.</p>`;
+        <label class="tb-field"><span>When it's turned on, also include ones already in the book?</span>
+          <select class="fb-select" data-f="trigger.missBack">${opt(MISS_BACK, t.missBack)}</select>
+          <small class="muted">By the appointment's date. Anyone who has rebooked since is still left out.</small></label>
+        <label class="fe-check"><input type="checkbox" data-f="trigger.missFuture"${t.missFuture ? " checked" : ""} />
+          Also include upcoming appointments that are already cancelled</label>
+        <p class="tb-info">Checked after each Day Sheet upload. After the first check, only new ones start the flow:
+          no-shows from the last 3 days, and cancellations for appointments up to 60 days ahead. Rescheduled appointments,
+          and anyone who came in or is booked at another time that day, don't count. Each appointment starts the flow once.
+          The two choices above only apply when the flow is turned on: to use them on a flow that's already on, turn it off
+          and on again (nobody already in the flow is started twice).</p>`;
     }
     if (t.event === "visit") {
       return `
@@ -1881,7 +1889,7 @@ async function mountFlowEditor(container, { id, staff }) {
       .finally(redrawSideSoon);
   }
 
-  const NUM_PATHS = ["stop.gapDays", "trigger.repeatDays", "trigger.dailyMax", "trigger.missGap"];
+  const NUM_PATHS = ["stop.gapDays", "trigger.repeatDays", "trigger.dailyMax", "trigger.missGap", "trigger.missBack"];
   const RERENDER_PATHS = ["trigger.event", "trigger.scope", "trigger.serviceScope"];
   function setFlowValue(path, el) {
     const v = el.type === "checkbox" ? el.checked : el.value;
@@ -2723,7 +2731,10 @@ async function mountFlowEditor(container, { id, staff }) {
       }
       const ev = flow.trigger.event;
       const who = ev === "form" ? "Patients start the flow when they send the form online"
-        : ev === "missed" ? "Patients who cancel or miss an appointment from now on start the flow after the next Day Sheet upload. Cancellations already in the book are only noted"
+        : ev === "missed" ? (Number(flow.trigger.missBack) || flow.trigger.missFuture
+          ? `Within 15 minutes, patients with ${[Number(flow.trigger.missBack) ? `a cancelled or missed appointment in the last ${flow.trigger.missBack} days` : "",
+              flow.trigger.missFuture ? "an upcoming appointment that's already cancelled" : ""].filter(Boolean).join(" or ")} start the flow (unless they've rebooked). After that, new ones start after each Day Sheet upload`
+          : "Patients who cancel or miss an appointment from now on start the flow after the next Day Sheet upload. Cancellations already in the book are only noted")
         : ev === "task" ? "Patients start the flow as soon as the task is sent to them"
         : ev === "visit" ? "Patients who come in from today start the flow the next morning"
         : ev === "daily" ? (flow.trigger.existing
