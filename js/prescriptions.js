@@ -319,9 +319,9 @@ async function loadRxNames() {
 }
 
 function injectWriterStyles() {
-  if (document.getElementById("rxw-styles-4")) return;
+  if (document.getElementById("rxw-styles-5")) return;
   const s = document.createElement("style");
-  s.id = "rxw-styles-4";
+  s.id = "rxw-styles-5";
   s.textContent = `
 .rxw{--t:#0f766e;--t2:#14b8a6;--tl:#f0fdfa;--ink:#0f172a;--mut:#64748b;--line:#e2e8f0}
 .rxw svg{width:16px;height:16px;flex:none}
@@ -482,6 +482,7 @@ function injectWriterStyles() {
 .rxw-sigprev img{height:46px;max-width:55%;object-fit:contain}
 .rxw-sig-acts{display:flex;gap:6px;margin-left:auto;flex-wrap:wrap;justify-content:flex-end}
 .rxw-dlg{width:min(680px,calc(100vw - 24px));max-width:none;max-height:calc(100vh - 24px);overflow:auto;box-sizing:border-box;border:0;border-radius:20px;padding:20px;box-shadow:0 24px 60px rgba(15,23,42,.3);color:var(--ink)}
+.rxw-dlg[open]{position:fixed;inset:0;margin:auto;height:fit-content}
 .rxw-dlg::backdrop{background:rgba(15,23,42,.45);backdrop-filter:blur(2px)}
 .rxw-dlg-h{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px}
 .rxw-dlg-h h3{margin:0;font-size:18px}
