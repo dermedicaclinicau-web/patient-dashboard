@@ -291,6 +291,8 @@ export async function openMarkingSetsDialog({ staff } = {}) {
         </div>
         ${label ? "" : `<label class="lh-field"><span class="lh-label">Name for the total (shown beside the set while marking)</span>
           <input class="fe-input" data-sk="totalLabel" maxlength="40" placeholder="Total, or e.g. Bolus injected" value="${esc(s.totalLabel || "")}" /></label>`}
+        ${label ? "" : `<label class="lh-field"><span class="lh-label">Name for the total (shown beside the set while marking)</span>
+          <input class="fe-input" data-sk="totalLabel" maxlength="40" placeholder="Leave empty to show just the number, or e.g. Bolus injected" value="${esc(s.totalLabel || "")}" /></label>`}
         ${label ? "" : `<label class="fe-check"><input type="checkbox" data-sk="tagMarks"${s.tagMarks ? " checked" : ""} /> Tag each mark (e.g. Treatment or Touch-up)</label>
         ${s.tagMarks ? `<label class="lh-field"><span class="lh-label">Tags, separated by commas (the first is the default)</span>
           <input class="fe-input" data-sk="tags" maxlength="120" placeholder="Treatment, Touch-up" value="${esc(s.tags.join(", "))}" /></label>` : ""}`}

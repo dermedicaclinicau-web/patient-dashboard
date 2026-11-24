@@ -316,7 +316,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     const f = setFigures(s);
     if (!f.n) return "";
     if (f.type === "label") return s.values.length === 1 ? `× ${f.n}` : f.counts.map((c) => `${c.code} ${c.n}`).join(" · ");
-    return `${s.totalLabel || "Total"}: ${fmt(f.total)}${s.unit ? ` ${s.unit}` : ""}`;
+    return `${s.totalLabel ? `${s.totalLabel}: ` : ""}${fmt(f.total)}${s.unit ? ` ${s.unit}` : ""}`;
   };
   // What the next tap places: "HA filler: 0.05 mL", "Cannula Entry Pt: Cannula entry point (Touch-up)"
   const placingText = () => {
@@ -345,7 +345,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     if (compact) {   // the line under the toolbar: how to use it, plus any other sets' figures
       const others = order.filter((s) => s !== primary).map(setFigures).filter((x) => x.n).map((x) => (x.type === "label"
         ? `${x.name}: ${x.counts.map((c) => `${c.code} × ${c.n}`).join(", ")}`
-        : `${x.name}: ${fmt(x.total)}${x.unit ? ` ${x.unit}` : ""}`));
+        : `${x.name}: ${x.totalLabel ? `${x.totalLabel} ` : ""}${fmt(x.total)}${x.unit ? ` ${x.unit}` : ""}`));
       totalEl.innerHTML = `<span>${tool === "erase"
         ? "Tap a mark, dot or line to remove it · Undo brings it back"
         : tool === "dot" || tool === "line" ? dotHint()
