@@ -20,30 +20,30 @@ const NUDGE_KEY = "dm.rx.nudge";
 const TESTED_KEY = "dm.rx.tested";
 const MEDS_KEY = "dm.rx.meds";
 const BGSHOW_KEY = "dm.rx.showbg";
-const MAX_ITEMS = 4;
+const MAX_ITEMS = 3;
 
 // Everything that can print. x / y: mm from the paper's left / top edge to the box's top-left corner.
 // The starting positions suit the PBS duplicate script (two copies side by side). Line them up in Set up the paper.
 const FIELDS = [
-  { key: "drHeader", label: "Doctor's name, address and phone", type: "area", def: { x: 3.5, y: 3.5, w: 62, h: 17, size: 9 } },
-  { key: "drPrescriber", label: "Prescriber no.", type: "text", def: { x: 23.5, y: 21.5, w: 30, size: 9 } },
+  { key: "drHeader", label: "Doctor's name, address and phone", type: "area", def: { x: 3.5, y: 3, w: 98, h: 18, size: 9 } },
+  { key: "drPrescriber", label: "Prescriber no.", type: "text", def: { x: 23, y: 23, w: 40, size: 9 } },
   { key: "medicare", label: "Medicare number", type: "boxes", count: 10,
-    def: { x: 26, y: 29.5, pitch: 2.4, groups: "4,5,1", gap: 1.6, size: 9 } },
-  { key: "ref", label: "Medicare Ref no.", type: "boxes", count: 1, def: { x: 58, y: 29.5, pitch: 2.4, size: 9 } },
-  { key: "entitlement", label: "Entitlement no.", type: "text", def: { x: 24, y: 35.5, w: 78, size: 9 } },
-  { key: "safetyNet", label: "PBS Safety Net", type: "tick", def: { x: 23, y: 41.5, box: 7 } },
-  { key: "concession", label: "Concessional / dependant", type: "tick", def: { x: 63.5, y: 41.5, box: 7 } },
-  { key: "name", label: "Patient's full name", type: "text", def: { x: 23.5, y: 52, w: 75, size: 9, bold: true } },
-  { key: "address1", label: "Address, line 1", type: "text", def: { x: 23.5, y: 56.5, w: 75, size: 9 } },
-  { key: "address2", label: "Suburb, state and postcode", type: "text", def: { x: 23.5, y: 61, w: 75, size: 9 } },
-  { key: "postcode", label: "Postcode (on its own)", type: "boxes", count: 4, def: { on: false, x: 85, y: 61, pitch: 2.4, size: 9 } },
-  { key: "date", label: "Date", type: "text", def: { x: 10.5, y: 68.5, w: 25, size: 9, bold: true } },
-  { key: "pbs", label: "PBS", type: "tick", def: { x: 10, y: 72, box: 4 } },
-  { key: "rpbs", label: "RPBS", type: "tick", def: { x: 28, y: 72, box: 4 } },
-  { key: "brand", label: "Brand substitution not permitted", type: "tick", def: { x: 44, y: 69.5, box: 7.5 } },
-  { key: "items", label: "Medicines", type: "area", def: { x: 27.5, y: 80, w: 70, h: 58, size: 10, upper: true, count: true } },
-  { key: "drSign", label: "Doctor's name and qualifications", type: "area", def: { x: 24, y: 141, w: 40, h: 9, size: 8 } },
-  { key: "signature", label: "Signature", type: "sig", def: { x: 54, y: 140, w: 45, h: 13 } },
+    def: { x: 36, y: 31.3, pitch: 2.4, groups: "4,5,1", gap: 1.6, size: 9 } },
+  { key: "ref", label: "Medicare Ref no.", type: "boxes", count: 1, def: { x: 66, y: 31.3, pitch: 2.4, size: 9 } },
+  { key: "entitlement", label: "Entitlement no.", type: "text", def: { x: 24, y: 39, w: 78, size: 9 } },
+  { key: "safetyNet", label: "PBS Safety Net", type: "tick", def: { x: 22, y: 46, box: 7.3 } },
+  { key: "concession", label: "Concessional / dependant", type: "tick", def: { x: 63.3, y: 46, box: 7.3 } },
+  { key: "name", label: "Patient's full name", type: "text", def: { x: 24, y: 55, w: 78, size: 9, bold: true } },
+  { key: "address1", label: "Address, line 1", type: "text", def: { x: 24, y: 59.3, w: 78, size: 9 } },
+  { key: "address2", label: "Suburb, state and postcode", type: "text", def: { x: 24, y: 63.6, w: 78, size: 9 } },
+  { key: "postcode", label: "Postcode (on its own)", type: "boxes", count: 4, def: { on: false, x: 85, y: 63.6, pitch: 2.4, size: 9 } },
+  { key: "date", label: "Date", type: "text", def: { x: 11, y: 71.3, w: 25, size: 9, bold: true } },
+  { key: "pbs", label: "PBS", type: "tick", def: { x: 11, y: 76, box: 4 } },
+  { key: "rpbs", label: "RPBS", type: "tick", def: { x: 30.5, y: 76, box: 4 } },
+  { key: "brand", label: "Brand substitution not permitted", type: "tick", def: { x: 43.3, y: 74.7, box: 7.3 } },
+  { key: "items", label: "Medicines", type: "area", def: { x: 25, y: 84, w: 77, h: 54, size: 9, upper: true, count: true } },
+  { key: "drSign", label: "Doctor's name and qualifications", type: "area", def: { x: 25, y: 139, w: 36, h: 7.5, size: 7.5 } },
+  { key: "signature", label: "Signature", type: "sig", def: { x: 62, y: 137, w: 38, h: 9 } },
 ];
 
 const DEF = Object.fromEntries(FIELDS.map((d) => [d.key, d]));
@@ -84,7 +84,7 @@ const getNudge = () => { const n = store.get(NUDGE_KEY, {}); return { x: num(n.x
 function defaultLayout() {
   const fields = {};
   FIELDS.forEach((d) => { fields[d.key] = { on: true, size: 11, align: "left", bold: false, ...d.def }; });
-  return { paper: { preset: "custom", w: 210, h: 181 }, offset: { x: 0, y: 0 }, font: "Arial",
+  return { paper: { preset: "A4", w: 210, h: 297 }, offset: { x: 0, y: 0 }, font: "Arial",
     bg: { x: 0, y: 0, w: 210, opacity: 0.5 }, copy: { on: true, dx: 105 },
     clinic: { address1: "", address2: "", phone: "" }, fields };
 }
