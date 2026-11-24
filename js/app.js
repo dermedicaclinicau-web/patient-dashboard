@@ -93,7 +93,7 @@ const PROSPECTS_V = 11;
 // Raise this each time refunds.js changes, so browsers don't keep using an old copy
 const REFUNDS_V = 10;
 // Raise this each time prescriptions.js changes, so browsers don't keep using an old copy
-const RX_V = 3;
+const RX_V = 4;
 let currentStaff = null;
 initFormPicker(els.content, { getStaff: () => currentStaff });
 initTopbar();

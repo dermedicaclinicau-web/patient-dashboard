@@ -53,7 +53,7 @@ import { openSspBuilder } from "./ssp-edit.js";
 const DOC_ACTIONS = [
   ["Consent record", "consent"],
   ["Treatment record", "treatment"],
-  ["Prescription", "rx", "rx-write"],
+  ["Prescription", "rx"], ["Create Script", "rx", "rx-write"],
   ["Skin script (SSP)", "ssp", "create-ssp"],
   ["General note", "note"],
   ["Personal note", "lock", "add-note"],

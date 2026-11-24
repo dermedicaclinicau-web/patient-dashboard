@@ -304,9 +304,9 @@ async function loadRxNames() {
 }
 
 function injectWriterStyles() {
-  if (document.getElementById("rxw-styles")) return;
+  if (document.getElementById("rxw-styles-2")) return;
   const s = document.createElement("style");
-  s.id = "rxw-styles";
+  s.id = "rxw-styles-2";
   s.textContent = `
 .rxw{--t:#0f766e;--t2:#14b8a6;--tl:#f0fdfa;--ink:#0f172a;--mut:#64748b;--line:#e2e8f0}
 .rxw svg{width:16px;height:16px;flex:none}
@@ -446,6 +446,11 @@ function injectWriterStyles() {
 .rxw-more[open] summary::before{transform:rotate(90deg)}
 .rxw-more-in{display:grid;gap:12px;margin-top:12px}
 .rxw-date input{height:44px;font-weight:600}
+.rxw-medbox{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.rxw-medbox i{color:#94a3b8;font-style:normal;font-weight:700}
+.rxw .rxw-medbox input{flex:none;width:calc(var(--n) * 1.5ch + 28px);height:40px;box-sizing:border-box;padding:0 8px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;color:var(--ink);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:15px;letter-spacing:.3em;text-align:center;transition:border-color .15s,box-shadow .15s}
+.rxw .rxw-medbox input:focus{outline:none;border-color:var(--t2);box-shadow:0 0 0 3px rgba(20,184,166,.15)}
+.rxw .rxw-medbox input::placeholder{color:#d5dde6}
 @media (max-width:1100px){.rxw-grid{grid-template-columns:1fr}.rxw-aside{position:static;max-height:none;overflow:visible}}
 @media (max-width:640px){.rxw-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.rxw-fields>*{grid-column:span 2!important}
   .rxw-head{flex-wrap:wrap}.rxw-ghost span{display:none}.rxw input,.rxw select{font-size:16px!important}.rxw-card{padding:16px}}`;
@@ -645,6 +650,14 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
 
   /* ---- Details ---- */
   const noFill = 'autocomplete="off" data-lpignore="true" data-1p-ignore';
+  // The Medicare number in three boxes, as on the paper: 4 – 5 – 1
+  const medGroups = () => { const d = String(st.v.medicare || "").replace(/\D/g, ""); return [d.slice(0, 4), d.slice(4, 9), d.slice(9, 10)]; };
+  const medInputs = () => [...root.querySelectorAll("[data-med]")];
+  function medSync() {
+    st.v.medicare = medInputs().map((x) => x.value.replace(/\D/g, "")).join("");
+    medHint();
+    draw();
+  }
   function medHint() {
     const el = $("medhint");
     if (!el) return;
@@ -666,8 +679,11 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
         ${inp("postcode", "Postcode", "c2", 'inputmode="numeric" maxlength="4"')}
       </div></div>
       ${med ? `<div class="rxw-group"><div class="rxw-group-h">Medicare</div><div class="rxw-fields">
-        ${on("medicare") ? `<label class="rxw-f c3"><span>Medicare number</span><input data-v="medicare" value="${esc(st.v.medicare)}" ${noFill}
-            inputmode="numeric" maxlength="14" placeholder="10 digits"><small data-role="medhint" class="rxw-fh"></small></label>` : ""}
+        ${on("medicare") ? `<div class="rxw-f c3"><span>Medicare number</span>
+          <div class="rxw-medbox" role="group" aria-label="Medicare number">${[4, 5, 1].map((n, g) =>
+            `${g ? '<i aria-hidden="true">–</i>' : ""}<input data-med="${g}" maxlength="${n}" style="--n:${n}" value="${esc(medGroups()[g])}"
+              inputmode="numeric" placeholder="${"0".repeat(n)}" ${noFill} aria-label="Medicare digits ${["1 to 4", "5 to 9", "10"][g]}">`).join("")}</div>
+          <small data-role="medhint" class="rxw-fh"></small></div>` : ""}
         ${inp("ref", "Ref no.", "c1", 'inputmode="numeric" maxlength="1"')}
         ${inp("entitlement", "Entitlement no.", "c2")}
       </div></div>` : ""}
@@ -855,6 +871,16 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     const t = e.target;
     if (t.dataset.role === "search") { clearTimeout(searchT); searchT = setTimeout(() => search(t.value), 300); return; }
     if (t.dataset.role === "date") { st.date = t.value; draw(); return; }
+    if (t.dataset.med !== undefined) {   // a Medicare box: digits only, then on to the next box when it's full
+      const clean = t.value.replace(/\D/g, "");
+      if (clean !== t.value) t.value = clean;
+      medSync();
+      if (clean.length >= Number(t.maxLength)) {
+        const next = medInputs()[Number(t.dataset.med) + 1] || root.querySelector('[data-v="ref"]');
+        if (next) { next.focus(); next.select?.(); }
+      }
+      return;
+    }
     if (t.dataset.v) {
       const k = t.dataset.v;
       if (t.type === "checkbox") { st.v[k] = t.checked; t.closest(".rxw-tick")?.classList.toggle("is-on", t.checked); }
@@ -893,10 +919,32 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
   });
   root.addEventListener("focusin", (e) => {
     const t = e.target;
-    st.focusKey = t.dataset.v || (t.dataset.item !== undefined ? "items" : t.dataset.role === "date" ? "date" : "");
+    st.focusKey = t.dataset.v || (t.dataset.med !== undefined ? "medicare"
+      : t.dataset.item !== undefined ? "items" : t.dataset.role === "date" ? "date" : "");
     markFocus();
   });
   root.addEventListener("focusout", () => { st.focusKey = ""; markFocus(); });
+  // A whole Medicare number pasted (with or without spaces): spread across the three boxes
+  root.addEventListener("paste", (e) => {
+    const t = e.target;
+    if (t.dataset.med === undefined) return;
+    const d = String((e.clipboardData && e.clipboardData.getData("text")) || "").replace(/\D/g, "");
+    if (d.length < 5) return;   // a few digits: pasted into this box as normal
+    e.preventDefault();
+    const ins = medInputs();
+    const all = d.slice(0, 10);
+    [all.slice(0, 4), all.slice(4, 9), all.slice(9, 10)].forEach((v, i) => { if (ins[i]) ins[i].value = v; });
+    medSync();
+    const next = all.length >= 10 ? root.querySelector('[data-v="ref"]') : ins[all.length >= 4 ? (all.length >= 9 ? 2 : 1) : 0];
+    if (next) next.focus();
+  });
+  // Backspace in an empty Medicare box: back to the box before
+  root.addEventListener("keydown", (e) => {
+    const t = e.target;
+    if (t.dataset.med === undefined || e.key !== "Backspace" || t.value) return;
+    const prev = medInputs()[Number(t.dataset.med) - 1];
+    if (prev) { e.preventDefault(); prev.focus(); prev.setSelectionRange(prev.value.length, prev.value.length); }
+  });
   root.addEventListener("click", (e) => {
     const t = e.target;
     const nb = t.closest("[data-nudge]");
