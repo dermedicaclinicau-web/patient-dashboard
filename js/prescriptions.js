@@ -372,8 +372,8 @@ async function buildPdf(L, vals, o = {}) {
   return doc.output("datauristring");
 }
 
-async function sendToPrinter(pdf, { id = "", test = false, copy = "" } = {}) {
-  const res = await callApi({ action: "rx", op: "print", id, test, pdf, copy });
+async function sendToPrinter(pdf, { id = "", test = false, copy = "", saveOnly = false } = {}) {
+  const res = await callApi({ action: "rx", op: "print", id, test, pdf, copy, saveOnly });
   if (!res || res.ok === false || res.problem) {
     throw Object.assign(new Error((res && res.problem) || "The printer couldn't be reached. Try again."), { friendly: true });
   }
@@ -534,10 +534,11 @@ async function loadRxNames() {
 }
 
 function injectWriterStyles() {
-  if (document.getElementById("rxw-styles-6")) return;
+  if (document.getElementById("rxw-styles-7")) return;
+  document.getElementById("rxw-styles-6")?.remove();
   document.getElementById("rxw-styles-5")?.remove();
   const s = document.createElement("style");
-  s.id = "rxw-styles-6";
+  s.id = "rxw-styles-7";
   s.textContent = `
 .rxw{--t:#0f766e;--t2:#14b8a6;--tl:#f0fdfa;--ink:#0f172a;--mut:#64748b;--line:#e2e8f0}
 .rxw svg{width:16px;height:16px;flex:none}
@@ -725,6 +726,9 @@ function injectWriterStyles() {
 .rxw-dlg-f{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
 .rxw-dlg-f .rxw-print{width:auto;height:44px;padding:0 20px;font-size:15px}
 .rxw-dlg-f .rxw-print:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
+.rxw-saveonly{width:100%;height:44px;margin-top:8px;display:flex;align-items:center;justify-content:center;gap:8px;border:1px solid var(--line);border-radius:12px;background:#fff;color:var(--t);font-family:inherit;font-size:14px;font-weight:700;cursor:pointer;transition:.15s}
+.rxw-saveonly:hover{border-color:var(--t2);background:var(--tl)}
+.rxw-saveonly:disabled{opacity:.6;cursor:progress}
 .rxw-done{width:min(420px,calc(100vw - 24px));text-align:center;padding:28px 24px 20px}
 .rxw-done h3{margin:14px 0 6px;font-size:19px}
 .rxw-done p{margin:0;color:var(--mut);font-size:14.5px;line-height:1.5}
@@ -1123,7 +1127,9 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
           <div class="rxw-sum" data-role="sum"></div>
           <div data-role="saved"></div>
           <button type="button" class="rxw-print" data-act="print" data-role="printbtn">${IC.print}<span>Save and print</span></button>
-          <p class="rxw-hint">Sends it straight to the front desk printer. <kbd>Ctrl</kbd> + <kbd>P</kbd> does the same.</p>
+          <button type="button" class="rxw-saveonly" data-act="saveonly" data-role="saveonly">${IC.check}<span>Save to patient's file only</span></button>
+          <p class="rxw-hint">Save and print sends it straight to the front desk printer (<kbd>Ctrl</kbd> + <kbd>P</kbd>).
+            Save only keeps it in the patient's Product Prescriptions without printing (<kbd>Ctrl</kbd> + <kbd>S</kbd>).</p>
           <div data-role="first"></div>
         </section>
       </aside>
@@ -1138,7 +1144,7 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
       ["patient", "Patient", !!st.patient],
       ["details", "Details", !!(st.v.name.trim() && (!on("address1") || st.v.address1.trim()))],
       ["meds", "Medicines", st.items.some((i) => itemName(i))],
-      ["print", "Saved and printed", !!st.savedId && sig() === st.savedSig],
+      ["print", "Saved", !!st.savedId && sig() === st.savedSig],
     ];
     const cur = s.findIndex((x) => !x[2]);
     $("steps").innerHTML = s.map(([k, label, done], i) => `<li class="${done ? "is-done" : i === cur ? "is-on" : ""}">
@@ -1333,12 +1339,14 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     const box = $("saved"), btn = $("printbtn");
     if (!box || !btn || st.busy) return;
     const label = btn.querySelector("span");
+    const so = $("saveonly");
+    if (so) so.querySelector("span").textContent = "Save to patient's file only";
     if (!st.savedId) { box.innerHTML = ""; label.textContent = "Save and print"; }
     else if (sig() === st.savedSig) {
       box.innerHTML = `<span class="rxw-pill is-ok">${IC.check}Saved to Product Prescriptions</span>`;
-      label.textContent = "Print again";
+      label.textContent = st.printedSig === st.savedSig ? "Print again" : "Print";
     } else {
-      box.innerHTML = '<span class="rxw-pill">Changed since it was saved. Printing saves the changes.</span>';
+      box.innerHTML = '<span class="rxw-pill">Changed since it was saved. Saving or printing keeps the changes.</span>';
       label.textContent = "Save changes and print";
     }
   }
@@ -1454,7 +1462,7 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
   }
 
   /* ---- Save, then print ---- */
-  async function doPrint(btn) {
+  async function doPrint(btn, print = true) {
     if (st.busy || !btn) return;
     if (!st.patient) {
       showToast("Choose the patient first, so it's saved to their Product Prescriptions.");
@@ -1520,39 +1528,43 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
       }
       if (sig() !== st.savedSig) return;   // changed while saving: press Print again
     }
-    await sendScript(btn);
+    await sendScript(btn, print);
   }
-  // Made into a PDF and sent to the front desk printer, then a message to say it's done
-  async function sendScript(btn) {
+  // Made into PDFs: one for the front desk printer (not for "Save only"), one on the form for the patient's file.
+  // Then a message to say it's done.
+  async function sendScript(btn, print = true) {
     st.busy = true;
     btn.disabled = true;
-    btn.querySelector("span").textContent = "Sending to the printer…";
+    btn.querySelector("span").textContent = print ? "Sending to the printer…" : "Saving to the patient's file…";
     let ok = false, msg = "", noCopy = false;
     try {
       const vals = values();
-      // One for the printer (the paper already has the form), one on the form's picture for the patient's file
-      const [pdf, copy] = await Promise.all([buildPdf(L, vals), buildPdf(L, vals, { bg })]);
-      const res = await sendToPrinter(pdf, { id: st.savedId, copy });
+      const [pdf, copy] = await Promise.all([print ? buildPdf(L, vals) : "", buildPdf(L, vals, { bg })]);
+      const res = await sendToPrinter(pdf, { id: st.savedId, copy, saveOnly: !print });
       noCopy = !!res.copyFailed;
+      if (print) st.printedSig = st.savedSig;
       ok = true;
     } catch (err) {
-      console.error("Prescription not printed:", err);
-      msg = err && err.friendly ? err.message : "The printer couldn't be reached. Check your connection and try again.";
+      console.error(print ? "Prescription not printed:" : "Prescription copy not saved:", err);
+      msg = err && err.friendly ? err.message
+        : print ? "The printer couldn't be reached. Check your connection and try again."
+        : "It couldn't be added to the patient's file. Check your connection and try again.";
     } finally {
       st.busy = false;
       btn.disabled = false;
       if (root.isConnected) draw();
     }
     if (ok) {
-      await printedNotice({ ok: true, title: "Saved and successfully printed", message: noCopy
-        ? "Please check the printer tray. The copy for the patient's file wasn't saved: print it again later to add it."
-        : "Please check the printer tray." });
+      await printedNotice(print
+        ? { ok: true, title: "Saved and successfully printed", message: noCopy
+          ? "Please check the printer tray. The copy for the patient's file wasn't saved: print it again later to add it."
+          : "Please check the printer tray." }
+        : { ok: true, title: "Saved to the patient's file", message: "It's in their Product Prescriptions. Nothing was printed." });
       return;
     }
-    const v = await printedNotice({ ok: false, title: "Saved, but not printed", message: msg, retry: true });
-    if (v === "retry" && root.isConnected) sendScript(btn);
+    const v = await printedNotice({ ok: false, title: print ? "Saved, but not printed" : "Saved, but not added to the file", message: msg, retry: true });
+    if (v === "retry" && root.isConnected) sendScript(btn, print);
   }
-
   /* ---- Typing, taps and keys ---- */
   root.addEventListener("input", (e) => {
     const t = e.target;
@@ -1671,6 +1683,7 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     else if (act === "sig-change") changeMySig();
     else if (act === "sig-remove") removeMySig();
     else if (act === "print") doPrint(a);
+    else if (act === "saveonly") doPrint(a, false);
     else if (act === "test") printTest(L, a).then(() => { if (root.isConnected) draw(); });
   });
   const onKey = (e) => {
@@ -1679,6 +1692,10 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "p") {
       e.preventDefault();
       doPrint($("printbtn"));
+    }
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      doPrint($("saveonly"), false);
     }
   };
   document.addEventListener("keydown", onKey);
