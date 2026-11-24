@@ -23,24 +23,29 @@ const BGSHOW_KEY = "dm.rx.showbg";
 const MAX_ITEMS = 4;
 
 // Everything that can print. x / y: mm from the paper's left / top edge to the box's top-left corner.
+// The starting positions suit the PBS duplicate script (two copies side by side). Line them up in Set up the paper.
 const FIELDS = [
+  { key: "drHeader", label: "Doctor's name, address and phone", type: "area", def: { x: 3.5, y: 3.5, w: 62, h: 17, size: 9 } },
+  { key: "drPrescriber", label: "Prescriber no.", type: "text", def: { x: 23.5, y: 21.5, w: 30, size: 9 } },
   { key: "medicare", label: "Medicare number", type: "boxes", count: 10,
-    def: { x: 24, y: 38, pitch: 5.6, groups: "4,5,1", gap: 2.4, size: 12 } },
-  { key: "ref", label: "Medicare Ref no.", type: "boxes", count: 1, def: { x: 92, y: 38, pitch: 5.6, size: 12 } },
-  { key: "name", label: "Patient's full name", type: "text", def: { x: 24, y: 50, w: 125, size: 12 } },
-  { key: "address1", label: "Address, line 1", type: "text", def: { x: 24, y: 58, w: 125 } },
-  { key: "address2", label: "Address, line 2", type: "text", def: { x: 24, y: 65, w: 95 } },
-  { key: "postcode", label: "Postcode", type: "boxes", count: 4, def: { x: 124, y: 65, pitch: 5.6 } },
-  { key: "entitlement", label: "Entitlement no.", type: "text", def: { x: 24, y: 73, w: 60 } },
-  { key: "safetyNet", label: "PBS Safety Net", type: "tick", def: { x: 112, y: 73, box: 4.5 } },
-  { key: "concession", label: "Concessional / dependant", type: "tick", def: { x: 140, y: 73, box: 4.5 } },
-  { key: "pbs", label: "PBS", type: "tick", def: { x: 24, y: 82, box: 4.5 } },
-  { key: "rpbs", label: "RPBS", type: "tick", def: { x: 44, y: 82, box: 4.5 } },
-  { key: "brand", label: "Brand substitution not permitted", type: "tick", def: { x: 70, y: 82, box: 4.5 } },
-  { key: "items", label: "Medicines", type: "area", def: { x: 24, y: 92, w: 160, h: 70 } },
-  { key: "date", label: "Date", type: "text", def: { x: 150, y: 180, w: 35 } },
-  { key: "signature", label: "Signature", type: "sig", def: { x: 40, y: 168, w: 60, h: 16 } },
+    def: { x: 26, y: 29.5, pitch: 2.4, groups: "4,5,1", gap: 1.6, size: 9 } },
+  { key: "ref", label: "Medicare Ref no.", type: "boxes", count: 1, def: { x: 58, y: 29.5, pitch: 2.4, size: 9 } },
+  { key: "entitlement", label: "Entitlement no.", type: "text", def: { x: 24, y: 35.5, w: 78, size: 9 } },
+  { key: "safetyNet", label: "PBS Safety Net", type: "tick", def: { x: 23, y: 41.5, box: 7 } },
+  { key: "concession", label: "Concessional / dependant", type: "tick", def: { x: 63.5, y: 41.5, box: 7 } },
+  { key: "name", label: "Patient's full name", type: "text", def: { x: 23.5, y: 52, w: 75, size: 9, bold: true } },
+  { key: "address1", label: "Address, line 1", type: "text", def: { x: 23.5, y: 56.5, w: 75, size: 9 } },
+  { key: "address2", label: "Suburb, state and postcode", type: "text", def: { x: 23.5, y: 61, w: 75, size: 9 } },
+  { key: "postcode", label: "Postcode (on its own)", type: "boxes", count: 4, def: { on: false, x: 85, y: 61, pitch: 2.4, size: 9 } },
+  { key: "date", label: "Date", type: "text", def: { x: 10.5, y: 68.5, w: 25, size: 9, bold: true } },
+  { key: "pbs", label: "PBS", type: "tick", def: { x: 10, y: 72, box: 4 } },
+  { key: "rpbs", label: "RPBS", type: "tick", def: { x: 28, y: 72, box: 4 } },
+  { key: "brand", label: "Brand substitution not permitted", type: "tick", def: { x: 44, y: 69.5, box: 7.5 } },
+  { key: "items", label: "Medicines", type: "area", def: { x: 27.5, y: 80, w: 70, h: 58, size: 10, upper: true, count: true } },
+  { key: "drSign", label: "Doctor's name and qualifications", type: "area", def: { x: 24, y: 141, w: 40, h: 9, size: 8 } },
+  { key: "signature", label: "Signature", type: "sig", def: { x: 54, y: 140, w: 45, h: 13 } },
 ];
+
 const DEF = Object.fromEntries(FIELDS.map((d) => [d.key, d]));
 const TICKS = FIELDS.filter((d) => d.type === "tick");
 
@@ -49,9 +54,15 @@ const SAMPLE_SIG = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 60"><path d="M8 44c14-30 22-34 24-18s-6 22 2 10 14-26 18-12-4 18 6 6 10-14 16-6 8 10 16 0 12-8 20 2 18 6 30-4" fill="none" stroke="#1e3a8a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M118 42c22-4 46-6 74-4" fill="none" stroke="#1e3a8a" stroke-width="2" stroke-linecap="round"/></svg>');
 const SAMPLE = {
   signature: SAMPLE_SIG,
-  medicare: "2123456701", ref: "1", name: "Jane Citizen", address1: "12 Example Street", address2: "Scarborough WA",
-  postcode: "6019", entitlement: "E12345678", safetyNet: true, concession: true, pbs: true, rpbs: true, brand: true,
-  items: "Soolantra 1% cream 30 g\nApply a thin layer at night\nQty: 1    Repeats: 2", date: "01/10/26",
+  drHeader: "Dr A Practitioner\n99 Station Street\nCentral NSW 2001\nPhone: (99) 9999 9999",
+  drPrescriber: "123456", drSign: "Dr A Practitioner\nMBBS",
+  medicare: "2123456701", ref: "1", name: "Mary Citizen", address1: "1 Main St", address2: "Central NSW 2001",
+  postcode: "2001", entitlement: "E12345678", safetyNet: true, concession: true, pbs: true, rpbs: true, brand: true,
+  items: [
+    { name: "Cephalexin capsule", dose: "500mg", dir: "1 QID", qty: "20", rep: "1" },
+    { name: "Salbutamol sulfate inhaler", dose: "100mcg/dose", dir: "1-2 QID PRN", qty: "2 * 200 dose", rep: "5" },
+  ],
+  date: "03/04/07",
 };
 
 /* ===================== Small helpers ===================== */
@@ -73,18 +84,20 @@ const getNudge = () => { const n = store.get(NUDGE_KEY, {}); return { x: num(n.x
 function defaultLayout() {
   const fields = {};
   FIELDS.forEach((d) => { fields[d.key] = { on: true, size: 11, align: "left", bold: false, ...d.def }; });
-  return { paper: { preset: "A4", w: 210, h: 297 }, offset: { x: 0, y: 0 }, font: "Arial",
-    bg: { x: 0, y: 0, w: 210, opacity: 0.5 }, fields };
+  return { paper: { preset: "custom", w: 210, h: 181 }, offset: { x: 0, y: 0 }, font: "Arial",
+    bg: { x: 0, y: 0, w: 210, opacity: 0.5 }, copy: { on: true, dx: 105 },
+    clinic: { address1: "", address2: "", phone: "" }, fields };
 }
 function mergeLayout(s) {
   const d = defaultLayout();
   if (!s || typeof s !== "object") return d;
   const out = { ...d, font: s.font || d.font, paper: { ...d.paper, ...(s.paper || {}) },
-    offset: { ...d.offset, ...(s.offset || {}) }, bg: { ...d.bg, ...(s.bg || {}) }, fields: {} };
+    offset: { ...d.offset, ...(s.offset || {}) }, bg: { ...d.bg, ...(s.bg || {}) },
+    copy: s.copy ? { ...d.copy, ...s.copy } : { on: false, dx: 105 },   // a layout saved before this keeps printing one copy
+    clinic: { ...d.clinic, ...(s.clinic || {}) }, fields: {} };
   FIELDS.forEach((f) => { out.fields[f.key] = { ...d.fields[f.key], ...((s.fields || {})[f.key] || {}) }; });
   return out;
 }
-
 let layoutMemo = null;
 let bgMemo;   // undefined = not read yet, null = none
 async function loadLayout(fresh) {
@@ -124,6 +137,31 @@ function geom(d, f) {
   if (d.type === "area" || d.type === "sig") return { w: num(f.w, 100), h: num(f.h, 40), size };
   return { w: num(f.w, 60), h: lineH(size), size };
 }
+// The medicines, set out like a written script: name and dose, instructions, then Qty on the left and repeats on the right.
+// A line between each one, and the number of items at the end.
+function medsHtml(list, f) {
+  const meds = list.filter((m) => m && String(m.name || "").trim());
+  if (!meds.length) return "";
+  const rule = '<div style="border-top:0.3mm solid #000;margin:1.2mm 0"></div>';
+  const rep = (r) => {
+    const s = String(r ?? "").trim();
+    if (s === "") return "";
+    const n = Number(s);
+    return Number.isFinite(n) ? `${n} repeat${n === 1 ? "" : "s"}` : s;
+  };
+  return meds.map((m) => {
+    const name = f.upper ? String(m.name).toUpperCase() : String(m.name);
+    const dose = String(m.dose || "").trim();
+    const qty = String(m.qty || "").trim();
+    const r = rep(m.rep);
+    return `<div style="line-height:1.35">
+      <div>${esc(name)}${dose ? ` ${esc(dose)}` : ""}</div>
+      ${String(m.dir || "").trim() ? `<div>${esc(m.dir)}</div>` : ""}
+      ${qty || r ? `<div style="display:flex;justify-content:space-between;gap:3mm"><span>${qty ? `Qty: ${esc(qty)}` : ""}</span><span>${esc(r)}</span></div>` : ""}
+    </div>`;
+  }).join(rule) + (f.count === false ? "" : `${rule}<div>${meds.length} item${meds.length === 1 ? "" : "s"}</div>`);
+}
+
 function fieldInner(d, f, g, val) {
   if (d.type === "tick") {
     return val ? '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-weight:700;line-height:1">X</div>' : "";
@@ -134,7 +172,10 @@ function fieldInner(d, f, g, val) {
   }
   // The signature sits on the bottom-left of its box (on the line), never stretched
   if (d.type === "sig") return val ? `<img alt="" src="${esc(val)}" style="position:absolute;left:0;bottom:0;max-width:100%;max-height:100%;width:auto;height:auto">` : "";
-  if (d.type === "area") return `<div class="rx-area-in" style="white-space:pre-wrap;line-height:1.3">${esc(val || "")}</div>`;
+  if (d.type === "area") {
+    if (Array.isArray(val)) return `<div class="rx-area-in">${medsHtml(val, f)}</div>`;
+    return `<div class="rx-area-in" style="white-space:pre-wrap;line-height:1.3">${esc(val || "")}</div>`;
+  }
   return `<span class="rx-line-in" style="display:block;white-space:nowrap;line-height:${g.h}mm;text-align:${f.align || "left"}">${esc(val || "")}</span>`;
 }
 function fieldStyle(d, f, L, dx = 0, dy = 0) {
@@ -142,22 +183,26 @@ function fieldStyle(d, f, L, dx = 0, dy = 0) {
   return `position:absolute;left:${num(f.x) + num(L.offset.x) + dx}mm;top:${num(f.y) + num(L.offset.y) + dy}mm;` +
     `width:${g.w}mm;height:${g.h}mm;font-size:${g.size}pt;${f.bold ? "font-weight:700;" : ""}`;
 }
-const empty = (v) => v === undefined || v === null || v === "" || v === false;
+const empty = (v) => v === undefined || v === null || v === "" || v === false || (Array.isArray(v) && !v.length);
 
-// The text of the sheet. o: { dx, dy, outlines, labels }
+// The text of the sheet. o: { dx, dy, outlines, labels, copies }
+// copies: how far right (mm) each copy prints. With "Print a second copy" on, the same text prints again beside it.
+const copiesOf = (L) => (L.copy && L.copy.on ? [0, num(L.copy.dx)] : [0]);
 function sheetHtml(L, vals, o = {}) {
-  return FIELDS.map((d) => {
+  return (o.copies || copiesOf(L)).map((cx, ci) => FIELDS.map((d) => {
     const f = L.fields[d.key];
     if (!f || !f.on) return "";
     const v = vals[d.key];
     if (!o.outlines && empty(v)) return "";
     const g = geom(d, f);
-    const label = o.labels ? `<div style="position:absolute;left:${num(f.x) + num(L.offset.x) + num(o.dx)}mm;` +
+    const dx = num(o.dx) + num(cx);
+    const label = o.labels && ci === 0 ? `<div style="position:absolute;left:${num(f.x) + num(L.offset.x) + dx}mm;` +
       `top:${num(f.y) + num(L.offset.y) + num(o.dy) - 2.6}mm;font-size:5.5pt;color:#6b7280;white-space:nowrap">${esc(d.label)}</div>` : "";
-    return `${label}<div data-key="${d.key}" style="${fieldStyle(d, f, L, num(o.dx), num(o.dy))}overflow:hidden;` +
+    return `${label}<div data-key="${d.key}" style="${fieldStyle(d, f, L, dx, num(o.dy))}overflow:hidden;` +
       `${o.outlines ? "outline:0.2mm dashed #9ca3af;" : ""}">${fieldInner(d, f, g, v)}</div>`;
-  }).join("");
+  }).join("")).join("");
 }
+
 
 function gridHtml(L) {
   const { w, h } = L.paper;
@@ -263,7 +308,8 @@ const LAST_KEY = "dm.rx.last";   // per product: what was written last time on t
 const DIRS_KEY = "dm.rx.dirs";   // directions used recently on this computer
 const DIR_PICKS = ["Apply a thin layer once daily", "Apply a thin layer at night", "Apply twice daily", "Use as directed"];
 const FIELD_LABELS = { medicare: "Medicare number", ref: "Ref no.", name: "Patient's name", address1: "Address",
-  address2: "Suburb and state", postcode: "Postcode", entitlement: "Entitlement no.", items: "Medicines", date: "Date" };
+  address2: "Suburb, state and postcode", postcode: "Postcode", entitlement: "Entitlement no.", items: "Medicines", date: "Date",
+  drHeader: "Doctor's details", drPrescriber: "Prescriber no.", drSign: "Doctor's name and qualifications" };
 const blankItem = (custom = false) => ({ product: "", custom, customName: "", addList: true,
   strength: "", directions: "", qty: "", repeats: "0", filled: false });
 const itemName = (i) => String(i.custom ? i.customName : i.product).trim();
@@ -775,11 +821,15 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
   root.innerHTML = '<div class="rxw-wrap"><div class="skeleton sm"></div></div>';
   container.replaceChildren(root);
 
-  let info, bg, products, rec = null, mySig = "";
+  let info, bg, products, rec = null, mySig = "", me = null;
   try {
-    let sigRes;
-    [info, bg, products, sigRes] = await Promise.all([loadLayout(true), loadBg(), loadRxNames(),
-      callApi({ action: "rx", op: "sig" }).catch(() => null)]);
+    let sigRes, meRes;
+    [info, bg, products, sigRes, meRes] = await Promise.all([loadLayout(true), loadBg(), loadRxNames(),
+      callApi({ action: "rx", op: "sig" }).catch(() => null), callApi({ action: "rx", op: "me" })]);
+    me = (meRes && meRes.prescriber) || null;
+    if (!me || !me.prescriberNo) {
+      throw Object.assign(new Error("Only prescribers can write prescriptions. A prescriber number needs to be on your staff record (an Admin adds it in Staff → Edit → Registration)."), { friendly: true });
+    }
     mySig = sigRes && sigRes.signature && sigRes.signature.data ? String(sigRes.signature.data) : "";
     if (recordId) {
       const res = await callApi({ action: "rx", op: "get", id: recordId });
@@ -796,6 +846,14 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
   }
   if (!root.isConnected) return;
   const L = info.L;
+  // The prescriber printed on it: whoever wrote it (reprints keep the original doctor), otherwise the person logged in
+  const pr = rec && rec.prescriberInfo && rec.prescriberInfo.prescriberNo ? rec.prescriberInfo : me;
+  const clinic = L.clinic || {};
+  const drVals = {
+    drHeader: [pr.name, clinic.address1, clinic.address2, clinic.phone && `Phone: ${clinic.phone}`].filter(Boolean).join("\n"),
+    drPrescriber: pr.prescriberNo || "",
+    drSign: [pr.name, pr.quals].filter(Boolean).join("\n"),
+  };
   const st = {
     patient: null, loadingPt: !!(patientId && !rec),
     v: { name: "", address1: "", address2: "", postcode: "", medicare: "", ref: "", entitlement: "",
@@ -822,7 +880,9 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
   }
   const on = (k) => !!(L.fields[k] && L.fields[k].on);
   const sigData = () => (st.signing === "pad" ? st.padSig : st.signing === "saved" ? st.mySig : "");
-  const values = () => ({ ...st.v, items: itemsText(st.items), date: fmtDate(st.date), signature: sigData() || "" });
+  const values = () => ({ ...st.v, ...drVals, date: fmtDate(st.date), signature: sigData() || "",
+    items: st.items.filter((i) => itemName(i)).map((i) => ({ name: itemName(i), dose: String(i.strength || "").trim(),
+      dir: String(i.directions || "").trim(), qty: String(i.qty || "").trim(), rep: String(i.repeats ?? "").trim() })) });
   const payload = () => ({
     patientId: st.patient ? st.patient.id : "", date: st.date,
     items: st.items.filter((i) => itemName(i)).map((i) => ({
@@ -855,6 +915,8 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     <ol class="rxw-steps" data-role="steps" aria-label="Progress"></ol>
     ${info.saved ? "" : `<div class="rxw-banner">${IC.info}<span><strong>The paper isn't set up yet.</strong> Things may print a little out of place until it is.</span>
       <a href="#/prescriptions/layout">Set it up</a></div>`}
+    ${clinic.address1 || clinic.phone ? "" : `<div class="rxw-banner">${IC.info}<span><strong>The clinic's address and phone aren't set up.</strong> They print under the doctor's name.</span>
+      <a href="#/prescriptions/layout">Add them</a></div>`}
     <div class="rxw-grid">
       <div class="rxw-main">
         <section class="rxw-card" data-step="patient">
@@ -929,7 +991,8 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     const a = splitAddress(p.address);
     st.patient = p;
     st.loadingPt = false;
-    Object.assign(st.v, { name: cleanName(p.name), address1: a.line1, address2: a.line2, postcode: a.postcode,
+    Object.assign(st.v, { name: cleanName(p.name), address1: a.line1,
+      address2: on("postcode") ? a.line2 : [a.line2, a.postcode].filter(Boolean).join(" "), postcode: a.postcode,
       medicare: String(p.medicare || "").replace(/\D/g, "").slice(0, 10), ref: String(p.irn || "").replace(/\D/g, "").slice(0, 1) });
     renderPt(); renderDetails(); draw();
   }
@@ -998,7 +1061,7 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
       <div class="rxw-group"><div class="rxw-group-h">Name and address</div><div class="rxw-fields">
         ${inp("name", "Full name", "c6")}
         ${inp("address1", "Street address", "c6")}
-        ${inp("address2", "Suburb and state", "c4")}
+        ${on("postcode") ? inp("address2", "Suburb and state", "c4") : inp("address2", "Suburb, state and postcode", "c6")}
         ${inp("postcode", "Postcode", "c2", 'inputmode="numeric" maxlength="4"')}
       </div></div>
       ${med ? `<div class="rxw-group"><div class="rxw-group-h">Medicare</div><div class="rxw-fields">
@@ -1040,11 +1103,11 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
         </div>` : ""}
         ${it.filled ? `<p class="rxw-filled">${IC.clock}Filled in from the last time it was prescribed on this computer. Check it.</p>` : ""}
         <div class="rxw-fields">
-          <label class="rxw-f c4"><span>Strength and form</span><input data-item="${i}" data-f="strength" value="${esc(it.strength)}" placeholder="e.g. 1% cream 30 g" ${noFill}></label>
+          <label class="rxw-f c4"><span>Dose</span><input data-item="${i}" data-f="strength" value="${esc(it.strength)}" placeholder="e.g. 500mg, or 1% cream 30 g" ${noFill}></label>
           <label class="rxw-f c2"><span>Quantity</span><input data-item="${i}" data-f="qty" value="${esc(it.qty)}" placeholder="e.g. 1" ${noFill}></label>
         </div>
         <div class="rxw-fields">
-          <label class="rxw-f c4"><span>Directions</span><input data-item="${i}" data-f="directions" value="${esc(it.directions)}" list="rxw-dirs" placeholder="e.g. Apply a thin layer at night" ${noFill}></label>
+          <label class="rxw-f c4"><span>Instructions</span><input data-item="${i}" data-f="directions" value="${esc(it.directions)}" list="rxw-dirs" placeholder="e.g. 1 QID, or apply a thin layer at night" ${noFill}></label>
           <div class="rxw-f c2"><span>Repeats</span><div class="rxw-step">
             <button type="button" data-act="rep" data-i="${i}" data-d="-1" aria-label="One fewer repeat">−</button>
             <input data-item="${i}" data-f="repeats" value="${esc(it.repeats)}" inputmode="numeric" maxlength="2" aria-label="Repeats" ${noFill}>
@@ -1087,6 +1150,7 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     $("sum").innerHTML = `
       <div class="rxw-sum-row"><span>Patient</span>${st.patient ? `<strong>${esc(cleanName(st.v.name || st.patient.name))}</strong>` : "<em>Not chosen yet</em>"}</div>
       <div class="rxw-sum-row"><span>Medicines</span>${named.length ? `<strong>${named.map((i) => esc(itemLine(i))).join("<br>")}</strong>` : "<em>None yet</em>"}</div>
+      <div class="rxw-sum-row"><span>Prescriber</span><strong>${esc(pr.name)} · ${esc(pr.prescriberNo)}</strong></div>
       <div class="rxw-sum-row"><span>Signature</span><strong>${esc(SIGN_LABEL[st.signing])}</strong></div>`;
   }
   function renderSaved() {
@@ -1115,7 +1179,7 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
       if (over) tight.push(FIELD_LABELS[el.dataset.key] || "A box");
     });
     markFocus();
-    $("warn").innerHTML = tight.length ? `<div class="rxw-warn">⚠ Too long to fit: <strong>${tight.map(esc).join(", ")}</strong>.
+    $("warn").innerHTML = tight.length ? `<div class="rxw-warn">⚠ Too long to fit: <strong>${[...new Set(tight)].map(esc).join(", ")}</strong>.
       Shorten it, or make the space bigger in <a href="#/prescriptions/layout">Set up the paper</a>.</div>` : "";
     $("first").innerHTML = store.get(TESTED_KEY, false) ? "" : `<div class="rxw-tip">${IC.info}<div><strong>First time printing on this computer?</strong>
       Print a test page on plain paper and hold it over a script against the light to check it lines up.
@@ -1529,8 +1593,15 @@ async function mountLayout(container, { staff }) {
     applyZoom();
     paper.innerHTML = (bg && showBg ? `<img class="rx-bg" alt="" src="${bg.data}" style="left:${num(L.bg.x)}mm;top:${num(L.bg.y)}mm;width:${num(L.bg.w, L.paper.w)}mm;opacity:${num(L.bg.opacity, 0.5)}">` : "") +
       (showGrid ? `<div class="rx-grid-lines"></div>${gridHtml(L).replace(/#eef0f3|#d1d5db/g, "transparent")}` : "") +
-      FIELDS.map(fldHtml).join("");
+      FIELDS.map(fldHtml).join("") + '<div class="rx-ghost" data-role="ghost"></div>';
     $("bgtoggle").hidden = !bg;
+    drawGhost();
+  }
+  // The second copy, faded: it follows the boxes of the first
+  function drawGhost() {
+    const g = paper.querySelector('[data-role="ghost"]');
+    if (!g) return;
+    g.innerHTML = L.copy && L.copy.on ? sheetHtml(L, SAMPLE, { copies: [num(L.copy.dx)], outlines: true }) : "";
   }
   function place(key) {
     const el = paper.querySelector(`.rx-fld[data-key="${key}"]`);
@@ -1539,6 +1610,7 @@ async function mountLayout(container, { staff }) {
     el.style.cssText = fieldStyle(d, f, L);
     el.classList.toggle("is-off", !f.on);
     el.querySelector(".rx-c").innerHTML = fieldInner(d, f, geom(d, f), SAMPLE[key]);
+    drawGhost();
   }
   function select(key) {
     sel = key || "";
@@ -1579,6 +1651,8 @@ async function mountLayout(container, { staff }) {
         ${d.type === "text" ? row("Line up", `<select data-p="align"><option value="left">Left</option><option value="center">Centre</option><option value="right">Right</option></select>`) : ""}
       </div>
       ${d.type !== "tick" && d.type !== "sig" ? `<label class="rx-check"><input type="checkbox" data-p="bold" ${f.bold ? "checked" : ""}> Bold</label>` : ""}
+      ${sel === "items" ? `<label class="rx-check"><input type="checkbox" data-p="upper" ${f.upper ? "checked" : ""}> Medicine names in capitals</label>
+        <label class="rx-check"><input type="checkbox" data-p="count" ${f.count !== false ? "checked" : ""}> Number of items at the end</label>` : ""}
       ${d.type === "sig" ? '<p class="rx-note">The signature sits on the bottom-left of this box. Put the bottom edge on the signature line.</p>' : ""}
     </div>`;
   }
@@ -1593,6 +1667,17 @@ async function mountLayout(container, { staff }) {
           <label class="rx-f"><span>Font</span><select data-paper="font">${FONTS.map((f) => `<option ${L.font === f ? "selected" : ""}>${f}</option>`).join("")}</select></label>
           <label class="rx-f"><span>Width</span>${mmIn('data-paper="w"', L.paper.w, 1, "mm", 50)}</label>
           <label class="rx-f"><span>Height</span>${mmIn('data-paper="h"', L.paper.h, 1, "mm", 50)}</label>
+        </div>
+        <label class="rx-switch" style="margin-top:12px"><input type="checkbox" data-copy="on" ${L.copy.on ? "checked" : ""}><span>Print a second copy beside it (duplicate script)</span></label>
+        ${L.copy.on ? `<div class="rx-mini" style="margin-top:10px"><label class="rx-f"><span>Second copy starts</span>${mmIn('data-copy="dx"', L.copy.dx, 0.5, "mm", 0)}</label>
+          <p class="rx-note" style="margin:0;align-self:end">to the right of the first. Only line up the first copy: the second follows it.</p></div>` : ""}
+      </div>
+      <div class="rx-card"><h3>Clinic details printed under the doctor's name</h3>
+        <p class="rx-note" style="margin:0 0 10px">The doctor's name, prescriber number and qualifications come from the logged-in doctor's staff record.</p>
+        <div class="rx-mini">
+          <label class="rx-f" style="grid-column:1/-1"><span>Street address</span><input data-clinic="address1" value="${esc(L.clinic.address1)}" placeholder="e.g. 1/123 Example Street"></label>
+          <label class="rx-f"><span>Suburb, state and postcode</span><input data-clinic="address2" value="${esc(L.clinic.address2)}" placeholder="e.g. Scarborough WA 6019"></label>
+          <label class="rx-f"><span>Phone</span><input data-clinic="phone" value="${esc(L.clinic.phone)}" placeholder="e.g. (08) 9000 0000"></label>
         </div>
       </div>
       <div class="rx-card"><h3><span class="rx-step">2</span>Picture of the blank form <small class="rx-opt">optional</small></h3>
@@ -1702,6 +1787,9 @@ async function mountLayout(container, { staff }) {
       if (sel === t.dataset.on) { const c = panel.querySelector('[data-p="on"]'); if (c) c.checked = t.checked; }
       return;
     }
+    if (t.dataset.clinic) { change(() => { L.clinic[t.dataset.clinic] = t.value; }, true); return; }
+    if (t.dataset.copy === "dx") { change(() => { L.copy.dx = val; }, true); drawGhost(); return; }
+    if (t.dataset.copy === "on") { change(() => { L.copy.on = t.checked; }); drawPaper(); drawPanel(); return; }
     if (t.dataset.off) { change(() => { L.offset[t.dataset.off] = val; }, true); drawPaper(); return; }
     if (t.dataset.bg) { change(() => { L.bg[t.dataset.bg] = val; }, true); drawPaper(); return; }
     if (t.dataset.paper === "w" || t.dataset.paper === "h") {
@@ -1749,7 +1837,7 @@ async function mountLayout(container, { staff }) {
     else if (act === "reset") {
       if (!(await confirmDialog({ title: "Start again?", message: "Every box goes back to the starting layout. You can still undo it, and nothing is saved until you press Save layout.",
         confirmLabel: "Start again", tone: "warning" }))) return;
-      change(() => { L = defaultLayout(); });
+      change(() => { const c = L.clinic; L = defaultLayout(); L.clinic = c; });   // the clinic details stay
       sel = ""; redrawAll();
     }
   });
@@ -1836,9 +1924,10 @@ async function mountLayout(container, { staff }) {
 /* ===================== Styles ===================== */
 
 function injectStyles() {
-  if (document.getElementById("rx-styles-2")) return;
+  if (document.getElementById("rx-styles-3")) return;
+  document.getElementById("rx-styles-2")?.remove();
   const s = document.createElement("style");
-  s.id = "rx-styles-2";
+  s.id = "rx-styles-3";
   s.textContent = `
 .rx{--acc:#0f766e;--acc2:#14b8a6;--line:#e5e7eb;--soft:#f8fafc;--ink:#0f172a;--mut:#64748b}
 .rx-back{display:inline-flex;align-items:center;gap:6px;color:var(--mut);text-decoration:none;font-size:13px;margin-bottom:4px}
@@ -1956,6 +2045,7 @@ function injectStyles() {
 .rx-bgrow img{width:64px;height:86px;object-fit:cover;border-radius:6px;border:1px solid var(--line)}
 .rx-bgrow div{display:flex;gap:6px;flex-wrap:wrap}
 .rx input[type=range]{accent-color:var(--acc);width:100%}
+.rx-ghost{position:absolute;inset:0;pointer-events:none;opacity:.4}
 .rx [hidden]{display:none!important}
 `;
   document.head.appendChild(s);
