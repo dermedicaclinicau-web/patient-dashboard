@@ -58,6 +58,7 @@ const I = {
   doc: ic('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>'),
   user: ic('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
   sms: ic('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="13" y2="13"/>'),
+  calx: ic('<rect x="3" y="5" width="18" height="16" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="8" y1="3" x2="8" y2="7"/><line x1="16" y1="3" x2="16" y2="7"/><line x1="10" y1="13" x2="14" y2="17"/><line x1="14" y1="13" x2="10" y2="17"/>'),
 };
 
 const TYPES = {
@@ -90,9 +91,13 @@ const TRIGGERS = [
   ["daily", "A daily check finds patients who match", false],
   ["task", "A task is sent from Task Manager", false],
   ["form", "A patient fills in a form online", false],
+  ["missed", "An appointment is cancelled or missed", false],
   ["ssp_created", "A Skin Script is created", true],
 ];
-const TRIG_ICON = { purchase: "cart", visit: "cal", daily: "sun", task: "doc", form: "user" };
+const TRIG_ICON = { purchase: "cart", visit: "cal", daily: "sun", task: "doc", form: "user", missed: "calx" };
+const MISS_KINDS = [["cancelled", "Cancelled"], ["noshow", "Didn't come (no-show or DNA)"]];
+const MISS_GAP = [[0, "Every time"], [14, "Not again within 14 days"], [30, "Not again within 30 days"],
+  [60, "Not again within 60 days"], [90, "Not again within 90 days"]];
 const TODO_TO = [["sender", "Whoever sent the task"], ["staff", "Chosen staff"], ["roles", "Everyone in a role"]];
 const DUE_DAYS = [[0, "Today"], [1, "Tomorrow"], [2, "In 2 days"], [3, "In 3 days"], [7, "In a week"]];
 const REPLY_PATHS = (s) => (s.type === "branch" || s.type === "reply");
@@ -142,6 +147,8 @@ const SAMPLE = {
   "ssp step": "Step B", "am instructions": "Apply 2 pumps after cleansing.",
   "pm instructions": "Apply 2 pumps before your moisturiser.", "when to use": "Every day",
   "ssp clinician": "Dr Teh", "ssp date": "2 September 2026", "ssp expiry date": "2 September 2027",
+  "appointment date": "22 October 2026", "appointment time": "10:30 am", "appointment services": "WR Forehead",
+  "appointment staff": "Dr Teh", "cancelled or missed": "cancelled",
 };
 // "Start from a basic layout" for HTML code
 const STARTER_HTML = `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-family:Arial,Helvetica,sans-serif;color:#1e293b">
@@ -322,6 +329,8 @@ function flowProblems(flow, tasks) {
   if (t.event === "visit" && t.serviceScope === "some" && !t.services.length) out.push("Choose at least one service for the trigger, or pick Any visit.");
   if (t.event === "task" && !t.taskIds.length) out.push("Choose which task starts the flow.");
   if (t.event === "form" && !t.formIds.length) out.push("Choose which form starts the flow.");
+  if (t.event === "missed" && !t.missKinds.length) out.push("Choose cancelled, didn't come, or both.");
+  if (t.event === "missed" && t.serviceScope === "some" && !t.services.length) out.push("Choose at least one service for the trigger, or pick Any appointment.");
   const tp = groupProblem(t.rules, t.event === "daily");
   if (tp) out.push(t.event === "daily" ? `Daily check: ${tp}.` : `Start rules: ${tp}.`);
   const sp = groupProblem(flow.stop.rules, false);
@@ -355,9 +364,11 @@ function snapshot(d = {}) {
     name: String(d.name || ""),
     description: String(d.description || ""),
     trigger: {
-      event: "purchase", scope: "any", serviceScope: "any", repeatDays: 0, dailyMax: 25, existing: false, again: "restart", ...t,
+      event: "purchase", scope: "any", serviceScope: "any", repeatDays: 0, dailyMax: 25, existing: false, again: "restart",
+      skipRebooked: true, missGap: 30, ...t,
       products: cleanNames(t.products), services: cleanNames(t.services), taskIds: cleanNames(t.taskIds),
       formIds: cleanNames(t.formIds), rules: cleanGroup(t.rules),
+      missKinds: Array.isArray(t.missKinds) ? cleanNames(t.missKinds).filter((k) => MISS_KINDS.some((m) => m[0] === k)) : ["cancelled", "noshow"],
     },
     steps: cleanSteps(d.steps),
     stop: { rebuy: true, booking: false, gapDays: 3, ...st, rules: cleanGroup(st.rules) },
@@ -596,6 +607,44 @@ const RECIPES = [
           "Call us on {Clinic phone} or reply to this email to book your review.", SIGN), true),
         rWait(2, "weeks"),
         rTodo("Call {Patient name} to book a Skin Script review (it expires {SSP expiry date})."),
+      ],
+    }),
+  },
+  {
+    key: "missed", icon: "calx", title: "Missed appointment",
+    who: "When someone doesn't come and hasn't rebooked: a 'sorry we missed you' email, then a call from Reception.",
+    build: () => ({
+      name: "Missed appointment",
+      description: "Starts after the Day Sheet upload that shows the no-show.",
+      trigger: { event: "missed", missKinds: ["noshow"], serviceScope: "any", skipRebooked: true, missGap: 30, again: "ignore" },
+      stop: { booking: true },
+      steps: [
+        rEmail("Sorry we missed you, {First name}", rp("Hi {First name},",
+          "We missed you at your appointment on {Appointment date}. We hope everything is okay.",
+          "If you'd like to book another time, just reply to this email or call us on {Clinic phone} and we'll find one that suits you.", SIGN)),
+        rWait(2, "days"),
+        rTodo("Call {Patient name}: they didn't come to their appointment on {Appointment date} ({Appointment services}) and haven't rebooked."),
+      ],
+    }),
+  },
+  {
+    key: "cancelled", icon: "calx", title: "Cancelled, not rebooked",
+    who: "When someone cancels and doesn't rebook: a rebook email the next day, another a week later, then a call.",
+    build: () => ({
+      name: "Cancelled, not rebooked",
+      description: "Stops as soon as they book again.",
+      trigger: { event: "missed", missKinds: ["cancelled"], serviceScope: "any", skipRebooked: true, missGap: 30, again: "ignore" },
+      stop: { booking: true },
+      steps: [
+        rWait(1, "days"),
+        rEmail("Let's find you a new time, {First name}", rp("Hi {First name},",
+          "We noticed your appointment on {Appointment date} was cancelled. No problem at all.",
+          "When you're ready, reply to this email or call us on {Clinic phone} and we'll find a time that suits you.", SIGN)),
+        rWait(1, "weeks"),
+        rEmail("Still keen to come in, {First name}?", rp("Hi {First name},",
+          "Just checking in, as we haven't found you a new time yet. Reply to this email or call us on {Clinic phone} whenever suits.", SIGN)),
+        rWait(2, "days"),
+        rTodo("Call {Patient name}: they cancelled their appointment on {Appointment date} ({Appointment services}) and haven't rebooked."),
       ],
     }),
   },
@@ -998,6 +1047,11 @@ async function mountFlowEditor(container, { id, staff }) {
       const names = (onlineForms || []).filter((x) => t.formIds.includes(x.id)).map((x) => x.name);
       return (names.length ? `“${names.join("”, “")}” is filled in` : "A form is filled in (choose which)") + rules;
     }
+    if (t.event === "missed") {
+      const k = t.missKinds.length === 1 ? (t.missKinds[0] === "noshow" ? "missed" : "cancelled") : "cancelled or missed";
+      const n = t.services.length;
+      return `An appointment is ${k}` + (t.serviceScope === "some" ? ` (${n} service${n === 1 ? "" : "s"})` : "") + rules;
+    }
     if (t.event === "daily") return "Daily check" + (r ? rules : " · no rules yet");
     const n = t.products.length;
     const what = t.scope === "catalogue" ? " (Skin Script catalogue)" : t.scope === "list" ? ` (${n} product${n === 1 ? "" : "s"})` : "";
@@ -1271,6 +1325,8 @@ async function mountFlowEditor(container, { id, staff }) {
     ? { only: TASK_RULE_KEYS, lists: { "task.answer": taskFieldList() } } : {});
   const tokensFor = (forStaff) => {
     const base = forStaff ? STAFF_TOKENS : PATIENT_TOKENS;
+    if (flow.trigger.event === "missed") return [...base, { title: "This appointment", smart: true,
+      tokens: ["Appointment date", "Appointment time", "Appointment services", "Appointment staff", "Cancelled or missed"] }];
     if (flow.trigger.event === "form") return [...base, { title: "The form", tokens: ["Form name"], smart: true }];
     if (flow.trigger.event !== "task") return base;
     const raws = [...new Set(taskFieldList().map((f) => f.raw))];
@@ -1382,6 +1438,27 @@ async function mountFlowEditor(container, { id, staff }) {
           tasks scheduled for later. Use the task's answers as blanks, like {Task: Refund amount}, and in rules (An answer on the task).
           Add <strong>Wait for a reply</strong> to do something when the patient replies to the task email.</p>`;
     }
+    if (t.event === "missed") {
+      return `
+        <div class="tb-field"><span>Which appointments</span>
+          <div class="ef-checks">${MISS_KINDS.map(([v, l]) => `<label class="fe-check"><input type="checkbox" data-missk="${v}"${
+            t.missKinds.includes(v) ? " checked" : ""} /> ${esc(l)}</label>`).join("")}</div></div>
+        <label class="tb-field"><span>For which services</span>
+          <select class="fb-select" data-f="trigger.serviceScope">${opt([["any", "Any appointment"], ["some", "Only appointments for these services"]], t.serviceScope)}</select></label>
+        ${t.serviceScope === "some" ? `<div class="tb-field"><span>Services</span><div class="fr-pp" data-role="trig-services"></div>
+          <small class="muted">An appointment matches if any of its services contains one of these, so "WR" matches "WR Forehead".</small></div>` : ""}
+        <label class="fe-check"><input type="checkbox" data-f="trigger.skipRebooked"${t.skipRebooked ? " checked" : ""} />
+          Only if they haven't booked another appointment</label>
+        <div class="tb-field"><span>Only start for patients who… <small>(optional)</small></span><div data-role="trig-rules"></div></div>
+        <label class="tb-field"><span>Each patient</span>
+          <select class="fb-select" data-f="trigger.missGap">${opt(MISS_GAP, t.missGap)}</select></label>
+        <label class="tb-field"><span>If they cancel or miss again while in this flow</span>
+          <select class="fb-select" data-f="trigger.again">${opt([["ignore", "Leave the flow they're already in"], ["restart", "Start the flow over"]], t.again)}</select></label>
+        <p class="tb-info">Checked after each Day Sheet upload: no-shows from the last few days, and cancellations for
+          appointments up to 60 days ahead. Rescheduled appointments, and anyone who came in or is booked at another time
+          that day, don't count. Each appointment starts the flow once. When it's turned on, cancellations already in the
+          book are only noted, so nobody gets an email about an old one.</p>`;
+    }
     if (t.event === "visit") {
       return `
         <label class="tb-field"><span>Which visits</span>
@@ -1479,6 +1556,7 @@ async function mountFlowEditor(container, { id, staff }) {
       empty: flow.trigger.event === "daily" ? "Add at least one rule, e.g. Has a future appointment booked: No."
         : flow.trigger.event === "visit" ? "Anyone who comes in starts the flow."
         : flow.trigger.event === "task" ? "Everyone the task is sent to starts the flow."
+        : flow.trigger.event === "missed" ? "Anyone who cancels or misses a matching appointment starts the flow."
         : flow.trigger.event === "form" ? "Everyone who sends the form starts the flow."
         : "Anyone who makes a matching purchase starts the flow." });
     const sr = side.querySelector('[data-role="stop-rules"]');
@@ -1803,7 +1881,7 @@ async function mountFlowEditor(container, { id, staff }) {
       .finally(redrawSideSoon);
   }
 
-  const NUM_PATHS = ["stop.gapDays", "trigger.repeatDays", "trigger.dailyMax"];
+  const NUM_PATHS = ["stop.gapDays", "trigger.repeatDays", "trigger.dailyMax", "trigger.missGap"];
   const RERENDER_PATHS = ["trigger.event", "trigger.scope", "trigger.serviceScope"];
   function setFlowValue(path, el) {
     const v = el.type === "checkbox" ? el.checked : el.value;
@@ -1821,7 +1899,10 @@ async function mountFlowEditor(container, { id, staff }) {
     if (el.dataset.role === "pwin") { buyDays = Number(el.value) || 14; return; }
     if (el.dataset.f !== undefined) {
       setFlowValue(el.dataset.f, el);
-      if (el.dataset.f === "trigger.event") { matchData = null; buyData = null; }
+      if (el.dataset.f === "trigger.event") {
+        matchData = null; buyData = null;
+        if (el.value === "missed") { flow.stop.booking = true; flow.trigger.again = "ignore"; }
+      }
       renderCanvas();
       changed();
       if (RERENDER_PATHS.includes(el.dataset.f)) renderSide();
@@ -1837,6 +1918,13 @@ async function mountFlowEditor(container, { id, staff }) {
       if (el.checked) set.add(el.dataset.trigtask); else set.delete(el.dataset.trigtask);
       flow.trigger.taskIds = [...set];
       changed(); renderCanvas(); renderSide();
+      return;
+    }
+    if (el.dataset.missk !== undefined) {
+      const set = new Set(flow.trigger.missKinds);
+      if (el.checked) set.add(el.dataset.missk); else set.delete(el.dataset.missk);
+      flow.trigger.missKinds = MISS_KINDS.map(([k]) => k).filter((k) => set.has(k));
+      changed(); renderCanvas();
       return;
     }
     if (el.dataset.trigform !== undefined) {
@@ -2401,6 +2489,7 @@ async function mountFlowEditor(container, { id, staff }) {
   function runWhat(r) {
     if (r.kind === "visit") return [`Visit on ${r.visitDate || r.purchaseDate || ""}`, (r.visitServices || []).join(", ")];
     if (r.kind === "task") return [`“${r.taskName || "Task"}” sent ${String(r.startedAt || "").slice(0, 10)}`, r.reply ? "Replied" : ""];
+    if (r.kind === "missed") return [`${r.missKind === "noshow" ? "Missed" : "Cancelled"} appointment on ${r.visitDate || ""}`, (r.visitServices || []).join(", ")];
     if (r.kind === "form") return [`“${r.formName || "Form"}” filled in ${String(r.startedAt || "").slice(0, 10)}`];
     if (r.kind === "daily") return [`Daily check · started ${String(r.startedAt || "").slice(0, 10)}`];
     return [r.product, r.purchaseDate && `bought ${r.purchaseDate}`];
@@ -2442,6 +2531,7 @@ async function mountFlowEditor(container, { id, staff }) {
     const list = runs.slice(0, 12);
     const ev = flow.trigger.event;
     const waiting = ev === "form" ? "Patients start the flow when they send the form."
+      : ev === "missed" ? "Patients start the flow after a Day Sheet upload shows a cancelled or missed appointment."
       : ev === "task" ? "Patients start the flow when the task is sent to them."
       : ev === "visit" ? "Patients start the flow the morning after a matching visit."
       : ev === "daily" ? "Patients start the flow when the morning check finds them."
@@ -2484,6 +2574,13 @@ async function mountFlowEditor(container, { id, staff }) {
         <p class="tb-info">Uses the answers from the last time the task was sent to this patient.</p>
         <label class="lh-field"><span class="lh-label">Pretend they replied with <small>(optional)</small></span>
           <input type="text" name="extra" maxlength="300" placeholder="Leave empty to try the No reply path" /></label>`
+      : ev === "missed" ? `
+        <label class="lh-field"><span class="lh-label">Pretend they</span>
+          <select name="miss" class="fb-select"><option value="cancelled">cancelled an appointment in 2 days</option>
+            <option value="noshow">didn't come yesterday</option></select></label>
+        <label class="lh-field"><span class="lh-label">Services at the appointment <small>(optional, separate with commas)</small></span>
+          <input type="text" name="extra" maxlength="300" list="ef-test-list" placeholder="e.g. WR Forehead" /></label>
+        <datalist id="ef-test-list">${serviceNames.map((n) => `<option value="${esc(n)}"></option>`).join("")}</datalist>`
       : ev === "form" ? '<p class="tb-info">Uses what they sent the last time they filled in the form online. Their record isn\'t changed in a test.</p>'
       : '<p class="tb-info">The patient is checked against the daily rules now, then the whole flow runs.</p>';
     const dlg = document.createElement("dialog");
@@ -2556,7 +2653,8 @@ async function mountFlowEditor(container, { id, staff }) {
       try {
         await settle();
         const res = await callApi({ action: "emailFlow", op: "test", flowId: id, patientId: chosen.id,
-          product: ev === "purchase" ? extraVal : "", services: ev === "visit" ? extraVal : "",
+          product: ev === "purchase" ? extraVal : "", services: ev === "visit" || ev === "missed" ? extraVal : "",
+          miss: ev === "missed" ? form.elements.miss.value : "",
           reply: ev === "task" ? extraVal : "" });
         out.innerHTML = `<div class="tb-ready">${res.sent} test email${res.sent === 1 ? "" : "s"} sent to ${esc(res.to)}</div>
           <ol class="ef-steps">${(res.steps || []).map((s) => `<li>${esc(s)}</li>`).join("")}</ol>`;
@@ -2625,6 +2723,7 @@ async function mountFlowEditor(container, { id, staff }) {
       }
       const ev = flow.trigger.event;
       const who = ev === "form" ? "Patients start the flow when they send the form online"
+        : ev === "missed" ? "Patients who cancel or miss an appointment from now on start the flow after the next Day Sheet upload. Cancellations already in the book are only noted"
         : ev === "task" ? "Patients start the flow as soon as the task is sent to them"
         : ev === "visit" ? "Patients who come in from today start the flow the next morning"
         : ev === "daily" ? (flow.trigger.existing
