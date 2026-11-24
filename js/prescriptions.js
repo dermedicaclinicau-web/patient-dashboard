@@ -1821,6 +1821,7 @@ async function mountLayout(container, { staff }) {
     sel = key || "";
     paper.querySelectorAll(".rx-fld").forEach((el) => el.classList.toggle("is-sel", el.dataset.key === sel));
     drawPanel();
+    panel.scrollTop = 0;   // the chosen box's settings, at the top
     if (sel) paper.querySelector(`.rx-fld[data-key="${sel}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
 
@@ -1828,7 +1829,10 @@ async function mountLayout(container, { staff }) {
   const mmIn = (attr, val, step = 0.5, unit = "mm", min = "") =>
     `<div class="rx-in"><input type="number" ${attr} step="${step}" ${min !== "" ? `min="${min}"` : ""} value="${esc(String(val))}"><em>${unit}</em></div>`;
   function inspHtml() {
-    if (!sel) return '<p class="rx-note">Choose a box above (or click one on the page) to move it, size it or change its text.</p>';
+    const pickBox = `<select class="rx-pickbox" data-pickbox aria-label="Choose a box"><option value="">Choose a box…</option>${FIELDS.map((x) =>
+      `<option value="${x.key}"${sel === x.key ? " selected" : ""}>${esc(x.label)}</option>`).join("")}</select>`;
+    if (!sel) return `<div class="rx-insp"><div class="rx-insp-head">${pickBox}</div>
+      <p class="rx-note" style="margin:0">Or click a box on the page. Its position and size show here.</p></div>`;
     const d = DEF[sel], f = L.fields[sel];
     const row = (label, html, cls = "") => `<label class="rx-f ${cls}"><span>${label}</span>${html}</label>`;
     let size = "";
@@ -1843,8 +1847,9 @@ async function mountLayout(container, { staff }) {
     }
     const mv = (v, label, txt) => `<button type="button" class="rx-nb" data-move="${v}" aria-label="${label}" title="${label}">${txt}</button>`;
     return `<div class="rx-insp">
-      <div class="rx-insp-head"><strong>${esc(d.label)}</strong>
-        <label class="rx-switch"><input type="checkbox" data-p="on" ${f.on ? "checked" : ""}><span>Print it</span></label></div>
+      <div class="rx-insp-head">${pickBox}
+        <label class="rx-switch"><input type="checkbox" data-p="on" ${f.on ? "checked" : ""}><span>Print it</span></label>
+        <button type="button" class="rx-btn sm is-quiet" data-act="desel" title="Done (Esc)">Done</button></div>
       <div class="rx-insp-pos">
         <div class="rx-mini">${row("From the left edge", mmIn('data-p="x"', f.x))}${row("From the top edge", mmIn('data-p="y"', f.y))}</div>
         <div class="rx-nudge">${["", mv("0,-0.5", "Up 0.5 mm", "↑"), "", mv("-0.5,0", "Left 0.5 mm", "←"), "", mv("0.5,0", "Right 0.5 mm", "→"), "", mv("0,0.5", "Down 0.5 mm", "↓"), ""]
@@ -1864,6 +1869,7 @@ async function mountLayout(container, { staff }) {
   function drawPanel() {
     const preset = L.paper.preset in PAPERS ? L.paper.preset : "custom";
     panel.innerHTML = `
+      <div class="rx-card rx-insp-card${sel ? " is-on" : ""}" data-role="insp">${inspHtml()}</div>
       <div class="rx-card"><h3><span class="rx-step">1</span>Paper</h3>
         <div class="rx-mini">
           <label class="rx-f"><span>Size</span><select data-paper="preset">
@@ -1904,7 +1910,6 @@ async function mountLayout(container, { staff }) {
         <div class="rx-list">${FIELDS.map((d) => `<div class="rx-li${sel === d.key ? " is-sel" : ""}" data-sel="${d.key}">
           <input type="checkbox" data-on="${d.key}" ${L.fields[d.key].on ? "checked" : ""} title="Print it" aria-label="Print ${esc(d.label)}">
           <span>${esc(d.label)}</span><em>${mm(L.fields[d.key].x)}, ${mm(L.fields[d.key].y)}</em></div>`).join("")}</div>
-        <div data-role="insp">${inspHtml()}</div>
       </div>
       <div class="rx-card"><h3><span class="rx-step">4</span>Margins</h3>
         <p class="rx-note">Moves every box at once. Use this when everything is off by the same amount on every computer.</p>
@@ -2004,6 +2009,7 @@ async function mountLayout(container, { staff }) {
   });
   root.addEventListener("change", (e) => {
     const t = e.target;
+    if (t.dataset.pickbox !== undefined) { select(t.value); return; }
     if (t.dataset.paper === "preset") {
       if (t.value === "custom") { change(() => { L.paper.preset = "custom"; }); return; }
       change(() => { const [w, h] = PAPERS[t.value]; L.paper = { preset: t.value, w, h }; });
@@ -2031,7 +2037,8 @@ async function mountLayout(container, { staff }) {
     const a = t.closest("[data-act]");
     if (!a) return;
     const act = a.dataset.act;
-    if (act === "save") save();
+    if (act === "desel") select("");
+    else if (act === "save") save();
     else if (act === "undo") doUndo();
     else if (act === "test") printTest(L, a);
     else if (act === "bg-pick") panel.querySelector('[data-role="bgfile"]').click();
@@ -2127,10 +2134,11 @@ async function mountLayout(container, { staff }) {
 /* ===================== Styles ===================== */
 
 function injectStyles() {
-  if (document.getElementById("rx-styles-3")) return;
+  if (document.getElementById("rx-styles-4")) return;
+  document.getElementById("rx-styles-3")?.remove();
   document.getElementById("rx-styles-2")?.remove();
   const s = document.createElement("style");
-  s.id = "rx-styles-3";
+  s.id = "rx-styles-4";
   s.textContent = `
 .rx{--acc:#0f766e;--acc2:#14b8a6;--line:#e5e7eb;--soft:#f8fafc;--ink:#0f172a;--mut:#64748b}
 .rx-back{display:inline-flex;align-items:center;gap:6px;color:var(--mut);text-decoration:none;font-size:13px;margin-bottom:4px}
@@ -2249,6 +2257,12 @@ function injectStyles() {
 .rx-bgrow div{display:flex;gap:6px;flex-wrap:wrap}
 .rx input[type=range]{accent-color:var(--acc);width:100%}
 .rx-ghost{position:absolute;inset:0;pointer-events:none;opacity:.4}
+.rx-panel{position:sticky;top:12px;max-height:calc(100vh - 24px);overflow:auto;scrollbar-width:thin;padding-right:2px}
+.rx-insp-card{position:sticky;top:0;z-index:3}
+.rx-insp-card.is-on{border-color:var(--acc2);box-shadow:0 0 0 3px rgba(20,184,166,.14),0 6px 18px rgba(15,23,42,.08)}
+.rx-insp-card .rx-insp{border-top:0;padding-top:0}
+.rx-pickbox{flex:1;min-width:0;font:inherit;font-size:14px;font-weight:600;color:var(--ink);border:1px solid #d1d5db;border-radius:9px;padding:7px 10px;background:#fff}
+@media (max-width:1100px){.rx-panel{position:static;max-height:none;overflow:visible}}
 .rx [hidden]{display:none!important}
 `;
   document.head.appendChild(s);
