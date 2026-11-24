@@ -516,6 +516,7 @@ const IC = {
   pen: wsvg('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'),
   pad: wsvg('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 14c1.5-3 3-3.5 3.5-1.5s1.5 2 3-.5 2.5-2 3 0"/>'),
   user: wsvg('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
+  download: wsvg('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>'),
 };
 
 // The prescription product list (rx-products.js may still be loading it when the page opens)
@@ -1118,6 +1119,8 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
           <div class="rxw-pv" data-role="pv"><div class="rxw-hold" data-role="hold">
             <div class="rx-paper" data-role="paper" style="width:${L.paper.w}mm;height:${L.paper.h}mm;font-family:${fontCss(L.font)}"></div></div></div>
           <p class="rxw-legend"><i></i>Still empty <i class="is-f"></i>The box you're typing in</p>
+          <button type="button" class="rxw-btn" data-act="download" style="width:100%;margin-top:10px"
+            title="A PDF on this computer, with the form behind it. Nothing is saved or printed.">${IC.download}Download PDF</button>
           <div data-role="warn"></div>
         </section>
         <section class="rxw-card">
@@ -1565,6 +1568,28 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     const v = await printedNotice({ ok: false, title: print ? "Saved, but not printed" : "Saved, but not added to the file", message: msg, retry: true });
     if (v === "retry" && root.isConnected) sendScript(btn, print);
   }
+  // A PDF on this computer, to see how it looks (with the form's picture behind it). Nothing is saved or printed.
+  async function downloadPdf(btn) {
+    btn.disabled = true;
+    try {
+      const uri = await buildPdf(L, values(), { bg });
+      const blob = await (await fetch(uri)).blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Prescription ${cleanName(st.v.name) || "preview"} ${st.date}.pdf`.replace(/[\\/:*?"<>|]/g, "");
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (err) {
+      console.error("PDF not downloaded:", err);
+      showToast(err && err.friendly ? err.message : "The PDF couldn't be made. Try again.");
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   /* ---- Typing, taps and keys ---- */
   root.addEventListener("input", (e) => {
     const t = e.target;
@@ -1684,6 +1709,7 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     else if (act === "sig-remove") removeMySig();
     else if (act === "print") doPrint(a);
     else if (act === "saveonly") doPrint(a, false);
+    else if (act === "download") downloadPdf(a);
     else if (act === "test") printTest(L, a).then(() => { if (root.isConnected) draw(); });
   });
   const onKey = (e) => {
