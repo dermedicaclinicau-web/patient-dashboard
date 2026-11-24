@@ -126,6 +126,7 @@ async function loadBillingAndRx(patient) {
             .filter(Boolean).join(" · "),
           scanned: s.source !== "written",
           written: s.source === "written" ? s.id : "",
+          copyUrl: s.source === "written" && s.copy && /^https:\/\//.test(String(s.copy.url || "")) ? String(s.copy.url) : "",
         })))
     : [];
   if (rxScanRes.status === "rejected") console.warn("Scanned prescriptions couldn't be loaded:", rxScanRes.reason);
@@ -405,10 +406,11 @@ function rxHtml(r) {
     : r.scanned ? '<span class="bp-portal is-scan">Scanned</span>'
     : r.portalId ? '<span class="bp-portal">Portal form</span>' : "";
   // Every record opens in a new tab, so the patient page stays open
+  // Written: View opens the copy on the form (saved when printed). Reprint is for prescribers.
   const acts = r.written
-    ? (can("rx.write")
-      ? `<a class="rc-act" href="#/prescriptions/view/${encodeURIComponent(r.written)}" target="_blank" rel="noopener">${ICONS.view}View / reprint</a>`
-      : `<span class="rc-act is-disabled" title="Only people who write prescriptions can open it">${ICONS.view}View</span>`)
+    ? [r.copyUrl ? `<a class="rc-act" href="${escapeHtml(r.copyUrl)}" target="_blank" rel="noopener noreferrer">${ICONS.view}View</a>` : "",
+       can("rx.write") ? `<a class="rc-act" href="#/prescriptions/view/${encodeURIComponent(r.written)}" target="_blank" rel="noopener">${ICONS.edit}Reprint</a>` : "",
+       !r.copyUrl && !can("rx.write") ? `<span class="rc-act is-disabled" title="Its copy is saved the next time it's printed">${ICONS.view}View</span>` : ""].join("")
     : r.portalId
     ? `<a class="rc-act" href="#/form-record/${encodeURIComponent(r.portalId)}" target="_blank" rel="noopener">${ICONS.view}View</a>`
     : r.scanned ? viewLink(r.link)

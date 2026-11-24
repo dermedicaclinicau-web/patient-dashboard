@@ -241,10 +241,179 @@ function printSheet(L, inner, title) {
   setTimeout(() => { if (frame.isConnected) frame.remove(); }, 120000);
 }
 
-function printTest(L) {
-  const n = getNudge();
-  printSheet(L, gridHtml(L) + sheetHtml(L, SAMPLE, { dx: n.x, dy: n.y, outlines: true, labels: true }), "Script paper test page");
-  store.set(TESTED_KEY, true);
+/* ===================== Sending to the front desk printer ===================== */
+// The script is made into a PDF here (exact mm, the same layout as the preview), and Apps Script emails it
+// to the printer (PrintNode). No print window.
+const PDF_LIB = "https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js";
+const PT = 0.3528;   // mm per point
+let pdfLibP = null;
+function loadPdfLib() {
+  if (window.jspdf && window.jspdf.jsPDF) return Promise.resolve(window.jspdf.jsPDF);
+  if (!pdfLibP) pdfLibP = new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = PDF_LIB;
+    s.async = true;
+    s.onload = () => (window.jspdf && window.jspdf.jsPDF ? res(window.jspdf.jsPDF)
+      : rej(Object.assign(new Error("The PDF maker didn't load. Refresh and try again."), { friendly: true })));
+    s.onerror = () => { pdfLibP = null; rej(Object.assign(new Error("The PDF maker didn't load. Check your connection."), { friendly: true })); };
+    document.head.appendChild(s);
+  });
+  return pdfLibP;
+}
+const pdfFont = (f) => (/times/i.test(f || "") ? "times" : /courier/i.test(f || "") ? "courier" : "helvetica");
+const repText = (r) => {
+  const s = String(r ?? "").trim();
+  if (s === "") return "";
+  const n = Number(s);
+  return Number.isFinite(n) ? `${n} repeat${n === 1 ? "" : "s"}` : s;
+};
+
+// A picture (PNG, JPG or SVG) as a PNG with its size, for the PDF
+function pngOf(src) {
+  return new Promise((res) => {
+    if (!src) { res(null); return; }
+    const i = new Image();
+    i.onload = () => {
+      const w = i.naturalWidth || 600, h = i.naturalHeight || 200;
+      if (/^data:image\/png/i.test(src)) { res({ data: src, w, h }); return; }
+      const k = Math.min(3, 1200 / w);
+      const c = document.createElement("canvas");
+      c.width = Math.round(w * k); c.height = Math.round(h * k);
+      c.getContext("2d").drawImage(i, 0, 0, c.width, c.height);
+      res({ data: c.toDataURL("image/png"), w: c.width, h: c.height });
+    };
+    i.onerror = () => res(null);
+    i.src = src;
+  });
+}
+
+// The medicines, as in the preview: name and dose, instructions, Qty left and repeats right, a line between, then "2 items"
+function pdfMeds(doc, list, f, x, y, w, size) {
+  const meds = list.filter((m) => m && String(m.name || "").trim());
+  if (!meds.length) return;
+  const lh = size * PT * 1.35;
+  let yy = y;
+  const put = (s, right) => doc.text(s, right ? x + w : x, yy + lh / 2, { baseline: "middle", align: right ? "right" : "left" });
+  const rule = () => { yy += 1.2; doc.setDrawColor(0); doc.setLineWidth(0.3); doc.line(x, yy, x + w, yy); yy += 1.2; };
+  meds.forEach((m, i) => {
+    if (i) rule();
+    const dose = String(m.dose || "").trim();
+    const name = (f.upper ? String(m.name).toUpperCase() : String(m.name)) + (dose ? ` ${dose}` : "");
+    doc.splitTextToSize(name, w).forEach((s) => { put(s); yy += lh; });
+    const dir = String(m.dir || "").trim();
+    if (dir) doc.splitTextToSize(dir, w).forEach((s) => { put(s); yy += lh; });
+    const qty = String(m.qty || "").trim(), r = repText(m.rep);
+    if (qty || r) { if (qty) put(`Qty: ${qty}`); if (r) put(r, true); yy += lh; }
+  });
+  if (f.count !== false) { rule(); put(`${meds.length} item${meds.length === 1 ? "" : "s"}`); }
+}
+
+// → the PDF as a data URL. o: { grid, outlines } for the test page
+async function buildPdf(L, vals, o = {}) {
+  const JsPDF = await loadPdfLib();
+  const PW = num(L.paper.w, 210), PH = num(L.paper.h, 297);
+  const doc = new JsPDF({ unit: "mm", format: [PW, PH], orientation: PW > PH ? "landscape" : "portrait", compress: true });
+  const font = pdfFont(L.font);
+  const sig = await pngOf(vals.signature);
+  // o.bg: the picture of the blank form, underneath (for the patient's copy)
+  if (o.bg && o.bg.data) {
+    const B = L.bg || {};
+    const bw = num(B.w, PW);
+    const bh = o.bg.w && o.bg.h ? (bw * o.bg.h) / o.bg.w : PH;
+    doc.addImage(o.bg.data, /^data:image\/png/i.test(o.bg.data) ? "PNG" : "JPEG", num(B.x), num(B.y), bw, bh);
+  }
+  if (o.grid) {
+    doc.setLineWidth(0.1); doc.setFont("helvetica", "normal"); doc.setFontSize(5.5); doc.setTextColor(150);
+    for (let gx = 10; gx < PW; gx += 10) { doc.setDrawColor(gx % 50 ? 225 : 190); doc.line(gx, 0, gx, PH); doc.text(String(gx), gx + 0.6, 3); }
+    for (let gy = 10; gy < PH; gy += 10) { doc.setDrawColor(gy % 50 ? 225 : 190); doc.line(0, gy, PW, gy); doc.text(String(gy), 1, gy + 2); }
+  }
+  doc.setTextColor(0);
+  copiesOf(L).forEach((cx) => FIELDS.forEach((d) => {
+    const f = L.fields[d.key];
+    if (!f || !f.on) return;
+    const v = vals[d.key];
+    const x = num(f.x) + num(L.offset.x) + num(cx), y = num(f.y) + num(L.offset.y);
+    const g = geom(d, f);
+    if (o.outlines) {
+      doc.setDrawColor(150); doc.setLineWidth(0.2); doc.setLineDashPattern([1, 0.8], 0);
+      doc.rect(x, y, g.w, g.h);
+      doc.setLineDashPattern([], 0);
+      if (!cx) { doc.setFont(font, "normal"); doc.setFontSize(5.5); doc.setTextColor(110); doc.text(d.label, x, y - 0.8); doc.setTextColor(0); }
+    }
+    if (empty(v)) return;
+    doc.setFont(font, f.bold ? "bold" : "normal");
+    doc.setFontSize(g.size);
+    if (d.type === "text") {
+      const al = f.align || "left";
+      doc.text(String(v), al === "center" ? x + g.w / 2 : al === "right" ? x + g.w : x, y + lineH(g.size) / 2, { baseline: "middle", align: al });
+    } else if (d.type === "boxes") {
+      String(v).replace(/\s+/g, "").slice(0, d.count).split("").forEach((c, i) =>
+        doc.text(c, x + g.xs[i] + num(f.pitch, 5) / 2, y + g.h / 2, { baseline: "middle", align: "center" }));
+    } else if (d.type === "tick") {
+      doc.setFont(font, "bold");
+      doc.text("X", x + g.w / 2, y + g.h / 2, { baseline: "middle", align: "center" });
+    } else if (d.type === "sig") {
+      if (sig) {   // on the bottom-left of its box, never stretched
+        const ar = sig.w / sig.h;
+        const iw = Math.min(g.w, g.h * ar), ih = iw / ar;
+        doc.addImage(sig.data, "PNG", x, y + g.h - ih, iw, ih);
+      }
+    } else if (d.type === "area") {
+      if (Array.isArray(v)) pdfMeds(doc, v, f, x, y, g.w, g.size);
+      else {
+        const lh = g.size * PT * 1.3;
+        let yy = y;
+        String(v).split("\n").forEach((line) => doc.splitTextToSize(line, g.w).forEach((s) => {
+          doc.text(s, x, yy + lh / 2, { baseline: "middle" }); yy += lh;
+        }));
+      }
+    }
+  }));
+  return doc.output("datauristring");
+}
+
+async function sendToPrinter(pdf, { id = "", test = false, copy = "" } = {}) {
+  const res = await callApi({ action: "rx", op: "print", id, test, pdf, copy });
+  if (!res || res.ok === false || res.problem) {
+    throw Object.assign(new Error((res && res.problem) || "The printer couldn't be reached. Try again."), { friendly: true });
+  }
+  return res;
+}
+
+// The message after sending: in the page (not a browser pop-up), closed with its button. → "close" or "retry"
+function printedNotice({ ok, title, message, retry = false }) {
+  injectWriterStyles();
+  return new Promise((resolve) => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "rxw rxw-dlg rxw-done";
+    dlg.setAttribute("aria-label", title);
+    dlg.innerHTML = `<div class="rxw-done-ic ${ok ? "is-ok" : "is-bad"}">${ok ? IC.check : IC.info}</div>
+      <h3>${esc(title)}</h3><p>${esc(message)}</p>
+      <div class="rxw-dlg-f">${retry ? '<button type="button" class="rxw-btn" data-d="retry">Try again</button>' : ""}
+        <button type="button" class="rxw-print" data-d="close">Close</button></div>`;
+    document.body.appendChild(dlg);
+    const done = (v) => { if (dlg.open) dlg.close(); dlg.remove(); resolve(v); };
+    dlg.addEventListener("cancel", (e) => { e.preventDefault(); done("close"); });
+    dlg.addEventListener("click", (e) => { const b = e.target.closest("[data-d]"); if (b) done(b.dataset.d); });
+    dlg.showModal();
+    dlg.querySelector('[data-d="close"]').focus();
+  });
+}
+
+async function printTest(L, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    await sendToPrinter(await buildPdf(L, SAMPLE, { grid: true, outlines: true }), { test: true });
+    store.set(TESTED_KEY, true);
+    await printedNotice({ ok: true, title: "Test page sent to the printer",
+      message: "Please check the printer tray. Hold the page over a script against the light to check it lines up." });
+  } catch (err) {
+    console.error("Test page not sent:", err);
+    await printedNotice({ ok: false, title: "The test page wasn't printed",
+      message: err && err.friendly ? err.message : "Check your connection and try again." });
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 /* ===================== This computer's nudge (shared by both screens) ===================== */
@@ -365,9 +534,10 @@ async function loadRxNames() {
 }
 
 function injectWriterStyles() {
-  if (document.getElementById("rxw-styles-5")) return;
+  if (document.getElementById("rxw-styles-6")) return;
+  document.getElementById("rxw-styles-5")?.remove();
   const s = document.createElement("style");
-  s.id = "rxw-styles-5";
+  s.id = "rxw-styles-6";
   s.textContent = `
 .rxw{--t:#0f766e;--t2:#14b8a6;--tl:#f0fdfa;--ink:#0f172a;--mut:#64748b;--line:#e2e8f0}
 .rxw svg{width:16px;height:16px;flex:none}
@@ -555,6 +725,14 @@ function injectWriterStyles() {
 .rxw-dlg-f{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
 .rxw-dlg-f .rxw-print{width:auto;height:44px;padding:0 20px;font-size:15px}
 .rxw-dlg-f .rxw-print:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
+.rxw-done{width:min(420px,calc(100vw - 24px));text-align:center;padding:28px 24px 20px}
+.rxw-done h3{margin:14px 0 6px;font-size:19px}
+.rxw-done p{margin:0;color:var(--mut);font-size:14.5px;line-height:1.5}
+.rxw-done-ic{width:64px;height:64px;margin:0 auto;border-radius:50%;display:grid;place-items:center}
+.rxw .rxw-done-ic svg{width:32px;height:32px}
+.rxw-done-ic.is-ok{background:#dcfce7;color:#15803d}
+.rxw-done-ic.is-bad{background:#fef3c7;color:#b45309}
+.rxw-done .rxw-dlg-f{justify-content:center}
 .rxw [hidden]{display:none!important}
 @media (max-width:640px){.rxw-padwrap{height:200px}.rxw-dlg{padding:16px}}
 @media (max-width:1100px){.rxw-grid{grid-template-columns:1fr}.rxw-aside{position:static;max-height:none;overflow:visible}}
@@ -945,10 +1123,8 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
           <div class="rxw-sum" data-role="sum"></div>
           <div data-role="saved"></div>
           <button type="button" class="rxw-print" data-act="print" data-role="printbtn">${IC.print}<span>Save and print</span></button>
-          <p class="rxw-hint"><kbd>Ctrl</kbd> + <kbd>P</kbd> also saves and prints. In the print window choose <strong>Actual size (100%)</strong>, not "Fit to page", and turn off headers and footers.</p>
+          <p class="rxw-hint">Sends it straight to the front desk printer. <kbd>Ctrl</kbd> + <kbd>P</kbd> does the same.</p>
           <div data-role="first"></div>
-          <details class="rxw-more"><summary>Printing a little off on this computer?</summary>
-            <div class="rxw-more-in">${nudgeHtml()}<button type="button" class="rxw-btn" data-act="test">Print a test page</button></div></details>
         </section>
       </aside>
     </div></div>`;
@@ -1181,9 +1357,9 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     markFocus();
     $("warn").innerHTML = tight.length ? `<div class="rxw-warn">⚠ Too long to fit: <strong>${[...new Set(tight)].map(esc).join(", ")}</strong>.
       Shorten it, or make the space bigger in <a href="#/prescriptions/layout">Set up the paper</a>.</div>` : "";
-    $("first").innerHTML = store.get(TESTED_KEY, false) ? "" : `<div class="rxw-tip">${IC.info}<div><strong>First time printing on this computer?</strong>
-      Print a test page on plain paper and hold it over a script against the light to check it lines up.
-      <button type="button" class="rxw-link-btn" data-act="test">Print a test page</button></div></div>`;
+    $("first").innerHTML = store.get(TESTED_KEY, false) ? "" : `<div class="rxw-tip">${IC.info}<div><strong>Not sure it lines up?</strong>
+      Send a test page to the printer on plain paper and hold it over a script against the light.
+      <button type="button" class="rxw-link-btn" data-act="test">Send a test page</button></div></div>`;
     renderSum(); renderSaved(); renderSteps();
   }
 
@@ -1344,8 +1520,37 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
       }
       if (sig() !== st.savedSig) return;   // changed while saving: press Print again
     }
-    const n = store.get("dm.rx.nudge", { x: 0, y: 0 }) || {};
-    printSheet(L, sheetHtml(L, values(), { dx: nv(n.x), dy: nv(n.y) }), `Prescription ${st.v.name}`);
+    await sendScript(btn);
+  }
+  // Made into a PDF and sent to the front desk printer, then a message to say it's done
+  async function sendScript(btn) {
+    st.busy = true;
+    btn.disabled = true;
+    btn.querySelector("span").textContent = "Sending to the printer…";
+    let ok = false, msg = "", noCopy = false;
+    try {
+      const vals = values();
+      // One for the printer (the paper already has the form), one on the form's picture for the patient's file
+      const [pdf, copy] = await Promise.all([buildPdf(L, vals), buildPdf(L, vals, { bg })]);
+      const res = await sendToPrinter(pdf, { id: st.savedId, copy });
+      noCopy = !!res.copyFailed;
+      ok = true;
+    } catch (err) {
+      console.error("Prescription not printed:", err);
+      msg = err && err.friendly ? err.message : "The printer couldn't be reached. Check your connection and try again.";
+    } finally {
+      st.busy = false;
+      btn.disabled = false;
+      if (root.isConnected) draw();
+    }
+    if (ok) {
+      await printedNotice({ ok: true, title: "Saved and successfully printed", message: noCopy
+        ? "Please check the printer tray. The copy for the patient's file wasn't saved: print it again later to add it."
+        : "Please check the printer tray." });
+      return;
+    }
+    const v = await printedNotice({ ok: false, title: "Saved, but not printed", message: msg, retry: true });
+    if (v === "retry" && root.isConnected) sendScript(btn);
   }
 
   /* ---- Typing, taps and keys ---- */
@@ -1466,7 +1671,7 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     else if (act === "sig-change") changeMySig();
     else if (act === "sig-remove") removeMySig();
     else if (act === "print") doPrint(a);
-    else if (act === "test") { printTest(L); draw(); }
+    else if (act === "test") printTest(L, a).then(() => { if (root.isConnected) draw(); });
   });
   const onKey = (e) => {
     if (!root.isConnected) { document.removeEventListener("keydown", onKey); return; }
@@ -1709,10 +1914,8 @@ async function mountLayout(container, { staff }) {
         </div>
       </div>
       <div class="rx-card"><h3><span class="rx-step">5</span>Check it</h3>
-        <p class="rx-note">Print a test page on plain paper. It shows a mm grid, each box's outline and sample text. Hold it over a script against the light.</p>
-        <button type="button" class="rx-btn" data-act="test">🖨 Print a test page</button>
-        <div class="rx-sep"></div>
-        ${nudgeHtml()}
+        <p class="rx-note">Sends a test page to the front desk printer: a mm grid, each box's outline and sample text. Put plain paper in first, then hold the page over a script against the light. If everything is off by the same amount, use Margins above.</p>
+        <button type="button" class="rx-btn" data-act="test">🖨 Send a test page to the printer</button>
       </div>
       <button type="button" class="rx-link" data-act="reset">Start again from the starting layout</button>`;
     const al = panel.querySelector('[data-p="align"]');
@@ -1830,7 +2033,7 @@ async function mountLayout(container, { staff }) {
     const act = a.dataset.act;
     if (act === "save") save();
     else if (act === "undo") doUndo();
-    else if (act === "test") { printTest(L); }
+    else if (act === "test") printTest(L, a);
     else if (act === "bg-pick") panel.querySelector('[data-role="bgfile"]').click();
     else if (act === "bg-fit") { change(() => { L.bg = { ...L.bg, x: 0, y: 0, w: L.paper.w }; }); redrawAll(); }
     else if (act === "bg-del") removeBg();
