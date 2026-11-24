@@ -53,7 +53,7 @@ import { openSspBuilder } from "./ssp-edit.js";
 const DOC_ACTIONS = [
   ["Consent record", "consent"],
   ["Treatment record", "treatment"],
-  ["Prescription", "rx"],
+  ["Prescription", "rx", "rx-write"],
   ["Skin script (SSP)", "ssp", "create-ssp"],
   ["General note", "note"],
   ["Personal note", "lock", "add-note"],
@@ -287,6 +287,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     if (refreshBtn) { refreshAll(refreshBtn); return; }
     if (t.closest("[data-action='merge-info']")) { mergeInfo(); return; }
     if (t.closest("[data-action='add-reminder']")) { addReminderFlow(); return; }
+    if (t.closest("[data-action='rx-write']")) { location.hash = `#/prescriptions/new/${encodeURIComponent(patient.id)}`; return; }
     if (t.closest("[data-action='paste-notes']")) {
       openPasteNotes({
         patient, staff,
@@ -427,7 +428,8 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       ${(() => {
           const tiles = DOC_ACTIONS.filter(([, , action]) =>
             (action !== "staff-task" || (can("tasks.run") && can("tasks.staff"))) &&
-            (action !== "paste-notes" || can("consult.record")));
+            (action !== "paste-notes" || can("consult.record")) &&
+            (action !== "rx-write" || can("rx.write")));
           const extra = tiles.filter(([, icon]) => !DOC_TOP.includes(icon)).length;
           return `<div class="doc-tiles">
             ${tiles.map(([label, icon, action]) =>

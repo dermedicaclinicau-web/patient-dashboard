@@ -50,7 +50,8 @@ service firebase.storage {
     match /image_bank/{imageId}/{file} {
       allow get: if isStaff();
       allow list: if false;
-      allow create: if isAdmin()
+      // Admins and Form Builder access (the same people the Firestore image_bank rule allows)
+      allow create: if (isAdmin() || (request.auth.token.perms is list && 'forms.build' in request.auth.token.perms))
         && (file == 'full' || file == 'thumb')
         && request.resource.size < 10 * 1024 * 1024
         && request.resource.contentType.matches('image/(png|jpeg|gif|webp)');

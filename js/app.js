@@ -92,6 +92,8 @@ const PAPER_V = 12;
 const PROSPECTS_V = 11;
 // Raise this each time refunds.js changes, so browsers don't keep using an old copy
 const REFUNDS_V = 10;
+// Raise this each time prescriptions.js changes, so browsers don't keep using an old copy
+const RX_V = 1;
 let currentStaff = null;
 initFormPicker(els.content, { getStaff: () => currentStaff });
 initTopbar();
@@ -382,6 +384,8 @@ const PAGES = {
     (m, el, param) => m.mountTaskManager(el, { param, isAdmin: can("tasks.build"), staff: currentStaff })),
   refunds: lazyPage(`./refunds.js?v=${REFUNDS_V}`, "Refunds",
     (m, el, param) => m.mountRefunds(el, { param, staff: currentStaff })),
+  prescriptions: lazyPage(`./prescriptions.js?v=${RX_V}`, "Prescriptions",
+    (m, el, param) => m.mountPrescriptions(el, { param, staff: currentStaff })),
   inventory: lazyPage("./inventory.js", "Inventory", (m, el, param) => m.mountInventory(el, { param, staff: currentStaff })),
   reports: lazyPage("./reports.js", "Reporting", (m, el, param) => m.mountReports(el, { param, staff: currentStaff })),
   staff: lazyPage("./staff-manager.js", "Staff", (m, el) => m.mountStaffManager(el, { staff: currentStaff })),
@@ -422,7 +426,7 @@ const PAGE_PERM = {
   notes: "menu.patients", email: "menu.patients",
   ssp: "ssp.create", calendar: "menu.calendar", forms: "menu.forms",
   "image-bank": "forms.build", "aftercare-bank": "forms.build", "specialist-bank": "menu.forms", "ssp-products": "ssp.config",
-  tasks: "menu.tasks", inventory: "menu.inventory", reports: "menu.reports", staff: "admin", settings: "admin",
+  tasks: "menu.tasks", prescriptions: "rx.write", inventory: "menu.inventory", reports: "menu.reports", staff: "admin", settings: "admin",
   scanner: "menu.scanner", paper: "paper.enter", seo: "menu.seo", prospects: "menu.prospects",
 };
 
@@ -497,6 +501,7 @@ function router() {
 
   const navKey = ["patient", "fill", "form-record", "ssp", "consult", "notes", "email"].includes(page) ? "patients"
     : ["image-bank", "aftercare-bank", "ssp-products", "specialist-bank"].includes(page) ? "forms"
+    : page === "prescriptions" ? "tasks"
     : page === "settings" && param.split("/")[0] === "recall" ? "recall" : page;
     els.navItems.forEach((a) => {
     const active = a.dataset.page === navKey;

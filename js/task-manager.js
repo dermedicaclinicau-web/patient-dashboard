@@ -43,6 +43,8 @@ const I = {
   refund: ic('<path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 3 3 9 9 9"/><path d="M12 8v8M14.5 9.5c-.4-.8-1.3-1.2-2.5-1.2-1.4 0-2.4.7-2.4 1.7 0 2.5 5 1.3 5 3.9 0 1.1-1.1 1.8-2.6 1.8-1.3 0-2.3-.5-2.7-1.4"/>'),
 };
 
+I.rx = ic('<path d="M10.5 20.5 3.5 13.5a5 5 0 0 1 7-7l7 7a5 5 0 0 1-7 7z"/><line x1="8.5" y1="8.5" x2="15.5" y2="15.5"/>');
+
 const CATEGORIES = [
   { key: "patient", title: "To Patient", icon: I.patient, tone: "teal", perm: "tasks.patient", needRun: true,
     blurb: "Email information to a patient, such as their treatment info or schedule." },
@@ -54,6 +56,8 @@ const CATEGORIES = [
     blurb: "Ask the ordering team for stock: products running low, or something new." },
   { key: "refund", title: "Refund request", icon: I.refund, tone: "rose", href: "#/refunds/new",
     blurb: "A patient wants money back for a service, package or product." },
+  { key: "rx", title: "Prescription", icon: I.rx, tone: "teal", href: "#/prescriptions/new", perm: "rx.write",
+    blurb: "Type a script and print it onto the clinic's script paper." },
 ];
 
 // A category card shows when the person has its tick (and "Run tasks", for the sending ones)

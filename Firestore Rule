@@ -25,6 +25,14 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    match /rx_settings/{docId} {
+  allow read: if request.auth != null
+    && (isAdmin() || 'rx.write' in request.auth.token.get('perms', []));
+  allow write: if request.auth != null
+    && (isAdmin() || 'rx.write' in request.auth.token.get('perms', []))
+    && docId in ['layout', 'background'];
+    }
+
     match /staff_prefs/{uid} {
       allow read, write: if request.auth != null && request.auth.uid == uid;
     }
@@ -1911,7 +1919,7 @@ match /inv_count_drafts/{id} {
           || resource.data.createdByUid == request.auth.uid)
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
              'steps', 'stepsOpen', 'ownerIds', 'openToAll', 'status', 'events', 'updatedAt', 'updatedBy',
-             'completedAt', 'cancelReason', 'cancelledBy', 'cancelledAt'])
+             'completedAt', 'cancelReason', 'cancelledBy', 'cancelledAt', 'agree'])
         && request.resource.data.status in ['open', 'done', 'cancelled'];
       allow delete: if false;
     }

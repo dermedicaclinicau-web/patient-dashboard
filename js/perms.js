@@ -15,7 +15,7 @@ export const PERM_KEYS = [
   "dash.attention", "dash.appts", "dash.tasks", "dash.kit", "dash.records", "dash.usage", "dash.requests", "dash.stock", "dash.overview",
   "menu.scanner", "scanner.billing", "scanner.docket", "scanner.rx", "inventory.history", "records.move",
   "menu.prospects", "prospects.work", "prospects.manage",
-  "social.plan", "social.approve",
+  "social.plan", "social.approve", "rx.write",
 ];
 
 let admin = false;
