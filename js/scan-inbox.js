@@ -35,6 +35,8 @@ const IC = {
   ext: svg('<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>'),
 };
 
+IC.flask = svg('<path d="M9 3h6"/><path d="M10 3v6L4.5 18.5A2 2 0 0 0 6.2 21h11.6a2 2 0 0 0 1.7-2.5L14 9V3"/><line x1="7" y1="15" x2="17" y2="15"/>');
+
 /* ---------- Small helpers ---------- */
 const pad = (n) => String(n).padStart(2, "0");
 const keyOf = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -122,6 +124,7 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
             : '<span class="si-live is-off"></span>Not switched on yet'}</p></div>
         <div class="si-head-acts">
           ${canFile || admin ? `<button type="button" class="si-ghost" data-act="check" ${st.checking ? "disabled" : ""}>${IC.refresh}<span>${st.checking ? "Checking…" : "Check now"}</span></button>` : ""}
+          ${admin ? `<button type="button" class="si-ghost" data-act="test">${IC.flask}<span>Test on past scans</span></button>` : ""}
           ${admin ? `<button type="button" class="si-ghost" data-act="settings">${IC.gear}<span>Settings</span></button>` : ""}
         </div>
       </header>
@@ -372,6 +375,7 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
     const a = t.closest("[data-act]");
     if (!a) return;
     if (a.dataset.act === "settings") openSettings(load);
+    else if (a.dataset.act === "test") openTest();
     else if (a.dataset.act === "check") {
       st.checking = true; render();
       try {
@@ -730,13 +734,262 @@ async function openSettings(onDone) {
   dlg.showModal();
 }
 
+/* ===================== Test on past scans (Admins, read only) ===================== */
+
+const WOULD = { file: ["Would file by itself", "is-ok"], paper: ["Would go to Paper records", "is-acc"], needs: ["Would wait for someone", "is-warn"] };
+const LIVE = { reading: "being read", needs: "waiting to be filed", filed: "filed", paper: "in Paper records", notrecord: "marked not a record", gone: "removed" };
+
+async function openTest() {
+  injectStyles();
+  const t = { from: todayKey(), to: todayKey(), data: null, running: false, stop: false, sel: "", busy: false };
+  const thumbs = new Map();
+  let thumbBusy = false, blobUrl = "", viewSeq = 0;
+  const dlg = document.createElement("dialog");
+  dlg.className = "si si-dlg";
+  dlg.setAttribute("aria-label", "Test on past scans");
+  dlg.innerHTML = `<div class="si-dlg-h">
+      <div><h3>Test on past scans</h3><p>Reads the scans and shows what it would do. Nothing is filed, and nothing changes in Paper records.</p></div>
+      <button type="button" class="si-icon" data-x aria-label="Close">${IC.x}</button></div>
+    <div class="si-dlg-b"><div class="si-view" data-role="view"><div class="si-view-msg">Choose a scan to see it here.</div></div>
+      <div class="si-side" data-role="side"><div class="si-loading"><span class="si-spin"></span>Loading…</div></div></div>`;
+  document.body.appendChild(dlg);
+  const side = dlg.querySelector('[data-role="side"]');
+  const view = dlg.querySelector('[data-role="view"]');
+  const close = () => { t.stop = true; if (blobUrl) URL.revokeObjectURL(blobUrl); if (dlg.open) dlg.close(); dlg.remove(); };
+  dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(); });
+  const counts = () => (t.data && t.data.counts) || {};
+  const rows = () => (t.data && t.data.rows) || [];
+  const aiName = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : "");
+
+  function summaryHtml() {
+    const k = counts();
+    const total = rows().length;
+    if (!total) return "";
+    const doneN = (k.done || 0) + (k.error || 0) + (k.sorted || 0);
+    const run = t.data.run;
+    const chip = (n, label, cls) => (n ? `<span class="si-pill ${cls}">${n} ${label}</span>` : "");
+    return `<div class="si-tsum">
+      <div class="si-tsum-h"><strong>${run ? `${esc(fmtDay(run.from))}${run.to !== run.from ? ` to ${esc(fmtDay(run.to))}` : ""}` : ""}</strong>
+        <span>${doneN} of ${plural(total, "scan")} done${k.queued ? (t.running ? " · reading…" : " · paused") : ""}</span></div>
+      <div class="si-prog"><span style="width:${Math.round((doneN * 100) / total)}%"></span></div>
+      <div class="si-tchips">${chip(k.file, "would file by itself", "is-ok")}${chip(k.paper, "to Paper records", "is-acc")}${
+        chip(k.needs, "would wait", "is-warn")}${chip(k.sorted, "already sorted", "is-mut")}${chip(k.error, "couldn't read", "is-bad")}</div>
+    </div>`;
+  }
+
+  function detailHtml(x) {
+    const drive = x.link ? `<a class="si-link" href="${esc(x.link)}" target="_blank" rel="noopener">${IC.drive}Open in Drive</a>` : "";
+    if (x.status !== "done") return drive ? `<div class="si-tdet"><div class="si-tmeta"><span></span>${drive}</div></div>` : "";
+    const m = x.match;
+    let banner;
+    if (x.would === "file") {
+      banner = `<div class="si-banner is-ok">${IC.check}<div><strong>Would file it for ${esc(m.name)}</strong>
+        <span>${esc(x.kindName)} · ${esc(fmtLong(m.date))}${m.time ? ` · ${esc(m.time)}` : ""}${m.staff ? ` with ${esc(m.staff)}` : ""}</span>
+        ${x.fus ? `<span>Would make ${plural(x.fus.book, "appointment")} to book and ${plural(x.fus.task, "task")}${
+          x.fus.quote ? `, and save ${plural(x.fus.quote, "quote")}` : ""}</span>` : ""}</div></div>`;
+    } else if (x.would === "paper") {
+      banner = `<div class="si-banner is-acc">${IC.doc}<div><strong>Would go to Paper records</strong>
+        <span>${m && x.confident ? `Looks like ${esc(m.name)} (${esc(fmtLong(m.date))})` : "Treatment records are filed there, where the products used are entered."}</span></div></div>`;
+    } else {
+      banner = `<div class="si-banner is-warn">${IC.alert}<div><strong>Would wait for someone to file it</strong><span>${esc(x.whyText)}</span></div></div>`;
+    }
+    const sugg = !x.confident && x.sugg.length ? `<div class="si-kv-h">It would suggest</div><ul class="si-ul">${x.sugg.map((s) =>
+      `<li><strong>${esc(s.name)}</strong>${s.source === "booking"
+        ? ` · booked ${esc(fmtDay(s.date))}${s.time ? ` ${esc(s.time)}` : ""}${s.staff ? ` with ${esc(s.staff)}` : ""}` : " · no booking that day"}${
+        s.patientId ? "" : ' · <em class="si-warn">not linked to a patient</em>'}</li>`).join("")}</ul>` : "";
+    const meta = [x.ms && `Read in ${(x.ms / 1000).toFixed(1)} s`, x.ai && `with ${aiName(x.ai)}`,
+      x.live && `In the live Scan Inbox: ${LIVE[x.live] || x.live}`].filter(Boolean).join(" · ");
+    return `<div class="si-tdet">${banner}${sugg}
+      <details class="si-read" open><summary>What it read</summary>${readHtml(x.read)}</details>
+      <div class="si-tmeta"><span>${esc(meta)}</span>${drive}</div></div>`;
+  }
+
+  function rowHtml(x) {
+    const r = x.read || {};
+    let title, sub, pill;
+    if (x.status === "queued") {
+      title = '<span class="si-muted">Waiting to be read</span>';
+      sub = esc(x.name);
+      pill = t.running ? '<span class="si-pill is-mut"><span class="si-spin"></span>Reading</span>' : '<span class="si-pill is-mut">Waiting</span>';
+    } else if (x.status === "sorted") {
+      title = esc(x.name);
+      sub = `Already sorted in Paper records (${esc(x.sorted)}), so it isn't read`;
+      pill = '<span class="si-pill is-mut">Skipped</span>';
+    } else if (x.status === "error") {
+      title = '<span class="si-muted">Couldn\'t read it</span>';
+      sub = `<span class="si-bad">${esc(x.error)}</span>`;
+      pill = '<span class="si-pill is-bad">Not read</span>';
+    } else {
+      const [label, cls] = WOULD[x.would] || ["", "is-mut"];
+      const m = x.match;
+      title = r.patientName ? `“${esc(r.patientName)}”` : '<span class="si-muted">No name read</span>';
+      sub = `${esc(x.kindName || "Scan")} · ${x.would === "file" && m
+        ? `for ${esc(m.name)}${m.time ? ` · booked ${esc(m.time)}` : ""}${m.staff ? ` with ${esc(m.staff)}` : ""}`
+        : x.would === "paper" ? "products entered there" : `<span class="si-warn">${esc(x.whyText)}</span>`}`;
+      pill = `<span class="si-pill ${cls}">${label}</span>`;
+    }
+    const on = t.sel === x.id;
+    return `<div class="si-tr${on ? " is-on" : ""}"><button type="button" class="si-row" data-row="${esc(x.id)}">
+      <span class="si-th" data-tthumb="${esc(x.id)}">${thumbs.get(x.id) ? `<img alt="" src="${esc(thumbs.get(x.id))}">` : IC.doc}</span>
+      <span class="si-time">${esc(fmtDay(dayOfIso(x.created)))}<br>${esc(fmtTime(x.created))}</span>
+      <span class="si-main"><strong>${title}</strong><small>${sub}</small></span>${pill}</button>
+      ${on ? detailHtml(x) : ""}</div>`;
+  }
+
+  function paint() {
+    if (!dlg.isConnected) return;
+    const keep = side.scrollTop;
+    const k = counts();
+    const has = rows().length > 0;
+    side.innerHTML = `<div class="si-tctl">
+        <div class="si-fields">
+          <label class="si-f"><span>From</span><input type="date" data-t="from" value="${esc(t.from)}" max="${todayKey()}" ${t.running ? "disabled" : ""}></label>
+          <label class="si-f"><span>To</span><input type="date" data-t="to" value="${esc(t.to)}" max="${todayKey()}" ${t.running ? "disabled" : ""}></label>
+        </div>
+        <div class="si-acts">${t.running
+          ? '<button type="button" class="si-ghost" data-ta="stop">Stop</button>'
+          : `<button type="button" class="si-primary sm" data-ta="start" ${t.busy ? "disabled" : ""}>${t.busy ? "Finding the scans…" : "Run test"}</button>
+             ${k.queued ? '<button type="button" class="si-ghost" data-ta="carry">Carry on</button>' : ""}
+             ${has ? '<button type="button" class="si-ghost" data-ta="clear">Clear results</button>' : ""}`}</div>
+        <p class="si-hint">Uses the same reading and matching as the live Scan Inbox, with its current settings. About 4 scans a minute, and each one is a real AI read. Scans already sorted in Paper records are skipped.</p>
+      </div>
+      ${summaryHtml()}
+      ${has ? `<div class="si-list">${rows().map(rowHtml).join("")}</div>`
+        : t.data && !t.busy ? `<div class="si-empty">${IC.flask}<strong>No test results yet</strong><span>Choose the dates, then press Run test.</span></div>` : ""}`;
+    side.scrollTop = keep;
+    loadThumbs();
+  }
+
+  async function loadThumbs() {
+    if (thumbBusy || !dlg.isConnected) return;
+    const want = [...new Set([...side.querySelectorAll("[data-tthumb]")].map((e) => e.dataset.tthumb))].filter((id) => !thumbs.has(id)).slice(0, 12);
+    if (!want.length) return;
+    thumbBusy = true;
+    want.forEach((id) => thumbs.set(id, null));
+    try {
+      const res = await api("thumbs", { ids: want });
+      Object.entries((res && res.thumbs) || {}).forEach(([id, u]) => thumbs.set(id, u || ""));
+    } catch { want.forEach((id) => thumbs.set(id, "")); }
+    thumbBusy = false;
+    side.querySelectorAll("[data-tthumb]").forEach((el) => {
+      const u = thumbs.get(el.dataset.tthumb);
+      if (u && !el.querySelector("img")) el.innerHTML = `<img alt="" src="${esc(u)}">`;
+    });
+    loadThumbs();
+  }
+
+  async function show(id) {
+    const seq = ++viewSeq;
+    view.classList.remove("is-zoom");
+    view.innerHTML = '<span class="si-spin"></span>';
+    try {
+      const res = await api("file", { fileId: id });
+      if (seq !== viewSeq || !dlg.isConnected) return;
+      if (!res || res.problem || !res.data) {
+        view.innerHTML = `<div class="si-view-msg">${esc((res && res.problem) || "The scan couldn't be shown.")}</div>`;
+        return;
+      }
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+      const bytes = Uint8Array.from(atob(res.data), (ch) => ch.charCodeAt(0));
+      blobUrl = URL.createObjectURL(new Blob([bytes], { type: res.mime }));
+      if (res.mime === "application/pdf") view.innerHTML = `<iframe title="Scan" src="${blobUrl}#view=FitH"></iframe>`;
+      else if (/heic|heif/i.test(res.mime)) view.innerHTML = '<div class="si-view-msg">This photo type can\'t be shown here. Open it in Drive.</div>';
+      else {
+        view.innerHTML = `<img alt="The scan" src="${blobUrl}" title="Tap to zoom">`;
+        view.querySelector("img").addEventListener("click", () => view.classList.toggle("is-zoom"));
+      }
+    } catch {
+      if (seq === viewSeq && dlg.isConnected) view.innerHTML = '<div class="si-view-msg">The scan couldn\'t be shown. Check your connection.</div>';
+    }
+  }
+
+  async function run() {
+    if (t.running) return;
+    t.running = true; t.stop = false; paint();
+    try {
+      for (let guard = 0; guard < 120 && !t.stop && dlg.isConnected; guard++) {
+        const res = await api("testRun");
+        if (res && res.problem) { showToast(res.problem); break; }
+        t.data = res; paint();
+        if (!(res.counts && res.counts.queued)) break;
+        if (res.busy) await new Promise((r) => setTimeout(r, 5000));
+      }
+    } catch (err) {
+      console.error("Scan test stopped:", err);
+      showToast("The test stopped. Check your connection, then press Carry on.");
+    }
+    t.running = false;
+    paint();
+  }
+
+  async function start() {
+    if (!t.from || !t.to) { showToast("Choose the dates."); return; }
+    if (t.from > t.to) { showToast("The From date needs to be on or before the To date."); return; }
+    if (rows().length && !(await confirmDialog({ title: "Start a new test?", message: "The last test's results are replaced.",
+      confirmLabel: "Start", tone: "warning" }))) return;
+    t.busy = true; t.sel = ""; paint();
+    let ok = false;
+    try {
+      const res = await api("testStart", { from: t.from, to: t.to });
+      if (res.problem) showToast(res.problem);
+      else {
+        t.data = res;
+        if (!res.rows.length) showToast("No scans were uploaded on those dates.");
+        else ok = true;
+      }
+    } catch (err) { console.error("Scan test not started:", err); showToast("The test couldn't start. Try again."); }
+    t.busy = false;
+    paint();
+    if (ok) run();
+  }
+
+  async function clear() {
+    if (!(await confirmDialog({ title: "Clear the test results?", message: "Only the test results are deleted. Nothing else changes.",
+      confirmLabel: "Clear", tone: "warning" }))) return;
+    try { t.data = await api("testClear"); t.sel = ""; paint(); }
+    catch { showToast("Couldn't clear them. Try again."); }
+  }
+
+  dlg.addEventListener("input", (e) => {
+    const k = e.target.dataset.t;
+    if (!k) return;
+    t[k] = e.target.value;
+    if (k === "from" && t.to && t.from > t.to) { t.to = t.from; const to = side.querySelector('[data-t="to"]'); if (to) to.value = t.to; }
+  });
+  dlg.addEventListener("click", (e) => {
+    const el = e.target;
+    if (el.closest("[data-x]")) { close(); return; }
+    if (el.closest("a[href]")) return;
+    const r = el.closest("[data-row]");
+    if (r) { const id = r.dataset.row; t.sel = t.sel === id ? "" : id; paint(); if (t.sel) show(id); return; }
+    const a = el.closest("[data-ta]");
+    if (!a) return;
+    if (a.dataset.ta === "start") start();
+    else if (a.dataset.ta === "carry") run();
+    else if (a.dataset.ta === "clear") clear();
+    else if (a.dataset.ta === "stop") { t.stop = true; showToast("Stopping once the scans it's reading now are done."); }
+  });
+
+  dlg.showModal();
+  try {
+    const res = await api("testList");
+    if (res.problem) { showToast(res.problem); t.data = { rows: [], counts: {} }; }
+    else {
+      t.data = res;
+      if (res.run) { t.from = res.run.from; t.to = res.run.to; }
+    }
+  } catch { showToast("The last test couldn't be loaded."); t.data = { rows: [], counts: {} }; }
+  paint();
+}
+
 /* ===================== Styles ===================== */
 
 function injectStyles() {
-  if (document.getElementById("si-styles-2")) return;
+  if (document.getElementById("si-styles-3")) return;
   document.getElementById("si-styles-1")?.remove();
+  document.getElementById("si-styles-2")?.remove();
   const s = document.createElement("style");
-  s.id = "si-styles-2";
+  s.id = "si-styles-3";
   s.textContent = `
 .si{--t:#0f766e;--t2:#14b8a6;--tl:#f0fdfa;--ink:#0f172a;--mut:#64748b;--line:#e2e8f0;--warn:#b45309;--warnl:#fffbeb;--ok:#047857;--okl:#ecfdf5}
 .si svg{width:18px;height:18px;flex:none}
@@ -940,6 +1193,24 @@ function injectStyles() {
 .si-switch input:focus-visible+.si-sw{box-shadow:0 0 0 3px rgba(20,184,166,.25)}
 .si-switch>span:last-child{display:flex;flex-direction:column;gap:1px;font-size:14px}
 .si-switch small{font-size:12.5px;color:var(--mut)}
+/* Test on past scans */
+.si-tctl{display:flex;flex-direction:column;gap:10px}
+.si-tsum{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:#fff}
+.si-tsum-h{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:13.5px;color:var(--mut)}
+.si-tsum-h strong{color:var(--ink)}
+.si-prog{height:6px;border-radius:999px;background:#f1f5f9;overflow:hidden}
+.si-prog span{display:block;height:100%;background:linear-gradient(90deg,var(--t2),var(--t));transition:width .3s}
+.si-tchips{display:flex;flex-wrap:wrap;gap:6px}
+.si-pill.is-bad{background:#fef2f2;color:#b91c1c}
+.si-tr{border-top:1px solid var(--line)}
+.si-list>.si-tr:first-child{border-top:0}
+.si-tr .si-row{border-top:0}
+.si-tr.is-on,.si-tr.is-on .si-row{background:#f8fafc}
+.si-tdet{display:flex;flex-direction:column;gap:10px;padding:2px 14px 14px}
+.si-tmeta{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;font-size:12.5px;color:var(--mut)}
+.si-side .si-row{grid-template-columns:44px 54px minmax(0,1fr) auto;gap:10px;padding:10px 12px}
+.si-side .si-th{width:44px;height:54px}
+.si-side .si-pill{white-space:normal;text-align:center}
 .si [hidden]{display:none!important}
 @media (max-width:1000px){.si-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:900px){.si-dlg-b{grid-template-columns:1fr;grid-template-rows:40vh auto;overflow:auto}.si-side{overflow:visible}}
