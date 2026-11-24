@@ -116,6 +116,9 @@ export const RULE_FIELDS = [
     ops: [["yes", "had a visit"], ["no", "had no visit"]] },
   { key: "appt.last_between", group: "Appointments", label: "Last visit date", type: "range",
     ops: [["yes", "was between"], ["no", "wasn't between"]] },
+  { key: "appt.cancelled", group: "Appointments", label: "Cancelled or missed an appointment", type: "cancels",
+    ops: [["yes", "did"], ["no", "didn't"]],
+    note: "By the appointment's date (the Day Sheet doesn't record when it was cancelled). Rescheduled appointments, and days they came in at another time, don't count. Updated after each Day Sheet upload." },
 
   { key: "ssp.active", group: "Skin Script", label: "Has an active Skin Script", type: "bool" },
   { key: "ssp.age_days", group: "Skin Script", label: "Time since their Skin Script was made", type: "number", unit: "days" },
@@ -180,7 +183,8 @@ function defaults(f) {
     ...(f.type === "txsent" ? { src: "any" } : {}),
     ...(f.type === "range" || f.type === "prange" ? { from: "", to: "" } : {}),
     ...(f.type === "year" || f.type === "number" ? { value2: "" } : {}),
-    ...(f.type === "answer" ? { fieldId: "", fieldLabel: "" } : {}) };
+    ...(f.type === "answer" ? { fieldId: "", fieldLabel: "" } : {}),
+    ...(f.type === "cancels" ? { ckind: "any", when: "last", days: 7, from: "", to: "" } : {}) };
 }
 export const blankGroup = () => ({ match: "all", rules: [] });
 // Groups: { id, type: "group", match, rules: [rules] } inside a set of rules (one level deep)
@@ -211,6 +215,13 @@ function cleanRule(r) {
     if (out.when === "any") out.days = "";
   }
   if (f.type === "range" || f.type === "prange") { out.from = isIso(r.from) ? r.from : ""; out.to = isIso(r.to) ? r.to : ""; }
+  if (f.type === "cancels") {
+    out.ckind = ["cancelled", "noshow"].includes(r.ckind) ? r.ckind : "any";
+    out.when = ["next", "range"].includes(r.when) ? r.when : "last";
+    out.days = r.days === "" || r.days === null || r.days === undefined ? "" : Number(r.days);
+    out.from = isIso(r.from) ? r.from : "";
+    out.to = isIso(r.to) ? r.to : "";
+  }
   if (f.type === "year" || f.type === "number") out.value2 = r.value2 === "" || r.value2 === null || r.value2 === undefined ? "" : Number(r.value2);
   if (f.type === "answer") {
     out.fieldId = String(r.fieldId || "").slice(0, 40);
@@ -270,6 +281,15 @@ function ruleProblem(r) {
     const n = Number(r.days);
     const min = r.op === "exact" ? 0 : 1;   // "exactly 0 days ago" = today
     if (r.days === "" || !Number.isInteger(n) || n < min || n > 730) return `Choose ${min} to 730 days for "Bought … days ago"`;
+  }
+  if (f.type === "cancels") {
+    if (r.when === "range") {
+      if (!isIso(r.from) || !isIso(r.to)) return `Choose both dates for "${f.label}"`;
+      if (r.to < r.from) return `"${f.label}": the second date is before the first`;
+    } else {
+      const n = Number(r.days);
+      if (r.days === "" || !Number.isInteger(n) || n < 1 || n > 730) return `Choose 1 to 730 days for "${f.label}"`;
+    }
   }
   if ((f.type === "text" || f.type === "form") && !String(r.value || "").trim()) return `Fill in "${f.label}"`;
   if (f.type === "products" && !(Array.isArray(r.value) && r.value.length)) return `Choose a product for "${f.label}"`;
@@ -336,6 +356,15 @@ export function describeRule(r) {
       : r.field === "mkt.clicked" ? (r.op === "no" ? "Didn't click a link in" : "Clicked a link in")
       : (r.op === "no" ? "Wasn't sent" : "Was sent");
     return `${verb} ${what}${when}`;
+  }
+  if (f.type === "cancels") {
+    const what = r.ckind === "cancelled" ? "a cancelled appointment"
+      : r.ckind === "noshow" ? "a missed appointment (no-show)" : "a cancelled or missed appointment";
+    const n = r.days === "" ? "…" : r.days;
+    const s = Number(n) === 1 ? "" : "s";
+    const when = r.when === "range" ? `between ${niceDay(r.from)} and ${niceDay(r.to)}`
+      : r.when === "next" ? `in the next ${n} day${s}` : `in the last ${n} day${s}`;
+    return `${r.op === "no" ? "No" : r.when === "next" ? "Has" : "Had"} ${what} ${when}`;
   }
   if (r.field === "pt.sample") return `${r.op === "out" ? "Not in" : "In"} a random ${r.value === "" ? "…" : r.value}% sample`;
   if (f.type === "number" && r.op === "between") {
@@ -780,6 +809,22 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
     } else if (f.type === "pdays") {
       val = `<input class="fe-input fr-num" type="number" min="0" max="730" step="1" inputmode="numeric" data-rd="${p}" value="${esc(r.days)}" placeholder="14" aria-label="Days" />
         <span class="fr-unit">day${Number(r.days) === 1 ? "" : "s"}${r.op === "exact" || r.op === "over" ? " ago" : ""}</span>`;
+    } else if (f.type === "cancels") {
+      const w = r.when || "last";
+      val = `<select class="fb-select fr-val" data-rc="${p}" aria-label="Which">
+          <option value="any"${r.ckind !== "cancelled" && r.ckind !== "noshow" ? " selected" : ""}>cancelled or missed</option>
+          <option value="cancelled"${r.ckind === "cancelled" ? " selected" : ""}>cancelled</option>
+          <option value="noshow"${r.ckind === "noshow" ? " selected" : ""}>missed (no-show)</option></select>
+        <select class="fb-select fr-val" data-rw2="${p}" aria-label="When">
+          <option value="last"${w === "last" ? " selected" : ""}>in the last</option>
+          <option value="next"${w === "next" ? " selected" : ""}>in the next</option>
+          <option value="range"${w === "range" ? " selected" : ""}>between</option></select>
+        ${w === "range"
+          ? `<input class="fe-input fr-date" type="date" data-rfrom="${p}" value="${esc(r.from || "")}" aria-label="From" />
+            <span class="fr-unit">and</span>
+            <input class="fe-input fr-date" type="date" data-rto="${p}" value="${esc(r.to || "")}" aria-label="To" />`
+          : `<input class="fe-input fr-num" type="number" min="1" max="730" step="1" inputmode="numeric" data-rd="${p}" value="${esc(r.days)}" placeholder="7" aria-label="Days" />
+            <span class="fr-unit">days</span>`}`;
     } else if (f.type === "range" || f.type === "prange") {
       const y = new Date().getFullYear();
       val = `<input class="fe-input fr-date" type="date" data-rfrom="${p}" value="${esc(r.from || "")}" aria-label="From" />
@@ -932,6 +977,18 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       if (r.when === "any") r.days = "";
       else if (r.days === "") r.days = 90;
       render();
+      onChange();
+      return;
+    }
+    if (d.rc !== undefined || d.rw2 !== undefined) {
+      const r = ruleAt(d.rc ?? d.rw2);
+      if (!r) return;
+      if (d.rc !== undefined) r.ckind = ["cancelled", "noshow"].includes(el.value) ? el.value : "any";
+      else {
+        r.when = ["next", "range"].includes(el.value) ? el.value : "last";
+        if (r.when !== "range" && (r.days === "" || r.days === undefined)) r.days = 7;
+        render();
+      }
       onChange();
       return;
     }
