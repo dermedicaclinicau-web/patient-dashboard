@@ -39,11 +39,16 @@ const FIELDS = [
   { key: "brand", label: "Brand substitution not permitted", type: "tick", def: { x: 70, y: 82, box: 4.5 } },
   { key: "items", label: "Medicines", type: "area", def: { x: 24, y: 92, w: 160, h: 70 } },
   { key: "date", label: "Date", type: "text", def: { x: 150, y: 180, w: 35 } },
+  { key: "signature", label: "Signature", type: "sig", def: { x: 40, y: 168, w: 60, h: 16 } },
 ];
 const DEF = Object.fromEntries(FIELDS.map((d) => [d.key, d]));
 const TICKS = FIELDS.filter((d) => d.type === "tick");
 
+// A made-up signature for Set up the paper and the test page
+const SAMPLE_SIG = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 60"><path d="M8 44c14-30 22-34 24-18s-6 22 2 10 14-26 18-12-4 18 6 6 10-14 16-6 8 10 16 0 12-8 20 2 18 6 30-4" fill="none" stroke="#1e3a8a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M118 42c22-4 46-6 74-4" fill="none" stroke="#1e3a8a" stroke-width="2" stroke-linecap="round"/></svg>');
 const SAMPLE = {
+  signature: SAMPLE_SIG,
   medicare: "2123456701", ref: "1", name: "Jane Citizen", address1: "12 Example Street", address2: "Scarborough WA",
   postcode: "6019", entitlement: "E12345678", safetyNet: true, concession: true, pbs: true, rpbs: true, brand: true,
   items: "Soolantra 1% cream 30 g\nApply a thin layer at night\nQty: 1    Repeats: 2", date: "01/10/26",
@@ -116,7 +121,7 @@ function geom(d, f) {
   const size = num(f.size, 11);
   if (d.type === "tick") { const b = num(f.box, 4.5); return { w: b, h: b, size }; }
   if (d.type === "boxes") { const xs = boxXs(d, f); return { w: xs[xs.length - 1] + num(f.pitch, 5), h: lineH(size), size, xs }; }
-  if (d.type === "area") return { w: num(f.w, 100), h: num(f.h, 40), size };
+  if (d.type === "area" || d.type === "sig") return { w: num(f.w, 100), h: num(f.h, 40), size };
   return { w: num(f.w, 60), h: lineH(size), size };
 }
 function fieldInner(d, f, g, val) {
@@ -127,6 +132,8 @@ function fieldInner(d, f, g, val) {
     return String(val || "").replace(/\s+/g, "").slice(0, d.count).split("").map((c, i) =>
       `<span style="position:absolute;left:${g.xs[i]}mm;top:0;width:${num(f.pitch, 5)}mm;text-align:center;line-height:${g.h}mm">${esc(c)}</span>`).join("");
   }
+  // The signature sits on the bottom-left of its box (on the line), never stretched
+  if (d.type === "sig") return val ? `<img alt="" src="${esc(val)}" style="position:absolute;left:0;bottom:0;max-width:100%;max-height:100%;width:auto;height:auto">` : "";
   if (d.type === "area") return `<div class="rx-area-in" style="white-space:pre-wrap;line-height:1.3">${esc(val || "")}</div>`;
   return `<span class="rx-line-in" style="display:block;white-space:nowrap;line-height:${g.h}mm;text-align:${f.align || "left"}">${esc(val || "")}</span>`;
 }
@@ -181,7 +188,11 @@ function printSheet(L, inner, title) {
   d.close();
   const win = frame.contentWindow;
   win.addEventListener("afterprint", () => setTimeout(() => frame.remove(), 500));
-  setTimeout(() => { win.focus(); win.print(); }, 250);
+  // Waits for pictures (the signature) to be ready, so they're never missing from the printout
+  const imgs = [...d.images];
+  Promise.all(imgs.map((i) => (i.complete ? (i.decode ? i.decode().catch(() => {}) : 0)
+    : new Promise((r) => { i.onload = r; i.onerror = r; }))))
+    .then(() => setTimeout(() => { win.focus(); win.print(); }, 150));
   setTimeout(() => { if (frame.isConnected) frame.remove(); }, 120000);
 }
 
@@ -245,6 +256,7 @@ export async function mountPrescriptions(container, { param = "", staff = null }
 // The medicines come from the clinic's prescription product list (the same list the Scanner uses).
 
 const TYPE_IT = "__type";   // "Not on the list: type the name"
+const SIGN_LABEL = { pen: "Wet signature (pen)", pad: "Signed on screen", saved: "My saved signature" };
 const SHEET_KEYS = ["name", "address1", "address2", "postcode", "medicare", "ref", "entitlement",
   "safetyNet", "concession", "pbs", "rpbs", "brand"];
 const LAST_KEY = "dm.rx.last";   // per product: what was written last time on this computer
@@ -286,6 +298,9 @@ const IC = {
   trash: wsvg('<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>'),
   print: wsvg('<polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/>'),
   clock: wsvg('<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>'),
+  pen: wsvg('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'),
+  pad: wsvg('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 14c1.5-3 3-3.5 3.5-1.5s1.5 2 3-.5 2.5-2 3 0"/>'),
+  user: wsvg('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
 };
 
 // The prescription product list (rx-products.js may still be loading it when the page opens)
@@ -304,9 +319,9 @@ async function loadRxNames() {
 }
 
 function injectWriterStyles() {
-  if (document.getElementById("rxw-styles-2")) return;
+  if (document.getElementById("rxw-styles-4")) return;
   const s = document.createElement("style");
-  s.id = "rxw-styles-2";
+  s.id = "rxw-styles-4";
   s.textContent = `
 .rxw{--t:#0f766e;--t2:#14b8a6;--tl:#f0fdfa;--ink:#0f172a;--mut:#64748b;--line:#e2e8f0}
 .rxw svg{width:16px;height:16px;flex:none}
@@ -451,10 +466,305 @@ function injectWriterStyles() {
 .rxw .rxw-medbox input{flex:none;width:calc(var(--n) * 1.5ch + 28px);height:40px;box-sizing:border-box;padding:0 8px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;color:var(--ink);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:15px;letter-spacing:.3em;text-align:center;transition:border-color .15s,box-shadow .15s}
 .rxw .rxw-medbox input:focus{outline:none;border-color:var(--t2);box-shadow:0 0 0 3px rgba(20,184,166,.15)}
 .rxw .rxw-medbox input::placeholder{color:#d5dde6}
+.rxw-signing{margin:16px 0 4px}
+.rxw-seg{display:grid;gap:6px}
+.rxw-seg button{display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;border:1px solid var(--line);border-radius:12px;background:#fff;text-align:left;font-family:inherit;cursor:pointer;transition:.15s}
+.rxw-seg button:hover{border-color:#99f6e4}
+.rxw-seg button.is-on{border-color:var(--t2);background:var(--tl);box-shadow:0 0 0 3px rgba(20,184,166,.12)}
+.rxw-seg-ic{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;flex:none;background:#f1f5f9;color:#475569}
+.rxw-seg button.is-on .rxw-seg-ic{background:var(--t);color:#fff}
+.rxw-seg-t{display:flex;flex-direction:column;min-width:0}
+.rxw-seg-t strong{font-size:13.5px;color:var(--ink)}
+.rxw-seg-t small{font-size:12px;color:var(--mut)}
+.rxw-seg-dot{margin-left:auto;width:18px;height:18px;border-radius:50%;border:2px solid #cbd5e1;flex:none;box-sizing:border-box}
+.rxw-seg button.is-on .rxw-seg-dot{border-color:var(--t);background:var(--t);box-shadow:inset 0 0 0 3px #fff}
+.rxw-sigprev{display:flex;align-items:center;gap:10px;margin-top:8px;padding:8px 10px;border:1px dashed #cbd5e1;border-radius:12px;background:#fff}
+.rxw-sigprev img{height:46px;max-width:55%;object-fit:contain}
+.rxw-sig-acts{display:flex;gap:6px;margin-left:auto;flex-wrap:wrap;justify-content:flex-end}
+.rxw-dlg{width:min(680px,calc(100vw - 24px));max-width:none;max-height:calc(100vh - 24px);overflow:auto;box-sizing:border-box;border:0;border-radius:20px;padding:20px;box-shadow:0 24px 60px rgba(15,23,42,.3);color:var(--ink)}
+.rxw-dlg::backdrop{background:rgba(15,23,42,.45);backdrop-filter:blur(2px)}
+.rxw-dlg-h{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px}
+.rxw-dlg-h h3{margin:0;font-size:18px}
+.rxw-dlg-h p{margin:3px 0 0;font-size:13px;color:var(--mut)}
+.rxw-tabs{display:inline-flex;padding:3px;border-radius:10px;background:#f1f5f9;margin-bottom:12px}
+.rxw-tabs button{border:0;background:transparent;padding:7px 14px;border-radius:8px;font-family:inherit;font-size:13px;font-weight:600;color:var(--mut);cursor:pointer}
+.rxw-tabs button.is-on{background:#fff;color:var(--ink);box-shadow:0 1px 2px rgba(15,23,42,.1)}
+.rxw-padwrap{position:relative;height:240px;border:1.5px solid #cbd5e1;border-radius:14px;background:#fff;overflow:hidden}
+.rxw-pad{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor:crosshair}
+.rxw-padline{position:absolute;left:28px;right:28px;bottom:58px;border-bottom:1.5px solid #cbd5e1;pointer-events:none}
+.rxw-padline span{position:absolute;left:-2px;bottom:4px;color:#94a3b8;font-size:16px}
+.rxw-padhint{position:absolute;left:0;right:0;top:40%;margin:0;text-align:center;color:#cbd5e1;font-size:22px;font-weight:600;pointer-events:none;transition:opacity .2s}
+.rxw-padhint.is-gone{opacity:0}
+.rxw-upwrap{display:grid;gap:10px;min-height:240px;align-content:start}
+.rxw-drop{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;min-height:120px;padding:18px;border:1.5px dashed #99f6e4;border-radius:14px;background:var(--tl);color:var(--t);text-align:center;cursor:pointer}
+.rxw-drop small{max-width:420px;color:var(--mut);font-size:12.5px}
+.rxw-upprev{display:grid;place-items:center;min-height:110px;border:1px solid var(--line);border-radius:14px;background:repeating-conic-gradient(#f1f5f9 0 25%,#fff 0 50%) 0 0/16px 16px}
+.rxw-upprev img{max-width:90%;max-height:140px}
+.rxw-dlg-tools{display:flex;align-items:center;gap:8px;margin-top:10px}
+.rxw-colors{display:flex;gap:6px;margin-right:auto}
+.rxw-color{width:26px;height:26px;border-radius:50%;border:2px solid #fff;background:var(--c);box-shadow:0 0 0 1px #cbd5e1;cursor:pointer}
+.rxw-color.is-on{box-shadow:0 0 0 2px var(--t2)}
+.rxw-dlg-save{margin-top:14px}
+.rxw-dlg-f{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+.rxw-dlg-f .rxw-print{width:auto;height:44px;padding:0 20px;font-size:15px}
+.rxw-dlg-f .rxw-print:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
+.rxw [hidden]{display:none!important}
+@media (max-width:640px){.rxw-padwrap{height:200px}.rxw-dlg{padding:16px}}
 @media (max-width:1100px){.rxw-grid{grid-template-columns:1fr}.rxw-aside{position:static;max-height:none;overflow:visible}}
 @media (max-width:640px){.rxw-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.rxw-fields>*{grid-column:span 2!important}
   .rxw-head{flex-wrap:wrap}.rxw-ghost span{display:none}.rxw input,.rxw select{font-size:16px!important}.rxw-card{padding:16px}}`;
   document.head.appendChild(s);
+}
+
+// A photo of a signature on white paper: the paper made see-through, the ink one colour, trimmed close
+async function cleanSignaturePhoto(file, hex) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    const k = Math.min(1, 1400 / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.max(1, Math.round(img.naturalWidth * k)), h = Math.max(1, Math.round(img.naturalHeight * k));
+    const c = document.createElement("canvas");
+    c.width = w; c.height = h;
+    const g = c.getContext("2d", { willReadFrequently: true });
+    g.drawImage(img, 0, 0, w, h);
+    const im = g.getImageData(0, 0, w, h), d = im.data;
+    const lum = new Float32Array(w * h);
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) lum[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    const sample = [];
+    for (let j = 0; j < lum.length; j += 13) sample.push(lum[j]);
+    sample.sort((a, b) => a - b);
+    const paperL = sample[Math.floor(sample.length * 0.85)] || 255;   // how bright the paper is in this photo
+    const hard = paperL * 0.55, soft = paperL * 0.8;
+    const [r, gg, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+    let x0 = w, y0 = h, x1 = -1, y1 = -1, ink = 0;
+    for (let j = 0; j < lum.length; j++) {
+      const L = lum[j];
+      const a = L <= hard ? 255 : L >= soft ? 0 : Math.round((255 * (soft - L)) / (soft - hard));
+      const i = j * 4;
+      d[i] = r; d[i + 1] = gg; d[i + 2] = b; d[i + 3] = a;
+      if (a > 60) {
+        ink++;
+        const x = j % w, y = (j / w) | 0;
+        if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+    }
+    if (x1 < 0 || x1 - x0 < 20) throw Object.assign(new Error("No signature found in that photo. Sign in dark ink on white paper and take it a little closer."), { friendly: true });
+    if (ink > lum.length * 0.25) throw Object.assign(new Error("That photo is too dark or shadowed. Take it in good light, flat on the table."), { friendly: true });
+    g.putImageData(im, 0, 0);
+    const pad = 8;
+    const cx = Math.max(0, x0 - pad), cy = Math.max(0, y0 - pad);
+    const cw = Math.min(w, x1 + pad) - cx, ch = Math.min(h, y1 + pad) - cy;
+    let s = Math.min(1, 1000 / cw), out;
+    do {
+      const o = document.createElement("canvas");
+      o.width = Math.max(1, Math.round(cw * s)); o.height = Math.max(1, Math.round(ch * s));
+      o.getContext("2d").drawImage(c, cx, cy, cw, ch, 0, 0, o.width, o.height);
+      out = o.toDataURL("image/png");
+      s *= 0.75;
+    } while (out.length > 380000 && s > 0.15);
+    return out;
+  } finally { URL.revokeObjectURL(url); }
+}
+
+// The signature pad (on the page, not a pop-up window): draw with a finger, stylus, mouse or USB signature pad,
+// or upload a photo. → { data: PNG with a see-through background, saveMine } or null if cancelled.
+function openSignPad({ mustSave = false } = {}) {
+  injectWriterStyles();
+  return new Promise((resolve) => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "rxw rxw-dlg";
+    dlg.setAttribute("aria-label", mustSave ? "Add my signature" : "Sign this script");
+    dlg.innerHTML = `
+      <div class="rxw-dlg-h"><div><h3>${mustSave ? "Add my signature" : "Sign this script"}</h3>
+        <p>${mustSave ? "Saved to your login only. Nobody else can see it or print it."
+          : "Sign in the box with a finger, stylus, mouse or signature pad."}</p></div>
+        <button type="button" class="rxw-x" data-d="cancel" aria-label="Close">✕</button></div>
+      <div class="rxw-tabs" role="tablist">
+        <button type="button" role="tab" class="is-on" data-tab="draw">Draw</button>
+        <button type="button" role="tab" data-tab="upload">Upload a photo</button></div>
+      <div class="rxw-padwrap" data-pane="draw">
+        <canvas class="rxw-pad" aria-label="Signature box"></canvas>
+        <div class="rxw-padline"><span>✕</span></div>
+        <p class="rxw-padhint" data-role="padhint">Sign here</p>
+      </div>
+      <div class="rxw-upwrap" data-pane="upload" hidden>
+        <label class="rxw-drop"><input type="file" accept="image/*" data-role="upfile" hidden>
+          <strong>Choose a photo of your signature</strong>
+          <small>Sign on plain white paper in dark ink, then take a close, flat photo in good light. The paper is removed automatically.</small></label>
+        <div class="rxw-upprev" data-role="upprev" hidden><img alt="Your signature"></div>
+      </div>
+      <div class="rxw-dlg-tools">
+        <div class="rxw-colors">${[["#1e3a8a", "Blue"], ["#111827", "Black"]].map(([c, n], i) =>
+          `<button type="button" class="rxw-color${i ? "" : " is-on"}" data-color="${c}" style="--c:${c}" aria-label="${n} ink" title="${n} ink"></button>`).join("")}</div>
+        <button type="button" class="rxw-btn sm" data-d="undo" data-drawonly>↶ Undo</button>
+        <button type="button" class="rxw-btn sm" data-d="clear" data-drawonly>Clear</button>
+      </div>
+      ${mustSave ? "" : `<label class="rxw-switch rxw-dlg-save"><input type="checkbox" data-role="savemine"><span class="rxw-sw"></span>Also save it as my signature, to use again</label>`}
+      <div class="rxw-dlg-f">
+        <button type="button" class="rxw-btn" data-d="cancel">Cancel</button>
+        <button type="button" class="rxw-print" data-d="ok" disabled>${mustSave ? "Save my signature" : "Use this signature"}</button></div>`;
+    document.body.appendChild(dlg);
+    const q = (s) => dlg.querySelector(s);
+    const cv = q(".rxw-pad"), ctx = cv.getContext("2d"), okBtn = q('[data-d="ok"]');
+    let strokes = [], cur = null, last = null, color = "#1e3a8a", tab = "draw", upData = "", upFile = null, done = false;
+
+    const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+    function paint(g, s, k = 1) {
+      const p = s.pts;
+      g.strokeStyle = s.color; g.fillStyle = s.color; g.lineCap = "round"; g.lineJoin = "round";
+      if (p.length === 1) { g.beginPath(); g.arc(p[0].x * k, p[0].y * k, (p[0].w * k) / 2, 0, Math.PI * 2); g.fill(); return; }
+      let from = p[0];
+      for (let i = 1; i < p.length; i++) {
+        const to = i === p.length - 1 ? p[i] : mid(p[i], p[i + 1]);
+        g.lineWidth = ((p[i - 1].w + p[i].w) / 2) * k;
+        g.beginPath();
+        g.moveTo(from.x * k, from.y * k);
+        g.quadraticCurveTo(p[i].x * k, p[i].y * k, to.x * k, to.y * k);
+        g.stroke();
+        from = to;
+      }
+    }
+    const inkCount = () => strokes.reduce((n, s) => n + s.pts.length, 0);
+    const refresh = () => { okBtn.disabled = tab === "draw" ? inkCount() < 6 : !upData; };
+    function redraw() {
+      const r = cv.getBoundingClientRect();
+      ctx.clearRect(0, 0, r.width, r.height);
+      strokes.forEach((s) => paint(ctx, s));
+      q('[data-role="padhint"]').classList.toggle("is-gone", strokes.length > 0);
+      refresh();
+    }
+    function fitCanvas() {
+      const r = cv.getBoundingClientRect();
+      if (!r.width) return;
+      const dpr = window.devicePixelRatio || 1;
+      cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      redraw();
+    }
+    // Thicker with pen pressure (stylus, signature pad), or when moving slowly (finger, mouse)
+    const widthOf = (ev, dist, dt) => (ev.pointerType === "pen" && ev.pressure > 0
+      ? 1 + ev.pressure * 3.2 : Math.max(1.3, Math.min(3.4, 3.6 - (dist / Math.max(1, dt)) * 1.1)));
+
+    cv.addEventListener("pointerdown", (e) => {
+      if (e.button > 0) return;
+      e.preventDefault();
+      cv.setPointerCapture(e.pointerId);
+      const r = cv.getBoundingClientRect();
+      const pt = { x: e.clientX - r.left, y: e.clientY - r.top, w: e.pointerType === "pen" && e.pressure > 0 ? 1 + e.pressure * 3.2 : 2.8 };
+      cur = { color, pts: [pt] };
+      last = { ...pt, t: e.timeStamp };
+      strokes.push(cur);
+      redraw();
+    });
+    cv.addEventListener("pointermove", (e) => {
+      if (!cur) return;
+      const r = cv.getBoundingClientRect();
+      const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+      (evs.length ? evs : [e]).forEach((ev) => {
+        const x = ev.clientX - r.left, y = ev.clientY - r.top;
+        const dist = Math.hypot(x - last.x, y - last.y);
+        if (dist < 0.8) return;
+        const w = last.w * 0.65 + widthOf(ev, dist, ev.timeStamp - last.t) * 0.35;
+        cur.pts.push({ x, y, w });
+        last = { x, y, w, t: ev.timeStamp };
+      });
+      redraw();
+    });
+    const endStroke = () => { cur = null; refresh(); };
+    cv.addEventListener("pointerup", endStroke);
+    cv.addEventListener("pointercancel", endStroke);
+
+    // Trimmed close, drawn again at up to 3× for a sharp print
+    function exportDrawn() {
+      const pts = strokes.flatMap((s) => s.pts);
+      if (!pts.length) return "";
+      const pad = 6;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      pts.forEach((p) => { x0 = Math.min(x0, p.x - p.w); y0 = Math.min(y0, p.y - p.w); x1 = Math.max(x1, p.x + p.w); y1 = Math.max(y1, p.y + p.w); });
+      x0 -= pad; y0 -= pad; x1 += pad; y1 += pad;
+      let k = Math.min(3, 1000 / (x1 - x0), 400 / (y1 - y0)), out;
+      do {
+        const c = document.createElement("canvas");
+        c.width = Math.max(1, Math.ceil((x1 - x0) * k)); c.height = Math.max(1, Math.ceil((y1 - y0) * k));
+        const g = c.getContext("2d");
+        g.translate(-x0 * k, -y0 * k);
+        strokes.forEach((s) => paint(g, s, k));
+        out = c.toDataURL("image/png");
+        k *= 0.7;
+      } while (out.length > 380000 && k > 0.3);
+      return out;
+    }
+    async function useFile(f) {
+      try {
+        upData = await cleanSignaturePhoto(f, color);
+        const pv = q('[data-role="upprev"]');
+        pv.hidden = false;
+        pv.querySelector("img").src = upData;
+      } catch (err) {
+        console.warn("Signature photo not used:", err);
+        upData = "";
+        q('[data-role="upprev"]').hidden = true;
+        showToast(err && err.friendly ? err.message : "That photo couldn't be used. Try a JPG or PNG.");
+      }
+      refresh();
+    }
+    q('[data-role="upfile"]').addEventListener("change", (e) => {
+      const f = e.target.files && e.target.files[0];
+      e.target.value = "";
+      if (!f) return;
+      if (!/^image\//.test(f.type) || /heic|heif/i.test(f.type)) { showToast("Choose a JPG or PNG photo."); return; }
+      upFile = f;
+      useFile(f);
+    });
+
+    const ro = new ResizeObserver(fitCanvas);
+    const finish = (val) => {
+      if (done) return;
+      done = true;
+      ro.disconnect();
+      if (dlg.open) dlg.close();
+      dlg.remove();
+      resolve(val);
+    };
+    dlg.addEventListener("cancel", (e) => { e.preventDefault(); finish(null); });
+    dlg.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && tab === "draw") { e.preventDefault(); strokes.pop(); redraw(); }
+    });
+    dlg.addEventListener("click", (e) => {
+      const t = e.target.closest("[data-d], [data-tab], [data-color]");
+      if (!t) return;   // a tap outside the box does nothing, so a signature is never lost by accident
+      if (t.dataset.tab) {
+        tab = t.dataset.tab;
+        dlg.querySelectorAll("[data-tab]").forEach((b) => b.classList.toggle("is-on", b === t));
+        dlg.querySelectorAll("[data-pane]").forEach((p) => { p.hidden = p.dataset.pane !== tab; });
+        dlg.querySelectorAll("[data-drawonly]").forEach((b) => { b.hidden = tab !== "draw"; });
+        if (tab === "draw") requestAnimationFrame(fitCanvas);
+        refresh();
+        return;
+      }
+      if (t.dataset.color) {
+        color = t.dataset.color;
+        dlg.querySelectorAll("[data-color]").forEach((b) => b.classList.toggle("is-on", b === t));
+        strokes.forEach((s) => { s.color = color; });   // the whole signature in one ink
+        redraw();
+        if (upFile) useFile(upFile);
+        return;
+      }
+      const d = t.dataset.d;
+      if (d === "cancel") finish(null);
+      else if (d === "undo") { strokes.pop(); redraw(); }
+      else if (d === "clear") { strokes = []; redraw(); }
+      else if (d === "ok") {
+        const data = tab === "draw" ? exportDrawn() : upData;
+        if (!data) return;
+        const sm = q('[data-role="savemine"]');
+        finish({ data, saveMine: mustSave || !!(sm && sm.checked) });
+      }
+    });
+    ro.observe(cv);
+    dlg.showModal();
+    requestAnimationFrame(fitCanvas);
+  });
 }
 
 async function mountWriter(container, { patientId = "", recordId = "", staff }) {
@@ -464,9 +774,12 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
   root.innerHTML = '<div class="rxw-wrap"><div class="skeleton sm"></div></div>';
   container.replaceChildren(root);
 
-  let info, bg, products, rec = null;
+  let info, bg, products, rec = null, mySig = "";
   try {
-    [info, bg, products] = await Promise.all([loadLayout(true), loadBg(), loadRxNames()]);
+    let sigRes;
+    [info, bg, products, sigRes] = await Promise.all([loadLayout(true), loadBg(), loadRxNames(),
+      callApi({ action: "rx", op: "sig" }).catch(() => null)]);
+    mySig = sigRes && sigRes.signature && sigRes.signature.data ? String(sigRes.signature.data) : "";
     if (recordId) {
       const res = await callApi({ action: "rx", op: "get", id: recordId });
       if (res.problem) throw Object.assign(new Error(res.problem), { friendly: true });
@@ -489,6 +802,7 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     items: [blankItem(!products.length)],
     date: todayKey(),
     savedId: "", savedSig: "", okTyped: new Set(), busy: false, focusKey: "",
+    signing: "pen", padSig: "", mySig,   // Wet signature is the default every time
   };
   if (rec) {   // opened from Product Prescriptions: the saved prescription, ready to print again
     st.patient = { id: rec.patientId, name: rec.patientName, pttId: rec.patientPttId, dobKey: "" };
@@ -506,7 +820,8 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     st.savedId = rec.id;
   }
   const on = (k) => !!(L.fields[k] && L.fields[k].on);
-  const values = () => ({ ...st.v, items: itemsText(st.items), date: fmtDate(st.date) });
+  const sigData = () => (st.signing === "pad" ? st.padSig : st.signing === "saved" ? st.mySig : "");
+  const values = () => ({ ...st.v, items: itemsText(st.items), date: fmtDate(st.date), signature: sigData() || "" });
   const payload = () => ({
     patientId: st.patient ? st.patient.id : "", date: st.date,
     items: st.items.filter((i) => itemName(i)).map((i) => ({
@@ -514,9 +829,15 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
       quantity: String(i.qty || "").trim(), directions: String(i.directions || "").trim(), repeats: String(i.repeats ?? "").trim(),
     })),
     sheet: Object.fromEntries(SHEET_KEYS.map((k) => [k, st.v[k]])),
+    signing: st.signing,
   });
   const sig = () => JSON.stringify(payload());
-  if (rec) st.savedSig = sig();
+  if (rec) {   // as it was saved (the signature choice starts at Wet each time)
+    const now = st.signing;
+    st.signing = ["pad", "saved"].includes(rec.signing) ? rec.signing : "pen";
+    st.savedSig = sig();
+    st.signing = now;
+  }
   const back = rec ? `#/patient/${encodeURIComponent(rec.patientId)}`
     : patientId ? `#/patient/${encodeURIComponent(patientId)}` : "#/tasks/new";
   const showBg = () => !!bg && store.get(BGSHOW_KEY, true);
@@ -557,6 +878,7 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
         <section class="rxw-card">
           <div class="rxw-card-h"><span class="rxw-n">4</span><div><h3>Save and print</h3></div></div>
           <label class="rxw-f rxw-date"><span>Date on the script</span><input type="date" data-role="date" value="${esc(st.date)}" max="${todayKey()}"></label>
+          <div class="rxw-signing" data-role="signing"></div>
           <div class="rxw-sum" data-role="sum"></div>
           <div data-role="saved"></div>
           <button type="button" class="rxw-print" data-act="print" data-role="printbtn">${IC.print}<span>Save and print</span></button>
@@ -763,7 +1085,8 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     const named = st.items.filter((i) => itemName(i));
     $("sum").innerHTML = `
       <div class="rxw-sum-row"><span>Patient</span>${st.patient ? `<strong>${esc(cleanName(st.v.name || st.patient.name))}</strong>` : "<em>Not chosen yet</em>"}</div>
-      <div class="rxw-sum-row"><span>Medicines</span>${named.length ? `<strong>${named.map((i) => esc(itemLine(i))).join("<br>")}</strong>` : "<em>None yet</em>"}</div>`;
+      <div class="rxw-sum-row"><span>Medicines</span>${named.length ? `<strong>${named.map((i) => esc(itemLine(i))).join("<br>")}</strong>` : "<em>None yet</em>"}</div>
+      <div class="rxw-sum-row"><span>Signature</span><strong>${esc(SIGN_LABEL[st.signing])}</strong></div>`;
   }
   function renderSaved() {
     const box = $("saved"), btn = $("printbtn");
@@ -784,7 +1107,7 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
       sheetHtml(L, values());
     const tight = [];
     paper.querySelectorAll("[data-key]").forEach((el) => {
-      el.classList.toggle("rxw-empty", !el.textContent.trim());
+      el.classList.toggle("rxw-empty", !el.textContent.trim() && !el.querySelector("img"));
       const inner = el.querySelector(".rx-area-in, .rx-line-in");
       if (!inner) return;
       const over = inner.classList.contains("rx-area-in") ? inner.offsetHeight > el.clientHeight + 1 : inner.scrollWidth > el.clientWidth + 1;
@@ -797,6 +1120,96 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
       Print a test page on plain paper and hold it over a script against the light to check it lines up.
       <button type="button" class="rxw-link-btn" data-act="test">Print a test page</button></div></div>`;
     renderSum(); renderSaved(); renderSteps();
+  }
+
+  /* ---- Signature: wet (pen), signed on screen, or my saved one ---- */
+  function renderSigning() {
+    const box = $("signing");
+    if (!box) return;
+    const opt = (k, ic, title, sub) => `<button type="button" role="radio" aria-checked="${st.signing === k}"
+      class="${st.signing === k ? "is-on" : ""}" data-sign="${k}"><span class="rxw-seg-ic">${ic}</span>
+      <span class="rxw-seg-t"><strong>${title}</strong><small>${sub}</small></span><span class="rxw-seg-dot"></span></button>`;
+    const img = sigData();
+    box.innerHTML = `<div class="rxw-group-h">Signature</div>
+      <div class="rxw-seg" role="radiogroup" aria-label="Signature">
+        ${opt("pen", IC.pen, "Wet signature", "Sign with a pen after printing")}
+        ${opt("pad", IC.pad, "Sign on screen", "Signature pad, stylus, finger or mouse")}
+        ${opt("saved", IC.user, "My saved signature", st.mySig ? "The one saved to your login" : "Not added yet. Add it once.")}
+      </div>
+      ${img ? `<div class="rxw-sigprev"><img alt="Signature" src="${esc(img)}"><div class="rxw-sig-acts">${st.signing === "pad"
+        ? '<button type="button" class="rxw-btn sm" data-act="sig-again">Sign again</button>'
+        : '<button type="button" class="rxw-btn sm" data-act="sig-change">Change</button><button type="button" class="rxw-btn sm" data-act="sig-remove">Remove</button>'}
+        </div></div>` : ""}
+      ${st.signing !== "pen" && !on("signature") ? '<div class="rxw-warn">The Signature box is turned off in <a href="#/prescriptions/layout">Set up the paper</a>, so it won\'t print.</div>' : ""}`;
+  }
+  async function saveMySig(data) {
+    try {
+      const res = await callApi({ action: "rx", op: "sigSave", data });
+      if (!res || res.ok === false || res.problem) { showToast((res && res.problem) || "Couldn't save your signature. Try again."); return false; }
+      st.mySig = data;
+      showToast("Your signature is saved to your login");
+      return true;
+    } catch (err) {
+      console.error("Signature not saved:", err);
+      showToast("Couldn't save your signature. Check your connection.");
+      return false;
+    }
+  }
+  let padOpen = false;
+  async function pad(opts) {
+    if (padOpen) return null;
+    padOpen = true;
+    try { return await openSignPad(opts); } finally { padOpen = false; }
+  }
+  async function chooseSign(mode) {
+    if (mode === "pen") st.signing = "pen";
+    else if (mode === "pad") {
+      if (!st.padSig) {
+        const r = await pad();
+        if (!r) return;
+        st.padSig = r.data;
+        if (r.saveMine) await saveMySig(r.data);
+      }
+      st.signing = "pad";
+    } else if (mode === "saved") {
+      if (!st.mySig) {
+        const r = await pad({ mustSave: true });
+        if (!r || !(await saveMySig(r.data))) return;
+      }
+      st.signing = "saved";
+    }
+    if (!root.isConnected) return;
+    renderSigning(); draw();
+  }
+  async function padAgain() {
+    const r = await pad();
+    if (!r) return;
+    st.padSig = r.data;
+    st.signing = "pad";
+    if (r.saveMine) await saveMySig(r.data);
+    renderSigning(); draw();
+  }
+  async function changeMySig() {
+    const r = await pad({ mustSave: true });
+    if (!r || !(await saveMySig(r.data))) return;
+    st.signing = "saved";
+    renderSigning(); draw();
+  }
+  async function removeMySig() {
+    if (!(await confirmDialog({ title: "Remove your saved signature?",
+      message: "It's deleted from your login. Scripts already printed aren't affected.", confirmLabel: "Remove", tone: "warning" }))) return;
+    try {
+      const res = await callApi({ action: "rx", op: "sigDelete" });
+      if (!res || res.ok === false || res.problem) { showToast((res && res.problem) || "Couldn't remove it. Try again."); return; }
+    } catch (err) {
+      console.error("Signature not removed:", err);
+      showToast("Couldn't remove it. Check your connection.");
+      return;
+    }
+    st.mySig = "";
+    if (st.signing === "saved") st.signing = "pen";
+    showToast("Your saved signature is removed");
+    renderSigning(); draw();
   }
 
   /* ---- Save, then print ---- */
@@ -816,6 +1229,10 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
       return;
     }
     if (!st.date || st.date > todayKey()) { showToast("Choose the date (it can't be in the future)."); return; }
+    if (st.signing !== "pen") {
+      if (!on("signature")) { showToast("Turn on the Signature box in Set up the paper, or choose Wet signature."); return; }
+      if (!sigData()) { await chooseSign(st.signing); if (!sigData()) return; }
+    }
 
     if (sig() !== st.savedSig) {
       const typed = named.filter((i) => i.custom).map(itemName).filter((n) => !st.okTyped.has(n));
@@ -951,6 +1368,8 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
     if (nb) { handleNudge(nb, root); return; }
     const pk = t.closest("[data-pick]");
     if (pk) { pick(pk.dataset.pick); return; }
+    const sg = t.closest("[data-sign]");
+    if (sg) { chooseSign(sg.dataset.sign); return; }
     const go = t.closest("[data-goto]");
     if (go) { root.querySelector(`[data-step="${go.dataset.goto}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" }); return; }
     const a = t.closest("[data-act]");
@@ -978,11 +1397,15 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
       if (inp) inp.value = a.dataset.t;
       draw();
     }
+    else if (act === "sig-again") padAgain();
+    else if (act === "sig-change") changeMySig();
+    else if (act === "sig-remove") removeMySig();
     else if (act === "print") doPrint(a);
     else if (act === "test") { printTest(L); draw(); }
   });
   const onKey = (e) => {
     if (!root.isConnected) { document.removeEventListener("keydown", onKey); return; }
+    if (document.querySelector("dialog.rxw-dlg[open]")) return;   // signing: Ctrl+P waits
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "p") {
       e.preventDefault();
       doPrint($("printbtn"));
@@ -990,7 +1413,7 @@ async function mountWriter(container, { patientId = "", recordId = "", staff }) 
   };
   document.addEventListener("keydown", onKey);
 
-  renderPt(); renderDetails(); renderItems();
+  renderPt(); renderDetails(); renderItems(); renderSigning();
   new ResizeObserver(fit).observe(pv);
   fit(); draw();
   if (patientId && !rec) pick(patientId);   // from the patient's page: filled in straight away
@@ -1096,7 +1519,7 @@ async function mountLayout(container, { staff }) {
   function fldHtml(d) {
     const f = L.fields[d.key];
     const g = geom(d, f);
-    const resizable = d.type === "text" || d.type === "area";
+    const resizable = d.type === "text" || d.type === "area" || d.type === "sig";
     return `<div class="rx-fld${f.on ? "" : " is-off"}${sel === d.key ? " is-sel" : ""}" data-key="${d.key}" style="${fieldStyle(d, f, L)}">
       <span class="rx-tag">${esc(d.label)}</span><div class="rx-c">${fieldInner(d, f, g, SAMPLE[d.key])}</div>
       ${resizable ? '<span class="rx-h" title="Drag to resize"></span>' : ""}</div>`;
@@ -1133,6 +1556,7 @@ async function mountLayout(container, { staff }) {
     let size = "";
     if (d.type === "text") size = row("Width", mmIn('data-p="w"', f.w, 0.5, "mm", 5));
     if (d.type === "area") size = row("Width", mmIn('data-p="w"', f.w, 0.5, "mm", 5)) + row("Height", mmIn('data-p="h"', f.h, 0.5, "mm", 4));
+    if (d.type === "sig") size = row("Width", mmIn('data-p="w"', f.w, 0.5, "mm", 10)) + row("Height", mmIn('data-p="h"', f.h, 0.5, "mm", 4));
     if (d.type === "tick") size = row("Box size", mmIn('data-p="box"', f.box, 0.5, "mm", 2));
     if (d.type === "boxes") {
       size = row("Width of each box", mmIn('data-p="pitch"', f.pitch, 0.1, "mm", 2)) +
@@ -1150,10 +1574,11 @@ async function mountLayout(container, { staff }) {
       </div>
       <div class="rx-mini">${size}</div>
       <div class="rx-mini">
-        ${d.type !== "tick" ? row("Text size", mmIn('data-p="size"', f.size, 0.5, "pt", 6)) : row("Mark size", mmIn('data-p="size"', f.size, 0.5, "pt", 6))}
+        ${d.type === "sig" ? "" : d.type !== "tick" ? row("Text size", mmIn('data-p="size"', f.size, 0.5, "pt", 6)) : row("Mark size", mmIn('data-p="size"', f.size, 0.5, "pt", 6))}
         ${d.type === "text" ? row("Line up", `<select data-p="align"><option value="left">Left</option><option value="center">Centre</option><option value="right">Right</option></select>`) : ""}
       </div>
-      ${d.type !== "tick" ? `<label class="rx-check"><input type="checkbox" data-p="bold" ${f.bold ? "checked" : ""}> Bold</label>` : ""}
+      ${d.type !== "tick" && d.type !== "sig" ? `<label class="rx-check"><input type="checkbox" data-p="bold" ${f.bold ? "checked" : ""}> Bold</label>` : ""}
+      ${d.type === "sig" ? '<p class="rx-note">The signature sits on the bottom-left of this box. Put the bottom edge on the signature line.</p>' : ""}
     </div>`;
   }
   function drawPanel() {
@@ -1239,7 +1664,7 @@ async function mountLayout(container, { staff }) {
       moved = true;
       if (resize) {
         f.w = clamp(r05(s.w + dx), 5, L.paper.w);
-        if (DEF[key].type === "area") f.h = clamp(r05(s.h + dy), 4, L.paper.h);
+        if (DEF[key].type === "area" || DEF[key].type === "sig") f.h = clamp(r05(s.h + dy), 4, L.paper.h);
       } else {
         f.x = clamp(r05(s.x + dx), 0, L.paper.w - 2);
         f.y = clamp(r05(s.y + dy), 0, L.paper.h - 2);
@@ -1410,9 +1835,9 @@ async function mountLayout(container, { staff }) {
 /* ===================== Styles ===================== */
 
 function injectStyles() {
-  if (document.getElementById("rx-styles")) return;
+  if (document.getElementById("rx-styles-2")) return;
   const s = document.createElement("style");
-  s.id = "rx-styles";
+  s.id = "rx-styles-2";
   s.textContent = `
 .rx{--acc:#0f766e;--acc2:#14b8a6;--line:#e5e7eb;--soft:#f8fafc;--ink:#0f172a;--mut:#64748b}
 .rx-back{display:inline-flex;align-items:center;gap:6px;color:var(--mut);text-decoration:none;font-size:13px;margin-bottom:4px}
@@ -1530,6 +1955,7 @@ function injectStyles() {
 .rx-bgrow img{width:64px;height:86px;object-fit:cover;border-radius:6px;border:1px solid var(--line)}
 .rx-bgrow div{display:flex;gap:6px;flex-wrap:wrap}
 .rx input[type=range]{accent-color:var(--acc);width:100%}
+.rx [hidden]{display:none!important}
 `;
   document.head.appendChild(s);
 }

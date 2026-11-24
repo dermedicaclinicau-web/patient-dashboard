@@ -53,7 +53,7 @@ import { openSspBuilder } from "./ssp-edit.js";
 const DOC_ACTIONS = [
   ["Consent record", "consent"],
   ["Treatment record", "treatment"],
-  ["Prescription", "rx"], ["Create Script", "rx", "rx-write"],
+  ["Prescription", "rx"], ["Create Script", "script", "rx-write"],
   ["Skin script (SSP)", "ssp", "create-ssp"],
   ["General note", "note"],
   ["Personal note", "lock", "add-note"],
@@ -169,6 +169,7 @@ const ICONS = {
   treatment: svg(FILE + '<line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/>'),
   rx: svg('<path d="M10.5 20.5 3.5 13.5a5 5 0 0 1 7-7l7 7a5 5 0 0 1-7 7z"/><line x1="8.5" y1="8.5" x2="15.5" y2="15.5"/>'),
   ssp: svg('<path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>'),
+  script: svg(FILE + '<path d="M9 12h2.5a1.5 1.5 0 0 1 0 3H9v-3zm0 3v3m2.2-3 2.6 3"/>'),
   summary: svg('<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="13" y2="16"/>'),
   note: svg('<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>'),
   lock: svg('<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>'),
@@ -848,7 +849,8 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
         if (!(r.date instanceof Date) || isNaN(r.date)) return;
         list.push({
           dateKey: toDateKey(r.date), kind: "rx",
-          href: /^https:\/\//i.test(r.link || "") ? r.link : "",
+          href: r.written && can("rx.write") ? `#/prescriptions/view/${encodeURIComponent(r.written)}`
+            : /^https:\/\//i.test(r.link || "") ? r.link : "",
           label: [r.title, r.staff && `by ${r.staff}`].filter(Boolean).join(" · "),
         });
       });
