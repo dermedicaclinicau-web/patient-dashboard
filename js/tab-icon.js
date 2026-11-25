@@ -49,8 +49,10 @@ export const TAB_RECORD_KINDS = [
     sample: { patient: "Jane Smith", form: "Anti-wrinkle treatment" }, def: { icon: "letters", text: "TxR", bg: "#F97316", bg2: "#C2410C", title: "TxR · {Patient}" } },
   { key: "consent", label: "Consent", desc: "A consent form opened in its own tab", vars: ["Patient", "Form"],
     sample: { patient: "Jane Smith", form: "Filler consent" }, def: { icon: "letters", text: "C", bg: "#7C3AED", bg2: "", title: "Consent · {Patient}" } },
-  { key: "rx", label: "Prescription", desc: "A prescription opened in its own tab", vars: ["Patient", "Form"],
+  { key: "rx", label: "Prescription form", desc: "A prescription form (Form Builder) opened in its own tab", vars: ["Patient", "Form"],
     sample: { patient: "Jane Smith", form: "Prescription" }, def: { icon: "letters", text: "Rx", bg: "#DB2777", bg2: "", title: "Rx · {Patient}" } },
+  { key: "rxWrite", label: "Product prescription", desc: "Writing a prescription, or a saved one opened to print again", vars: ["Patient"],
+    sample: { patient: "Jane Smith" }, def: { icon: "letters", text: "Rx", bg: "#14B8A6", bg2: "#0F766E", title: "Rx · {Patient}" } },
   { key: "ssp", label: "Skin Script", desc: "The Skin Script builder", vars: ["Patient"],
     sample: { patient: "Jane Smith" }, def: { icon: "drop", text: "", bg: "#E11D48", bg2: "", title: "Skin Script · {Patient}" } },
   // The Consultation tab, and notes opened in their own tab (the standard: the dots and names the portal has always used)
@@ -77,7 +79,7 @@ const REC_LABEL = { tx: "TxR", consent: "Consent", rx: "Rx", ssp: "Skin Script" 
 const MENU_BG = { calendar: "#DC2626" };
 const TEAL = "#0F766E";
 const HEX = /^#[0-9a-f]{6}$/i;
-const KEY_OK = /^(menu:[a-z0-9-]{1,40}|patient|tx|consent|rx|ssp|consult|rec|recPaused|writing|attention|ready|notesDraft|notesReviewed)$/;
+const KEY_OK = /^(menu:[a-z0-9-]{1,40}|patient|tx|consent|rx|rxWrite|ssp|consult|rec|recPaused|writing|attention|ready|notesDraft|notesReviewed)$/;
 
 // The standard look of a kind of tab
 export function tabDefault(key) {
@@ -526,6 +528,16 @@ export function setSspTab(patientName) {
   const who = patientName || "Patient";
   setTabTitle(fillTabTitle(tabSpecOf("ssp").title, { patient: who }, `Skin Script · ${who}`));
   lastCall = () => setSspTab(patientName);
+}
+// The Prescription page, as set in Settings (standard: Rx on teal, and "Rx · Jane Smith").
+// who: the patient ("New prescription" before one is chosen). page: a name of its own (Set up the paper).
+export function setRxTab(who = "", page = "") {
+  lastCall = () => setRxTab(who, page);
+  asked = "";
+  const s = tabSpecOf("rxWrite");
+  setTabTitle(page || fillTabTitle(s.title, { patient: who }, who || "Prescription"));
+  try { show(tabIconKey(s), tabIconUrl(s)); }
+  catch (err) { shown = ""; console.warn("Prescription tab icon not set:", err); }
 }
 // #/form-record/<id>: the saved record's tab
 export async function labelFormRecordTab(id) {

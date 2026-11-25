@@ -12,6 +12,9 @@ import { escapeHtml as esc, showToast } from "./utils.js";
 import { confirmDialog } from "./dialog.js";
 import { can } from "./perms.js";
 import { rxProductList, addRxProducts } from "./rx-products.js";
+// The browser tab's icon and name (System configuration → Browser tabs). Imported as a whole, so a computer still
+// holding the old tab-icon.js opens this page normally (with the old tab) until it gets the latest version.
+import * as tabs from "./tab-icon.js";
 
 const PX = 96 / 25.4;                       // screen px per mm
 const PAPERS = { A4: [210, 297], A5: [148, 210], Letter: [216, 279] };
@@ -1028,6 +1031,7 @@ function openSignPad({ mustSave = false } = {}) {
 
 async function mountWriter(container, { patientId = "", recordId = "", copyOf = false, staff }) {
   injectWriterStyles();
+  tabs.setRxTab?.(recordId ? "Prescription" : "New prescription");
   const root = document.createElement("section");
   root.className = "page wide rx rxw";
   root.innerHTML = '<div class="rxw-wrap"><div class="skeleton sm"></div></div>';
@@ -1117,6 +1121,7 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
   const back = rec ? `#/patient/${encodeURIComponent(rec.patientId)}`
     : patientId ? `#/patient/${encodeURIComponent(patientId)}` : "#/tasks/new";
   const showBg = () => !!bg && store.get(BGSHOW_KEY, true);
+  const rxTab = () => tabs.setRxTab?.(st.patient ? cleanName(st.patient.name) : "New prescription");
 
   root.innerHTML = `<div class="rxw-wrap">
     <a class="rxw-back" href="${back}">← ${rec || patientId ? "Back to the patient" : "Back to Task Manager"}</a>
@@ -1212,7 +1217,7 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
     Object.assign(st.v, { name: cleanName(p.name), address1: a.line1,
       address2: on("postcode") ? a.line2 : [a.line2, a.postcode].filter(Boolean).join(" "), postcode: a.postcode,
       medicare: String(p.medicare || "").replace(/\D/g, "").slice(0, 10), ref: String(p.irn || "").replace(/\D/g, "").slice(0, 1) });
-    renderPt(); renderDetails(); draw();
+    renderPt(); renderDetails(); draw(); rxTab();
   }
   async function pick(id) {
     const box = $("results");
@@ -1728,7 +1733,7 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
     const a = t.closest("[data-act]");
     if (!a) return;
     const act = a.dataset.act;
-    if (act === "change-pt") { st.patient = null; renderPt(); renderDetails(); draw(); }
+    if (act === "change-pt") { st.patient = null; renderPt(); renderDetails(); draw(); rxTab(); }
     else if (act === "add-item") {
       st.items.push(blankItem(!products.length));
       renderItems(); draw();
@@ -1775,6 +1780,7 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
   renderPt(); renderDetails(); renderItems(); renderSigning();
   new ResizeObserver(fit).observe(pv);
   fit(); draw();
+  rxTab();
   if (patientId && !rec) pick(patientId);   // from the patient's page: filled in straight away
 }
 
@@ -1798,6 +1804,7 @@ async function compressImage(file) {
 }
 
 async function mountLayout(container, { staff }) {
+  tabs.setRxTab?.("", "Set up the script paper");
   const root = document.createElement("section");
   root.className = "page wide rx";
   root.innerHTML = '<div class="skeleton sm"></div>';
