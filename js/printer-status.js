@@ -102,7 +102,7 @@ function psStyles() {
   st.id = 'ps-styles-2';
   st.textContent = `
     .ps-pill { display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border:1px solid #e2e8f0;
-      border-radius:999px; background:#fff; font:500 12px/1.4 inherit; color:#334155; cursor:pointer;
+      border-radius:999px; background:#fff; font-family:inherit; font-size:12px; font-weight:500; line-height:1.4; color:#334155; cursor:pointer;
       white-space:nowrap; vertical-align:middle; }
     .ps-pill:hover { background:#f8fafc; }
     .ps-compact { padding:2px 8px; font-size:11px; gap:5px; margin-left:6px; }
