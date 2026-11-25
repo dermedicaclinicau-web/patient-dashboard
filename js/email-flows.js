@@ -106,7 +106,8 @@ const TODO_TO = [["sender", "Whoever sent the task"], ["staff", "Chosen staff"],
 const DUE_DAYS = [[0, "Today"], [1, "Tomorrow"], [2, "In 2 days"], [3, "In 3 days"], [7, "In a week"]];
 const REPLY_PATHS = (s) => (s.type === "branch" || s.type === "reply");
 const SCOPES = [["any", "Any product"], ["catalogue", "Only Skin Script catalogue products"], ["list", "Only these products"]];
-const VISIT_SCOPES = [["any", "Any visit"], ["some", "Only visits for these services"]];
+const VISIT_SCOPES = [["any", "Any visit"], ["some", "Only visits for these services"],
+  ["except", "All visits except these services"]];
 const REPEATS = [[0, "Once only"], [30, "Again after 30 days"], [60, "Again after 60 days"], [90, "Again after 90 days"],
   [180, "Again after 180 days"], [365, "Again after a year"]];
 const DAILY_MAX = [[10, "10"], [25, "25"], [50, "50"], [100, "100"], [200, "200"]];
@@ -350,6 +351,7 @@ function flowProblems(flow, tasks) {
   if (!flow.name.trim()) out.push("Give the flow a name.");
   if (t.event === "purchase" && t.scope === "list" && !t.products.length) out.push("Choose at least one product for the trigger, or pick Any product.");
   if (t.event === "visit" && t.serviceScope === "some" && !t.services.length) out.push("Choose at least one service for the trigger, or pick Any visit.");
+  if (t.event === "visit" && t.serviceScope === "except" && !t.services.length) out.push("Choose at least one service to leave out, or pick Any visit.");
   if (t.event === "task" && !t.taskIds.length) out.push("Choose which task starts the flow.");
   if (t.event === "form" && !t.formIds.length) out.push("Choose which form starts the flow.");
   if (t.event === "missed" && !t.missKinds.length) out.push("Choose cancelled, didn't come, or both.");
@@ -1061,7 +1063,8 @@ async function mountFlowEditor(container, { id, staff }) {
     const rules = r ? ` · ${r} rule${r === 1 ? "" : "s"}` : "";
     if (t.event === "visit") {
       const n = t.services.length;
-      return "A patient has been in" + (t.serviceScope === "some" ? ` (${n} service${n === 1 ? "" : "s"})` : "") + rules;
+      return "A patient has been in" + (t.serviceScope === "some" ? ` (${n} service${n === 1 ? "" : "s"})`
+        : t.serviceScope === "except" ? ` (not ${n} service${n === 1 ? "" : "s"})` : "") + rules;
     }
     if (t.event === "task") {
       const names = (taskTypes || []).filter((x) => t.taskIds.includes(x.id)).map((x) => x.name);
@@ -1499,8 +1502,10 @@ async function mountFlowEditor(container, { id, staff }) {
       return `
         <label class="tb-field"><span>Which visits</span>
           <select class="fb-select" data-f="trigger.serviceScope">${opt(VISIT_SCOPES, t.serviceScope)}</select></label>
-        ${t.serviceScope === "some" ? `<div class="tb-field"><span>Services</span><div class="fr-pp" data-role="trig-services"></div>
-          <small class="muted">A visit matches if any of its services contains one of these, so "Peel" matches "DermaGlow Peel".</small></div>` : ""}
+        ${t.serviceScope === "some" || t.serviceScope === "except" ? `<div class="tb-field"><span>${t.serviceScope === "except" ? "Services to leave out" : "Services"}</span><div class="fr-pp" data-role="trig-services"></div>
+          <small class="muted">${t.serviceScope === "except"
+            ? "A visit is left out only if every service at it contains one of these, so leaving out “Review” still includes “WR Forehead + Review”."
+            : "A visit matches if any of its services contains one of these, so \"Peel\" matches \"DermaGlow Peel\"."}</small></div>` : ""}
         <div class="tb-field"><span>Only start for patients who… <small>(optional)</small></span><div data-role="trig-rules"></div></div>
         <p class="tb-info">Checked each morning after the appointment sync, for the day before. Cancelled and DNA appointments don't count.
           Each visit starts the flow once.</p>`;
@@ -1939,7 +1944,7 @@ async function mountFlowEditor(container, { id, staff }) {
       if (el.dataset.f === "trigger.event") {
         matchData = null; buyData = null;
         if (el.value === "missed") { flow.stop.booking = true; flow.trigger.again = "ignore"; }
-        else if (flow.trigger.serviceScope === "except") flow.trigger.serviceScope = "any";
+        else if (el.value !== "visit" && flow.trigger.serviceScope === "except") flow.trigger.serviceScope = "any";
       }
       renderCanvas();
       changed();
