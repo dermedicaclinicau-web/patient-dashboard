@@ -154,9 +154,9 @@ function medsHtml(list, f) {
     const dose = String(m.dose || "").trim();
     const qty = String(m.qty || "").trim();
     const r = rep(m.rep);
+    const ing = String(m.ing || "").split("\n").map((s) => s.trim()).filter(Boolean);   // a compound: one ingredient a line, instead of its name
     return `<div style="line-height:1.35">
-      <div>${esc(name)}${dose ? ` ${esc(dose)}` : ""}</div>
-      ${String(m.ing || "").trim() ? `<div>${esc(m.ing)}</div>` : ""}
+      ${ing.length ? ing.map((s) => `<div>${esc(s)}</div>`).join("") : `<div>${esc(name)}${dose ? ` ${esc(dose)}` : ""}</div>`}
       ${String(m.dir || "").trim() ? `<div>${esc(m.dir)}</div>` : ""}
       ${qty || r ? `<div style="display:flex;justify-content:space-between;gap:3mm"><span>${qty ? `Qty: ${esc(qty)}` : ""}</span><span>${esc(r)}</span></div>` : ""}
     </div>`;
@@ -301,9 +301,8 @@ function pdfMeds(doc, list, f, x, y, w, size) {
     if (i) rule();
     const dose = String(m.dose || "").trim();
     const name = (f.upper ? String(m.name).toUpperCase() : String(m.name)) + (dose ? ` ${dose}` : "");
-    doc.splitTextToSize(name, w).forEach((s) => { put(s); yy += lh; });
-    const ing = String(m.ing || "").trim();
-    if (ing) doc.splitTextToSize(ing, w).forEach((s) => { put(s); yy += lh; });
+    const ing = String(m.ing || "").split("\n").map((s) => s.trim()).filter(Boolean);   // a compound: one ingredient a line, instead of its name
+    (ing.length ? ing : [name]).forEach((line) => doc.splitTextToSize(line, w).forEach((s) => { put(s); yy += lh; }));
     const dir = String(m.dir || "").trim();
     if (dir) doc.splitTextToSize(dir, w).forEach((s) => { put(s); yy += lh; });
     const qty = String(m.qty || "").trim(), r = repText(m.rep);
@@ -495,8 +494,8 @@ const ckey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 const compoundOf = (i) => (i && !i.custom && i.ings ? COMPOUNDS[ckey(i.product)] || null : null);
 const blankIngs = (product) => { const l = COMPOUNDS[ckey(product)]; return l ? Object.fromEntries(l.map((n) => [n, ""])) : null; };
 // "Hydroquinone 4%, Kojic acid 2%" (an ingredient left blank is left off the script)
-const ingText = (i) => (compoundOf(i) || []).map((n) => { const v = String(i.ings[n] || "").trim(); return v ? `${n} ${v}` : ""; })
-  .filter(Boolean).join(", ");
+const ingText = (i, sep = ", ") => (compoundOf(i) || []).map((n) => { const v = String(i.ings[n] || "").trim(); return v ? `${n} ${v}` : ""; })
+  .filter(Boolean).join(sep);
 // A saved one opened again: each strength back in its box. null if it was written another way (e.g. scanned "4% HQ")
 function parseIngs(product, text) {
   const l = COMPOUNDS[ckey(product)];
@@ -1097,7 +1096,7 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
   const sigData = () => (st.signing === "pad" ? st.padSig : st.signing === "saved" ? st.mySig : "");
   const values = () => ({ ...st.v, ...drVals, date: fmtDate(st.date), signature: sigData() || "",
     items: st.items.filter((i) => itemName(i)).map((i) => ({ name: itemName(i),
-      dose: compoundOf(i) ? "" : String(i.strength || "").trim(), ing: compoundOf(i) ? ingText(i) : "",
+      dose: compoundOf(i) ? "" : String(i.strength || "").trim(), ing: compoundOf(i) ? ingText(i, "\n") : "",
       dir: String(i.directions || "").trim(), qty: String(i.qty || "").trim(), rep: String(i.repeats ?? "").trim() })) });
   const payload = () => ({
     patientId: st.patient ? st.patient.id : "", date: st.date,
