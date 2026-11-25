@@ -43,6 +43,7 @@ const I = {
   userPlus: svg('<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/>'),
   reply: svg('<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>'),
   chevR: svg('<polyline points="9 18 15 12 9 6"/>'),
+  refresh: svg('<polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>'),
 };
 
 // The emoji panel in the message box
@@ -129,6 +130,12 @@ function presText(u) {
   if (p.status === "online") return `Online now${ON_DEVICE[p.device] ? ` · on ${ON_DEVICE[p.device]}` : ""}`;
   if (p.status === "away") return "Away";
   return p.lastAt ? `Last seen ${seenWhen(p.lastAt)}` : "";
+}
+// Admins: "Older version · loaded today 9:12 am"
+function oldText(u) {
+  const p = presOf(u);
+  if (!p.old) return "";
+  return `Older version${p.loaded ? ` · loaded ${seenWhen(p.loaded)}` : ""}${p.oldTabs > 1 ? ` · ${p.oldTabs} tabs` : ""}`;
 }
 const presDot = (u) => {
   const s = presOf(u).status;
@@ -739,7 +746,7 @@ function updatePresSub() {
   const u = faceOf(current);
   const el = panel.querySelector('[data-role="presub"]');
   if (el) {
-    el.textContent = u ? presText(u) : "";
+    el.textContent = u ? [presText(u), admin ? oldText(u) : ""].filter(Boolean).join(" · ") : "";
     el.classList.toggle("is-online", presOf(u).status === "online");
   }
   const av = panel.querySelector(".ch-hd > .ch-avw, .ch-hd > .ch-av");
@@ -904,13 +911,42 @@ function hereHtml() {
   const rank = (s) => (presOf(s.id).status === "online" ? 0 : 1);
   const here = staffList.filter((s) => String(s.id) !== me.uid && presOf(s.id).status !== "offline")
     .sort((a, b) => rank(a) - rank(b) || String(a.name || "").localeCompare(String(b.name || "")));
+  const isOld = (s) => admin && presOf(s.id).old;
+  const old = here.filter(isOld);
+  const first = (s) => String(s.name || "").split(/\s+/)[0];
+  const tip = (s) => [s.name, presText(s.id), isOld(s) ? oldText(s.id) : ""].filter(Boolean).join(" · ");
   return `<div class="ch-online">
     <p class="ch-sec">On the portal now${here.length ? ` (${here.length})` : ""}</p>
     ${here.length ? `<div class="ch-online-row">${here.map((s) => `
-      <button type="button" class="ch-online-p" data-dm="${esc(s.id)}" title="${esc(`${s.name} · ${presText(s.id)}`)}">
-        ${avatar(s.name, "", s.id)}<span class="ch-online-n">${esc(String(s.name || "").split(/\s+/)[0])}</span></button>`).join("")}</div>`
+      <button type="button" class="ch-online-p${isOld(s) ? " is-old" : ""}" data-dm="${esc(s.id)}" title="${esc(tip(s))}">
+        ${avatar(s.name, "", s.id)}${isOld(s) ? '<span class="ch-oldv" aria-label="Older version">↻</span>' : ""}
+        <span class="ch-online-n">${esc(first(s))}</span></button>`).join("")}</div>`
       : '<p class="ch-none">No one else is on the portal right now.</p>'}
+    ${old.length ? `<div class="ch-oldbar"><span>↻ <b>${old.length}</b> on an older version: ${esc(old.map(first).join(", "))}</span>
+      <button type="button" class="rc-link" data-act="refreshold">${old.length === 1 ? "Refresh their portal" : "Refresh them"}</button></div>` : ""}
   </div>`;
+}
+
+// Admins: refresh some people's portals. Each waits until they've finished recording, a form or typing.
+async function refreshPeople(people) {
+  if (!people.length) return;
+  const names = people.map((s) => s.name || "Staff");
+  const ok = await confirmDialog({
+    title: people.length === 1 ? `Refresh ${names[0]}'s portal?` : `Refresh ${people.length} people's portals?`,
+    message: `${people.length === 1 ? "" : `${names.join(", ")}.\n\n`}Their portal gets the latest version. It waits until `
+      + "they've finished recording, handing a form to a patient or typing, then shows a 15-second countdown.",
+    confirmLabel: "Refresh",
+  });
+  if (!ok) return;
+  try {
+    await requestRefresh(me, people.map((s) => String(s.id)));
+    showToast(people.length === 1 ? `Sent. ${names[0]}'s portal will refresh shortly.` : "Sent. Their portals will refresh shortly.");
+  } catch (err) {
+    console.error("Refresh request failed:", err);
+    showToast(err && err.code === "permission-denied"
+      ? "Couldn't send. Check the app_settings Firestore rule lets admins write."
+      : "Couldn't send. Try again.");
+  }
 }
 
 function drawList() {
@@ -983,6 +1019,7 @@ function openThread(id) {
       <div class="ch-menu" data-role="more" hidden>
         <button type="button" data-act="cmute">${muteOn ? I.bell : I.bellOff}<span>${muteOn ? "Unmute this chat" : "Mute this chat"}</span></button>
         <button type="button" data-act="search">${I.search}<span>Search this chat</span></button>
+        ${admin && c.kind === "dm" && isMember ? `<button type="button" data-act="refreshone">${I.refresh}<span>Refresh their portal</span></button>` : ""}
         ${canHide ? `<hr /><button type="button" class="is-danger" data-act="hide">${I.trash}<span>Remove from my list</span></button>` : ""}
       </div></span>`;
   panel.innerHTML = `${head(`${avatar(titleOf(c), kindOf(c), faceOf(c))}<span class="ch-hd-t"><strong>${esc(titleOf(c))}</strong>${sub}</span>`, {
@@ -1712,6 +1749,17 @@ async function onClick(e) {
           ? "Couldn't send. Check the app_settings Firestore rule lets admins write."
           : "Couldn't send. Try again.");
       }
+      break;
+    }
+    case "refreshold":
+      refreshPeople((staffList || []).filter((s) => String(s.id) !== me.uid
+        && presOf(s.id).status !== "offline" && presOf(s.id).old));
+      break;
+    case "refreshone": {
+      closeMenus();
+      const u = current ? faceOf(current) : "";
+      const s = u && staffById.get(String(u));
+      if (s) refreshPeople([s]);
       break;
     }
     case "awayset": drawAway(); break;

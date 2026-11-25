@@ -1,5 +1,6 @@
 // Tells open portals when a new version has been deployed (version.json, written by deploy.ps1).
 import { freshReload } from "./fresh-reload.js";
+import { setAppVersion } from "./presence.js";
 const CHECK_EVERY = 5 * 60 * 1000;
 const CDN_WAIT = 11 * 60 * 1000;   // GitHub Pages can hand out the old files for up to 10 minutes after a deploy
 let loaded = null;     // the version this page started with
@@ -59,7 +60,7 @@ async function check(force = false) {
   let v = null;
   try { v = await fetchVersion(); } catch { return; }
   if (!v || !v.version) return;
-  if (!loaded) { loaded = v.version; return; }
+  if (!loaded) { loaded = v.version; setAppVersion(loaded, false); return; }
   if (v.version === loaded || banner) return;
 
   if (seen.version !== v.version) seen = { version: v.version, at: Date.now() };
@@ -72,6 +73,7 @@ async function check(force = false) {
     return;
   }
 
+  setAppVersion(loaded, true);   // Admins see this person is behind (Chat → On the portal now)
   if (autoReload()) { refreshNow(v, true); return; }  // e.g. on the login screen: nothing to lose
   showBanner(v);
 }

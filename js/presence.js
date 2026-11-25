@@ -13,6 +13,8 @@ const TICK = 30 * 1000;
 const MAX_TABS = 25;                   // the Firestore rule allows 30: stay well under it
 const ACT = ["pointerdown", "keydown", "wheel", "touchstart", "mousemove"];
 const toMs = (v) => (v && typeof v.toMillis === "function" ? v.toMillis() : 0);
+const LOADED = Date.now();             // when this tab loaded the portal (a refresh starts it again)
+let appVer = { v: "", old: false };    // this tab's version, and whether a newer one is out (set by updates.js)
 
 // One id per tab (kept through a refresh)
 const tabId = (() => {
@@ -69,7 +71,7 @@ function write(next, retried = false) {
   lastWrite = Date.now();
   setDoc(doc(db, "presence", me.uid), {
     name: String(me.name || "").slice(0, 120),
-    devices: { [tabId]: { state: next, at: serverTimestamp(), device: deviceName() } },
+    devices: { [tabId]: { state: next, at: serverTimestamp(), device: deviceName(), v: appVer.v, old: appVer.old, loaded: LOADED } },
     updatedAt: serverTimestamp(),
   }, { merge: true }).catch((err) => {
     if (err && err.code === "permission-denied" && !retried) {
@@ -112,6 +114,14 @@ function onShow() {
 }
 const onLeave = () => removeTab();
 
+// updates.js says which version this tab is on, and whether a newer one has been published. Saved straight away.
+export function setAppVersion(v, old) {
+  const next = { v: String(v || "").slice(0, 40), old: old === true };
+  if (next.v === appVer.v && next.old === appVer.old) return;
+  appVer = next;
+  if (me) write(state || wanted());
+}
+
 export function startPresence(staff) {
   if (!staff || !staff.uid) return;
   if (me && me.uid === staff.uid) { me = staff; return; }
@@ -146,13 +156,19 @@ export function stopPresence() {
 export function summarise(x, now = Date.now() + skew) {
   const tabs = Object.values((x && x.devices) || {}).map((t) => ({
     state: String((t && t.state) || ""), at: toMs(t && t.at), device: String((t && t.device) || ""),
+    // Behind: updates.js says so, or the tab is still on code from before this check (it sends no "loaded")
+    old: !!t && (t.old === true || !t.loaded), loaded: Number(t && t.loaded) || 0,
   }));
   const lastAt = tabs.reduce((m, t) => Math.max(m, t.at), toMs(x && x.updatedAt));
   const live = tabs.filter((t) => t.at && t.state !== "offline" && now - t.at < STALE).sort((a, b) => b.at - a.at);
+  // Older version: any of their open tabs is behind (loaded = when the oldest of those was opened)
+  const oldTabs = live.filter((t) => t.old);
+  const ver = { old: oldTabs.length > 0, oldTabs: oldTabs.length,
+    loaded: oldTabs.reduce((m, t) => (t.loaded && (!m || t.loaded < m) ? t.loaded : m), 0) };
   const act = live.find((t) => t.state === "active");
-  if (act) return { status: "online", device: act.device, lastAt };
-  if (live.length) return { status: "away", device: live[0].device, lastAt };
-  return { status: "offline", device: "", lastAt };
+  if (act) return { status: "online", device: act.device, lastAt, ...ver };
+  if (live.length) return { status: "away", device: live[0].device, lastAt, ...ver };
+  return { status: "offline", device: "", lastAt, old: false, oldTabs: 0, loaded: 0 };
 }
 
 // My closed and silent tabs are removed (at most every 10 minutes, and only once there are a few)
@@ -173,7 +189,7 @@ export function watchPresence(onChange, onError = () => {}) {
   let sig = "";
   const emit = () => {
     const map = new Map(docs.map((d) => [d.id, summarise(d.data)]));
-    const s = [...map].map(([u, p]) => `${u}:${p.status}:${p.device}:${p.status === "offline" ? Math.floor(p.lastAt / 60000) : ""}`).join("|");
+    const s = [...map].map(([u, p]) => `${u}:${p.status}:${p.device}:${p.status === "offline" ? Math.floor(p.lastAt / 60000) : ""}:${p.oldTabs || 0}`).join("|");
     if (s === sig) return;
     sig = s;
     onChange(map);

@@ -131,6 +131,9 @@ onAuthStateChanged(auth, (u) => {
     if (first) { first = false; seenId = id; return; }
     if (!id || id === seenId) return;
     seenId = id;
+    // Sent to some people only (Chat → Refresh their portal): everyone else ignores it
+    const uids = Array.isArray(x.uids) ? x.uids.map(String) : [];
+    if (uids.length && !uids.includes(u.uid)) return;
     pending = { id, by: String(x.by || "") };
     countdown = null;
     snoozes = 0;
@@ -142,10 +145,12 @@ onAuthStateChanged(auth, (u) => {
 });
 
 /* ---------- Admins: ask everyone to refresh ---------- */
-export async function requestRefresh(staff) {
+// uids: only these people's portals (empty: everyone's)
+export async function requestRefresh(staff, uids = []) {
   const id = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
   seenId = id;   // not this tab: you've just pushed, refresh yourself with Ctrl+Shift+R
   await setDoc(doc(db, "app_settings", "refresh"), {
     id, at: serverTimestamp(), by: String((staff && staff.name) || "").slice(0, 120),
+    uids: (Array.isArray(uids) ? uids : []).map(String).filter(Boolean).slice(0, 40),
   });
 }
