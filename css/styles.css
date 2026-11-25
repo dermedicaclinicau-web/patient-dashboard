@@ -14914,3 +14914,31 @@ a.sds-btn { display: inline-flex; align-items: center; text-decoration: none; }
   background: #fffbeb; color: #92400e; font-size: 12.5px; line-height: 1.4;
 }
 .ch-oldbar .rc-link { white-space: nowrap; }
+
+/* Marking sets on a form (the strip layout): bigger, easier to tap */
+.is-drawing .an-marks.is-strip .an-setname { font-size: 15px; }
+.is-drawing .an-marks.is-strip .an-setname small,
+.is-drawing .an-marks.is-strip .an-setfig { font-size: 15px; }
+.is-drawing .an-marks.is-strip .an-vals { gap: 8px; flex-wrap: wrap; }
+.is-drawing .an-marks.is-strip .an-pick {
+  min-width: 52px; min-height: 52px; padding: 5px;
+  display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+}
+.is-drawing .an-marks.is-strip .an-pick svg { width: 40px; height: 40px; }
+.is-drawing .an-marks.is-strip .an-pick small { font-size: 12px; line-height: 1.2; }
+/* iPad and phone: a little bigger again */
+@media (pointer: coarse) {
+  .is-drawing .an-marks.is-strip .an-pick { min-width: 58px; min-height: 58px; }
+  .is-drawing .an-marks.is-strip .an-pick svg { width: 44px; height: 44px; }
+}
+
+/* Values on arrows and lines (Dot / Line) */
+.an-avals { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; padding: 8px 10px;
+  border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc; }
+.an-avals[hidden] { display: none; }
+.an-avals-l { font-size: 13px; font-weight: 600; color: #475569; margin-right: 4px; }
+.an-avals .an-aval { min-height: 40px; min-width: 56px; font-weight: 600; }
+.an-avals .an-aother { width: 90px; min-height: 40px; }
+/* Form Builder → Marking sets */
+.ms-arrow { margin-top: 10px; padding: 10px 12px; border: 1px dashed #cbd5e1; border-radius: 10px; display: grid; gap: 8px; }
+.ms-arrow .fe-help { margin: 0; }

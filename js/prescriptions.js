@@ -43,7 +43,7 @@ const FIELDS = [
   { key: "brand", label: "Brand substitution not permitted", type: "tick", def: { x: 43.3, y: 74.7, box: 7.3 } },
   { key: "items", label: "Medicines", type: "area", def: { x: 25, y: 84, w: 77, h: 54, size: 9, upper: true, count: true } },
   { key: "drSign", label: "Doctor's name and qualifications", type: "area", def: { x: 25, y: 139, w: 36, h: 7.5, size: 7.5 } },
-  { key: "signature", label: "Signature", type: "sig", def: { x: 62, y: 137, w: 38, h: 9 } },
+  { key: "signature", label: "Signature", type: "sig", def: { x: 62, y: 137, w: 38, h: 9, copy2: false } },   // left copy only
 ];
 
 const DEF = Object.fromEntries(FIELDS.map((d) => [d.key, d]));
@@ -192,6 +192,7 @@ function sheetHtml(L, vals, o = {}) {
   return (o.copies || copiesOf(L)).map((cx, ci) => FIELDS.map((d) => {
     const f = L.fields[d.key];
     if (!f || !f.on) return "";
+    if (num(cx) && f.copy2 === false) return "";   // this box only prints on the first copy
     const v = vals[d.key];
     if (!o.outlines && empty(v)) return "";
     const g = geom(d, f);
@@ -331,6 +332,7 @@ async function buildPdf(L, vals, o = {}) {
   copiesOf(L).forEach((cx) => FIELDS.forEach((d) => {
     const f = L.fields[d.key];
     if (!f || !f.on) return;
+    if (num(cx) && f.copy2 === false) return;   // first copy only (e.g. the signature)
     const v = vals[d.key];
     const x = num(f.x) + num(L.offset.x) + num(cx), y = num(f.y) + num(L.offset.y);
     const g = geom(d, f);
@@ -1909,6 +1911,7 @@ async function mountLayout(container, { staff }) {
       ${d.type !== "tick" && d.type !== "sig" ? `<label class="rx-check"><input type="checkbox" data-p="bold" ${f.bold ? "checked" : ""}> Bold</label>` : ""}
       ${sel === "items" ? `<label class="rx-check"><input type="checkbox" data-p="upper" ${f.upper ? "checked" : ""}> Medicine names in capitals</label>
         <label class="rx-check"><input type="checkbox" data-p="count" ${f.count !== false ? "checked" : ""}> Number of items at the end</label>` : ""}
+      ${L.copy && L.copy.on ? `<label class="rx-check"><input type="checkbox" data-p="copy2" ${f.copy2 !== false ? "checked" : ""}> Also on the second copy</label>` : ""}
       ${d.type === "sig" ? '<p class="rx-note">The signature sits on the bottom-left of this box. Put the bottom edge on the signature line.</p>' : ""}
     </div>`;
   }

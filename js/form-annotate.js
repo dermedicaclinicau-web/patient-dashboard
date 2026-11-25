@@ -49,7 +49,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       <div class="an-vals" role="group" aria-label="${esc(s.name || "Values")}">${s.values.map((x, i) =>
         `<button type="button" class="an-pick${i === 0 ? " is-on" : ""}" data-pick="${si}:${i}" aria-pressed="${i === 0}"
           title="${esc(s.type === "label" ? (x.name ? `${x.code}: ${x.name}` : x.code) : `${fmt(x.v)} ${s.unit || ""}`)}">${
-          valueSvg(s, x, compact ? 34 : 30)}${s.type === "label" && x.name ? `<small>${esc(x.name)}</small>` : ""}</button>`).join("")}</div>
+          valueSvg(s, x, compact ? 34 : 40)}${s.type === "label" && x.name ? `<small>${esc(x.name)}</small>` : ""}</button>`).join("")}</div>
       ${tagsOf(s).length && !tagQ ? `<div class="an-seg an-tags" role="group" aria-label="Tag">${tagsOf(s).map((t, i) =>
         `<button type="button" class="an-btn${i === 0 ? " is-on" : ""}" data-tag="${si}:${i}" aria-pressed="${i === 0}">${esc(t)}</button>`).join("")}</div>` : ""}
     </div>`;
@@ -72,7 +72,8 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   const marksHtml = marking ? `<div class="an-marks${order.length === 1 ? " has-one" : ""}${compact ? "" : " is-strip"}" data-role="marks">${order.map(rowHtml).join("")}</div>` : "";
   const stageHtml = `<div class="an-stage"><img alt="" draggable="false" /><canvas aria-label="${marking
     ? "Marking area. Tap to place the chosen value." : "Drawing area. Draw or tap to mark the picture."}"></canvas></div>`;
-  const totalHtml = marking ? '<div class="an-total" data-role="total" aria-live="polite"></div>' : "";
+  const totalHtml = marking ? '<div class="an-avals" data-role="avals" hidden></div>'
+    + '<div class="an-total" data-role="total" aria-live="polite"></div>' : "";
 
   box.innerHTML = compact
     ? `<div class="an-tools is-compact" role="toolbar" aria-label="Marking tools">
@@ -92,6 +93,9 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   const clearBtn = box.querySelector('[data-act="clear"]');
   const totalEl = box.querySelector('[data-role="total"]');
   const marksRow = box.querySelector('[data-role="marks"]');
+  const avalsEl = box.querySelector('[data-role="avals"]');   // values for Dot / Line
+  const aval = {};          // per set: { pick: "0.3" | "other" | "", other: typed value }
+  let avalWarn = false;     // Other is chosen but no value typed
   let W = 0, H = 0;
   let tool = marking ? "mark" : "pen", colour = COLOURS[0][0], size = "thin";
   const ops = [];
@@ -113,17 +117,116 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   const penWidth = () => (size === "thick" ? 7 : 3) * scale();
   const dotRadius = () => (size === "thick" ? 12 : 7) * scale();
   const linkWidth = () => (size === "thick" ? 5 : 3) * scale();
-  const dotHint = () => (tool === "line"
-    ? (pending ? "Now tap point B, where the line ends."
-      : "Tap point A, where it starts, then point B, where it ends. A straight line joins them.")
-    : pending ? "Now tap point B, where the arrow goes."
-      : "Tap point A, where it starts, then point B, where it goes. An arrow joins them.");
+  const dotHint = () => {
+    if (avalWarn) return "Type the value for Other first, or choose another value.";
+    const av = arrowValue();
+    const carry = av && av !== "bad" ? ` It's labelled <b>${esc(av.vtext)}</b>, next to point A.` : "";
+    return (tool === "line"
+      ? (pending ? "Now tap point B, where the line ends."
+        : "Tap point A, where it starts, then point B, where it ends. A straight line joins them.")
+      : pending ? "Now tap point B, where the arrow goes."
+        : "Tap point A, where it starts, then point B, where it goes. An arrow joins them.") + carry;
+  };
   // n screen pixels, in drawing pixels (the picture may be shown smaller or bigger than it's drawn)
   const px = (n) => n * W / (canvas.getBoundingClientRect().width || W);
   // Marks are about 13px on screen, whatever size the picture is shown at
   const markRadius = () => Math.max(10, px(13));
   const markOps = () => ops.filter((o) => o.type === "mark");
   const marksOf = (s) => markOps().filter((o) => o.setId === s.id);
+
+  /* ---------- Values on arrows and lines (Dot / Line): presets from the marking set ---------- */
+  function arrowOps() { return ops.filter((o) => o.type === "link" && o.b && o.v != null); }
+  function arrowsOf(s) { return arrowOps().filter((o) => o.setId === s.id); }
+  function countedOf(s) { return marksOf(s).concat(arrowsOf(s)); }   // everything that adds to a set's total
+  // The set an arrow's value comes from: the one chosen in the strip, or else the first number set with arrow values
+  function arrowSetIdx() {
+    const ok = (s) => !!s && s.type !== "label" && ((s.arrowValues || []).length > 0 || s.arrowOther === true);
+    return ok(order[active]) ? active : order.findIndex(ok);
+  }
+  function avalState(si) {
+    if (!aval[si]) {
+      const s = order[si];
+      const d = Number(s.arrowDefault);
+      aval[si] = { pick: (s.arrowValues || []).some((v) => Math.abs(v - d) < 1e-9) ? String(d) : "", other: "" };
+    }
+    return aval[si];
+  }
+  // The chosen value { si, setId, v, vtext, tag, fs }, null for no value, or "bad" when Other is chosen but empty
+  function arrowValue() {
+    const si = arrowSetIdx();
+    if (si < 0) return null;
+    const s = order[si];
+    const st = avalState(si);
+    if (st.pick === "") return null;
+    const v = Math.round(Number(st.pick === "other" ? st.other : st.pick) * 100) / 100;
+    if (!(v > 0 && v <= 1000)) return st.pick === "other" ? "bad" : null;
+    return { si, setId: s.id, v, vtext: `${fmt(v)}${s.unit ? ` ${s.unit}` : ""}`,
+      tag: tagsOf(s).length ? tagSel[si] : 0, fs: Math.max(14, px(15)) };
+  }
+  // Where the value's label sits: just past point A, away from the arrow, kept inside the picture
+  function pillBox(op) {
+    const fs = op.fs || 16;
+    g.font = `bold ${fs}px Arial, Helvetica, sans-serif`;
+    const w = g.measureText(op.vtext).width + fs * 0.9, h = fs * 1.5;
+    const [ax, ay] = op.a, [bx, by] = op.b;
+    const d = Math.hypot(bx - ax, by - ay) || 1;
+    const ux = (ax - bx) / d, uy = (ay - by) / d;
+    const reach = Math.abs(ux) * w / 2 + Math.abs(uy) * h / 2 + op.r + fs * 0.3;
+    return {
+      cx: Math.min(Math.max(ax + ux * reach, w / 2 + 2), W - w / 2 - 2),
+      cy: Math.min(Math.max(ay + uy * reach, h / 2 + 2), H - h / 2 - 2), w, h, fs,
+    };
+  }
+  function drawPill(op) {
+    const p = pillBox(op);
+    g.save();
+    g.beginPath();
+    if (g.roundRect) g.roundRect(p.cx - p.w / 2, p.cy - p.h / 2, p.w, p.h, p.h / 2);
+    else g.rect(p.cx - p.w / 2, p.cy - p.h / 2, p.w, p.h);
+    g.fillStyle = "#ffffff";
+    g.fill();
+    g.lineWidth = Math.max(2, p.fs / 8);
+    g.strokeStyle = op.colour;
+    g.stroke();
+    g.fillStyle = op.colour;
+    g.font = `bold ${p.fs}px Arial, Helvetica, sans-serif`;
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.fillText(op.vtext, p.cx, p.cy + p.fs * 0.04);
+    g.restore();
+  }
+  // The value bar, shown while Dot or Line is chosen
+  function showAvals() {
+    if (!avalsEl) return;
+    const si = arrowSetIdx();
+    const on = (tool === "dot" || tool === "line") && si >= 0;
+    avalsEl.hidden = !on;
+    if (!on) { avalsEl.innerHTML = ""; return; }
+    const s = order[si];
+    const st = avalState(si);
+    const u = s.unit ? ` ${esc(s.unit)}` : "";
+    const btn = (val, label) => `<button type="button" class="an-btn an-aval${st.pick === val ? " is-on" : ""}" data-aval="${esc(val)}"
+      aria-pressed="${st.pick === val}">${label}</button>`;
+    avalsEl.dataset.si = String(si);
+    avalsEl.innerHTML = `<span class="an-avals-l">${esc(s.name || "Value")} on the ${tool === "line" ? "line" : "arrow"}</span>${
+      (s.arrowValues || []).map((v) => btn(String(v), `${esc(fmt(v))}${u}`)).join("")}${
+      s.arrowOther ? btn("other", "Other") : ""}${
+      s.arrowOther && st.pick === "other" ? `<input class="fe-input an-aother" type="number" min="0" max="1000" step="any" inputmode="decimal"
+        placeholder="0.4" value="${esc(st.other)}" aria-label="Other value${s.unit ? ` (${esc(s.unit)})` : ""}" />` : ""}${
+      btn("", "No value")}`;
+  }
+  function focusOther() {
+    const i = avalsEl && avalsEl.querySelector(".an-aother");
+    if (i) i.focus();
+  }
+  if (avalsEl) avalsEl.addEventListener("input", (e) => {
+    if (!e.target.matches(".an-aother")) return;
+    e.stopPropagation();   // typing a value isn't a change to the picture
+    avalState(Number(avalsEl.dataset.si)).other = e.target.value;
+    avalWarn = false;
+    showTotal();
+  });
+
 
   function setup() {
     const nw = img.naturalWidth || 1000, nh = img.naturalHeight || 750;
@@ -269,6 +372,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
         g.arc(ax, ay, op.r, 0, Math.PI * 2);
         g.fill();
       }
+      if (op.b && op.v != null) drawPill(op);   // the value, just past point A
       if (op === pending) {   // a faint ring: point A is waiting for point B
         g.save();
         g.globalAlpha = 0.35;
@@ -303,10 +407,12 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
         counts: s.values.map((x) => ({ code: x.code, name: x.name || "", n: mine.filter((o) => o.code === x.code).length })).filter((c) => c.n) };
     }
     const tags = tagsOf(s);
-    const out = { id: s.id, name: s.name, type: "number", unit: s.unit || "", totalLabel: s.totalLabel || "", n: mine.length, total: sum(mine) };
+    const all = countedOf(s);   // marks, and arrows or lines with a value
+    const out = { id: s.id, name: s.name, type: "number", unit: s.unit || "", totalLabel: s.totalLabel || "",
+      n: mine.length, arrows: all.length - mine.length, total: sum(all) };
     if (tags.length) {
       out.byTag = {};
-      tags.forEach((t, i) => { out.byTag[t] = sum(mine.filter((o) => (o.tag || 0) === i)); });
+      tags.forEach((t, i) => { out.byTag[t] = sum(all.filter((o) => (o.tag || 0) === i)); });
     }
     return out;
   }
@@ -314,7 +420,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   // Beside a set's name: "0.35 mL", "SD 2 · PO 1", or "× 2" for a set with one label ("" before any marks)
   const figText = (s) => {
     const f = setFigures(s);
-    if (!f.n) return "";
+    if (!f.n && !f.arrows) return "";
     if (f.type === "label") return s.values.length === 1 ? `× ${f.n}` : f.counts.map((c) => `${c.code} ${c.n}`).join(" · ");
     return `${s.totalLabel ? `${s.totalLabel}: ` : ""}${fmt(f.total)}${s.unit ? ` ${s.unit}` : ""}`;
   };
@@ -343,7 +449,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     box.querySelectorAll("[data-fig]").forEach((el) => { el.textContent = figText(order[Number(el.dataset.fig)]); });
     if (!totalEl) return;
     if (compact) {   // the line under the toolbar: how to use it, plus any other sets' figures
-      const others = order.filter((s) => s !== primary).map(setFigures).filter((x) => x.n).map((x) => (x.type === "label"
+      const others = order.filter((s) => s !== primary).map(setFigures).filter((x) => x.n || x.arrows).map((x) => (x.type === "label"
         ? `${x.name}: ${x.counts.map((c) => `${c.code} × ${c.n}`).join(", ")}`
         : `${x.name}: ${x.totalLabel ? `${x.totalLabel} ` : ""}${fmt(x.total)}${x.unit ? ` ${x.unit}` : ""}`));
       totalEl.innerHTML = `<span>${tool === "erase"
@@ -382,6 +488,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     }
     else if (h.joined) {   // point B goes; point A waits again
       h.joined.b = null;
+      h.joined.v = null;   // its value goes with point B
       if (ops.includes(h.joined) && tool === (h.joined.plain ? "line" : "dot")) pending = h.joined;
     }
     else if (h.removed) ops.splice(Math.min(h.at, ops.length), 0, h.removed);
@@ -412,6 +519,10 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       if (o.type === "link") {   // either dot, or anywhere on the line
         if (Math.hypot(o.a[0] - x, o.a[1] - y) <= o.r + tol) return i;
         if (o.b && segDist(x, y, o.a[0], o.a[1], o.b[0], o.b[1]) <= Math.max(o.r, o.width / 2) + tol) return i;
+        if (o.b && o.v != null) {   // its value label
+          const p = pillBox(o);
+          if (Math.abs(x - p.cx) <= p.w / 2 + tol * 0.3 && Math.abs(y - p.cy) <= p.h / 2 + tol * 0.3) return i;
+        }
       }
       if (o.type === "pen") {
         const lim = o.width / 2 + tol;
@@ -456,8 +567,11 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       return;
     }
     if (tool === "dot" || tool === "line") {
+      const av = arrowValue();
+      if (av === "bad") { avalWarn = true; showTotal(); focusOther(); return; }
       if (pending && ops.includes(pending)) {   // point B: join it to point A
         pending.b = [x, y];
+        if (av) Object.assign(pending, av);   // its value, written next to point A
         history.push({ joined: pending });
         pending = null;
         hover = null;
@@ -506,6 +620,8 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     if (marksRow) marksRow.classList.toggle("is-idle", t !== "mark");
     stage.classList.toggle("is-erasing", t === "erase");
     if (t !== "dot" && t !== "line") { pending = null; hover = null; }
+    avalWarn = false;
+    showAvals();
     redraw();
   };
 
@@ -527,6 +643,13 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       pickOne(b.closest("[data-setrow]").querySelectorAll("[data-tag]"), b);
       setActive(si);
       setTool("mark");
+    } else if (b.dataset.aval !== undefined) {
+      const st = avalState(Number(avalsEl.dataset.si));
+      st.pick = b.dataset.aval;
+      avalWarn = false;
+      showAvals();
+      showTotal();
+      if (st.pick === "other") focusOther();
     } else if (b.dataset.act === "undo") undo();
     else if (b.dataset.act === "clear") {
       if (!ops.length && !baseImg) return;
@@ -555,7 +678,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       return url;
     },
     // The first number set's total (for Calculations and Consumables)
-    total: primary ? () => sum(marksOf(primary)) : null,
+    total: primary ? () => sum(countedOf(primary)) : null,
     // The question's answer sets the tag: every mark takes it, and so do new marks. Each change can be undone.
     // → true if the answer is one of the tags
     setTag: (name) => {
@@ -619,6 +742,14 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
             x: +(o.x / W).toFixed(4), y: +(o.y / H).toFixed(4), set: s.name, setId: o.setId,
             ...(o.label ? { code: o.code } : { v: o.v }),
             ...(tags.length ? { tag: tags[o.tag || 0] } : {}),
+          };
+        }),
+        arrows: arrowOps().map((o) => {
+          const s = order[o.si];
+          const tags = tagsOf(s);
+          return {
+            ax: +(o.a[0] / W).toFixed(4), ay: +(o.a[1] / H).toFixed(4), bx: +(o.b[0] / W).toFixed(4), by: +(o.b[1] / H).toFixed(4),
+            line: !!o.plain, v: o.v, set: s.name, setId: o.setId, ...(tags.length ? { tag: tags[o.tag || 0] } : {}),
           };
         }),
         sets: setsOut,

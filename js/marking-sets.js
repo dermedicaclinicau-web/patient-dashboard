@@ -63,6 +63,17 @@ const DEFAULT_SETS = [{
   tagMarks: false, tags: ["Treatment", "Touch-up"],
 }];
 
+// Values staff can put on an arrow or line (Dot / Line), e.g. 0.1, 0.2, 0.3 mL
+export function cleanArrowValues(raw) {
+  const list = Array.isArray(raw) ? raw : String(raw || "").split(/[,\s]+/);
+  const out = [];
+  list.forEach((x) => {
+    const v = Math.round(Number(x) * 100) / 100;
+    if (Number.isFinite(v) && v > 0 && v <= 1000 && !out.includes(v)) out.push(v);
+  });
+  return out.sort((a, b) => a - b).slice(0, 12);
+}
+
 export function cleanSet(s = {}, i = 0) {
   const type = s.type === "label" ? "label" : "number";
   const seen = new Set();
@@ -81,6 +92,7 @@ export function cleanSet(s = {}, i = 0) {
       .slice(0, 20);
   const tags = (Array.isArray(s.tags) ? s.tags : [])
     .map((t) => String(t || "").trim().slice(0, 30)).filter(Boolean).slice(0, 4);
+  const av = type === "label" ? [] : cleanArrowValues(s.arrowValues);
   return {
     id: /^[A-Za-z0-9_-]{1,40}$/.test(s.id || "") ? s.id : `ms_${i}`,
     name: String(s.name || "").trim().slice(0, 60),
@@ -88,6 +100,9 @@ export function cleanSet(s = {}, i = 0) {
     unit: type === "label" ? "" : String(s.unit || "").trim().slice(0, 20),
     totalLabel: type === "label" ? "" : String(s.totalLabel || "").trim().slice(0, 40),   // e.g. "Bolus injected"
     values,
+    arrowValues: av,                                                      // values on arrows and lines
+    arrowDefault: av.includes(Number(s.arrowDefault)) ? Number(s.arrowDefault) : null,   // pre-selected (null: none)
+    arrowOther: type === "number" && s.arrowOther === true,               // staff can type another value
     tagMarks: type === "number" && s.tagMarks === true,
     tags: tags.length ? tags : ["Treatment", "Touch-up"],
   };
@@ -194,15 +209,16 @@ export async function saveMarkingSets(sets, staff) {
 
 // "Units: 23.5 units (9 marks), Treatment 20 · Depth: SD × 5, PO × 4" (or "" when there are no marks)
 export function markSummary(v) {
-  if (!v || typeof v !== "object" || !Array.isArray(v.marks) || !v.marks.length) return "";
+  if (!v || typeof v !== "object" || !Array.isArray(v.marks)
+    || !(v.marks.length || (Array.isArray(v.arrows) && v.arrows.length))) return "";
   if (Array.isArray(v.sets) && v.sets.length) {
-    return v.sets.filter((s) => Number(s.n) > 0).map((s) => {
+    return v.sets.filter((s) => Number(s.n) > 0 || Number(s.arrows) > 0).map((s) => {
       if (s.type === "label") {
         return `${s.name}: ${(s.counts || []).filter((c) => Number(c.n) > 0).map((c) => `${c.code} × ${c.n}`).join(", ")}`;
       }
       const tags = s.byTag && typeof s.byTag === "object"
         ? Object.entries(s.byTag).filter(([, x]) => Number(x) > 0).map(([t, x]) => `${t} ${fmtMark(x)}`) : [];
-      return `${s.name}: ${s.totalLabel ? `${s.totalLabel} ` : ""}${fmtMark(s.total)}${s.unit ? ` ${s.unit}` : ""} (${s.n} mark${s.n === 1 ? "" : "s"})${tags.length ? `, ${tags.join(", ")}` : ""}`;
+      return `${s.name}: ${s.totalLabel ? `${s.totalLabel} ` : ""}${fmtMark(s.total)}${s.unit ? ` ${s.unit}` : ""} (${[s.n ? `${s.n} mark${s.n === 1 ? "" : "s"}` : "", s.arrows ? `${s.arrows} arrow${s.arrows === 1 ? "" : "s"}` : ""].filter(Boolean).join(", ")})${tags.length ? `, ${tags.join(", ")}` : ""}`;
     }).join(" · ");
   }
   // Records saved before marking sets could be used separately
@@ -275,6 +291,8 @@ export async function openMarkingSetsDialog({ staff } = {}) {
         <button type="button" class="hx-x" data-vdel aria-label="Remove this value">×</button>
       </div>`;
     };
+    const arrowDefaultOptions = (s) => `<option value="">None (staff choose each time)</option>${(s.arrowValues || []).map((v) =>
+      `<option value="${v}"${Number(s.arrowDefault) === v ? " selected" : ""}>${fmtMark(v)}${s.unit ? ` ${esc(s.unit)}` : ""}</option>`).join("")}`;
     const setHtml = (s, i) => {
       const label = s.type === "label";
       return `
@@ -290,12 +308,21 @@ export async function openMarkingSetsDialog({ staff } = {}) {
           <button type="button" class="hx-add" data-vadd>+ ${label ? "Label" : "Value"}</button>
         </div>
         ${label ? "" : `<label class="lh-field"><span class="lh-label">Name for the total (shown beside the set while marking)</span>
-          <input class="fe-input" data-sk="totalLabel" maxlength="40" placeholder="Total, or e.g. Bolus injected" value="${esc(s.totalLabel || "")}" /></label>`}
-        ${label ? "" : `<label class="lh-field"><span class="lh-label">Name for the total (shown beside the set while marking)</span>
           <input class="fe-input" data-sk="totalLabel" maxlength="40" placeholder="Leave empty to show just the number, or e.g. Bolus injected" value="${esc(s.totalLabel || "")}" /></label>`}
         ${label ? "" : `<label class="fe-check"><input type="checkbox" data-sk="tagMarks"${s.tagMarks ? " checked" : ""} /> Tag each mark (e.g. Treatment or Touch-up)</label>
         ${s.tagMarks ? `<label class="lh-field"><span class="lh-label">Tags, separated by commas (the first is the default)</span>
           <input class="fe-input" data-sk="tags" maxlength="120" placeholder="Treatment, Touch-up" value="${esc(s.tags.join(", "))}" /></label>` : ""}`}
+        ${label ? "" : `<div class="ms-arrow">
+          <span class="lh-label">Values on arrows and lines</span>
+          <p class="fe-help">When staff use Dot (arrow) or Line on a picture with this set, they can add one of these, e.g. 0.3 mL.
+            It's written next to the start of the arrow and adds to this set's total.</p>
+          <label class="lh-field"><span class="lh-label">Values, separated by commas</span>
+            <input class="fe-input" data-sk="arrowValues" inputmode="decimal" maxlength="120" placeholder="e.g. 0.1, 0.2, 0.3, 0.5"
+              value="${esc(s.arrowText ?? (s.arrowValues || []).join(", "))}" /></label>
+          <label class="lh-field"><span class="lh-label">Pre-selected</span>
+            <select class="fb-select" data-sk="arrowDefault">${arrowDefaultOptions(s)}</select></label>
+          <label class="fe-check"><input type="checkbox" data-sk="arrowOther"${s.arrowOther ? " checked" : ""} /> Let staff type another value (Other)</label>
+        </div>`}
       </section>`;
     };
     const draw = () => {
@@ -321,6 +348,16 @@ export async function openMarkingSetsDialog({ staff } = {}) {
       }
       if (t.dataset.sk === "tagMarks") { s.tagMarks = t.checked; draw(); return; }
       if (t.dataset.sk === "tags") { s.tags = t.value.split(",").map((x) => x.trim()).filter(Boolean); return; }
+      if (t.dataset.sk === "arrowValues") {
+        s.arrowText = t.value;   // kept as typed while editing (not saved)
+        s.arrowValues = cleanArrowValues(t.value);
+        if (!s.arrowValues.includes(Number(s.arrowDefault))) s.arrowDefault = null;
+        const ds = box.querySelector('[data-sk="arrowDefault"]');
+        if (ds) ds.innerHTML = arrowDefaultOptions(s);
+        return;
+      }
+      if (t.dataset.sk === "arrowDefault") { s.arrowDefault = t.value === "" ? null : Number(t.value); return; }
+      if (t.dataset.sk === "arrowOther") { s.arrowOther = t.checked; return; }
       if (t.dataset.sk) { s[t.dataset.sk] = t.value; return; }
       const vb = t.closest("[data-v]");
       if (!vb || !t.dataset.vk) return;
