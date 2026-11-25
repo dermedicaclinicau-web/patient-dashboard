@@ -89,6 +89,7 @@ function defaultLayout() {
   FIELDS.forEach((d) => { fields[d.key] = { on: true, size: 11, align: "left", bold: false, ...d.def }; });
   return { paper: { preset: "A4", w: 210, h: 297 }, offset: { x: 0, y: 0 }, font: "Arial",
     bg: { x: 0, y: 0, w: 210, opacity: 0.5 }, copy: { on: true, dx: 105 },
+    fix: { x: 100, y: 100 },   // how big the printer prints the page, in % (100 = true size)
     clinic: { address1: "", address2: "", phone: "" }, fields };
 }
 function mergeLayout(s) {
@@ -97,6 +98,7 @@ function mergeLayout(s) {
   const out = { ...d, font: s.font || d.font, paper: { ...d.paper, ...(s.paper || {}) },
     offset: { ...d.offset, ...(s.offset || {}) }, bg: { ...d.bg, ...(s.bg || {}) },
     copy: s.copy ? { ...d.copy, ...s.copy } : { on: false, dx: 105 },   // a layout saved before this keeps printing one copy
+    fix: { ...d.fix, ...(s.fix || {}) },
     clinic: { ...d.clinic, ...(s.clinic || {}) }, fields: {} };
   FIELDS.forEach((f) => { out.fields[f.key] = { ...d.fields[f.key], ...((s.fields || {})[f.key] || {}) }; });
   return out;
@@ -313,12 +315,34 @@ function pdfMeds(doc, list, f, x, y, w, size) {
   });
   if (f.count !== false) { rule(); put(`${meds.length} item${meds.length === 1 ? "" : "s"}`); }
 }
-
+// The front desk printer shrinks each page towards its middle (fit to page). This makes the printer's PDF
+// bigger by the same amount, so it prints at true size. Sizes and positions only: the layout itself doesn't change.
+function printerFix(pdf, L, PW, PH) {
+  const sx = num(L.fix && L.fix.x, 100), sy = num(L.fix && L.fix.y, 100);
+  if (!(sx >= 80 && sx <= 120 && sy >= 80 && sy <= 120) || (sx === 100 && sy === 100)) return pdf;
+  const kx = 100 / sx, ky = 100 / sy, k = (kx + ky) / 2;
+  const X = (x) => PW / 2 + (x - PW / 2) * kx, Y = (y) => PH / 2 + (y - PH / 2) * ky;
+  return new Proxy(pdf, {
+    get(t, p) {
+      if (p === "text") return (s, x, y, o) => t.text(s, X(x), Y(y), o);
+      if (p === "line") return (x1, y1, x2, y2) => t.line(X(x1), Y(y1), X(x2), Y(y2));
+      if (p === "rect") return (x, y, w, h, st) => t.rect(X(x), Y(y), w * kx, h * ky, st);
+      if (p === "addImage") return (d, f, x, y, w, h) => t.addImage(d, f, X(x), Y(y), w * kx, h * ky);
+      if (p === "setFontSize") return (n) => t.setFontSize(n * k);
+      if (p === "setLineWidth") return (n) => t.setLineWidth(n * k);
+      if (p === "splitTextToSize") return (s, w, o) => t.splitTextToSize(s, w * k, o);
+      const v = t[p];
+      return typeof v === "function" ? v.bind(t) : v;
+    },
+  });
+}
 // → the PDF as a data URL. o: { grid, outlines } for the test page
 async function buildPdf(L, vals, o = {}) {
   const JsPDF = await loadPdfLib();
   const PW = num(L.paper.w, 210), PH = num(L.paper.h, 297);
-  const doc = new JsPDF({ unit: "mm", format: [PW, PH], orientation: PW > PH ? "landscape" : "portrait", compress: true });
+  const pdf = new JsPDF({ unit: "mm", format: [PW, PH], orientation: PW > PH ? "landscape" : "portrait", compress: true });
+  // o.bg = the patient's copy or a download (true size); otherwise it's for the printer, so the printer's shrink is undone
+  const doc = o.bg ? pdf : printerFix(pdf, L, PW, PH);
   const font = pdfFont(L.font);
   const sig = await pngOf(vals.signature);
   // o.bg: the picture of the blank form, underneath (for the patient's copy)
@@ -492,23 +516,32 @@ const blankItem = (custom = false) => ({ product: "", custom, customName: "", ad
 const itemName = (i) => String(i.custom ? i.customName : i.product).trim();
 // Compounds: medicines made up of set ingredients. Each strength is typed for each patient,
 // and they print on the line under the medicine's name. To change the ingredients, change this list.
+// The starting ingredients. On each script they can be removed, renamed, or more added (up to MAX_INGS).
 const COMPOUNDS = { fadingcream: ["Hydroquinone", "Kojic acid", "Ascorbic acid", "Dexamethasone"] };
+const MAX_INGS = 8;
 const ckey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
-const compoundOf = (i) => (i && !i.custom && i.ings ? COMPOUNDS[ckey(i.product)] || null : null);
-const blankIngs = (product) => { const l = COMPOUNDS[ckey(product)]; return l ? Object.fromEntries(l.map((n) => [n, ""])) : null; };
-// "Hydroquinone 4%, Kojic acid 2%" (an ingredient left blank is left off the script)
-const ingText = (i, sep = ", ") => (compoundOf(i) || []).map((n) => { const v = String(i.ings[n] || "").trim(); return v ? `${n} ${v}` : ""; })
-  .filter(Boolean).join(sep);
-// A saved one opened again: each strength back in its box. null if it was written another way (e.g. scanned "4% HQ")
-function parseIngs(product, text) {
+// The item's ingredients: [{ n: name, v: strength }], or null when it isn't a compound
+const compoundOf = (i) => (i && !i.custom && Array.isArray(i.ings) ? i.ings : null);
+const blankIngs = (product) => { const l = COMPOUNDS[ckey(product)]; return l ? l.map((n) => ({ n, v: "" })) : null; };
+// The ones with a name and a strength (one left blank is left off the script)
+const ingsFilled = (i) => (compoundOf(i) || []).map((g) => ({ n: String(g.n || "").trim(), v: String(g.v || "").trim() }))
+  .filter((g) => g.n && g.v);
+// "Hydroquinone 4%, Kojic acid 2%"
+const ingText = (i, sep = ", ") => ingsFilled(i).map((g) => `${g.n} ${g.v}`).join(sep);
+// A saved one opened again: its own list if it has one, otherwise read from the text (scripts saved before this).
+// null if it was written another way (e.g. scanned "4% HQ"): it then opens in the Dose box.
+function parseIngs(product, text, saved) {
   const l = COMPOUNDS[ckey(product)];
   if (!l) return null;
-  const out = blankIngs(product);
+  if (Array.isArray(saved) && saved.length) {
+    return saved.map((g) => ({ n: String((g && (g.name ?? g.n)) || ""), v: String((g && (g.strength ?? g.v)) || "") }));
+  }
   const s = String(text || "").trim();
-  if (!s) return out;
+  if (!s) return blankIngs(product);
+  const out = [];
   const ok = s.split(/\s*,\s*/).every((p) => {
     const n = l.find((x) => p.toLowerCase().startsWith(`${x.toLowerCase()} `));
-    if (n) out[n] = p.slice(n.length).trim();
+    if (n) out.push({ n, v: p.slice(n.length).trim() });
     return !!n;
   });
   return ok ? out : null;
@@ -567,11 +600,12 @@ async function loadRxNames() {
 }
 
 function injectWriterStyles() {
-  if (document.getElementById("rxw-styles-7")) return;
+  if (document.getElementById("rxw-styles-8")) return;
+  document.getElementById("rxw-styles-7")?.remove();
   document.getElementById("rxw-styles-6")?.remove();
   document.getElementById("rxw-styles-5")?.remove();
   const s = document.createElement("style");
-  s.id = "rxw-styles-7";
+  s.id = "rxw-styles-8";
   s.textContent = `
 .rxw{--t:#0f766e;--t2:#14b8a6;--tl:#f0fdfa;--ink:#0f172a;--mut:#64748b;--line:#e2e8f0}
 .rxw svg{width:16px;height:16px;flex:none}
@@ -668,6 +702,10 @@ function injectWriterStyles() {
 .rxw-chip:hover{border-style:solid;border-color:var(--t2);background:var(--tl);color:var(--t)}
 .rxw-add{width:100%;height:46px;margin-top:12px;border:1.5px dashed #99f6e4;border-radius:12px;background:var(--tl);color:var(--t);font-family:inherit;font-size:14px;font-weight:700;cursor:pointer}
 .rxw-add:hover{border-color:var(--t2)}
+.rxw-ings{display:grid;gap:8px}
+.rxw-ing{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr) 36px;gap:8px;align-items:center}
+.rxw-ing-add{height:40px;padding:0 14px;border:1.5px dashed #99f6e4;border-radius:10px;background:var(--tl);color:var(--t);font-family:inherit;font-size:13px;font-weight:700;cursor:pointer}
+.rxw-ing-add:hover{border-color:var(--t2)}
 .rxw-switch{position:relative;display:flex;align-items:center;gap:10px;font-size:13px;color:#334155;cursor:pointer}
 .rxw-switch input{position:absolute;opacity:0;pointer-events:none}
 .rxw-sw{position:relative;width:34px;height:20px;border-radius:999px;background:#cbd5e1;flex:none;transition:.15s}
@@ -1088,7 +1126,7 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
       st.items = rec.items.map((it) => {
         const onList = products.includes(it.product);
         if (!onList) st.okTyped.add(it.product);
-        const ings = onList ? parseIngs(it.product, it.strengths) : null;   // Fading Cream: each strength back in its box
+        const ings = onList ? parseIngs(it.product, it.strengths, it.ingredients) : null;   // Fading Cream: its ingredients as written
         return { ...blankItem(), product: onList ? it.product : "", custom: !onList, customName: onList ? "" : it.product,
           addList: false, strength: ings ? "" : it.strengths || "", ings, directions: it.directions || "", qty: it.quantity || "", repeats: it.repeats ?? "" };
       });
@@ -1107,6 +1145,7 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
     items: st.items.filter((i) => itemName(i)).map((i) => ({
       product: itemName(i), custom: !!i.custom, medicine: itemLine(i), strengths: strengthOf(i),
       quantity: String(i.qty || "").trim(), directions: String(i.directions || "").trim(), repeats: String(i.repeats ?? "").trim(),
+      ingredients: ingsFilled(i).map((g) => ({ name: g.n, strength: g.v })),
     })),
     sheet: Object.fromEntries(SHEET_KEYS.map((k) => [k, st.v[k]])),
     signing: st.signing,
@@ -1325,12 +1364,21 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
           <label class="rxw-switch c6"><input type="checkbox" data-item="${i}" data-f="addList" ${it.addList ? "checked" : ""}><span class="rxw-sw"></span>Add it to the prescription product list for next time</label>
         </div>` : ""}
         ${it.filled ? `<p class="rxw-filled">${IC.clock}Filled in from the last time it was prescribed on this computer. Check it.</p>` : ""}
-        ${compoundOf(it) ? `<div class="rxw-fields">
-          <p class="rxw-fh c6" style="margin:0">Type the strength of each ingredient. One left blank is left off the script.</p>
-          ${compoundOf(it).map((n) => `<label class="rxw-f c2"><span>${esc(n)}</span><input data-item="${i}" data-f="ing" data-ing="${esc(n)}"
-            value="${esc(it.ings[n] || "")}" placeholder="e.g. 4%" ${noFill}></label>`).join("")}
-          <label class="rxw-f c2"><span>Quantity</span><input data-item="${i}" data-f="qty" value="${esc(it.qty)}" placeholder="e.g. 30 g" ${noFill}></label>
-        </div>` : `<div class="rxw-fields">
+        ${compoundOf(it) ? `<p class="rxw-fh" style="margin:0 0 8px">Type the strength of each ingredient. One left blank is left off the script. Remove any it doesn't need, or add more.</p>
+          <div class="rxw-ings">${it.ings.map((g, k) => `<div class="rxw-ing">
+            <input class="rxw-in" data-item="${i}" data-f="ingN" data-k="${k}" value="${esc(g.n)}" maxlength="60"
+              placeholder="Ingredient" aria-label="Ingredient ${k + 1}" ${noFill}>
+            <input class="rxw-in" data-item="${i}" data-f="ingV" data-k="${k}" value="${esc(g.v)}" maxlength="30"
+              placeholder="e.g. 4%" aria-label="Strength of ${esc(g.n || `ingredient ${k + 1}`)}" ${noFill}>
+            <button type="button" class="rxw-x" data-act="del-ing" data-i="${i}" data-k="${k}"
+              aria-label="Remove ${esc(g.n || "this ingredient")}" title="Remove">${IC.trash}</button>
+          </div>`).join("")}</div>
+          <div class="rxw-fields" style="margin-top:10px">
+            ${it.ings.length < MAX_INGS
+              ? `<div class="c4" style="align-self:end"><button type="button" class="rxw-ing-add" data-act="add-ing" data-i="${i}">+ Add ingredient</button></div>`
+              : `<p class="rxw-fh c4" style="align-self:end;margin:0">Up to ${MAX_INGS} ingredients.</p>`}
+            <label class="rxw-f c2"><span>Quantity</span><input data-item="${i}" data-f="qty" value="${esc(it.qty)}" placeholder="e.g. 30 g" ${noFill}></label>
+          </div>` : `<div class="rxw-fields">
           <label class="rxw-f c4"><span>Dose</span><input data-item="${i}" data-f="strength" value="${esc(it.strength)}" placeholder="e.g. 500mg, or 1% cream 30 g" ${noFill}></label>
           <label class="rxw-f c2"><span>Quantity</span><input data-item="${i}" data-f="qty" value="${esc(it.qty)}" placeholder="e.g. 1" ${noFill}></label>
         </div>`}
@@ -1522,7 +1570,15 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
     const noStr = named.find((i) => compoundOf(i) && !ingText(i));
     if (noStr) {
       showToast(`Type the strengths for ${itemName(noStr)}.`);
-      root.querySelector(`[data-item="${st.items.indexOf(noStr)}"][data-f="ing"]`)?.focus();
+      root.querySelector(`[data-item="${st.items.indexOf(noStr)}"][data-f="ingV"]`)?.focus();
+      return;
+    }
+    // A strength typed with no name would be left off without a word: ask for the name instead
+    const noName = named.find((i) => compoundOf(i) && i.ings.some((g) => String(g.v || "").trim() && !String(g.n || "").trim()));
+    if (noName) {
+      showToast(`Type the ingredient's name for ${itemName(noName)}, or remove that line.`);
+      const k = noName.ings.findIndex((g) => String(g.v || "").trim() && !String(g.n || "").trim());
+      root.querySelector(`[data-item="${st.items.indexOf(noName)}"][data-f="ingN"][data-k="${k}"]`)?.focus();
       return;
     }
     if (st.items.some((i) => !itemName(i) && (i.strength + i.directions + i.qty).trim())) {
@@ -1665,7 +1721,12 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
     if (t.dataset.item !== undefined && t.dataset.f !== "product") {
       const it = st.items[Number(t.dataset.item)];
       if (!it) return;
-      if (t.dataset.f === "ing") { if (it.ings) it.ings[t.dataset.ing] = t.value; draw(); return; }
+      if (t.dataset.f === "ingN" || t.dataset.f === "ingV") {   // an ingredient's name or strength
+        const g = it.ings && it.ings[Number(t.dataset.k)];
+        if (g) g[t.dataset.f === "ingN" ? "n" : "v"] = t.value;
+        draw();
+        return;
+      }
       it[t.dataset.f] = t.type === "checkbox" ? t.checked : t.value;
       if (t.dataset.f === "repeats") it.repeats = t.value.replace(/\D/g, "");
       if (it.filled && t.dataset.f !== "addList") { it.filled = false; t.closest(".rxw-med")?.querySelector(".rxw-filled")?.remove(); }
@@ -1740,6 +1801,18 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
       root.querySelector(`[data-row="${st.items.length - 1}"] select, [data-row="${st.items.length - 1}"] input`)?.focus();
     }
     else if (act === "del-item") { st.items.splice(Number(a.dataset.i), 1); renderItems(); draw(); }
+    else if (act === "add-ing") {
+      const i = Number(a.dataset.i), it = st.items[i];
+      if (!it || !it.ings || it.ings.length >= MAX_INGS) return;
+      it.ings.push({ n: "", v: "" });
+      renderItems(); draw();
+      root.querySelector(`[data-item="${i}"][data-f="ingN"][data-k="${it.ings.length - 1}"]`)?.focus();
+    }
+    else if (act === "del-ing") {
+      const it = st.items[Number(a.dataset.i)];
+      if (it && it.ings) it.ings.splice(Number(a.dataset.k), 1);
+      renderItems(); draw();
+    }
     else if (act === "rep") {
       const i = Number(a.dataset.i);
       const it = st.items[i];
@@ -2014,6 +2087,12 @@ async function mountLayout(container, { staff }) {
           <label class="rx-f"><span>Move right by</span>${mmIn('data-off="x"', L.offset.x)}</label>
           <label class="rx-f"><span>Move down by</span>${mmIn('data-off="y"', L.offset.y)}</label>
         </div>
+        <p class="rx-note">If the printer shrinks the page: on a test page, measure from the 10 line to the 200 line, across and down.
+          Divide each by 190 and times by 100 (e.g. 177 mm → 93.2). Put them here. 100 = no change.</p>
+        <div class="rx-mini">
+          <label class="rx-f"><span>Printer prints across at</span>${mmIn('data-fix="x"', num(L.fix && L.fix.x, 100), 0.1, "%", 80)}</label>
+          <label class="rx-f"><span>Printer prints down at</span>${mmIn('data-fix="y"', num(L.fix && L.fix.y, 100), 0.1, "%", 80)}</label>
+        </div>
       </div>
       <div class="rx-card"><h3><span class="rx-step">5</span>Check it</h3>
         <p class="rx-note">Sends a test page to the front desk printer: a mm grid, each box's outline and sample text. Put plain paper in first, then hold the page over a script against the light. If everything is off by the same amount, use Margins above.</p>
@@ -2096,6 +2175,11 @@ async function mountLayout(container, { staff }) {
     if (t.dataset.copy === "dx") { change(() => { L.copy.dx = val; }, true); drawGhost(); return; }
     if (t.dataset.copy === "on") { change(() => { L.copy.on = t.checked; }); drawPaper(); drawPanel(); return; }
     if (t.dataset.off) { change(() => { L.offset[t.dataset.off] = val; }, true); drawPaper(); return; }
+    if (t.dataset.fix) {   // only changes what's sent to the printer, so the screen stays the same
+      if (val < 80 || val > 120) return;
+      change(() => { L.fix = { ...(L.fix || {}), [t.dataset.fix]: val }; }, true);
+      return;
+    }
     if (t.dataset.bg) { change(() => { L.bg[t.dataset.bg] = val; }, true); drawPaper(); return; }
     if (t.dataset.paper === "w" || t.dataset.paper === "h") {
       if (val < 50) return;
