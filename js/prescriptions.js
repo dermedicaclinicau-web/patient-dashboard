@@ -156,6 +156,7 @@ function medsHtml(list, f) {
     const r = rep(m.rep);
     return `<div style="line-height:1.35">
       <div>${esc(name)}${dose ? ` ${esc(dose)}` : ""}</div>
+      ${String(m.ing || "").trim() ? `<div>${esc(m.ing)}</div>` : ""}
       ${String(m.dir || "").trim() ? `<div>${esc(m.dir)}</div>` : ""}
       ${qty || r ? `<div style="display:flex;justify-content:space-between;gap:3mm"><span>${qty ? `Qty: ${esc(qty)}` : ""}</span><span>${esc(r)}</span></div>` : ""}
     </div>`;
@@ -301,6 +302,8 @@ function pdfMeds(doc, list, f, x, y, w, size) {
     const dose = String(m.dose || "").trim();
     const name = (f.upper ? String(m.name).toUpperCase() : String(m.name)) + (dose ? ` ${dose}` : "");
     doc.splitTextToSize(name, w).forEach((s) => { put(s); yy += lh; });
+    const ing = String(m.ing || "").trim();
+    if (ing) doc.splitTextToSize(ing, w).forEach((s) => { put(s); yy += lh; });
     const dir = String(m.dir || "").trim();
     if (dir) doc.splitTextToSize(dir, w).forEach((s) => { put(s); yy += lh; });
     const qty = String(m.qty || "").trim(), r = repText(m.rep);
@@ -483,9 +486,33 @@ const FIELD_LABELS = { medicare: "Medicare number", ref: "Ref no.", name: "Patie
   address2: "Suburb, state and postcode", postcode: "Postcode", entitlement: "Entitlement no.", items: "Medicines", date: "Date",
   drHeader: "Doctor's details", drPrescriber: "Prescriber no.", drSign: "Doctor's name and qualifications" };
 const blankItem = (custom = false) => ({ product: "", custom, customName: "", addList: true,
-  strength: "", directions: "", qty: "", repeats: "0", filled: false });
+  strength: "", directions: "", qty: "", repeats: "0", filled: false, ings: null });
 const itemName = (i) => String(i.custom ? i.customName : i.product).trim();
-const itemLine = (i) => [itemName(i), String(i.strength || "").trim()].filter(Boolean).join(" ");
+// Compounds: medicines made up of set ingredients. Each strength is typed for each patient,
+// and they print on the line under the medicine's name. To change the ingredients, change this list.
+const COMPOUNDS = { fadingcream: ["Hydroquinone", "Kojic acid", "Ascorbic acid", "Dexamethasone"] };
+const ckey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+const compoundOf = (i) => (i && !i.custom && i.ings ? COMPOUNDS[ckey(i.product)] || null : null);
+const blankIngs = (product) => { const l = COMPOUNDS[ckey(product)]; return l ? Object.fromEntries(l.map((n) => [n, ""])) : null; };
+// "Hydroquinone 4%, Kojic acid 2%" (an ingredient left blank is left off the script)
+const ingText = (i) => (compoundOf(i) || []).map((n) => { const v = String(i.ings[n] || "").trim(); return v ? `${n} ${v}` : ""; })
+  .filter(Boolean).join(", ");
+// A saved one opened again: each strength back in its box. null if it was written another way (e.g. scanned "4% HQ")
+function parseIngs(product, text) {
+  const l = COMPOUNDS[ckey(product)];
+  if (!l) return null;
+  const out = blankIngs(product);
+  const s = String(text || "").trim();
+  if (!s) return out;
+  const ok = s.split(/\s*,\s*/).every((p) => {
+    const n = l.find((x) => p.toLowerCase().startsWith(`${x.toLowerCase()} `));
+    if (n) out[n] = p.slice(n.length).trim();
+    return !!n;
+  });
+  return ok ? out : null;
+}
+const strengthOf = (i) => (compoundOf(i) ? ingText(i) : String(i.strength || "").trim());
+const itemLine = (i) => [itemName(i), strengthOf(i)].filter(Boolean).join(" ");
 function itemsText(items) {
   return items.filter((i) => itemName(i)).map((i) => [
     itemLine(i), String(i.directions || "").trim(),
@@ -1058,8 +1085,9 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
       st.items = rec.items.map((it) => {
         const onList = products.includes(it.product);
         if (!onList) st.okTyped.add(it.product);
+        const ings = onList ? parseIngs(it.product, it.strengths) : null;   // Fading Cream: each strength back in its box
         return { ...blankItem(), product: onList ? it.product : "", custom: !onList, customName: onList ? "" : it.product,
-          addList: false, strength: it.strengths || "", directions: it.directions || "", qty: it.quantity || "", repeats: it.repeats ?? "" };
+          addList: false, strength: ings ? "" : it.strengths || "", ings, directions: it.directions || "", qty: it.quantity || "", repeats: it.repeats ?? "" };
       });
     }
     if (isRec && rec.recordDate) st.date = rec.recordDate;   // a copy is dated today
@@ -1068,12 +1096,13 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
   const on = (k) => !!(L.fields[k] && L.fields[k].on);
   const sigData = () => (st.signing === "pad" ? st.padSig : st.signing === "saved" ? st.mySig : "");
   const values = () => ({ ...st.v, ...drVals, date: fmtDate(st.date), signature: sigData() || "",
-    items: st.items.filter((i) => itemName(i)).map((i) => ({ name: itemName(i), dose: String(i.strength || "").trim(),
+    items: st.items.filter((i) => itemName(i)).map((i) => ({ name: itemName(i),
+      dose: compoundOf(i) ? "" : String(i.strength || "").trim(), ing: compoundOf(i) ? ingText(i) : "",
       dir: String(i.directions || "").trim(), qty: String(i.qty || "").trim(), rep: String(i.repeats ?? "").trim() })) });
   const payload = () => ({
     patientId: st.patient ? st.patient.id : "", date: st.date,
     items: st.items.filter((i) => itemName(i)).map((i) => ({
-      product: itemName(i), custom: !!i.custom, medicine: itemLine(i), strengths: String(i.strength || "").trim(),
+      product: itemName(i), custom: !!i.custom, medicine: itemLine(i), strengths: strengthOf(i),
       quantity: String(i.qty || "").trim(), directions: String(i.directions || "").trim(), repeats: String(i.repeats ?? "").trim(),
     })),
     sheet: Object.fromEntries(SHEET_KEYS.map((k) => [k, st.v[k]])),
@@ -1292,10 +1321,15 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
           <label class="rxw-switch c6"><input type="checkbox" data-item="${i}" data-f="addList" ${it.addList ? "checked" : ""}><span class="rxw-sw"></span>Add it to the prescription product list for next time</label>
         </div>` : ""}
         ${it.filled ? `<p class="rxw-filled">${IC.clock}Filled in from the last time it was prescribed on this computer. Check it.</p>` : ""}
-        <div class="rxw-fields">
+        ${compoundOf(it) ? `<div class="rxw-fields">
+          <p class="rxw-fh c6" style="margin:0">Type the strength of each ingredient. One left blank is left off the script.</p>
+          ${compoundOf(it).map((n) => `<label class="rxw-f c2"><span>${esc(n)}</span><input data-item="${i}" data-f="ing" data-ing="${esc(n)}"
+            value="${esc(it.ings[n] || "")}" placeholder="e.g. 4%" ${noFill}></label>`).join("")}
+          <label class="rxw-f c2"><span>Quantity</span><input data-item="${i}" data-f="qty" value="${esc(it.qty)}" placeholder="e.g. 30 g" ${noFill}></label>
+        </div>` : `<div class="rxw-fields">
           <label class="rxw-f c4"><span>Dose</span><input data-item="${i}" data-f="strength" value="${esc(it.strength)}" placeholder="e.g. 500mg, or 1% cream 30 g" ${noFill}></label>
           <label class="rxw-f c2"><span>Quantity</span><input data-item="${i}" data-f="qty" value="${esc(it.qty)}" placeholder="e.g. 1" ${noFill}></label>
-        </div>
+        </div>`}
         <div class="rxw-fields">
           <label class="rxw-f c4"><span>Instructions</span><input data-item="${i}" data-f="directions" value="${esc(it.directions)}" list="rxw-dirs" placeholder="e.g. 1 QID, or apply a thin layer at night" ${noFill}></label>
           <div class="rxw-f c2"><span>Repeats</span><div class="rxw-step">
@@ -1481,6 +1515,12 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
     if (!st.v.name.trim()) { showToast("Add the patient's name."); return; }
     const named = st.items.filter((i) => itemName(i));
     if (!named.length) { showToast("Choose at least one medicine."); return; }
+    const noStr = named.find((i) => compoundOf(i) && !ingText(i));
+    if (noStr) {
+      showToast(`Type the strengths for ${itemName(noStr)}.`);
+      root.querySelector(`[data-item="${st.items.indexOf(noStr)}"][data-f="ing"]`)?.focus();
+      return;
+    }
     if (st.items.some((i) => !itemName(i) && (i.strength + i.directions + i.qty).trim())) {
       showToast("Choose the product for every medicine, or remove it.");
       return;
@@ -1621,6 +1661,7 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
     if (t.dataset.item !== undefined && t.dataset.f !== "product") {
       const it = st.items[Number(t.dataset.item)];
       if (!it) return;
+      if (t.dataset.f === "ing") { if (it.ings) it.ings[t.dataset.ing] = t.value; draw(); return; }
       it[t.dataset.f] = t.type === "checkbox" ? t.checked : t.value;
       if (t.dataset.f === "repeats") it.repeats = t.value.replace(/\D/g, "");
       if (it.filled && t.dataset.f !== "addList") { it.filled = false; t.closest(".rxw-med")?.querySelector(".rxw-filled")?.remove(); }
@@ -1635,11 +1676,12 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
       const it = st.items[i];
       if (t.value === TYPE_IT) Object.assign(it, { custom: true, product: "", filled: false });
       else {
-        Object.assign(it, { custom: false, product: t.value, filled: false });
+        Object.assign(it, { custom: false, product: t.value, filled: false, ings: blankIngs(t.value) });
         const last = t.value && readJson(LAST_KEY, {})[t.value];
-        if (last && !it.strength.trim() && !it.directions.trim() && !it.qty.trim()) {
-          Object.assign(it, { strength: last.strength || "", directions: last.directions || "", qty: last.qty || "",
-            repeats: last.repeats ?? it.repeats, filled: true });
+        if (last && (it.ings || !it.strength.trim()) && !it.directions.trim() && !it.qty.trim()) {
+          // Fading Cream: the strengths are typed each time, so only the instructions and amounts fill in
+          Object.assign(it, { strength: it.ings ? it.strength : last.strength || "", directions: last.directions || "",
+            qty: last.qty || "", repeats: last.repeats ?? it.repeats, filled: true });
         }
       }
       renderItems(); draw();
