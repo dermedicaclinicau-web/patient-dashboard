@@ -14,6 +14,7 @@ const I = {
   mark: ic('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3" fill="currentColor"/>'),
   erase: ic('<path d="M20 20H8l-4.3-4.3a2 2 0 0 1 0-2.8L13.2 3.4a2 2 0 0 1 2.8 0l4.6 4.6a2 2 0 0 1 0 2.8L11 20"/><line x1="7.5" y1="9.5" x2="14.5" y2="16.5"/>'),
   undo: ic('<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>'),
+  tag: ic('<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>'),
 };
 const COLOURS = [["#dc2626", "Red"], ["#2563eb", "Blue"], ["#16a34a", "Green"], ["#111827", "Black"]];
 const MAX_W = 1200; // drawing resolution (wide enough for print, small enough to save)
@@ -66,7 +67,9 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       <button type="button" class="an-btn is-on" data-size="thin" aria-pressed="true">Thin</button>
       <button type="button" class="an-btn" data-size="thick" aria-pressed="false">Thick</button>
     </div>`;
+  const anyLbl = order.some((s) => s.labelOn);   // a set shows a label beside each mark
   const editBtns = `<span class="an-spacer"></span>
+    ${anyLbl ? `<button type="button" class="an-btn is-on" data-act="labels" aria-pressed="true" title="Show or hide the labels beside the marks">${I.tag}<span>Labels</span></button>` : ""}
     <button type="button" class="an-btn" data-act="undo" disabled>${I.undo}<span>Undo</span></button>
     <button type="button" class="an-btn" data-act="clear" disabled>Clear</button>`;
   const marksHtml = marking ? `<div class="an-marks${order.length === 1 ? " has-one" : ""}${compact ? "" : " is-strip"}" data-role="marks">${order.map(rowHtml).join("")}</div>` : "";
@@ -96,6 +99,8 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   const avalsEl = box.querySelector('[data-role="avals"]');   // values for Dot / Line
   const aval = {};          // per set: { pick: "0.3" | "other" | "", other: typed value }
   let avalWarn = false;     // Other is chosen but no value typed
+  let showLabels = true;    // the labels beside the marks (the Labels button)
+  let lblEd = null;         // the box for changing one mark's label
   let W = 0, H = 0;
   let tool = marking ? "mark" : "pen", colour = COLOURS[0][0], size = "thin";
   const ops = [];
@@ -228,6 +233,100 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   });
 
 
+  /* ---------- Labels beside the marks (set in the marking set; one mark's label can be changed) ---------- */
+  // "Volume injected", or "Volume injected 0.1 mL" when the set includes the value
+  function markLabel(s, x) {
+    const t = s.labelText || s.name || "";
+    const v = !s.labelValue ? "" : s.type === "label" ? (x.code || "") : `${fmt(x.v)}${s.unit ? ` ${s.unit}` : ""}`;
+    return [t, v].filter(Boolean).join(" ").slice(0, 60);
+  }
+  // Where the label sits: to the right of the mark, or the left when there's no room, kept inside the picture
+  function lblBox(op) {
+    const fs = op.lfs || 14;
+    g.font = `600 ${fs}px Arial, Helvetica, sans-serif`;
+    const w = g.measureText(op.lbl).width + fs * 0.9, h = fs * 1.55;
+    const gap = op.r * 1.45;
+    let cx = op.x + gap + w / 2;
+    if (cx + w / 2 > W - 2) cx = op.x - gap - w / 2;
+    return {
+      cx: Math.min(Math.max(cx, w / 2 + 2), W - w / 2 - 2),
+      cy: Math.min(Math.max(op.y, h / 2 + 2), H - h / 2 - 2), w, h, fs,
+    };
+  }
+  function drawLbl(op) {
+    const p = lblBox(op);
+    g.save();
+    g.beginPath();
+    if (g.roundRect) g.roundRect(p.cx - p.w / 2, p.cy - p.h / 2, p.w, p.h, p.h / 2);
+    else g.rect(p.cx - p.w / 2, p.cy - p.h / 2, p.w, p.h);
+    g.fillStyle = "rgba(255,255,255,0.95)";
+    g.fill();
+    g.lineWidth = Math.max(1.5, p.fs / 9);
+    g.strokeStyle = op.colour;   // the mark's colour around it
+    g.stroke();
+    g.fillStyle = "#0f172a";     // dark text, so it reads whatever the mark's colour
+    g.font = `600 ${p.fs}px Arial, Helvetica, sans-serif`;
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.fillText(op.lbl, p.cx, p.cy + p.fs * 0.04);
+    g.restore();
+  }
+  // The mark whose label is under the finger (the top one first), or -1
+  function hitLbl(x, y) {
+    if (!showLabels) return -1;
+    for (let i = ops.length - 1; i >= 0; i--) {
+      const o = ops[i];
+      if (o.type !== "mark" || !o.lbl) continue;
+      const p = lblBox(o);
+      if (Math.abs(x - p.cx) <= p.w / 2 && Math.abs(y - p.cy) <= p.h / 2) return i;
+    }
+    return -1;
+  }
+  function closeLblEd() { if (lblEd) { lblEd.remove(); lblEd = null; } }
+  // A small box over the label: a new label for this mark only. Done or Enter saves, Escape cancels, Undo steps back.
+  function openLblEd(i) {
+    closeLblEd();
+    const m = ops[i];
+    const p = lblBox(m);
+    const k = (canvas.getBoundingClientRect().width || W) / W;
+    lblEd = document.createElement("div");
+    lblEd.className = "an-lbl-ed";
+    lblEd.innerHTML = `<input class="fe-input" maxlength="60" value="${esc(m.lbl)}" aria-label="Label for this mark">
+      <button type="button" class="an-btn is-on" data-lbl="ok">Done</button>
+      ${m.lblOwn && m.lblDef ? `<button type="button" class="an-btn" data-lbl="reset" title="${esc(m.lblDef)}">Reset</button>` : ""}`;
+    stage.appendChild(lblEd);
+    const sw = stage.clientWidth, sh = stage.clientHeight;   // kept inside the picture
+    const left = Math.min(Math.max(0, (p.cx - p.w / 2) * k), Math.max(0, sw - lblEd.offsetWidth));
+    let top = (p.cy - p.h / 2) * k;
+    if (top + lblEd.offsetHeight > sh) top = sh - lblEd.offsetHeight;
+    lblEd.style.left = `${left}px`;
+    lblEd.style.top = `${Math.max(0, top)}px`;
+    const inp = lblEd.querySelector("input");
+    const save = (reset) => {
+      const at = ops.indexOf(m);
+      const text = reset ? "" : inp.value.replace(/\s+/g, " ").trim();
+      const next = text || m.lblDef || m.lbl;   // left empty: back to the set's label
+      closeLblEd();
+      if (at < 0 || next === m.lbl) return;
+      const by = { ...m, lbl: next, lblOwn: next !== m.lblDef };
+      ops[at] = by;
+      history.push({ replaced: m, by });
+      changed();
+    };
+    lblEd.addEventListener("input", (e) => e.stopPropagation());   // typing isn't a change to the picture yet
+    lblEd.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const b = e.target.closest("[data-lbl]");
+      if (b) save(b.dataset.lbl === "reset");
+    });
+    inp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); save(false); }
+      else if (e.key === "Escape") { e.preventDefault(); closeLblEd(); }
+    });
+    inp.focus();
+    inp.select();
+  }
+
   function setup() {
     const nw = img.naturalWidth || 1000, nh = img.naturalHeight || 750;
     W = Math.min(nw, MAX_W);
@@ -261,6 +360,10 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       tagSel[si] = Math.max(0, tagsOf(s).findIndex((t) => String(t).toLowerCase().replace(/[^a-z]/g, "")
         === String(m.tag || "").toLowerCase().replace(/[^a-z]/g, "")));
       const op = makeMark({ x: m.x * W, y: m.y * H, r: markRadius() });
+      if (typeof m.label === "string" && m.label.trim()) {   // the label it had on the earlier record
+        const t = m.label.trim().slice(0, 60);
+        Object.assign(op, { lbl: t, lblOwn: !!op.lblDef && t !== op.lblDef, lfs: op.lfs || Math.max(13, px(14)) });
+      }
       [active, sel[si], tagSel[si]] = keep;
       ops.push(op);
       history.push({ add: op });
@@ -278,12 +381,14 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     const s = order[active];
     const x = s.values[sel[active]];
     const label = s.type === "label";
+    const lbl = s.labelOn ? markLabel(s, x) : "";
     return {
       ...at, type: "mark", si: active, setId: s.id, label,
       v: label ? null : x.v, code: label ? x.code : "", text: valueText(s, x),
       shape: x.shape || "circle", colour: x.colour, fill: x.fill || "solid", tcolour: x.text, tsize: x.tsize || "m",
       tpos: x.tpos || "in",
       tag: tagsOf(s).length ? tagSel[active] : 0,
+      ...(lbl ? { lbl, lblDef: lbl, lfs: Math.max(13, px(14)) } : {}),   // its label, if the set shows one
     };
   }
 
@@ -326,7 +431,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   }
 
   function drawOp(op) {
-    if (op.type === "mark") { drawMark(op); return; }
+    if (op.type === "mark") { drawMark(op); if (op.lbl && showLabels) drawLbl(op); return; }
     g.fillStyle = g.strokeStyle = op.colour;
     if (op.type === "link") {   // Dot: an arrow from point A (a dot) to point B (the arrowhead)
       const [ax, ay] = op.a;
@@ -455,7 +560,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       totalEl.innerHTML = `<span>${tool === "erase"
         ? "Tap a mark, dot or line to remove it · Undo brings it back"
         : tool === "dot" || tool === "line" ? dotHint()
-        : "Tap the picture to place the chosen value · tap it again to remove it · Erase removes dots and lines"}</span>${
+        : `Tap the picture to place the chosen value · tap it again to remove it · Erase removes dots and lines${anyLbl && showLabels ? " · Tap a label to change it" : ""}`}</span>${
         others.map((o) => `<span><b>${esc(o)}</b></span>`).join("")}`;
       return;
     }
@@ -463,7 +568,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     totalEl.innerHTML = `<span>${tool === "erase"
       ? "Tap a mark, dot or line to remove it. Undo brings it back."
       : tool === "mark"
-        ? `Placing <b>${esc(placingText())}</b>. Tap the picture to add it, or tap a mark again to remove it.`
+        ? `Placing <b>${esc(placingText())}</b>. Tap the picture to add it, or tap a mark again to remove it.${anyLbl && showLabels ? " Tap a label to change it." : ""}`
         : tool === "dot" || tool === "line" ? dotHint()
         : "Draw on the picture. Choose a value above to place marks again."}</span>`;
   }
@@ -476,7 +581,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     clearBtn.disabled = !ops.length && !baseImg;
     showTotal();
   }
-  const changed = () => { redraw(); box.dispatchEvent(new Event("input", { bubbles: true })); };
+  const changed = () => { closeLblEd(); redraw(); box.dispatchEvent(new Event("input", { bubbles: true })); };
 
   function undo() {
     const h = history.pop();
@@ -515,6 +620,10 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     for (let i = ops.length - 1; i >= 0; i--) {
       const o = ops[i];
       if (o.type === "mark" && Math.hypot(o.x - x, o.y - y) <= o.r * 1.2 + tol * 0.3) return i;
+      if (o.type === "mark" && o.lbl && showLabels) {   // its label
+        const p = lblBox(o);
+        if (Math.abs(x - p.cx) <= p.w / 2 + tol * 0.3 && Math.abs(y - p.cy) <= p.h / 2 + tol * 0.3) return i;
+      }
       if (o.type === "dot" && Math.hypot(o.x - x, o.y - y) <= o.r + tol) return i;
       if (o.type === "link") {   // either dot, or anywhere on the line
         if (Math.hypot(o.a[0] - x, o.a[1] - y) <= o.r + tol) return i;
@@ -541,6 +650,11 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     if (!W) return;
     e.preventDefault();
     const [x, y] = pos(e);
+    closeLblEd();
+    if (tool === "mark") {   // tapping a label: change it for this mark
+      const li = hitLbl(x, y);
+      if (li >= 0) { openLblEd(li); return; }
+    }
     if (tool === "erase") {
       const i = hitAny(x, y);
       if (i >= 0) {
@@ -558,7 +672,11 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
         const m = ops[hit];
         const same = (m.label ? m.code === next.code : m.v === next.v) && (m.tag || 0) === (next.tag || 0);
         if (same) { history.push({ removed: m, at: hit }); ops.splice(hit, 1); }
-        else { const by = { ...next, x: m.x, y: m.y, r: m.r }; ops[hit] = by; history.push({ replaced: m, by }); }
+        else {   // a changed label on this mark stays
+          const by = { ...next, x: m.x, y: m.y, r: m.r, ...(m.lblOwn ? { lbl: m.lbl, lblOwn: true, lfs: m.lfs } : {}) };
+          ops[hit] = by;
+          history.push({ replaced: m, by });
+        }
       } else {
         ops.push(next);
         history.push({ add: next });
@@ -614,6 +732,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     tool = t;
     pickOne(box.querySelectorAll("[data-tool]"), box.querySelector(`[data-tool="${t}"]`));
     if (t !== was) { pending = null; hover = null; }   // a lone point A stays as a single dot
+    closeLblEd();
     const plain = t === "pen" || t === "dot" || t === "line";   // colour and size only matter for drawing
     box.querySelector(".an-colours").hidden = !plain;
     box.querySelector('[data-role="sizes"]').hidden = !plain;
@@ -650,6 +769,11 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       showAvals();
       showTotal();
       if (st.pick === "other") focusOther();
+    } else if (b.dataset.act === "labels") {
+      showLabels = !showLabels;
+      b.classList.toggle("is-on", showLabels);
+      b.setAttribute("aria-pressed", String(showLabels));
+      changed();   // the saved picture shows what's on screen
     } else if (b.dataset.act === "undo") undo();
     else if (b.dataset.act === "clear") {
       if (!ops.length && !baseImg) return;
@@ -741,6 +865,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
           return {
             x: +(o.x / W).toFixed(4), y: +(o.y / H).toFixed(4), set: s.name, setId: o.setId,
             ...(o.label ? { code: o.code } : { v: o.v }),
+            ...(o.lbl && showLabels ? { label: o.lbl } : {}),
             ...(tags.length ? { tag: tags[o.tag || 0] } : {}),
           };
         }),

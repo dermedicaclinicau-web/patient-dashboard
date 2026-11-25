@@ -14942,3 +14942,12 @@ a.sds-btn { display: inline-flex; align-items: center; text-decoration: none; }
 /* Form Builder → Marking sets */
 .ms-arrow { margin-top: 10px; padding: 10px 12px; border: 1px dashed #cbd5e1; border-radius: 10px; display: grid; gap: 8px; }
 .ms-arrow .fe-help { margin: 0; }
+
+/* Labels beside the marks: changing one */
+.an-lbl-ed { position: absolute; z-index: 5; display: flex; align-items: center; gap: 6px; padding: 6px;
+  border: 1px solid var(--primary); border-radius: 10px; background: #fff; line-height: normal;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, .18); }
+.an-lbl-ed .fe-input { width: 220px; max-width: 50vw; min-height: 36px; }
+.an-lbl-ed .an-btn { height: 36px; border: 1px solid var(--border); }
+@media (pointer: coarse) { .an-lbl-ed .fe-input { font-size: 16px; } }
+.ms-lbl .fe-help b { color: var(--text); }

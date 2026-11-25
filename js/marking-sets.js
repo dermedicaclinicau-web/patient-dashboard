@@ -103,6 +103,9 @@ export function cleanSet(s = {}, i = 0) {
     arrowValues: av,                                                      // values on arrows and lines
     arrowDefault: av.includes(Number(s.arrowDefault)) ? Number(s.arrowDefault) : null,   // pre-selected (null: none)
     arrowOther: type === "number" && s.arrowOther === true,               // staff can type another value
+    labelOn: s.labelOn === true,                                           // a label beside each mark
+    labelText: String(s.labelText || "").replace(/\s+/g, " ").trim().slice(0, 40),   // "" = the set's name
+    labelValue: s.labelValue === true,                                     // "Volume injected 0.1 mL"
     tagMarks: type === "number" && s.tagMarks === true,
     tags: tags.length ? tags : ["Treatment", "Touch-up"],
   };
@@ -291,6 +294,12 @@ export async function openMarkingSetsDialog({ staff } = {}) {
         <button type="button" class="hx-x" data-vdel aria-label="Remove this value">×</button>
       </div>`;
     };
+    // The label as it will read, e.g. "Volume injected 0.1 mL"
+    const lblEg = (s) => {
+      const x = s.values[0] || {};
+      const v = s.labelValue ? (s.type === "label" ? (x.code || "SD") : `${fmtMark(x.v || 0.1)}${s.unit ? ` ${s.unit}` : ""}`) : "";
+      return [s.labelText || s.name || "Volume injected", v].filter(Boolean).join(" ");
+    };
     const arrowDefaultOptions = (s) => `<option value="">None (staff choose each time)</option>${(s.arrowValues || []).map((v) =>
       `<option value="${v}"${Number(s.arrowDefault) === v ? " selected" : ""}>${fmtMark(v)}${s.unit ? ` ${esc(s.unit)}` : ""}</option>`).join("")}`;
     const setHtml = (s, i) => {
@@ -323,6 +332,13 @@ export async function openMarkingSetsDialog({ staff } = {}) {
             <select class="fb-select" data-sk="arrowDefault">${arrowDefaultOptions(s)}</select></label>
           <label class="fe-check"><input type="checkbox" data-sk="arrowOther"${s.arrowOther ? " checked" : ""} /> Let staff type another value (Other)</label>
         </div>`}
+        <div class="ms-arrow ms-lbl">
+          <label class="fe-check"><input type="checkbox" data-sk="labelOn"${s.labelOn ? " checked" : ""} /> Show a label beside each mark</label>
+          ${s.labelOn ? `<label class="lh-field"><span class="lh-label">Label</span>
+            <input class="fe-input" data-sk="labelText" maxlength="40" placeholder="${esc(s.name || "e.g. Volume injected")}" value="${esc(s.labelText || "")}" /></label>
+          <label class="fe-check"><input type="checkbox" data-sk="labelValue"${s.labelValue ? " checked" : ""} /> Include the value</label>
+          <p class="fe-help">Each mark reads: <b data-role="lbl-eg">${esc(lblEg(s))}</b>. Staff can change the label on one mark by tapping it.</p>` : ""}
+        </div>
       </section>`;
     };
     const draw = () => {
@@ -358,6 +374,13 @@ export async function openMarkingSetsDialog({ staff } = {}) {
       }
       if (t.dataset.sk === "arrowDefault") { s.arrowDefault = t.value === "" ? null : Number(t.value); return; }
       if (t.dataset.sk === "arrowOther") { s.arrowOther = t.checked; return; }
+      if (t.dataset.sk === "labelOn") { s.labelOn = t.checked; draw(); return; }
+      if (t.dataset.sk === "labelText" || t.dataset.sk === "labelValue") {
+        if (t.dataset.sk === "labelValue") s.labelValue = t.checked; else s.labelText = t.value;
+        const eg = box.querySelector('[data-role="lbl-eg"]');
+        if (eg) eg.textContent = lblEg(s);
+        return;
+      }
       if (t.dataset.sk) { s[t.dataset.sk] = t.value; return; }
       const vb = t.closest("[data-v]");
       if (!vb || !t.dataset.vk) return;
