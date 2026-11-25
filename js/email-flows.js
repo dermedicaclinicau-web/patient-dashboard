@@ -96,6 +96,8 @@ const TRIGGERS = [
 ];
 const TRIG_ICON = { purchase: "cart", visit: "cal", daily: "sun", task: "doc", form: "user", missed: "calx" };
 const MISS_KINDS = [["cancelled", "Cancelled"], ["noshow", "Didn't come (no-show or DNA)"]];
+const MISS_SCOPES = [["any", "Any appointment"], ["some", "Only appointments for these services"],
+  ["except", "All appointments except these services"]];
 const MISS_GAP = [[0, "Every time"], [14, "Not again within 14 days"], [30, "Not again within 30 days"],
   [60, "Not again within 60 days"], [90, "Not again within 90 days"]];
 const MISS_BACK = [[0, "No, only new ones from now on"], [7, "Yes, appointments in the last 7 days"],
@@ -352,6 +354,7 @@ function flowProblems(flow, tasks) {
   if (t.event === "form" && !t.formIds.length) out.push("Choose which form starts the flow.");
   if (t.event === "missed" && !t.missKinds.length) out.push("Choose cancelled, didn't come, or both.");
   if (t.event === "missed" && t.serviceScope === "some" && !t.services.length) out.push("Choose at least one service for the trigger, or pick Any appointment.");
+  if (t.event === "missed" && t.serviceScope === "except" && !t.services.length) out.push("Choose at least one service to leave out, or pick Any appointment.");
   const tp = groupProblem(t.rules, t.event === "daily");
   if (tp) out.push(t.event === "daily" ? `Daily check: ${tp}.` : `Start rules: ${tp}.`);
   const sp = groupProblem(flow.stop.rules, false);
@@ -1071,7 +1074,8 @@ async function mountFlowEditor(container, { id, staff }) {
     if (t.event === "missed") {
       const k = t.missKinds.length === 1 ? (t.missKinds[0] === "noshow" ? "missed" : "cancelled") : "cancelled or missed";
       const n = t.services.length;
-      return `An appointment is ${k}` + (t.serviceScope === "some" ? ` (${n} service${n === 1 ? "" : "s"})` : "") + rules;
+      return `An appointment is ${k}` + (t.serviceScope === "some" ? ` (${n} service${n === 1 ? "" : "s"})`
+        : t.serviceScope === "except" ? ` (not ${n} service${n === 1 ? "" : "s"})` : "") + rules;
     }
     if (t.event === "daily") return "Daily check" + (r ? rules : " · no rules yet");
     const n = t.products.length;
@@ -1468,9 +1472,11 @@ async function mountFlowEditor(container, { id, staff }) {
           <div class="ef-checks">${MISS_KINDS.map(([v, l]) => `<label class="fe-check"><input type="checkbox" data-missk="${v}"${
             t.missKinds.includes(v) ? " checked" : ""} /> ${esc(l)}</label>`).join("")}</div></div>
         <label class="tb-field"><span>For which services</span>
-          <select class="fb-select" data-f="trigger.serviceScope">${opt([["any", "Any appointment"], ["some", "Only appointments for these services"]], t.serviceScope)}</select></label>
-        ${t.serviceScope === "some" ? `<div class="tb-field"><span>Services</span><div class="fr-pp" data-role="trig-services"></div>
-          <small class="muted">An appointment matches if any of its services contains one of these, so "WR" matches "WR Forehead".</small></div>` : ""}
+          <select class="fb-select" data-f="trigger.serviceScope">${opt(MISS_SCOPES, t.serviceScope)}</select></label>
+        ${t.serviceScope === "some" || t.serviceScope === "except" ? `<div class="tb-field"><span>${t.serviceScope === "except" ? "Services to leave out" : "Services"}</span><div class="fr-pp" data-role="trig-services"></div>
+          <small class="muted">${t.serviceScope === "except"
+            ? "An appointment is left out only if every service on it contains one of these, so leaving out “Review” still includes “WR Forehead + Review”."
+            : "An appointment matches if any of its services contains one of these, so “WR” matches “WR Forehead”."}</small></div>` : ""}
         <label class="fe-check"><input type="checkbox" data-f="trigger.skipRebooked"${t.skipRebooked ? " checked" : ""} />
           Only if they haven't booked another appointment</label>
         <div class="tb-field"><span>Only start for patients who… <small>(optional)</small></span><div data-role="trig-rules"></div></div>
@@ -1933,6 +1939,7 @@ async function mountFlowEditor(container, { id, staff }) {
       if (el.dataset.f === "trigger.event") {
         matchData = null; buyData = null;
         if (el.value === "missed") { flow.stop.booking = true; flow.trigger.again = "ignore"; }
+        else if (flow.trigger.serviceScope === "except") flow.trigger.serviceScope = "any";
       }
       renderCanvas();
       changed();
