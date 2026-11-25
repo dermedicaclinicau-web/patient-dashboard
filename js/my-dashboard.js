@@ -24,7 +24,7 @@ import { mountMyVisits } from "./my-visits.js";
 import { mountMyFollowUps } from "./prospects.js";
 import { getDashPrefs, saveDashPrefs, syncDashPrefs } from "./dash-prefs.js";
 import { enableDashArrange } from "./dash-arrange.js";
-
+import { mountKitRestock } from "./kit-restock.js";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(1));
 const DAY = 864e5;
@@ -572,7 +572,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     }));
     rels.filter((r) => r.requestedByUid === me && r.status === "approved" && r.handledAt && now - r.handledAt < 3 * DAY).forEach((r) => att.push({
       tone: "ok", text: `${plural(r.qty, r.unit)} of ${r.productName} is on the Shelf for you`,
-      href: "#/inventory/kits", act: "Take it",
+      gotoKit: true, act: "Take it",
     }));
     usage.filter((u) => u.short && u.resolved !== true && now - u.at < 14 * DAY).forEach((u) => att.push({
       tone: "bad", text: `Saved short for ${u.patientName}: ${u.lines.filter((l) => l.short > 0).map((l) => `${l.name} by ${fmt(l.short)} ${l.unit}`).join(", ")}`,
@@ -598,6 +598,8 @@ export async function mountMyDashboard(container, { staff } = {}) {
       ? `<button type="button" class="lh-btn is-primary" data-sod="1">${esc(a.act)}</button>`
       : a.notesId
         ? `<button type="button" class="lh-btn" data-notes="${esc(a.notesId)}">${esc(a.act)}</button>`
+        : a.gotoKit
+          ? `<button type="button" class="lh-btn is-primary" data-goto-card="kit">${esc(a.act)}</button>`
         : a.ttab
           ? `<button type="button" class="lh-btn" data-ttab="${esc(a.ttab)}" data-goto="tasks">${esc(a.act)}</button>`
           : `<a class="lh-btn" href="${a.href}">${esc(a.act)}</a>`);
@@ -608,18 +610,10 @@ export async function mountMyDashboard(container, { staff } = {}) {
           <span class="md-att-t">${esc(a.text)}</span>${attAct(a)}</li>`).join("")}</ul>`,
         "md-att-card", `<span class="md-count">${att.length}</span>`);
 
-    /* ---------- My kit ---------- */
+    /* ---------- My kit: what's in it, and restocking (kit-restock.js fills it in) ---------- */
     const kitProducts = products.filter((p) => p.active && isKitProduct(p));
-    const kitHtml = !canKit || !kitProducts.length ? "" : card("My kit", `<ul class="md-kitlist">${kitProducts.map((p) => {
-      const ks = myKits.filter((k) => k.productId === p.id);
-      const total = ks.reduce((a, k) => a + kitUnits(k), 0);
-      const open = ks.reduce((a, k) => a + k.open, 0);
-      const sealed = ks.reduce((a, k) => a + k.sealed, 0);
-      const sub = [open ? `${fmt(open)} in the opened ${p.stockUnit}` : "", sealed ? `${plural(sealed, p.stockUnit)} unopened` : "",
-        !total ? `Shelf has ${plural(p.stock.shelf, p.stockUnit)}` : ""].filter(Boolean).join(" · ");
-      return `<li class="${total ? "" : "is-empty"}"><span><strong>${esc(p.name)}</strong>${sub ? `<small>${esc(sub)}</small>` : ""}</span>
-        <b>${fmt(total)}<small>${esc(p.doseUnit)}</small></b></li>`;
-    }).join("")}</ul>`, "", '<a class="md-link" href="#/inventory/kits">Open Kits</a>');
+    const kitHtml = !canKit || !kitProducts.length ? "" : card("My kit", '<div data-role="kit-restock"></div>',
+      "md-kit-card", can("menu.inventory") ? '<a class="md-link" href="#/inventory/kits">Open Kits</a>' : "");
 
     /* ---------- My records (grouped by form) ---------- */
     const todayN = records.filter((s) => s.createdAt >= today).length;
@@ -890,7 +884,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
         unit: kitProducts.length === 1 ? kitProducts[0].doseUnit : "units",
         tone: sodPending || !units ? "warn" : "",
         sub: sodPending ? "Count not done yet" : !units ? "Your kit is empty" : kitProducts.map((p) => p.name).join(", "),
-        attr: sodPending ? 'data-sod="1"' : "", href: sodPending ? "" : "#/inventory/kits" });
+        attr: sodPending ? 'data-sod="1"' : 'data-goto-card="kit"', href: "" });
     }
     if (drafts.length && kpis.length < 5) {
       kpis.push({ label: "Notes to review", icon: ICON.note, value: drafts.length, tone: "warn",
@@ -948,6 +942,8 @@ export async function mountMyDashboard(container, { staff } = {}) {
         notesEl.innerHTML = `<div class="md-ph-head"><h3>My notes</h3></div>${LOADING}`;
         mountMyNotes(notesEl);
       }
+      const kitEl = grid.querySelector('[data-role="kit-restock"]');
+      if (kitEl) mountKitRestock(kitEl, { staff, bare: true, onChange: () => load() });
       addFolds(grid, me);
     }
     // Start & end of day fills itself in a moment later: give it its ⌄ button once its header appears

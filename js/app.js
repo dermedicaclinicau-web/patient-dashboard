@@ -30,7 +30,7 @@ import { initTopbar, closeTopbarMenu } from "./topbar.js";
 import { initChat, teardownChat } from "./chat.js";
 import { openMyPhoto } from "./my-photo.js";
 import { setPrinterStatusApi } from "./printer-status.js";
-import { callApi } from "./api.js";   // ← the same import line you found in step 1
+import { callApi } from "./appointments.js";
 //import { mountKnowledge } from "./knowledge.js";
 //import { mountScanner } from "./scanner.js";
 //import { mountRecall } from "./recall.js";
