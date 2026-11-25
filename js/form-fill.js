@@ -14,6 +14,7 @@ import { getPatient, patientIds, formatMedicare, formatMedicareExpiry } from "./
 import { saveSubmission, getSubmission, listSubmissionsForPatient } from "./form-submissions.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast, formatDobLong, formatMobile } from "./utils.js";
+import { refreshPrinterStatus } from "./printer-status.js";
 import { queueDelivery, takeDelivery, openEmailComposer, sendToPrinter, deliveriesHtml, deliveryError } from "./form-delivery.js";
 import { conditionPasses, visibleIds } from "./form-conditions.js";
 import { formGroup } from "./form-templates.js";
@@ -621,6 +622,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
             <a class="ff-btn is-quiet" href="${exitHref}">Cancel</a>
             ${offerHand ? `<button type="button" class="ff-btn" data-act="handover">${BAR_ICONS.hand}<span>Hand to patient</span></button>` : ""}
             <button type="button" class="ff-btn" data-save="print">${BAR_ICONS.print}<span>Save &amp; print</span></button>
+            <span data-printer-status></span>
             <button type="button" class="ff-btn" data-save="email">${BAR_ICONS.mail}<span>Save &amp; email</span></button>
             <button type="button" class="ff-btn is-primary" data-save="save">${BAR_ICONS.check}<span>Save</span></button>`}
           </div>
@@ -1791,6 +1793,7 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
           <div class="ff-bar-actions">
             <button type="button" class="ff-btn" data-act="email">${BAR_ICONS.mail}<span>Email</span></button>
             <button type="button" class="ff-btn" data-act="printer">${BAR_ICONS.send}<span>Send to printer</span></button>
+            <span data-printer-status></span>
             <button type="button" class="ff-btn" data-act="print">${BAR_ICONS.print}<span>Print here</span></button>
             ${canMoveRecords() ? `<button type="button" class="ff-btn" data-act="move" title="Saved to the wrong patient? Move it">${BAR_ICONS.send}<span>Move</span></button>` : ""}
             ${isAdmin() && !sub.deleted ? `<a class="ff-btn" href="#/fill/${encodeURIComponent(sub.patientId)}/${encodeURIComponent(sub.templateId)}/edit/${encodeURIComponent(sub.id)}" title="Change the answers (Admins only)">${BAR_ICONS.edit}<span>Edit</span></a>` : ""}
@@ -1938,6 +1941,7 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
       showToast(deliveryError(err));
     } finally {
       if (printerBtn.isConnected) { printerBtn.disabled = false; printerBtn.querySelector("span").textContent = "Send to printer"; }
+      refreshPrinterStatus(true);   // the pill shows straight away if the printer is offline
     }
   };
 

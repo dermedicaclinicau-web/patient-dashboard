@@ -211,7 +211,8 @@ async function renderCategory(main, key, isAdmin) {
   main.innerHTML = `
     ${steps(1)}
     <a class="tm-back" href="#/tasks/new">${I.back}<span>All task types</span></a>
-    <h3 class="tm-h"><span class="tm-h-icon tone-${cat.tone}">${cat.icon}</span>${esc(cat.title)}</h3>
+    <h3 class="tm-h"><span class="tm-h-icon tone-${cat.tone}">${cat.icon}</span>${esc(cat.title)}${
+      key === "print" ? "<span data-printer-status></span>" : ""}</h3>
     <p class="muted tm-sub">${esc(cat.blurb)}</p>
     <div class="tm-tasks" data-role="tasks"><div class="skeleton tm-skel"></div><div class="skeleton tm-skel"></div></div>`;
   const list = main.querySelector('[data-role="tasks"]');

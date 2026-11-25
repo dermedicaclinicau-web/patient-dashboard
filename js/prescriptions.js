@@ -15,6 +15,7 @@ import { rxProductList, addRxProducts } from "./rx-products.js";
 // The browser tab's icon and name (System configuration → Browser tabs). Imported as a whole, so a computer still
 // holding the old tab-icon.js opens this page normally (with the old tab) until it gets the latest version.
 import * as tabs from "./tab-icon.js";
+import { refreshPrinterStatus } from "./printer-status.js";
 
 const PX = 96 / 25.4;                       // screen px per mm
 const PAPERS = { A4: [210, 297], A5: [148, 210], Letter: [216, 279] };
@@ -444,6 +445,7 @@ async function printTest(L, btn) {
       message: err && err.friendly ? err.message : "Check your connection and try again." });
   } finally {
     if (btn) btn.disabled = false;
+    refreshPrinterStatus(true);
   }
 }
 
@@ -1207,6 +1209,7 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
           <div class="rxw-sum" data-role="sum"></div>
           <div data-role="saved"></div>
           <button type="button" class="rxw-print" data-act="print" data-role="printbtn">${IC.print}<span>Save and print</span></button>
+          <p style="margin:8px 0 0;text-align:center"><span data-printer-status="full"></span></p>
           <button type="button" class="rxw-saveonly" data-act="saveonly" data-role="saveonly">${IC.check}<span>Save to patient's file only</span></button>
           <p class="rxw-hint">Save and print sends it straight to the front desk printer (<kbd>Ctrl</kbd> + <kbd>P</kbd>).
             Save only keeps it in the patient's Product Prescriptions without printing (<kbd>Ctrl</kbd> + <kbd>S</kbd>).</p>
@@ -1661,6 +1664,7 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
       st.busy = false;
       btn.disabled = false;
       if (root.isConnected) draw();
+      if (print) refreshPrinterStatus(true);
     }
     if (ok) {
       await printedNotice(print
@@ -2097,6 +2101,7 @@ async function mountLayout(container, { staff }) {
       <div class="rx-card"><h3><span class="rx-step">5</span>Check it</h3>
         <p class="rx-note">Sends a test page to the front desk printer: a mm grid, each box's outline and sample text. Put plain paper in first, then hold the page over a script against the light. If everything is off by the same amount, use Margins above.</p>
         <button type="button" class="rx-btn" data-act="test">🖨 Send a test page to the printer</button>
+        <span data-printer-status></span>
       </div>
       <button type="button" class="rx-link" data-act="reset">Start again from the starting layout</button>`;
     const al = panel.querySelector('[data-p="align"]');

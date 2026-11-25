@@ -29,6 +29,8 @@ import { initEndOfDay, teardownEndOfDay, endOfDayPending, askEndBeforeLogout, op
 import { initTopbar, closeTopbarMenu } from "./topbar.js";
 import { initChat, teardownChat } from "./chat.js";
 import { openMyPhoto } from "./my-photo.js";
+import { setPrinterStatusApi } from "./printer-status.js";
+import { callApi } from "./api.js";   // ← the same import line you found in step 1
 //import { mountKnowledge } from "./knowledge.js";
 //import { mountScanner } from "./scanner.js";
 //import { mountRecall } from "./recall.js";
@@ -93,7 +95,7 @@ const PROSPECTS_V = 11;
 // Raise this each time refunds.js changes, so browsers don't keep using an old copy
 const REFUNDS_V = 11;
 // Raise this each time prescriptions.js changes, so browsers don't keep using an old copy
-const RX_V = 11;
+const RX_V = 12;
 // Raise this each time scan-inbox.js changes, so browsers don't keep using an old copy
 const SCANINBOX_V = 2;
 let currentStaff = null;
@@ -609,6 +611,7 @@ watchAuth((staff) => {
     maybeShowStartOfDay(staff);
     initEndOfDay(staff, { onLogout: () => els.logoutBtn.click() }); // runs the usual "recording in progress" checks
     initChat(staff);
+    setPrinterStatusApi((b) => callApi({ action: "printStatus", ...b }));   // the printer pill beside Print buttons
     clearInterval(accessTimer);
     accessTimer = setInterval(checkAccess, 5 * 60 * 1000);
     lastAccessCheck = 0;
