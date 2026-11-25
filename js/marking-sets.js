@@ -7,6 +7,7 @@
 import { db } from "./firebase-config.js";
 import { doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { showToast } from "./utils.js";
+import { confirmDialog } from "./dialog.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 export const MARK_COLOURS = ["#2563eb", "#16a34a", "#d97706", "#dc2626", "#7c3aed", "#db2777", "#0891b2", "#4b5563"];
@@ -241,6 +242,26 @@ export function markSummary(v) {
 
 /* ---------- Managing the sets (Form Builder) ---------- */
 
+/* The window's own icons */
+const msi = (p) => `<svg class="msx-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+const MSI = {
+  x: msi('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
+  plus: msi('<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>'),
+  hash: msi('<line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/>'),
+  tag: msi('<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>'),
+  eye: msi('<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>'),
+  dots: msi('<circle cx="6" cy="12" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/>'),
+  sum: msi('<path d="M18 4H6l6 8-6 8h12"/>'),
+  arrow: msi('<line x1="5" y1="19" x2="19" y2="5"/><polyline points="10 5 19 5 19 14"/>'),
+  label: msi('<rect x="3" y="7" width="18" height="10" rx="5"/><line x1="7" y1="12" x2="17" y2="12"/>'),
+  trash: msi('<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>'),
+  copy: msi('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
+};
+const ARROW_SVG = '<svg viewBox="0 0 80 30" aria-hidden="true"><line x1="72" y1="23" x2="16" y2="9" stroke="#dc2626" stroke-width="3" stroke-linecap="round"/>' +
+  '<polygon points="8,7 21,4 18,15" fill="#dc2626"/><circle cx="72" cy="23" r="4.5" fill="#dc2626"/></svg>';
+const SIZE_SHORT = [["s", "Small"], ["m", "Medium"], ["l", "Large"]];
+const VAL_MAX = { number: 20, label: 12 };
+
 // Resolves with the saved sets, or null if cancelled
 export async function openMarkingSetsDialog({ staff } = {}) {
   let sets;
@@ -254,191 +275,323 @@ export async function openMarkingSetsDialog({ staff } = {}) {
   return new Promise((resolve) => {
     let result = null;
     let busy = false;
+    let dirty = false;
+    let cur = 0;   // the set open on the right
     const dlg = document.createElement("dialog");
-    dlg.className = "lh-dialog ms-dlg";
+    dlg.className = "lh-dialog ms-dlg msx";
+    dlg.setAttribute("aria-label", "Marking sets");
     dlg.innerHTML = `
-      <form class="lh-form" novalidate>
-        <div class="lh-dialog-head"><h3>Marking sets</h3>
-          <p>What staff tap onto a picture. <strong>Numbers</strong> add up to a total (units, mL). <strong>Labels</strong> are codes that
-            are counted, like depth of placement (SD, PO). A picture can use several sets, and each is placed on its own.
-            Shared by every form; forms already saved keep their own marks.</p></div>
-        <div class="ms-list" data-role="list"></div>
-        <button type="button" class="hx-add" data-act="ms-new">+ New marking set</button>
-        <p class="lh-error" role="alert" hidden></p>
-        <div class="lh-actions">
+      <form class="msx-form" novalidate>
+        <header class="msx-head">
+          <div><h3>Marking sets</h3>
+            <p>What staff tap onto a picture. Shared by every form; forms already saved keep their own marks.</p></div>
+          <button type="button" class="msx-x" data-act="cancel" aria-label="Close">${MSI.x}</button>
+        </header>
+        <div class="msx-body">
+          <aside class="msx-rail">
+            <div class="msx-rail-list" data-role="rail" aria-label="Marking sets"></div>
+            <button type="button" class="msx-new" data-act="ms-new">${MSI.plus}New marking set</button>
+          </aside>
+          <div class="msx-main" data-role="main"></div>
+        </div>
+        <footer class="msx-foot">
+          <p class="lh-error" role="alert" hidden></p>
+          <span class="msx-state" data-role="state"></span>
           <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
           <button type="submit" class="lh-btn is-primary">Save</button>
-        </div>
+        </footer>
       </form>`;
-    const list = dlg.querySelector('[data-role="list"]');
-    const err = dlg.querySelector(".lh-error");
+    const q = (s) => dlg.querySelector(s);
+    const rail = q('[data-role="rail"]');
+    const main = q('[data-role="main"]');
+    const err = q(".lh-error");
+    const stateEl = q('[data-role="state"]');
 
-    const sel = (key, items, cur, label) => `<select class="fb-select ms-small" data-vk="${key}" aria-label="${label}" title="${label}">${items.map(([k, l]) =>
-      `<option value="${k}"${k === cur ? " selected" : ""}>${l}</option>`).join("")}</select>`;
-    const valHtml = (s, x, j) => {
-      const label = s.type === "label";
-      const noText = !showsText(x.shape, x.tpos);
-      return `<div class="ms-val${label ? " is-label" : ""}" data-v="${j}">
-        <span class="ms-prev">${valueSvg(s, x, 34)}</span>
-        ${label
-          ? `<input class="fe-input ms-code" data-vk="code" maxlength="5" placeholder="SD" value="${esc(x.code || "")}" aria-label="Code" />
-             <input class="fe-input ms-name" data-vk="name" maxlength="40" placeholder="Meaning (optional)" value="${esc(x.name || "")}" aria-label="Meaning" />`
-          : `<input class="fe-input ms-num" type="number" min="0" step="any" data-vk="v" value="${x.v ?? ""}" aria-label="Value" />`}
-        ${sel("shape", MARK_SHAPES, x.shape || "circle", "Shape")}
-        <label class="ms-sw" title="Shape colour"><span>Shape</span><input type="color" data-vk="colour" value="${esc(x.colour)}" aria-label="Shape colour" /></label>
-        ${sel("fill", [["solid", "Filled"], ["none", "See-through"]], x.fill || "solid", "Background")}
-        ${sel("tpos", shapeHasText(x.shape) ? [["in", "Text inside"], ["below", "Text below"]] : [["in", "No label"], ["below", "Label below"]],
-          x.tpos || "in", "Label")}
-        ${noText ? "" : `<label class="ms-sw" title="Text colour"><span>Text</span><input type="color" data-vk="text" value="${esc(x.text || "#ffffff")}" aria-label="Text colour" /></label>
-        ${sel("tsize", TEXT_SIZES, x.tsize || "m", "Text size")}`}
-        <button type="button" class="hx-x" data-vdel aria-label="Remove this value">×</button>
-      </div>`;
-    };
-    // The label as it will read, e.g. "Volume injected 0.1 mL"
-    const lblEg = (s) => {
-      const x = s.values[0] || {};
-      const v = s.labelValue ? (s.type === "label" ? (x.code || "SD") : `${fmtMark(x.v || 0.1)}${s.unit ? ` ${s.unit}` : ""}`) : "";
-      return [s.labelText || s.name || "Volume injected", v].filter(Boolean).join(" ");
-    };
+    const isLabel = (s) => s.type === "label";
+    const unitText = (s) => (s.unit ? ` ${s.unit}` : "");
+    const problemOf = (s) => { const c = cleanSet(s); return !c.name || !c.values.length; };
+    // The label beside a mark, as it will read
+    const lblText = (s, x) => [s.labelText || s.name || "Volume injected",
+      s.labelValue && x ? (isLabel(s) ? (x.code || "SD") : `${fmtMark(x.v)}${unitText(s)}`) : ""].filter(Boolean).join(" ");
+    const sel = (key, items, val, label) => `<select class="fb-select msx-sel" data-vk="${key}" aria-label="${label}" title="${label}">${items.map(([k, l]) =>
+      `<option value="${k}"${k === val ? " selected" : ""}>${l}</option>`).join("")}</select>`;
+    const sw = (key, value, label) => `<label class="msx-sw" title="${label}"><input type="color" data-vk="${key}" value="${esc(value)}" aria-label="${label}"></label>`;
+    const switchHtml = (key, on, title, sub) => `<label class="msx-switch"><input type="checkbox" data-sk="${key}"${on ? " checked" : ""}>
+      <span class="msx-switch-ui" aria-hidden="true"></span><span><b>${title}</b>${sub ? `<small>${sub}</small>` : ""}</span></label>`;
+    const card = (icon, title, sub, body) => `<section class="msx-card"><header class="msx-ch"><span class="msx-ch-ic">${icon}</span>
+      <div><h4>${title}</h4>${sub ? `<p>${sub}</p>` : ""}</div></header>${body}</section>`;
     const arrowDefaultOptions = (s) => `<option value="">None (staff choose each time)</option>${(s.arrowValues || []).map((v) =>
       `<option value="${v}"${Number(s.arrowDefault) === v ? " selected" : ""}>${fmtMark(v)}${s.unit ? ` ${esc(s.unit)}` : ""}</option>`).join("")}`;
-    const setHtml = (s, i) => {
-      const label = s.type === "label";
-      return `
-      <section class="ms-set" data-set="${i}">
-        <div class="ms-head${label ? " is-label" : ""}">
-          <input class="fe-input" data-sk="name" maxlength="60" placeholder="${label ? "e.g. Depth of placement" : "e.g. Wrinkle relaxer units"}" value="${esc(s.name)}" aria-label="Name" />
-          ${label ? "" : `<input class="fe-input" data-sk="unit" maxlength="20" placeholder="units" value="${esc(s.unit)}" aria-label="Unit" />`}
-          <button type="button" class="hx-x" data-setdel aria-label="Delete this marking set" title="Delete">×</button>
-        </div>
-        <div class="fe-seg ms-type">${[["number", "Numbers (add up)"], ["label", "Labels (e.g. SD, PO)"]].map(([v, l]) =>
-          `<label class="fe-seg-btn"><input type="radio" name="ms-type-${i}" data-sk="type" value="${v}"${s.type === v ? " checked" : ""} /><span>${l}</span></label>`).join("")}</div>
-        <div class="ms-vals">${s.values.map((x, j) => valHtml(s, x, j)).join("")}
-          <button type="button" class="hx-add" data-vadd>+ ${label ? "Label" : "Value"}</button>
-        </div>
-        ${label ? "" : `<label class="lh-field"><span class="lh-label">Name for the total (shown beside the set while marking)</span>
-          <input class="fe-input" data-sk="totalLabel" maxlength="40" placeholder="Leave empty to show just the number, or e.g. Bolus injected" value="${esc(s.totalLabel || "")}" /></label>`}
-        ${label ? "" : `<label class="fe-check"><input type="checkbox" data-sk="tagMarks"${s.tagMarks ? " checked" : ""} /> Tag each mark (e.g. Treatment or Touch-up)</label>
-        ${s.tagMarks ? `<label class="lh-field"><span class="lh-label">Tags, separated by commas (the first is the default)</span>
-          <input class="fe-input" data-sk="tags" maxlength="120" placeholder="Treatment, Touch-up" value="${esc(s.tags.join(", "))}" /></label>` : ""}`}
-        ${label ? "" : `<div class="ms-arrow">
-          <span class="lh-label">Values on arrows and lines</span>
-          <p class="fe-help">When staff use Dot (arrow) or Line on a picture with this set, they can add one of these, e.g. 0.3 mL.
-            It's written next to the start of the arrow and adds to this set's total.</p>
-          <label class="lh-field"><span class="lh-label">Values, separated by commas</span>
-            <input class="fe-input" data-sk="arrowValues" inputmode="decimal" maxlength="120" placeholder="e.g. 0.1, 0.2, 0.3, 0.5"
-              value="${esc(s.arrowText ?? (s.arrowValues || []).join(", "))}" /></label>
-          <label class="lh-field"><span class="lh-label">Pre-selected</span>
-            <select class="fb-select" data-sk="arrowDefault">${arrowDefaultOptions(s)}</select></label>
-          <label class="fe-check"><input type="checkbox" data-sk="arrowOther"${s.arrowOther ? " checked" : ""} /> Let staff type another value (Other)</label>
-        </div>`}
-        <div class="ms-arrow ms-lbl">
-          <label class="fe-check"><input type="checkbox" data-sk="labelOn"${s.labelOn ? " checked" : ""} /> Show a label beside each mark</label>
-          ${s.labelOn ? `<label class="lh-field"><span class="lh-label">Label</span>
-            <input class="fe-input" data-sk="labelText" maxlength="40" placeholder="${esc(s.name || "e.g. Volume injected")}" value="${esc(s.labelText || "")}" /></label>
-          <label class="fe-check"><input type="checkbox" data-sk="labelValue"${s.labelValue ? " checked" : ""} /> Include the value</label>
-          <p class="fe-help">Each mark reads: <b data-role="lbl-eg">${esc(lblEg(s))}</b>. Staff can change the label on one mark by tapping it.</p>` : ""}
-        </div>
-      </section>`;
-    };
-    const draw = () => {
-      list.innerHTML = sets.length ? sets.map(setHtml).join("") : '<p class="tb-none">No marking sets yet.</p>';
-    };
-    draw();
 
+    /* ---- The list on the left ---- */
+    const railHtml = (s, i) => {
+      const c = cleanSet(s, i);
+      const extras = [c.labelOn && "label", c.arrowValues.length && "arrows", c.tagMarks && "tags"].filter(Boolean);
+      return `<button type="button" class="msx-ri${i === cur ? " is-on" : ""}${problemOf(s) ? " is-bad" : ""}" data-pick-set="${i}"${i === cur ? ' aria-current="true"' : ""}>
+        <span class="msx-ri-top"><strong>${esc(c.name || "Untitled set")}</strong>
+          <em class="msx-type${isLabel(c) ? " is-label" : ""}">${isLabel(c) ? "Labels" : esc(c.unit || "Numbers")}</em></span>
+        <span class="msx-ri-vals">${c.values.slice(0, 7).map((x) => valueSvg(c, x, 22)).join("")}${
+          c.values.length > 7 ? `<small>+${c.values.length - 7}</small>` : ""}${c.values.length ? "" : "<small>No values yet</small>"}</span>
+        ${extras.length ? `<small class="msx-ri-meta">With ${extras.join(", ")}</small>` : ""}
+      </button>`;
+    };
+
+    /* ---- How it looks on the form ---- */
+    function previewHtml(s) {
+      const c = cleanSet(s, cur);
+      const vals = c.values;
+      const lbl = isLabel(c);
+      const x0 = vals[0];
+      const fig = !vals.length ? "" : lbl ? (vals.length === 1 ? "× 2" : `${vals[0].code} 2`)
+        : `${c.totalLabel ? `${c.totalLabel}: ` : ""}${fmtMark(vals.slice(0, 2).reduce((a, x) => a + x.v, 0))}${unitText(c)}`;
+      const av = c.arrowDefault ?? c.arrowValues[0];
+      return `<div class="msx-pv-strip">
+          <span class="msx-pv-name">${esc(c.name || "Untitled set")}${!lbl && c.unit ? ` <small>${esc(c.unit)}</small>` : ""}${fig ? `<b>${esc(fig)}</b>` : ""}</span>
+          <span class="msx-pv-picks">${vals.length ? vals.map((x, i) => `<span class="msx-pv-pick${i ? "" : " is-on"}">${valueSvg(c, x, 36)}</span>`).join("")
+            : "<em>Add a value below</em>"}</span>
+        </div>
+        <div class="msx-pv-pic">
+          ${x0 ? `<span class="msx-pv-mark">${valueSvg(c, x0, 44)}${c.labelOn
+            ? `<span class="msx-pv-pill" style="border-color:${esc(x0.colour)}">${esc(lblText(c, x0))}</span>` : ""}</span>` : ""}
+          ${!lbl && av != null ? `<span class="msx-pv-arrow">${ARROW_SVG}<span class="msx-pv-pill is-arrow">${esc(`${fmtMark(av)}${unitText(c)}`)}</span></span>` : ""}
+        </div>`;
+    }
+
+    /* ---- The chosen set ---- */
+    const typeBtn = (s, type, icon, title, sub) => `<button type="button" class="msx-tb${s.type === type ? " is-on" : ""}" data-type="${type}"
+      role="radio" aria-checked="${s.type === type}"><span class="msx-tb-ic">${icon}</span><span><b>${title}</b><small>${sub}</small></span></button>`;
+    const valRow = (s, x, j) => {
+      const lbl = isLabel(s);
+      const noText = !showsText(x.shape, x.tpos);
+      return `<div class="msx-v" data-v="${j}">
+        <span class="msx-v-pv">${valueSvg(s, x, 34)}</span>
+        ${lbl ? `<input class="fe-input msx-code" data-vk="code" maxlength="5" placeholder="SD" value="${esc(x.code || "")}" aria-label="Code">
+                 <input class="fe-input" data-vk="name" maxlength="40" placeholder="Meaning (optional)" value="${esc(x.name || "")}" aria-label="Meaning">`
+          : `<input class="fe-input msx-num" type="number" min="0" step="any" inputmode="decimal" data-vk="v" placeholder="0.1" value="${esc(x.v ?? "")}" aria-label="Value">`}
+        ${sel("shape", MARK_SHAPES, x.shape || "circle", "Shape")}
+        ${sw("colour", x.colour, "Shape colour")}
+        ${sel("fill", [["solid", "Filled"], ["none", "Outline"]], x.fill || "solid", "Fill")}
+        ${sel("tpos", shapeHasText(x.shape) ? [["in", "Inside"], ["below", "Below"]] : [["in", "None"], ["below", "Below"]], x.tpos || "in", "Text")}
+        ${noText ? '<span class="msx-na"></span><span class="msx-na"></span>'
+          : `${sw("text", x.text || "#ffffff", "Text colour")}${sel("tsize", SIZE_SHORT, x.tsize || "m", "Text size")}`}
+        <button type="button" class="msx-ib is-danger" data-vdel aria-label="Remove this ${lbl ? "label" : "value"}" title="Remove">${MSI.trash}</button>
+      </div>`;
+    };
+    function mainHtml() {
+      const s = sets[cur];
+      if (!s) {
+        return `<div class="msx-empty"><span class="msx-ch-ic">${MSI.dots}</span><strong>No marking sets yet</strong>
+          <p>Add one, then choose it on a picture in Form Builder.</p>
+          <button type="button" class="lh-btn is-primary" data-act="ms-new">${MSI.plus}New marking set</button></div>`;
+      }
+      const lbl = isLabel(s);
+      const max = VAL_MAX[lbl ? "label" : "number"];
+      const heads = lbl ? ["", "Code", "Meaning", "Shape", "Colour", "Fill", "Text", "Text colour", "Size", ""]
+        : ["", "Value", "Shape", "Colour", "Fill", "Text", "Text colour", "Size", ""];
+      return `
+        <section class="msx-card">
+          <div class="msx-row">
+            <label class="msx-f msx-grow"><span>Name</span><input class="fe-input" data-sk="name" maxlength="60"
+              placeholder="${lbl ? "e.g. Depth of placement" : "e.g. Bolus volume"}" value="${esc(s.name)}"></label>
+            ${lbl ? "" : `<label class="msx-f msx-unit"><span>Unit</span><input class="fe-input" data-sk="unit" maxlength="20" placeholder="mL" value="${esc(s.unit)}"></label>`}
+          </div>
+          <div class="msx-types" role="radiogroup" aria-label="Kind of set">
+            ${typeBtn(s, "number", MSI.hash, "Numbers", "Add up to a total, e.g. 0.1 mL or 2 units")}
+            ${typeBtn(s, "label", MSI.tag, "Labels", "Codes that are counted, e.g. SD, PO")}
+          </div>
+        </section>
+        <section class="msx-card msx-pv"><header class="msx-ch"><span class="msx-ch-ic">${MSI.eye}</span>
+          <div><h4>On the form</h4><p>How staff see this set while marking a picture.</p></div></header>
+          <div data-role="pv">${previewHtml(s)}</div></section>
+        ${card(MSI.dots, lbl ? "Labels" : "Values", lbl ? "Each code staff can place. Up to 12." : "Each amount staff can place. Up to 20; they're sorted when saved.",
+          `<div class="msx-vals${lbl ? " is-label" : ""}">
+            <div class="msx-vhead" aria-hidden="true">${heads.map((h) => `<span>${h}</span>`).join("")}</div>
+            ${s.values.map((x, j) => valRow(s, x, j)).join("")}
+          </div>
+          <button type="button" class="msx-add" data-vadd${s.values.length >= max ? " disabled" : ""}>${MSI.plus}Add a ${lbl ? "label" : "value"}</button>`)}
+        ${lbl ? "" : card(MSI.sum, "Total", "", `
+          <label class="msx-f"><span>Name for the total <small>shown beside the set while marking</small></span>
+            <input class="fe-input" data-sk="totalLabel" maxlength="40" placeholder="Leave empty for just the number, or e.g. Bolus injected" value="${esc(s.totalLabel || "")}"></label>
+          ${switchHtml("tagMarks", s.tagMarks, "Tag each mark", "e.g. Treatment or Touch-up. Later tags are drawn dashed.")}
+          ${s.tagMarks ? `<label class="msx-f"><span>Tags, separated by commas <small>the first is the default</small></span>
+            <input class="fe-input" data-sk="tags" maxlength="120" placeholder="Treatment, Touch-up" value="${esc((s.tags || []).join(", "))}"></label>` : ""}`)}
+        ${lbl ? "" : card(MSI.arrow, "Values on arrows and lines",
+          "When staff use Dot (arrow) or Line, they can add one of these. It's written beside the arrow and adds to the total.", `
+          <label class="msx-f"><span>Values, separated by commas</span>
+            <input class="fe-input" data-sk="arrowValues" inputmode="decimal" maxlength="120" placeholder="e.g. 0.1, 0.2, 0.3, 0.5"
+              value="${esc(s.arrowText ?? (s.arrowValues || []).join(", "))}"></label>
+          <div class="msx-row">
+            <label class="msx-f msx-grow"><span>Pre-selected</span><select class="fb-select" data-sk="arrowDefault">${arrowDefaultOptions(s)}</select></label>
+            ${switchHtml("arrowOther", s.arrowOther, "Let staff type another value", "Adds an Other button")}
+          </div>`)}
+        ${card(MSI.label, "Label beside each mark", "A small pill next to every mark on the picture. Staff can change it on one mark by tapping it.", `
+          ${switchHtml("labelOn", s.labelOn, "Show a label beside each mark", "")}
+          ${s.labelOn ? `<div class="msx-row">
+            <label class="msx-f msx-grow"><span>Label</span><input class="fe-input" data-sk="labelText" maxlength="40"
+              placeholder="${esc(s.name || "e.g. Volume injected")}" value="${esc(s.labelText || "")}"></label>
+            ${switchHtml("labelValue", s.labelValue, "Include the value", lbl ? "e.g. Depth SD" : "e.g. Volume injected 0.1 mL")}
+          </div>` : ""}`)}
+        <div class="msx-setacts">
+          <button type="button" class="lh-btn" data-setdup>${MSI.copy}Duplicate this set</button>
+          <button type="button" class="lh-btn msx-del" data-setdel>${MSI.trash}Delete this set</button>
+        </div>`;
+    }
+
+    /* ---- Drawing ---- */
+    function paintRail() {
+      rail.innerHTML = sets.length ? sets.map(railHtml).join("") : '<p class="msx-ri-meta">No marking sets yet.</p>';
+    }
+    function paintPreview() {
+      const pv = main.querySelector('[data-role="pv"]');
+      if (pv && sets[cur]) pv.innerHTML = previewHtml(sets[cur]);
+    }
+    function paintState() { stateEl.textContent = dirty ? "Unsaved changes" : ""; }
+    function draw() { paintRail(); main.innerHTML = mainHtml(); paintState(); }
+    const touched = () => { dirty = true; paintPreview(); paintRail(); paintState(); };
+
+    async function tryClose() {
+      if (busy) return;
+      if (dirty && !(await confirmDialog({ title: "Close without saving?", message: "Your changes to the marking sets haven't been saved.",
+        confirmLabel: "Close without saving", tone: "warning" }))) return;
+      dlg.close();
+    }
+
+    /* ---- Typing ---- */
     dlg.addEventListener("input", (e) => {
       const t = e.target;
-      const box = t.closest("[data-set]");
-      if (!box) return;
-      const s = sets[Number(box.dataset.set)];
-      if (t.dataset.sk === "type") {
-        if (s.type !== t.value) {
-          s.type = t.value;
-          s.tagMarks = false;
-          s.values = t.value === "label"
-            ? [{ code: "", name: "", ...newStyle(MARK_COLOURS[0]) }]
-            : [{ v: 1, ...newStyle(MARK_COLOURS[0]) }];
-        }
-        draw();
+      const s = sets[cur];
+      if (!s || !main.contains(t)) return;
+      err.hidden = true;
+      const k = t.dataset.sk;
+      if (k) {
+        if (k === "tagMarks" || k === "labelOn") { s[k] = t.checked; dirty = true; draw(); return; }
+        if (k === "arrowOther" || k === "labelValue") s[k] = t.checked;
+        else if (k === "tags") s.tags = t.value.split(",").map((x) => x.trim()).filter(Boolean);
+        else if (k === "arrowValues") {
+          s.arrowText = t.value;   // kept as typed while editing (not saved)
+          s.arrowValues = cleanArrowValues(t.value);
+          if (!s.arrowValues.includes(Number(s.arrowDefault))) s.arrowDefault = null;
+          const ds = main.querySelector('[data-sk="arrowDefault"]');
+          if (ds) ds.innerHTML = arrowDefaultOptions(s);
+        } else if (k === "arrowDefault") s.arrowDefault = t.value === "" ? null : Number(t.value);
+        else s[k] = t.value;
+        touched();
         return;
       }
-      if (t.dataset.sk === "tagMarks") { s.tagMarks = t.checked; draw(); return; }
-      if (t.dataset.sk === "tags") { s.tags = t.value.split(",").map((x) => x.trim()).filter(Boolean); return; }
-      if (t.dataset.sk === "arrowValues") {
-        s.arrowText = t.value;   // kept as typed while editing (not saved)
-        s.arrowValues = cleanArrowValues(t.value);
-        if (!s.arrowValues.includes(Number(s.arrowDefault))) s.arrowDefault = null;
-        const ds = box.querySelector('[data-sk="arrowDefault"]');
-        if (ds) ds.innerHTML = arrowDefaultOptions(s);
-        return;
-      }
-      if (t.dataset.sk === "arrowDefault") { s.arrowDefault = t.value === "" ? null : Number(t.value); return; }
-      if (t.dataset.sk === "arrowOther") { s.arrowOther = t.checked; return; }
-      if (t.dataset.sk === "labelOn") { s.labelOn = t.checked; draw(); return; }
-      if (t.dataset.sk === "labelText" || t.dataset.sk === "labelValue") {
-        if (t.dataset.sk === "labelValue") s.labelValue = t.checked; else s.labelText = t.value;
-        const eg = box.querySelector('[data-role="lbl-eg"]');
-        if (eg) eg.textContent = lblEg(s);
-        return;
-      }
-      if (t.dataset.sk) { s[t.dataset.sk] = t.value; return; }
       const vb = t.closest("[data-v]");
       if (!vb || !t.dataset.vk) return;
       const x = s.values[Number(vb.dataset.v)];
       x[t.dataset.vk] = t.value;
-      // Circle with dot: see-through (a ring and a dot, like it's drawn by hand); the text settings go
-      if (t.dataset.vk === "shape" || t.dataset.vk === "tpos") {   // both change which text settings show
+      // Circle with dot: outline (a ring and a dot, like it's drawn by hand)
+      if (t.dataset.vk === "shape" || t.dataset.vk === "tpos") {
         if (t.dataset.vk === "shape" && !shapeHasText(t.value) && x.fill !== "none") { x.fill = "none"; x.text = x.colour; }
+        dirty = true;
         draw();
         return;
       }
-      // Keep the text readable when switching between filled and see-through
+      // The text stays readable when switching between filled and outline
       if (t.dataset.vk === "fill") {
-        const tx = vb.querySelector('[data-vk="text"]');
         if (t.value === "none" && String(x.text).toLowerCase() === "#ffffff") x.text = x.colour;
         if (t.value === "solid" && String(x.text).toLowerCase() === String(x.colour).toLowerCase()) x.text = "#ffffff";
+        const tx = vb.querySelector('[data-vk="text"]');
         if (tx) tx.value = x.text;
       }
-      const prev = vb.querySelector(".ms-prev");
-      if (prev) prev.innerHTML = valueSvg(s, x, 34);
+      const pv = vb.querySelector(".msx-v-pv");
+      if (pv) pv.innerHTML = valueSvg(s, x, 34);
+      touched();
     });
 
-    dlg.addEventListener("click", (e) => {
-      if (e.target.closest('[data-act="cancel"]')) { if (!busy) dlg.close(); return; }
-      if (e.target.closest('[data-act="ms-new"]')) {
-        sets.push({ id: `ms_${Date.now().toString(36)}`, name: "", type: "number", unit: "units",
-          values: [{ v: 1, ...newStyle(MARK_COLOURS[0]) }], tagMarks: false, tags: ["Treatment", "Touch-up"] });
+    /* ---- Buttons ---- */
+    dlg.addEventListener("click", async (e) => {
+      const t = e.target;
+      if (t.closest('[data-act="cancel"]')) { tryClose(); return; }
+      if (t.closest('[data-act="ms-new"]')) {
+        sets.push({ id: `ms_${Date.now().toString(36)}`, name: "", type: "number", unit: "mL",
+          values: [{ v: 0.1, ...newStyle(MARK_COLOURS[0]) }], tagMarks: false, tags: ["Treatment", "Touch-up"] });
+        cur = sets.length - 1;
+        dirty = true;
         draw();
-        const names = list.querySelectorAll('[data-sk="name"]');
-        if (names.length) names[names.length - 1].focus();
+        main.scrollTop = 0;
+        main.querySelector('[data-sk="name"]')?.focus();
         return;
       }
-      const box = e.target.closest("[data-set]");
-      if (!box) return;
-      const s = sets[Number(box.dataset.set)];
-      if (e.target.closest("[data-setdel]")) { sets.splice(Number(box.dataset.set), 1); draw(); return; }
-      if (e.target.closest("[data-vadd]")) {
+      const ps = t.closest("[data-pick-set]");
+      if (ps) { cur = Number(ps.dataset.pickSet); draw(); main.scrollTop = 0; return; }
+      const s = sets[cur];
+      if (!s) return;
+      const ty = t.closest("[data-type]");
+      if (ty) {
+        const to = ty.dataset.type;
+        if (to === s.type) return;
+        const has = s.values.some((x) => String(isLabel(s) ? x.code || "" : x.v ?? "").trim() !== "");
+        if (has && !(await confirmDialog({ title: `Change “${s.name || "this set"}” to ${to === "label" ? "Labels" : "Numbers"}?`,
+          message: "Its values are cleared, because numbers and labels are set up differently.", confirmLabel: "Change it", tone: "warning" }))) return;
+        s.type = to;
+        s.tagMarks = false;
+        s.values = to === "label" ? [{ code: "", name: "", ...newStyle(MARK_COLOURS[0]) }] : [{ v: 0.1, ...newStyle(MARK_COLOURS[0]) }];
+        dirty = true;
+        draw();
+        return;
+      }
+      if (t.closest("[data-setdup]")) {
+        const copy = JSON.parse(JSON.stringify(s));
+        copy.id = `ms_${Date.now().toString(36)}`;
+        copy.name = `${s.name || "Marking set"} (copy)`.slice(0, 60);
+        sets.splice(cur + 1, 0, copy);
+        cur += 1;
+        dirty = true;
+        draw();
+        main.scrollTop = 0;
+        main.querySelector('[data-sk="name"]')?.select();
+        return;
+      }
+      if (t.closest("[data-setdel]")) {
+        if (!(await confirmDialog({ title: `Delete “${s.name || "this set"}”?`,
+          message: "Pictures that use it can only draw until another set is chosen in Form Builder. Forms already saved keep their marks.",
+          confirmLabel: "Delete", tone: "danger" }))) return;
+        sets.splice(cur, 1);
+        cur = Math.max(0, Math.min(cur, sets.length - 1));
+        dirty = true;
+        draw();
+        return;
+      }
+      if (t.closest("[data-vadd]")) {
         const st = newStyle(MARK_COLOURS[s.values.length % MARK_COLOURS.length]);
-        s.values.push(s.type === "label" ? { code: "", name: "", ...st } : { v: "", ...st });
+        s.values.push(isLabel(s) ? { code: "", name: "", ...st } : { v: "", ...st });
+        dirty = true;
         draw();
-        const inputs = list.querySelectorAll(`[data-set="${box.dataset.set}"] [data-vk="${s.type === "label" ? "code" : "v"}"]`);
-        if (inputs.length) inputs[inputs.length - 1].focus();
+        const ins = main.querySelectorAll(`[data-vk="${isLabel(s) ? "code" : "v"}"]`);
+        const last = ins[ins.length - 1];
+        if (last) { last.scrollIntoView({ block: "nearest" }); last.focus(); }
         return;
       }
-      const vd = e.target.closest("[data-vdel]");
-      if (vd) { s.values.splice(Number(vd.closest("[data-v]").dataset.v), 1); draw(); }
+      const vd = t.closest("[data-vdel]");
+      if (vd) { s.values.splice(Number(vd.closest("[data-v]").dataset.v), 1); dirty = true; draw(); }
     });
 
-    dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
+    // Enter in a box doesn't save by accident; Ctrl + S does
+    dlg.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); dlg.querySelector("form").requestSubmit(); return; }
+      if (e.key === "Enter" && e.target.matches("input:not([type=checkbox])")) e.preventDefault();
+    });
+    dlg.addEventListener("cancel", (e) => { e.preventDefault(); tryClose(); });
+
+    /* ---- Saving ---- */
     dlg.querySelector("form").addEventListener("submit", async (e) => {
       e.preventDefault();
+      if (busy) return;
       const clean = sets.map(cleanSet);
-      const noName = clean.find((s) => !s.name);
-      const empty = clean.find((s) => !s.values.length);
-      const bad = noName ? "Give every marking set a name."
-        : empty ? (empty.type === "label" ? `“${empty.name}” needs at least one label code (e.g. SD).`
-          : `“${empty.name}” needs at least one value above 0.`) : "";
-      if (bad) { err.textContent = bad; err.hidden = false; return; }
+      const badAt = clean.findIndex((s) => !s.name || !s.values.length);
+      if (badAt >= 0) {   // straight to the set that needs fixing
+        const b = clean[badAt];
+        cur = badAt;
+        draw();
+        err.textContent = !b.name ? "Give every marking set a name."
+          : b.type === "label" ? `“${b.name}” needs at least one label code (e.g. SD).` : `“${b.name}” needs at least one value above 0.`;
+        err.hidden = false;
+        main.querySelector(!b.name ? '[data-sk="name"]' : "[data-vk]")?.focus();
+        return;
+      }
       err.hidden = true;
       busy = true;
       const btn = dlg.querySelector('[type="submit"]');
@@ -447,6 +600,7 @@ export async function openMarkingSetsDialog({ staff } = {}) {
       try {
         result = await saveMarkingSets(clean, staff);
         busy = false;
+        dirty = false;
         dlg.close();
         showToast("Marking sets saved");
       } catch (ex) {
@@ -462,6 +616,7 @@ export async function openMarkingSetsDialog({ staff } = {}) {
     });
 
     dlg.addEventListener("close", () => { dlg.remove(); resolve(result); });
+    draw();
     document.body.appendChild(dlg);
     dlg.showModal();
   });
