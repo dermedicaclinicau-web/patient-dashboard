@@ -7696,10 +7696,23 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 .rc-chip em { font-style: normal; color: #64748b; margin-left: 3px; }
 .rc-chip.is-on { background: #ccfbf1; border-color: #5eead4; color: #115e59; }
 .rc-layout { display: grid; gap: 16px; align-items: start; }
-@media (min-width: 1400px) {
-  .rc-layout { grid-template-columns: minmax(0, 1fr) 420px; }
-  .rc-panel { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow: auto; }
+.rc-panel { position: sticky; top: calc(var(--topbar-h) + var(--recbar-h, 0px) + 12px);
+  max-height: calc(100dvh - var(--topbar-h) - var(--recbar-h, 0px) - 24px); overflow: auto; overscroll-behavior: contain; }
+@media (min-width: 1280px) { .rc-layout { grid-template-columns: minmax(0, 1fr) 380px; } }
+@media (min-width: 1500px) { .rc-layout { grid-template-columns: minmax(0, 1fr) 420px; } }
+/* iPads and smaller laptops: the card slides in from the right, over a dimmed list */
+@media (max-width: 1279px) {
+  .rc-panel:not([hidden]) { position: fixed; top: var(--topbar-h); right: 0; bottom: 0; z-index: 60;
+    width: min(440px, 100vw); max-height: none; border-radius: 16px 0 0 16px;
+    box-shadow: -20px 0 50px -20px rgba(15, 23, 42, .35); animation: rc-sheet-in .2s ease-out; }
+  .rc-layout:has(> .rc-panel:not([hidden]))::before { content: ""; position: fixed; inset: var(--topbar-h) 0 0 0; z-index: 59;
+    background: rgba(15, 23, 42, .25); }
 }
+@media (max-width: 640px) {
+  .rc-panel:not([hidden]) { width: 100vw; border-radius: 0; padding-bottom: calc(18px + env(safe-area-inset-bottom)); }
+}
+@keyframes rc-sheet-in { from { transform: translateX(24px); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .rc-panel:not([hidden]) { animation: none; } }
 @media (max-width: 900px) { .rc-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .rc-sec { margin-bottom: 18px; }
 .rc-sec-h, .rc-sub-h { display: flex; align-items: baseline; gap: 8px; font-size: 13px; color: #64748b; margin: 0 0 6px 2px; }
@@ -8330,7 +8343,7 @@ dialog.lh-dialog.inv-dlg.kit-set-dlg { width: min(760px, 96vw); }
 .rc-links .lh-btn[disabled] { opacity: .45; cursor: not-allowed; }
 
 /* Recall results */
-.rr-intro { margin: .25rem .25rem 1rem; font-size: .85rem; }
+.rc.rr .rr-intro { margin: .25rem .25rem 1rem; font-size: .85rem; }
 .rr-dates { display: inline-flex; align-items: center; gap: .4rem; }
 .rr .rc-stats { margin-bottom: 1rem; }
 .rr-sub { display: block; margin-top: .15rem; font-size: .75rem; color: #64748b; }
@@ -8339,7 +8352,7 @@ dialog.lh-dialog.inv-dlg.kit-set-dlg { width: min(760px, 96vw); }
 .rr-card { padding: 1rem 1.1rem; }
 .rr-card .mc-h { margin: 0 0 .75rem; }
 .rr-wide { grid-column: 1 / -1; }
-.rr-row { display: grid; grid-template-columns: minmax(120px, 190px) 1fr auto; align-items: center; gap: .6rem; padding: .3rem 0; font-size: .88rem; }
+.rc.rr .rr-row { display: grid; grid-template-columns: minmax(120px, 190px) 1fr auto; align-items: center; gap: .6rem; padding: .3rem 0; font-size: .88rem; }
 .rr-bar { height: 8px; border-radius: 999px; background: #eef2f6; overflow: hidden; }
 .rr-bar i { display: block; height: 100%; border-radius: inherit; background: #0f766e; }
 .rr-val { white-space: nowrap; font-size: .82rem; color: #475569; }
@@ -8359,8 +8372,8 @@ dialog.lh-dialog.inv-dlg.kit-set-dlg { width: min(760px, 96vw); }
 .rr-help li { margin: .3rem 0; }
 .rr-body.is-loading { opacity: .5; pointer-events: none; transition: opacity .15s; }
 @media (max-width: 640px) {
-  .rr-row { grid-template-columns: 1fr auto; }
-  .rr-row .rr-bar { grid-column: 1 / -1; order: 3; }
+  .rc.rr .rr-row { grid-template-columns: 1fr auto; }
+  .rc.rr .rr-row .rr-bar { grid-column: 1 / -1; order: 3; }
 }
 
 /* Inventory activity: undo / used on a patient */
@@ -12593,11 +12606,11 @@ dialog.lh-dialog.ae-dlg { width: min(520px, calc(100vw - 2rem)); }
 .rc-active svg { width: 12px; height: 12px; }
 
 /* Rows: coloured edge for how overdue, calm icon instead of a Call button */
-.rc .rc-item { border-left: 3px solid transparent; }
-.rc .rc-item.r-due { border-left-color: #2a9d8f; }
-.rc .rc-item.r-late { border-left-color: #d97706; }
-.rc .rc-item.r-old { border-left-color: #dc2626; }
-.rc .rc-item.is-on { background: color-mix(in srgb, var(--rc-pri) 6%, #fff); }
+.page.rc .rc-item { border-left: 3px solid transparent; }
+.page.rc .rc-item.r-due { border-left-color: #2a9d8f; }
+.page.rc .rc-item.r-late { border-left-color: #d97706; }
+.page.rc .rc-item.r-old { border-left-color: #dc2626; }
+.page.rc .rc-item.is-on { background: color-mix(in srgb, var(--rc-pri) 6%, #fff); }
 .rc-av.h0 { background: #e0f2f1; color: #0f5f57; } .rc-av.h1 { background: #ede9fe; color: #5b3fb5; }
 .rc-av.h2 { background: #fdf0e1; color: #9a5a0f; } .rc-av.h3 { background: #e6f0fb; color: #1d5fa5; }
 .rc-av.h4 { background: #fbe7ef; color: #a23a63; } .rc-av.h5 { background: #e9f5e1; color: #3f6f1a; }
@@ -14288,7 +14301,7 @@ body.scan-full { overflow: hidden; }
 .rf-step-main { display: grid; flex: 1; gap: .35rem; min-width: 0; }
 .rf-step-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .4rem .75rem; }
 .rf-step-top strong { font-size: .98rem; }
-.rf-who { display: inline-flex; align-items: center; gap: .35rem; font-size: .8rem; color: #475569; }
+.rf .rf-who { display: inline-flex; align-items: center; gap: .35rem; font-size: .8rem; color: #475569; }
 .rf-step-done, .rf-step-due, .rf-step-wait { margin: 0; font-size: .82rem; color: var(--muted); }
 .rf-step-done { color: #047857; font-weight: 600; }
 .rf-step-due.is-late { color: #b91c1c; font-weight: 700; }

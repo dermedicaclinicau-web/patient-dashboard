@@ -125,7 +125,7 @@ const hue = (s) => { let h = 0; for (const ch of String(s || "")) h = (h * 31 + 
 // "61414498026" → "0414 498 026"; anything else is shown as it is
 const mobileText = (m) => {
   let d = String(m || "").replace(/\D/g, "");
-  if (/^614\d{8}$/.test(d)) d = `0${d.slice(2)}`;
+  if (/^610?4\d{8}$/.test(d)) d = `0${d.slice(-9)}`;   // 61428…, 610428… and +61 428… all become 0428…
   if (/^4\d{8}$/.test(d)) d = `0${d}`;
   return /^04\d{8}$/.test(d) ? `${d.slice(0, 4)} ${d.slice(4, 7)} ${d.slice(7)}` : String(m || "").trim();
 };
@@ -227,6 +227,7 @@ export function mountRecall(container, { staff = null } = {}) {
   root.innerHTML = `
     <div class="rc-top"><h2>Recall</h2><span class="inv-spacer"></span>
       <button type="button" class="rc-start" data-act="session-start" hidden title="Work through My calls one patient at a time">${I.headset}<span>Start calling</span></button>
+      <a class="lh-btn is-quiet" href="#/recall/messages">Texts &amp; emails</a>
       <button type="button" class="lh-btn is-quiet" data-act="optouts" title="Mobiles that opted out of texts">Opted out</button>
       ${can(staff, "recall.manage") ? '<a class="lh-btn is-quiet" href="#/recall/results">Results</a>' : ""}
       ${can(staff, "recall.manage") ? '<a class="lh-btn is-quiet" href="#/settings/recall">Recall settings</a>' : ""}</div>
@@ -1623,6 +1624,12 @@ export function mountRecall(container, { staff = null } = {}) {
   document.addEventListener("click", onDocClick);
 
   root.addEventListener("click", async (e) => {
+    // iPads and phones: tapping the dimmed list beside the card closes the card
+    if (e.target.classList && e.target.classList.contains("rc-layout") && !$("panel").hidden
+      && window.matchMedia("(max-width: 1279px)").matches) {
+      endCall(); sel = ""; drawList(); drawPanel(true);
+      return;
+    }
     // Calling: the phone dials (if it can) and the card turns into "On a call"
     const telA = e.target.closest('a[href^="tel:"]');
     if (telA) {
