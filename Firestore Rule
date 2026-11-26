@@ -320,9 +320,11 @@ service cloud.firestore {
           || (invReceive() && request.resource.data.type == 'receive')
           || (invKit() && request.resource.data.type in ['kit-take', 'kit-open', 'kit-return', 'kit-discard', 'kit-use', 'kit-borrow'])
           || (invJt() && request.resource.data.type == 'release')
-          || (invUse() && request.resource.data.type in ['use', 'sale'])
+          || (invUse() && request.resource.data.type in ['use', 'sale', 'shared-open', 'vial-open'])
           || (invSell() && request.resource.data.type == 'sale')
-          || (invRefund() && request.resource.data.type == 'return'));
+          || (invRefund() && request.resource.data.type == 'return')
+          // Marking an opened container finished (missing at the count, or empty). No stock changes.
+          || (isStaff() && request.resource.data.type == 'shared-finish'));
       allow update, delete: if false;
     }
 
@@ -414,7 +416,7 @@ service cloud.firestore {
     match /inv_counts/{id} {
       allow read: if isStaff();
       allow create: if request.resource.data.byUid == request.auth.uid
-        && request.resource.data.lines is list && request.resource.data.lines.size() <= 400
+        && request.resource.data.lines is list && request.resource.data.lines.size() <= 1200
         && ((request.resource.data.kind == 'opening' && (can('inventory.count') || invOrder()))
           || (request.resource.data.kind == 'kit' && invKit()));
       allow update: if ((can('menu.reports') || invUse() || can('data.upload') || invRefund())

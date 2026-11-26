@@ -333,11 +333,15 @@ export async function mountStockCount(container, { param = "", staff = null } = 
     } catch { /* storage unavailable */ }
     let localDraft = null;
     try { localDraft = JSON.parse(localStorage.getItem(LOCAL_KEY) || "null"); } catch { localDraft = null; }
-    let loadedAt = Date.now();
-    const drafts = [serverDraft, localDraft].filter((d) => d && Array.isArray(d.items)).sort((a, b) => (a.savedAt || 0) - (b.savedAt || 0));
+    // savedAt may be a number, a Date or a Firestore Timestamp, and may come from another device's clock
+    const toMs = (v) => (!v ? 0 : typeof v === "number" ? v : typeof v.toMillis === "function" ? v.toMillis()
+      : v instanceof Date ? v.getTime() : Number(v) || 0);
+    // The newest shared copy already merged here. Compared with the copy's own time, never this device's clock.
+    let lastDraftAt = serverDraft ? toMs(serverDraft.savedAt) : 0;
+    const drafts = [serverDraft, localDraft].filter((d) => d && Array.isArray(d.items)).sort((a, b) => toMs(a.savedAt) - toMs(b.savedAt));
     drafts.forEach(applyDraft);
     const latest = drafts[drafts.length - 1];
-    if (latest && draftCount(latest)) st.resumed = { by: latest.byUid === me ? "" : (latest.by || "Someone"), at: latest.savedAt || 0 };
+    if (latest && draftCount(latest)) st.resumed = { by: latest.byUid === me ? "" : (latest.by || "Someone"), at: toMs(latest.savedAt) };
 
     let saveTimer = 0;
     const autosave = () => {
@@ -352,11 +356,12 @@ export async function mountStockCount(container, { param = "", staff = null } = 
     // Someone saved more counts after this page opened: theirs fill the gaps, what's typed here wins
     async function mergeNewer() {
       const cur = await getCountDraft().catch(() => null);
-      if (!cur || !Array.isArray(cur.items) || (cur.savedAt || 0) <= loadedAt) return "";
+      const curAt = cur ? toMs(cur.savedAt) : 0;
+      if (!cur || !Array.isArray(cur.items) || curAt <= lastDraftAt) return "";
+      lastDraftAt = curAt;   // this copy is now merged: it can't trigger again
       const mine = snapshot();
       applyDraft(cur);
       applyDraft(mine);
-      loadedAt = Date.now();
       return cur.byUid === me ? "You (on another device)" : (cur.by || "Someone");
     }
 
@@ -469,7 +474,8 @@ export async function mountStockCount(container, { param = "", staff = null } = 
 
     function itemHtml(it, i, loc) {
       const lines = it.rows.map((r, ri) => ({ r, ri })).filter(({ r }) => r.found || r.at[loc]);
-      if (noneAt(it, loc)) lines.unshift({ none: true });
+      // Once a batch has been added, it replaces the "none here" box
+      if (noneAt(it, loc) && !it.rows.some((r) => r.found)) lines.unshift({ none: true });
       const n = lines.length;
       const unit = esc(unitPlural(it.p.stockUnit));
       return `<tbody class="sc-tb${locFilled(it, loc) ? " is-done" : ""}" data-it="${i}">${lines.map((x, k) => {
@@ -1006,7 +1012,16 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       const idx = tb ? Number(tb.dataset.it) : -1;
       const it = idx >= 0 ? items[idx] : null;
       if (act === "found" && it) {
-        it.rows.push(newRow("", "", true));
+        const row = newRow("", "", true);
+        // The number already typed in the "none here" box moves onto the new batch line
+        const loc = st.place;
+        if (LOCS.includes(loc) && noneAt(it, loc) && Number(it.none[loc]) > 0) {
+          row.counted[loc] = it.none[loc];
+          row.countedAt[loc] = it.noneAt[loc] || Date.now();
+          it.none[loc] = "";
+          it.noneAt[loc] = 0;
+        }
+        it.rows.push(row);
         drawTable();
         autosave();
         const ins = body.querySelectorAll(`tbody[data-it="${idx}"] [data-f="batch"]`);
@@ -1077,7 +1092,9 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       // Someone saved more counts for later while this was open: add them in first
       busy = true;
       let merged = "";
-      try { merged = await mergeNewer(); } finally { busy = false; }
+      try { merged = await mergeNewer(); }
+      catch (err) { console.warn("Couldn't check for newer saved counts:", err); }   // never block the save over this
+      finally { busy = false; }
       if (merged) {
         draw();
         msgEl.textContent = `${merged} saved more counts while you were counting. They've been added: check them, then press Save count again.`;
@@ -1087,10 +1104,21 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       const label = (it, loc) => `${it.p.name} (${LOC[loc]})`;
       // Shows the place (and the product, if the category filter is hiding it)
       const goTo = (loc, it = null) => {
-        let redraw = false;
-        if (st.place !== loc) { st.place = loc; redraw = true; }
-        if (it && st.cat && it.p.category !== st.cat) { st.cat = ""; redraw = true; }
-        if (redraw) draw();
+        // Clear anything that could be hiding the product, then scroll to it
+        const hiddenByCat = it && st.cat && it.p.category !== st.cat;
+        if (st.place !== loc || hiddenByCat || st.q || st.left) {
+          st.place = loc;
+          if (hiddenByCat) st.cat = "";
+          st.q = "";
+          st.left = false;
+          draw();
+        }
+        if (!it) return;
+        const tb = body.querySelector(`tbody[data-it="${items.indexOf(it)}"]`);
+        if (!tb) return;
+        tb.scrollIntoView({ behavior: "smooth", block: "center" });
+        const empty = [...tb.querySelectorAll("input.sc-in, [data-f]")].find((x) => !x.value);
+        if (empty) setTimeout(() => empty.focus({ preventScroll: true }), 300);
       };
       for (const it of items) {
         for (const loc of it.locs) {
@@ -1099,13 +1127,15 @@ export async function mountStockCount(container, { param = "", staff = null } = 
             msgEl.textContent = `${label(it, loc)}: fill in every ${batchName(it.p).toLowerCase()}, or leave them all empty to skip it.`;
             return;
           }
-          if (noneAt(it, loc) && Number(it.none[loc]) > 0) {
+          if (noneAt(it, loc) && Number(it.none[loc]) > 0 && !foundAt(it, loc).length) {
             goTo(loc, it);
             msgEl.textContent = `${label(it, loc)}: use “+ A ${batchName(it.p).toLowerCase()} that isn't listed” to enter the ${batchName(it.p).toLowerCase()} number and expiry of what's there.`;
             return;
           }
         }
         for (const r of it.rows.filter((x) => x.found && LOCS.some((l) => x.counted[l] !== ""))) {
+          const at = LOCS.find((l) => r.counted[l] !== "" && it.locs.includes(l)) || it.locs[0];
+          if (!r.batch.trim() || !r.expiry) goTo(at, it);
           if (!r.batch.trim()) { msgEl.textContent = `${it.p.name}: enter the ${batchName(it.p).toLowerCase()} number you found.`; return; }
           if (!r.expiry) { msgEl.textContent = `${it.p.name}: enter a real expiry date for the ${batchName(it.p).toLowerCase()} you found (check the day).`; return; }
         }
@@ -1119,7 +1149,8 @@ export async function mountStockCount(container, { param = "", staff = null } = 
 
       const lines = [];
       items.forEach((it) => it.locs.filter((loc) => locFilled(it, loc)).forEach((loc) => {
-        if (noneAt(it, loc) && it.none[loc] !== "") {
+        // A batch typed in with "+ A batch that isn't listed" replaces the "none here" box
+        if (noneAt(it, loc) && it.none[loc] !== "" && !foundAt(it, loc).length) {
           lines.push({ productId: it.p.id, loc, batch: "", expiry: "", counted: it.none[loc], countedAt: it.noneAt[loc] || 0, note: it.note });
         }
         it.rows.filter((r) => (r.found || r.at[loc]) && r.counted[loc] !== "").forEach((r) => lines.push({
@@ -1128,6 +1159,12 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       }));
       const readyKits = kitRows.filter(kitFilled);
       if (!lines.length && !readyKits.length) { msgEl.textContent = "Count at least one item first."; return; }
+      // The same limit as the Firestore rule for inv_counts, so this never shows up as "no access"
+      const lineTotal = lines.length + readyKits.length;
+      if (lineTotal > 1000) {
+        msgEl.textContent = `This count has ${lineTotal} lines, more than one count can hold (1000). Ask an Admin before saving.`;
+        return;
+      }
 
       busy = true;
       saveBtn.disabled = true;
@@ -1153,7 +1190,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         }
         showResults(res, missing);
       } catch (err) {
-        console.error("Save count failed:", err);
+        console.error("Save count failed:", err, { lines: lines.length, kits: readyKits.length });
         msgEl.textContent = err && err.code === "permission-denied"
           ? "You don't have access to save counts. Ask an Admin to check your access in Staff."
           : err && err.message && !err.code ? err.message : "Couldn't save. Try again.";
