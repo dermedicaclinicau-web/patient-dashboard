@@ -32,6 +32,7 @@ import { renderServiceLinks } from "./service-links.js";
 import { enableUiText } from "./ui-text.js";
 import { openInvoiceLinks } from "./invoice-links.js";
 import { renderBillingCheck } from "./billing-check.js";
+import { renderDockets } from "./inventory-dockets.js";
 
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -53,11 +54,12 @@ const TAB_ICONS = {
   activity: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
   notifications: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
 };
+TAB_ICONS.dockets = '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="m9 15 2 2 4-4"/>';
 const tabIcon = (k) => (TAB_ICONS[k]
   ? `<svg class="inv-tab-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${TAB_ICONS[k]}</svg>`
   : "");
 const TABS = [["stock", "Stock"], ["kits", "Kits"], ["investigations", "Investigations"], ["billing", "Billing check"], ["requests", "Requests"],
-  ["receive", "Receive delivery"], ["orders", "Purchase orders"], ["products", "Products"], ["services", "Service links"],
+  ["receive", "Receive delivery"], ["dockets", "Dockets"], ["orders", "Purchase orders"], ["products", "Products"], ["services", "Service links"],
   ["suppliers", "Suppliers"], ["activity", "Activity"], ["notifications", "Notifications"]];
 const niceDate = (key) => {
 const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
@@ -379,7 +381,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   const showInv = canMove || can("inventory.count") || can("menu.reports");
   const TAB_OK = {
     stock: canView, kits: showKits, investigations: showInv, billing: showInv, requests: canRequest || canMove, receive: canReceive,
-    orders: canMove, products: canView, services: canManage, suppliers: canView, activity: canView, notifications: canManage,
+    orders: canMove, dockets: canView || canReceive, products: canView, services: canManage, suppliers: canView, activity: canView, notifications: canManage,
   };
   const tabs = TABS.filter(([k]) => TAB_OK[k]);
   const noAccess = () => {
@@ -500,6 +502,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     function render() {
     if (tab === "stock") renderStock();
     else if (tab === "receive") mountReceivePo(body, "", staff);
+    else if (tab === "dockets") renderDockets(body, { canScanInbox: can("scans.view") || can("scans.file") || isAdminStaff(staff) });
     else if (tab === "kits") renderKitsTab();
     else if (tab === "investigations") renderInvestigations(body, { staff });
     else if (tab === "billing") renderBillingCheck(body, { staff });
@@ -4632,7 +4635,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   }
   /* ---------- Events ---------- */
   root.addEventListener("click", (e) => {
-    if (tab === "receive" && body.contains(e.target)) return;   // the receiving screen handles its own clicks
+    if ((tab === "receive" || tab === "dockets") && body.contains(e.target)) return;   // these screens handle their own clicks
     if (e.target.closest('[data-act="set-kit"]')) { openSetKit(); return; }
     if (e.target.closest('[data-act="kit-from-shelf"]')) { openSetKit("", "shelf"); return; }
     if (e.target.closest('[data-act="quick"]')) { toggleQuick(); return; }
@@ -4707,7 +4710,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (es) { const s = st.suppliers.find((x) => x.id === es.dataset.editSupplier); if (s) editSupplier(s); }
   });
   body.addEventListener("input", (e) => {
-    if (tab === "receive") return;
+    if (tab === "receive" || tab === "dockets") return;
     const t = e.target;
     // Stock → Update digital count
     if (t.dataset.qc !== undefined) {

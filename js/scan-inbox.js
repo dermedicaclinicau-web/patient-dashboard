@@ -419,7 +419,7 @@ function readHtml(r) {
   const p = r.payment || null;
   const list = (arr, fn) => (arr && arr.length ? `<ul class="si-ul">${arr.map(fn).join("")}</ul>` : "");
   return `${row("Name", r.patientName ? esc(r.patientName) + conf : '<em class="si-muted">Couldn\'t read it</em>')}
-    ${row("Date", esc(fmtLong(r.date)))}${row("Time", esc(r.time))}${row("With", esc(r.provider))}${row("Form", esc(r.title))}
+    ${row("Date", esc(fmtLong(r.date)))}${row("Time", esc(r.time))}${row("With", esc(r.provider))}${row("Form", esc(r.title))}${row("Supplier", esc(r.supplier))}${row("Docket no.", esc(r.docNo))}
     ${p ? row("Paid", [p.fee != null ? `$${Number(p.fee).toFixed(2)}` : "", p.tyroRef && `Tyro ${esc(p.tyroRef)}`, p.checkedOut && "checked out"].filter(Boolean).join(" · ")) : ""}
     ${r.nextAppts && r.nextAppts.length ? `<div class="si-kv-h">Next appointments</div>${list(r.nextAppts, (a) =>
       `<li><strong>${esc(a.service || a.text)}</strong>${[a.staff, a.minutes && `${a.minutes} min`, a.when, a.dateGuess && `about ${fmtDay(a.dateGuess)}`, a.price].filter(Boolean).map((x) => ` · ${esc(x)}`).join("")}</li>`)}` : ""}
@@ -767,6 +767,7 @@ async function openSettings(onDone) {
       <label class="si-f si-wide"><span>How the portal spots one</span><textarea data-tf="hint" rows="2" maxlength="300">${esc(t.hint)}</textarea></label>
     </div>
     ${t.seen && t.seen.length ? `<p class="si-hint">Learnt from ones kept before: ${t.seen.map(esc).join(" · ")}</p>` : ""}
+    <label class="si-switch"><input type="checkbox" data-tf="inv" ${t.inv ? "checked" : ""}><span class="si-sw"></span><span><strong>Show in Inventory → Dockets</strong><small>Kept ones are listed there for the team</small></span></label>
     <div class="si-type-acts">
       <label class="si-switch"><input type="checkbox" data-tf="auto" ${t.auto ? "checked" : ""}><span class="si-sw"></span><span><strong>Keep these by itself</strong><small>No one checks them first</small></span></label>
       <button type="button" class="si-link si-type-del" data-tdel>Remove</button>
@@ -818,7 +819,8 @@ async function openSettings(onDone) {
         toHour: Number(q("to").value), autoBilling: q("bill").checked, autoConsent: q("cons").checked,
         types: [...dlg.querySelectorAll("[data-tid]")].filter((row) => !row.hidden).map((row) => ({
           id: row.dataset.tid, name: row.querySelector('[data-tf="name"]').value, hint: row.querySelector('[data-tf="hint"]').value,
-          folder: row.querySelector('[data-tf="folder"]').value, auto: row.querySelector('[data-tf="auto"]').checked })) });
+          folder: row.querySelector('[data-tf="folder"]').value, auto: row.querySelector('[data-tf="auto"]').checked,
+          inv: row.querySelector('[data-tf="inv"]').checked })) });
       if (res.problem) { showToast(res.problem); return; }
       showToast("Settings saved");
       close();
