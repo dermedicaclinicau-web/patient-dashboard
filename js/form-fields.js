@@ -582,12 +582,135 @@ export function prefillSummary(f) {
 export function renameInPrefill(f, from, to) {
   if (f.prefill === from) f.prefill = to;
   else if (Array.isArray(f.prefill)) f.prefill = f.prefill.map((x) => (x === from ? to : x));
+  if (f.apptFill && Array.isArray(f.apptFill.rules)) {
+    f.apptFill.rules.forEach((r) => { if (Array.isArray(r.tick)) r.tick = r.tick.map((x) => (x === from ? to : x)); });
+  }
 }
 // A choice removed in the builder is taken out of the pre-fill
 export function tidyPrefill(f) {
   const opts = f.options || [];
   if (Array.isArray(f.prefill)) f.prefill = f.prefill.filter((x) => opts.includes(x));
   else if ((f.type === "single_choice" || f.type === "dropdown") && f.prefill && !opts.includes(f.prefill)) f.prefill = "";
+  if (f.apptFill && Array.isArray(f.apptFill.rules)) {
+    f.apptFill.rules.forEach((r) => { if (Array.isArray(r.tick)) r.tick = r.tick.filter((x) => opts.includes(x)); });
+  }
+}
+
+/* ---------- From today's appointment: the patient's booked services choose the answers ---------- */
+// f.apptFill = { on, auto, only: "Wrinkle Relaxer\nWR", rules: [{ words: "WR 3\nWrinkle Relaxer 3", tick: ["Frown", "Forehead", "Crow's feet"] }] }
+export const APPT_TYPES = ["checkboxes", "checkbox_notes", "single_choice", "dropdown"];
+const AF_MAX_RULES = 30;
+// "Crow's Feet & Brow" -> " crows feet and brow " (a space at each end, so only whole words match)
+const afNorm = (s) => ` ${String(s || "").toLowerCase().replace(/&/g, " and ").replace(/['’]/g, "").replace(/[^a-z0-9]+/g, " ").trim()} `;
+const afWords = (s) => String(s || "").split(/[\n,]+/).map((x) => x.trim()).filter(Boolean);
+export function apptFillOf(f) {
+  const a = f && f.apptFill && typeof f.apptFill === "object" ? f.apptFill : {};
+  return {
+    on: a.on === true,
+    auto: a.auto !== false,
+    only: String(a.only || ""),
+    rules: (Array.isArray(a.rules) ? a.rules : []).map((r) => ({
+      words: String((r && r.words) || ""),
+      tick: (Array.isArray(r && r.tick) ? r.tick : []).map(String),
+    })),
+  };
+}
+export const apptFillOn = (f) => !!f && APPT_TYPES.includes(f.type) && apptFillOf(f).on;
+
+// The answers one booked service chooses
+function afService(f, a, service) {
+  const s = afNorm(service);
+  const opts = (f.options || []).filter((o) => String(o).trim());
+  const only = afWords(a.only);
+  if (only.length && !only.some((w) => s.includes(afNorm(w)))) return [];   // another treatment booked the same day
+  const out = new Set();
+  a.rules.forEach((r) => {
+    if (afWords(r.words).some((w) => afNorm(w).trim() && s.includes(afNorm(w)))) {
+      r.tick.forEach((o) => { if (opts.includes(o)) out.add(o); });
+    }
+  });
+  if (a.auto) {
+    // The answer's name, or each part of "Underarm/Hyperhidrosis" (unless another answer has that name, like Nose)
+    const exact = new Set(opts.map(afNorm));
+    const hits = [];
+    opts.forEach((o) => {
+      const keys = [afNorm(o), ...(String(o).includes("/")
+        ? String(o).split("/").map(afNorm).filter((k) => k.trim() && !exact.has(k)) : [])];
+      const k = keys.filter((x) => x.trim() && s.includes(x)).sort((x, y) => y.length - x.length)[0];
+      if (k) hits.push({ o, k });
+    });
+    // The longer name wins: "Nose/Cheeks" doesn't also choose "Nose"
+    hits.filter((h) => !hits.some((x) => x !== h && x.k.length > h.k.length && x.k.includes(h.k))).forEach((h) => out.add(h.o));
+  }
+  return [...out];
+}
+
+// services: [{ service, label }] → { ticks: [answers, in the form's order], used: [the bookings that chose something] }
+export function apptMatch(f, services) {
+  const a = apptFillOf(f);
+  const all = new Set();
+  const used = [];
+  (services || []).forEach((x) => {
+    const t = afService(f, a, x.service);
+    if (t.length) { t.forEach((o) => all.add(o)); used.push(x.label || x.service); }
+  });
+  return { ticks: (f.options || []).filter((o) => all.has(o)), used: [...new Set(used)] };
+}
+
+let afServices = null;   // services booked in the last 90 days (Form Builder), for the check list
+function afCheckHtml(f) {
+  if (!afServices) return '<small class="fe-note">Loading the services booked in the last 90 days…</small>';
+  if (!afServices.length) return '<small class="fe-note">No bookings in the last 90 days to check against.</small>';
+  const a = apptFillOf(f);
+  const only = afWords(a.only);
+  const rows = afServices.filter((s) => !only.length || only.some((w) => afNorm(s.service).includes(afNorm(w))))
+    .map((s) => ({ ...s, t: afService(f, a, s.service) }))
+    .sort((x, y) => (x.t.length ? 1 : 0) - (y.t.length ? 1 : 0) || (y.n || 0) - (x.n || 0));
+  if (!rows.length) return '<small class="fe-note">No services booked in the last 90 days include those words.</small>';
+  const none = rows.filter((r) => !r.t.length).length;
+  return `<details class="fe-af-check"${none ? " open" : ""}>
+    <summary>Check against real services <small class="muted">${rows.length} service${rows.length === 1 ? "" : "s"}${
+      none ? ` · ${none} choose nothing` : " · all choose something"}</small></summary>
+    <ul>${rows.slice(0, 150).map((r) => `<li class="${r.t.length ? "" : "is-none"}">
+      <span>${esc(r.service)} <small class="muted">${r.n || 0}</small></span><em>${r.t.length ? esc(r.t.join(", ")) : "Nothing"}</em></li>`).join("")}</ul>
+    <small class="fe-note">From the appointment book, last 90 days. The number is how many bookings.</small></details>`;
+}
+
+export function apptFillSettings(f, ctx = {}) {
+  if (!APPT_TYPES.includes(f.type)) return "";
+  if (ctx.services !== undefined) afServices = ctx.services;
+  const a = apptFillOf(f);
+  const opts = (f.options || []).filter((o) => String(o).trim());
+  const multi = f.type === "checkboxes" || f.type === "checkbox_notes";
+  const verb = multi ? "tick" : "choose";
+  const head = `<span class="fe-insp-label">From today's appointment</span>
+    <label class="fe-check"><input type="checkbox" data-af="on" data-rerender=""${a.on ? " checked" : ""} /> ${multi ? "Tick" : "Choose"} answers from the patient's booking today</label>`;
+  if (!a.on) {
+    return `<div class="fe-insp-field fe-apptfill">${head}
+      <small class="fe-note">For example, a booking for Wrinkle Relaxer Forehead ticks Forehead. Staff see a note and can change it before saving.</small></div>`;
+  }
+  return `<div class="fe-insp-field fe-apptfill">${head}
+    <label class="fe-insp-sub"><small>Only use services that include (optional, one per line)</small>
+      <textarea class="fe-input" data-af="only" rows="2" placeholder="Wrinkle Relaxer&#10;WR">${esc(a.only)}</textarea></label>
+    <small class="fe-note">Stops other treatments booked the same day (like Lip filler) from ${multi ? "ticking" : "choosing"} answers here.</small>
+    <label class="fe-check"><input type="checkbox" data-af="auto" data-rerender=""${a.auto ? " checked" : ""} /> Match answer names in the service name</label>
+    <small class="fe-note">“Wrinkle Relaxer Forehead” ${multi ? "ticks" : "chooses"} Forehead. Whole words only, and the longer name wins, so
+      “Nose/Cheeks” doesn't also ${verb} Nose. Capitals and apostrophes don't matter.</small>
+    <span class="fe-insp-sub"><small>Packages and short names</small></span>
+    ${a.rules.map((r, i) => `<div class="fe-grp fe-af-rule">
+      <div class="fe-grp-head">
+        <textarea class="fe-input" data-af="words" data-afr="${i}" rows="2" placeholder="WR 3&#10;Wrinkle Relaxer 3"
+          aria-label="Rule ${i + 1}: words in the service">${esc(r.words)}</textarea>
+        <button type="button" class="hx-x" data-afdel="${i}" aria-label="Remove rule ${i + 1}">${svg(ICONS.x)}</button>
+      </div>
+      <small class="fe-note">When the service has any of these words (one per line), ${verb}:</small>
+      <div class="fe-parts">${opts.map((o) => `<label class="fe-check"><input type="checkbox" data-af="tick" data-afr="${i}" data-afo="${esc(o)}"${
+        r.tick.includes(o) ? " checked" : ""} /> ${esc(o)}</label>`).join("") || '<small class="fe-note">Add answer choices first.</small>'}</div>
+    </div>`).join("")}
+    ${a.rules.length < AF_MAX_RULES ? '<button type="button" class="hx-add" data-act="afadd">+ Add a rule</button>' : ""}
+    ${multi ? "" : '<small class="fe-note">If a booking matches more than one answer, nothing is chosen and staff are asked to choose.</small>'}
+    <div data-afcheck>${afCheckHtml(f)}</div>
+  </div>`;
 }
 // Pictures staff place unit marks on: their total can be used in a Calculation
 export const isMarkImage = (x) => !!x && x.type === "image" && x.source !== "staff" && x.annotate === true && x.markMode === "marks";
@@ -1084,6 +1207,13 @@ export function cleanField(f) {
       const s = clip(v, f.type === "long_text" ? 2000 : 500);
       if (s.trim()) out.prefill = s;
     }
+  }
+  if (APPT_TYPES.includes(f.type)) {
+    const a = apptFillOf(f);
+    const rules = a.rules.slice(0, AF_MAX_RULES)
+      .map((r) => ({ words: clip(r.words, 500), tick: r.tick.filter((o) => out.options.includes(o)).slice(0, 50) }))
+      .filter((r) => r.words.trim() || r.tick.length);
+    if (a.on || rules.length || a.only.trim()) out.apptFill = { on: a.on, auto: a.auto, only: clip(a.only, 500), rules };
   }
   if (sw) out.showWhen = sw;
   if (f.pdfHide === true && !["watermark", "letterhead"].includes(f.type)) out.pdfHide = true;
@@ -2101,6 +2231,25 @@ export function prefillSettings(f) {
 // Typing in table columns, sub-option groups, patient detail ticks and layout buttons.
 // Returns true if it changed something.
 export function applyInput(f, el) {
+  if (el.dataset.af !== undefined) {
+    const a = apptFillOf(f);
+    const k = el.dataset.af;
+    if (k === "on" || k === "auto") a[k] = el.checked;
+    else if (k === "only") a.only = el.value;
+    else {
+      const r = a.rules[Number(el.dataset.afr)];
+      if (!r) return false;
+      if (k === "words") r.words = el.value;
+      else if (k === "tick") r.tick = (f.options || []).filter((o) => (o === el.dataset.afo ? el.checked : r.tick.includes(o)));
+      else return false;
+    }
+    f.apptFill = a;
+    // The check list keeps up while typing (the box keeps the cursor)
+    const box = el.closest(".fe-apptfill");
+    const list = box && box.querySelector("[data-afcheck]");
+    if (list && el.dataset.rerender === undefined) list.innerHTML = afCheckHtml(f);
+    return true;
+  }
   if (el.dataset.sppart !== undefined) {
     const on = new Set(specialistParts(f).map(([k]) => k));
     if (el.checked) on.add(el.dataset.sppart); else on.delete(el.dataset.sppart);
@@ -2218,6 +2367,19 @@ export function applyInput(f, el) {
 
 // Add / remove buttons for table columns and sub-option groups.
 export function applyClick(f, target) {
+  if (target.closest('[data-act="afadd"]')) {
+    const a = apptFillOf(f);
+    if (a.rules.length < AF_MAX_RULES) a.rules.push({ words: "", tick: [] });
+    f.apptFill = a;
+    return true;
+  }
+  const afd = target.closest("[data-afdel]");
+  if (afd) {
+    const a = apptFillOf(f);
+    a.rules.splice(Number(afd.dataset.afdel), 1);
+    f.apptFill = a;
+    return true;
+  }
   // Calculated column: a column or operator goes into its formula
   const tins = target.closest("[data-tcalcins]");
   if (tins) {

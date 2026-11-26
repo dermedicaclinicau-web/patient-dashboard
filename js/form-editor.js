@@ -17,7 +17,7 @@ import { openPrinterDialog } from "./form-delivery.js";
 import { conditionSettingsHtml, applyConditionInput, applyConditionClick, conditionSummary, conditionProblem } from "./form-conditions.js";
 import { applyVisibility, fieldTagValues } from "./form-fill.js";
 import { CATEGORIES, categorize } from "./records.js";
-import { TAG_TYPES, fieldTagName, tagKeyOf, formTitleHtml } from "./form-fields.js";
+import { TAG_TYPES, fieldTagName, tagKeyOf, formTitleHtml, apptFillOn, apptFillSettings } from "./form-fields.js";
 import { openImagePicker } from "./image-bank.js";
 import { bankUpload, bankError, hydrateBankImages } from "./image-bank-api.js";
 import { attachAnnotators } from "./form-annotate.js";
@@ -29,7 +29,7 @@ import { listAftercare } from "./aftercare-api.js";
 import { openAftercarePicker } from "./aftercare-bank.js";
 import { mountAftercareField } from "./aftercare-field.js";
 import { listTaskTypes } from "./task-types.js";
-import { listProducts, isKitProduct } from "./inventory-api.js";
+import { listProducts, isKitProduct, listServicesSeen } from "./inventory-api.js";
 import { openProductPicker } from "./consumables-field.js";
 import { listMarkingSets, openMarkingSetsDialog } from "./marking-sets.js";
 import { listSpecialists, specialitiesOf } from "./specialists-api.js";
@@ -137,6 +137,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   let products = [];         // inventory products, for the Consumables field
   let markSets = null;       // marking sets, once loaded
   let specialities = [];     // from the Specialist Bank, for the field's Speciality suggestions
+  let services = null;       // services booked in the last 90 days, for "From today's appointment"
   let previewAnnots = {};    // pictures being drawn on in Preview
   let previewTags = [];      // text with tags in it, on the Preview
   let staffView = false;     // Preview: hide the fields staff won't see
@@ -144,7 +145,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   let blocks = null;         // saved blocks, once loaded
   let blockIdx = new Map();  // question id -> { link, block, first } for questions inserted from a block
   let palTab = (() => { try { return localStorage.getItem("fe-paltab") === "outline" ? "outline" : "add"; } catch { return "add"; } })();
-  const ctx = (live) => ({ live, fields, consentForms, prescriptionForms, letterhead, calcValues: null, aftercare: aftercareMap, emailTemplates, products, markSets, specialities });
+  const ctx = (live) => ({ live, fields, consentForms, prescriptionForms, letterhead, calcValues: null, aftercare: aftercareMap, emailTemplates, products, markSets, specialities, services });
   const current = () => fields.find((f) => f.id === sel) || null;
   // The treatment group saves and applies straight away, so it isn't counted as an unpublished change
   const pubSig = (n, f, s) => JSON.stringify(formSnapshot({ name: n, fields: f, settings: { ...(s || {}), group: "" } }));
@@ -650,6 +651,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       blk && blk.first === f.id && `<span class="fe-chip is-blk${blkNew ? " is-new" : ""}">${svg(UI.block)}${esc(blockChipText(blk))}</span>`,
       f.fill && `<span class="fe-chip">${svg(UI.user)}Auto-filled: ${esc(FILLS[f.fill] || f.fill)}</span>`,
       pf && `<span class="fe-chip">${svg('<polyline points="20 6 9 17 4 12"/>')}Pre-filled: ${esc(pf)}</span>`,
+      apptFillOn(f) && `<span class="fe-chip">${svg(ICONS.date)}From today's appointment</span>`,
       (() => {
         const tn = tagOwners.has(f.id) ? fieldTagName(f) : "";
         const n = tn ? tagUsedBy(fields, tn, f.id).length : 0;
@@ -1007,6 +1009,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
         f.fill ? "Staff can still change it before saving." : "");
     }
     h += prefillSettings(f);
+    h += apptFillSettings(f, ctx(false));
     h += conditionSettingsHtml(f, fields);
     if (canLiveHide(f)) {
       h += `<label class="fe-check"><input type="checkbox" data-k="liveHide" data-rerender=""${f.liveHide ? " checked" : ""} /> Hide on the live form</label>
@@ -2668,6 +2671,14 @@ export async function mountFormEditor(container, { templateId, staff }) {
     })
     .catch((err) => { console.warn("Couldn't load marking sets:", err); markSets = []; });
     
+  listServicesSeen(90)
+    .then((list) => {
+      services = Array.isArray(list) ? list : [];
+      const f = current();
+      if (root.isConnected && f && apptFillOn(f)) renderInspector();
+    })
+    .catch((err) => { console.warn("Couldn't load the services:", err); services = []; });
+
     listSpecialists()
     .then((list) => {
       specialities = specialitiesOf(list);

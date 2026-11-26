@@ -15138,3 +15138,14 @@ dialog.msx .msx-sel { width: 100%; min-height: 0; height: 36px; padding: 0 .45re
 .rem-to-save { display: flex; align-items: center; gap: .4rem; color: #334155; font-size: .83rem; cursor: pointer; }
 .rem-to-err { color: #b91c1c; font-size: .8rem; }
 .rem-to [hidden] { display: none !important; }
+
+/* Form fields: answers from today's appointment */
+.ff-apptnote { margin: .45rem 0 0; padding: .4rem .65rem; border-radius: 8px; background: #f0fdfa; color: #115e59; font-size: .82rem; }
+.ff-apptnote.is-warn { background: #fffbeb; color: #92400e; }
+.fe-af-rule .fe-grp-head textarea { flex: 1; min-width: 0; }
+.fe-af-check { margin-top: .5rem; border: 1px solid #e2e8f0; border-radius: 10px; padding: .45rem .65rem; }
+.fe-af-check summary { cursor: pointer; font-size: .85rem; font-weight: 600; }
+.fe-af-check ul { list-style: none; margin: .4rem 0; padding: 0; max-height: 300px; overflow: auto; }
+.fe-af-check li { display: flex; justify-content: space-between; gap: .6rem; padding: .3rem 0; border-top: 1px solid #f1f5f9; font-size: .82rem; }
+.fe-af-check li em { font-style: normal; color: #0f766e; text-align: right; }
+.fe-af-check li.is-none em { color: #b45309; }

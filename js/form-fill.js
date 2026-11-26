@@ -6,9 +6,10 @@ import { fetchBillingAndRx } from "./billing-rx-view.js";
 import { esc, svg, ICONS, FIELD_TYPES, renderField, normaliseField, watermarkHtml, canRequire,
   choiceList, otherLabel, syncChoiceExtras, readExtras, writeExtras, readImageQs, writeImageQs, STAFF_FILLS,
   tableCols, tableMax, tableRowHtml, syncTableRows, tableClick, tableTotal, tableRecalc, spanClass, syncButtons,
-  readTableDisc, readTablePays, tableInvRead, tableInvWrite, tableInvoice } from "./form-fields.js";
+  readTableDisc, readTablePays, tableInvRead, tableInvWrite, tableInvoice, apptFillOn, apptMatch } from "./form-fields.js";
 import { listMarkingSets, markSummary } from "./marking-sets.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
+import { fetchDayAppointments } from "./appointments.js";
 import { letterheadHtml, DEFAULT_LETTERHEAD } from "./form-letterhead.js";
 import { getPatient, patientIds, formatMedicare, formatMedicareExpiry } from "./patients.js";
 import { saveSubmission, getSubmission, listSubmissionsForPatient } from "./form-submissions.js";
@@ -1111,6 +1112,68 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     sheet.addEventListener("input", wrCheckSoon);   // a Treatment answer or mark placed
   }
 
+  /* ---------- From today's appointment: the booked services choose the answers ---------- */
+  const apptFields = editing ? [] : fields.filter(apptFillOn);
+  const CANCELLED = /cancel|no.?show|\bdna\b|did not attend/i;
+  const nameKeyOf = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  function apptNote(w, html, warn = false) {
+    const old = w.querySelector(".ff-apptnote");
+    if (old) old.remove();
+    w.insertAdjacentHTML("beforeend", `<p class="fe-help ff-apptnote${warn ? " is-warn" : ""}">${html}</p>`);
+  }
+  async function applyApptFill() {
+    if (!apptFields.length || !root.isConnected) return;
+    if (recordDateNow() !== todayIso()) return;   // backdated: today's booking isn't this record's
+    let day;
+    try {
+      day = await fetchDayAppointments(todayIso());
+    } catch (err) {
+      console.warn("Today's appointments not loaded:", err);
+      apptFields.forEach((f) => {
+        const w = wrap(f.id);
+        if (w && !w.dataset.staffTouched) apptNote(w, "Couldn't check today's appointments, so nothing was chosen. Choose the answers below.", true);
+      });
+      return;
+    }
+    if (!root.isConnected) return;
+    const ids = new Set([patient.id, ...patientIds(patient)].filter(Boolean).map(String));
+    const me = nameKeyOf(patient.name);
+    const mine = (day.appointments || []).filter((a) => !CANCELLED.test(String(a.status || ""))
+      && (a.patientId ? ids.has(String(a.patientId)) : !!me && nameKeyOf(a.patientName) === me));
+    const services = mine.flatMap((a) => (a.services || []).map((s) => ({
+      service: s,
+      label: [s, a.time, a.staff && !/^unassigned$/i.test(a.staff) ? `with ${a.staff}` : ""].filter(Boolean).join(" · "),
+    })));
+    if (!services.length) return;   // nothing booked today: nothing to say
+    const booked = [...new Set(services.map((x) => x.service))].join(", ");
+    apptFields.forEach((f) => {
+      const w = wrap(f.id);
+      if (!w || w.dataset.staffTouched) return;   // staff have already answered it
+      const m = apptMatch(f, services);
+      const multi = f.type === "checkboxes" || f.type === "checkbox_notes";
+      if (!m.ticks.length) {
+        apptNote(w, `Today's booking (${esc(booked)}) didn't match an answer here. Choose ${multi ? "them" : "one"} below.`);
+        return;
+      }
+      if (!multi && m.ticks.length > 1) {
+        apptNote(w, `Today's booking matches more than one answer (${esc(m.ticks.join(", "))}). Choose one below.`, true);
+        return;
+      }
+      const now = readField(f, w, rctx());
+      if (f.type === "checkboxes") {
+        writeField(f, w, [...new Set([...(Array.isArray(now) ? now : []), ...m.ticks])]);
+      } else if (f.type === "checkbox_notes") {
+        const have = Array.isArray(now) ? now : [];
+        writeField(f, w, [...have, ...m.ticks.filter((o) => !have.some((r) => r.option === o)).map((o) => ({ option: o, note: "" }))]);
+      } else {
+        writeField(f, w, m.ticks[0]);
+      }
+      syncChoiceExtras(f, w);
+      apptNote(w, `${multi ? "Ticked" : "Chosen"} from today's appointment: <strong>${esc(m.used.join("; "))}</strong>. Check before saving.`);
+    });
+    refresh();
+  }
+
   /* ---------- Unsaved answers kept on this device ---------- */
   // Never kept: things that can't be stored safely or come back by themselves
   const NO_DRAFT = ["photo", "signature", "image", "aftercare", "consumables", "consent_status",
@@ -1134,6 +1197,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     fields.forEach((f) => {
       const w = wrap(f.id);
       if (!w || !(f.id in a)) return;
+      w.dataset.staffTouched = "1";   // answers put back: today's appointment doesn't change them
       tableInvWrite(f, w, a);
       writeField(f, w, a[f.id]);
       writeExtras(f, w, a[`${f.id}__x`]);
@@ -1183,6 +1247,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     }
     draftPending = false; // anything that happened while setting up isn't staff typing
     draftReady = true;
+    if (!isReturnLeg) applyApptFill();   // after any draft, so put-back answers win
   })();
 
 
@@ -1349,6 +1414,8 @@ export async function mountFormFill(container, param, { staff, embedded = null }
 
     sheet.addEventListener("input", (e) => {
     if (e.target.matches && e.target.matches("[data-linked]")) e.target.dataset.touched = "1"; // staff typed: stop following
+    const tw = e.target.closest && e.target.closest("[data-fid]");
+    if (tw) tw.dataset.staffTouched = "1";   // today's appointment doesn't change it now
     const clinPick = e.target.closest("[data-clin-pick]");
     if (clinPick) {
       const d = staffList.find((s) => s.id === clinPick.value);
