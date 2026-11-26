@@ -99,11 +99,22 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
   }
   const timer = setInterval(() => {
     if (!root.isConnected) { clearInterval(timer); return; }
-    if (document.visibilityState === "visible" && !st.busyFu) load();
+    if (document.visibilityState === "visible" && !st.busyFu && !st.fuMore) load();
   }, POLL_MS);
 
   const fu = () => (st.data && st.data.followUps) || { mine: [], all: [], canAll: false };
   const myOpen = (type) => fu().mine.filter((f) => f.status === "open" && f.type === type);
+
+  function headLine(d) {
+    if (!d) return "";
+    if (!d.on) return '<span class="si-live is-off"></span>Not switched on yet';
+    const last = d.lastCheck ? fmtTime(d.lastCheck) : "";
+    if (d.open && (!d.lastCheck || Date.now() - Date.parse(d.lastCheck) > 5 * 60000)) {
+      return `<span class="si-live is-warn"></span>${last ? `Hasn't checked the scan folder since ${esc(last)}` : "Hasn't checked the scan folder yet"}`;
+    }
+    return `<span class="si-live${d.open ? "" : " is-off"}"></span>${d.open ? "Watching the scan folder" : "After hours: checks every 15 minutes"}${
+      last ? ` · last check ${esc(last)}` : ""}`;
+  }
 
   /* ---- The page ---- */
   function render() {
@@ -111,7 +122,6 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
     if (!d && !st.error) return;
     const c = (d && d.counts) || {};
     const mine = (d && d.mine) || [];
-    const last = d && d.lastCheck ? fmtTime(d.lastCheck) : "";
     const isToday = st.day === todayKey();
     const nBook = myOpen("book").length, nTask = myOpen("task").length;
     const tabs = [["today", "Today", 0], ["mine", "To file", mine.length], ["followups", "Follow-ups", nBook + nTask],
@@ -120,8 +130,7 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
       <header class="si-head">
         <span class="si-logo">${IC.inbox}</span>
         <div class="si-head-main"><h2>${greeting()}${staff && staff.name ? `, ${esc(first(staff.name))}` : ""}</h2>
-          <p>${d && d.on ? `<span class="si-live"></span>Watching the scan folder${last ? ` · last check ${esc(last)}` : ""}`
-            : '<span class="si-live is-off"></span>Not switched on yet'}</p></div>
+          <p>${headLine(d)}</p></div>
         <div class="si-head-acts">
           ${canFile || admin ? `<button type="button" class="si-ghost" data-act="check" ${st.checking ? "disabled" : ""}>${IC.refresh}<span>${st.checking ? "Checking…" : "Check now"}</span></button>` : ""}
           ${admin ? `<button type="button" class="si-ghost" data-act="test">${IC.flask}<span>Test on past scans</span></button>` : ""}
@@ -129,6 +138,8 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
         </div>
       </header>
       ${st.error ? `<div class="si-note is-bad">${esc(st.error)}</div>` : ""}
+      ${d && d.lastError && (canFile || admin) ? `<div class="si-note is-warn">The last check stopped with a problem: ${esc(d.lastError.split("|")[1] || d.lastError)}. ${
+        admin ? "Apps Script → Executions has the details." : "Let an Admin know."}</div>` : ""}
       ${d && !d.on ? `<div class="si-off"><strong>The Scan Inbox isn't switched on yet.</strong>
         <span>Once it is, every sheet scanned on the ScanSnap is read and filed here by itself. Scans from before then stay in Paper records.</span>
         ${admin ? '<button type="button" class="si-primary" data-act="settings">Switch it on</button>' : "<span>Ask an Admin to switch it on.</span>"}</div>` : ""}
@@ -189,7 +200,8 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
     let title, subline = "", right;
     if (reading) {
       title = '<span class="si-muted">Reading the scan…</span>';
-      subline = it.error ? `<span class="si-bad">${esc(it.error)}</span>` : "Usually about a minute";
+      const wait = it.nextTryAt > Date.now();
+      subline = it.error ? `<span class="si-bad">${esc(it.error)}</span>${wait ? ` · tries again at ${esc(fmtTime(it.nextTryAt))}` : ""}` : "Usually about a minute";
       right = '<span class="si-pill is-mut"><span class="si-spin"></span>Reading</span>';
     } else if (it.status === "needs") {
       title = name ? `“${esc(name)}”` : '<span class="si-muted">No name read</span>';
@@ -212,6 +224,10 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
     } else if (it.status === "notrecord") {
       title = esc(name || it.name); subline = "Not a patient record";
       right = '<span class="si-pill is-mut">Not a record</span>';
+    } else if (it.status === "kept") {
+      title = esc(it.kindName || "Scan");
+      subline = `${r.title ? `${esc(r.title)} · ` : ""}kept in ${esc(it.keptIn || "Google Drive")}`;
+      right = '<span class="si-pill is-mut">Kept</span>';
     } else {
       title = esc(it.name); subline = "Removed from Google Drive";
       right = '<span class="si-pill is-mut">Removed</span>';
@@ -326,7 +342,7 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
       try { const res = await api("item", { fileId: id }); if (res.problem) { showToast(res.problem); return; } it = res.item; }
       catch { showToast("The sheet couldn't be opened."); return; }
     }
-    openScan(it, { canFile, canBook, me, onDone: load });
+    openScan(it, { canFile, onDone: load, types: (st.data && st.data.types) || [] });
   }
 
   /* ---- Taps ---- */
@@ -383,7 +399,8 @@ export async function mountScanInbox(container, { param = "", staff = null } = {
         if (r.recent) showToast("It was checked a moment ago.");
         else if (r.off) showToast("The Scan Inbox isn't switched on.");
         else if (r.busy) showToast("It's checking right now. Give it a minute.");
-        else showToast(r.added ? `${plural(r.added, "new scan")} found${r.read ? `, ${r.read} read` : ""}` : "No new scans in the folder.");
+        else showToast([r.added ? `${plural(r.added, "new scan")} found` : "No new scans", r.read ? `${r.read} read` : "",
+          r.waiting ? `${r.waiting} still waiting, read over the next few minutes` : ""].filter(Boolean).join(" · "));
       } catch (err) { console.error("Check failed:", err); showToast("Couldn't check the folder. Try again."); }
       st.checking = false;
       load();
@@ -415,14 +432,15 @@ function readHtml(r) {
 const FU_STATE = { open: ["Open", "is-warn"], booked: ["Booked", "is-ok"], done: ["Done", "is-ok"], notneeded: ["Not needed", "is-mut"],
   cancelled: ["Cancelled", "is-mut"], info: ["Saved", "is-acc"] };
 
-function openScan(it, { canFile, onDone }) {
+function openScan(it, { canFile, onDone, types = [] }) {
   injectStyles();
   const r = it.read || {};
+  const typeOf = (k) => types.find((t) => t.id === k) || null;
   const s = {
     pt: it.patientId ? { id: it.patientId, name: it.patientName, note: it.apptTime ? `Booked ${it.apptTime}${it.staff ? ` with ${it.staff}` : ""}` : "" } : null,
-    kind: KINDS.some(([k]) => k === it.kind) ? it.kind : "",
+    kind: KINDS.some(([k]) => k === it.kind) || typeOf(it.kind) ? it.kind : "",
     date: it.recordDate || r.date || dayOfIso(it.created), clin: it.staff || r.provider || "", title: r.title || "",
-    meds: [""], mode: "", results: null, bookings: null, busy: false, fus: null,
+    meds: [""], mode: "", results: null, bookings: null, busy: false, fus: null, adding: false, tname: "", thint: "",
   };
   const dlg = document.createElement("dialog");
   dlg.className = "si si-dlg";
@@ -498,6 +516,11 @@ function openScan(it, { canFile, onDone }) {
       return `<div class="si-banner is-acc">${IC.doc}<div><strong>In Paper records</strong><span>Treatment records are filed there, where the products used are entered.</span></div></div>
         <div class="si-acts"><a class="si-primary" href="#/paper">Open Paper records</a>${putBack}</div>${readBox}${hist}`;
     }
+    if (it.status === "kept") {
+      return `<div class="si-banner is-ok">${IC.check}<div><strong>Kept in ${esc(it.keptIn || "Google Drive")}</strong>
+        <span>${esc(it.kindName)} · ${it.filedBy === "Scan Inbox" ? "by itself" : `by ${esc(it.filedBy)}`}</span></div></div>
+        <div class="si-acts">${putBack}</div>${readBox}${hist}`;
+    }
     if (it.status === "notrecord" || it.status === "gone") {
       return `<div class="si-banner">${IC.doc}<div><strong>${it.status === "gone" ? "Removed from Google Drive" : "Not a patient record"}</strong></div></div>
         ${it.status === "notrecord" ? `<div class="si-acts">${putBack}</div>` : ""}${readBox}${hist}`;
@@ -505,8 +528,10 @@ function openScan(it, { canFile, onDone }) {
     if (!canFile) return `${reason}<p class="si-hint">Someone with "File scans the portal couldn't match" sorts this one out.</p>${readBox}${hist}`;
     const sugg = (it.suggestions || []).filter((x) => x.patientId || x.ptt);
     const treat = s.kind === "treatment";
-    return `${reason}${readBox}
-      <div class="si-step"><span>1</span><h4>Who is it?</h4></div>
+    const custom = typeOf(s.kind);
+    const kindBtn = (k, l) => `<button type="button" class="${s.kind === k ? "is-on" : ""}" data-kind="${esc(k)}">${esc(l)}</button>`;
+    const who = `
+      <div class="si-step"><span>2</span><h4>Who is it?</h4></div>
       ${s.pt ? `<div class="si-pt"><span class="si-av">${esc(first(s.pt.name).slice(0, 1) || "?")}</span><div><strong>${esc(s.pt.name)}</strong>${s.pt.note ? `<small>${esc(s.pt.note)}</small>` : ""}</div>
           <button type="button" class="si-link" data-a="clearpt">Change</button></div>`
         : `${sugg.length ? `<p class="si-lbl">Could it be</p><div class="si-cards">${sugg.map((x, i) =>
@@ -516,9 +541,6 @@ function openScan(it, { canFile, onDone }) {
           <div data-role="results">${s.results || ""}</div>
           <button type="button" class="si-link" data-a="bookings">${IC.cal}See who was booked on ${esc(fmtDay(s.date))}</button>
           <div data-role="bookings">${s.bookings || ""}</div>`}
-      <div class="si-step"><span>2</span><h4>What is it?</h4></div>
-      <div class="si-kinds">${KINDS.map(([k, l]) => `<button type="button" class="${s.kind === k ? "is-on" : ""}" data-kind="${k}">${l}</button>`).join("")}</div>
-      ${treat ? '<p class="si-hint">Treatment records go to Paper records, where the products used are entered and taken off stock.</p>' : `
       <div class="si-step"><span>3</span><h4>Details</h4></div>
       <div class="si-fields">
         <label class="si-f"><span>Date on the paper</span><input type="date" data-f="date" value="${esc(s.date)}" max="${todayKey()}"></label>
@@ -529,9 +551,22 @@ function openScan(it, { canFile, onDone }) {
           <button type="button" class="si-link" data-a="addmed">+ Another medicine</button></div>` : ""}
       </div>
       ${s.kind === "billing" && ((r.nextAppts || []).length || (r.tasks || []).length)
-        ? `<p class="si-hint">Filing it makes ${plural((r.nextAppts || []).length + (r.tasks || []).length, "follow-up")} from what's written on it.</p>` : ""}`}
+        ? `<p class="si-hint">Filing it makes ${plural((r.nextAppts || []).length + (r.tasks || []).length, "follow-up")} from what's written on it.</p>` : ""}`;
+    return `${reason}${readBox}
+      <div class="si-step"><span>1</span><h4>What is it?</h4></div>
+      <div class="si-kinds">${KINDS.map(([k, l]) => kindBtn(k, l)).join("")}${types.map((t) => kindBtn(t.id, t.name)).join("")}
+        <button type="button" class="si-kind-add${s.adding ? " is-on" : ""}" data-a="addtype">+ Something else</button></div>
+      ${s.adding ? `<div class="si-addtype">
+        <label class="si-f"><span>What is it called?</span><input data-f="tname" value="${esc(s.tname)}" maxlength="40" placeholder="e.g. Delivery docket"></label>
+        <label class="si-f"><span>How can the portal spot one? <small>Optional. It also learns from each one you keep.</small></span>
+          <textarea data-f="thint" rows="2" maxlength="300" placeholder="e.g. A supplier's packing slip with product codes and quantities">${esc(s.thint)}</textarea></label>
+        <div class="si-acts"><button type="button" class="si-primary sm" data-a="savetype" ${s.busy ? "disabled" : ""}>Save and use it</button>
+          <button type="button" class="si-link" data-a="canceltype">Cancel</button></div></div>` : ""}
+      ${treat ? '<p class="si-hint">Treatment records go to Paper records, where the products used are entered and taken off stock.</p>'
+        : custom ? `<p class="si-hint">${esc(custom.name)} scans are kept in their own Google Drive folder, not on a patient's page.</p>` : who}
       <div class="si-acts">
-        <button type="button" class="si-primary" data-a="${treat ? "topaper" : "file"}" ${s.busy ? "disabled" : ""}>${s.busy ? "Saving…" : treat ? "Send to Paper records" : "File it"}</button>
+        <button type="button" class="si-primary" data-a="${treat ? "topaper" : custom ? "keep" : "file"}" ${s.busy ? "disabled" : ""}>${
+          s.busy ? "Saving…" : treat ? "Send to Paper records" : custom ? "Keep it" : "File it"}</button>
       </div>
       <div class="si-more">
         ${treat ? "" : '<button type="button" data-a="topaper">Send to Paper records</button>'}
@@ -542,6 +577,7 @@ function openScan(it, { canFile, onDone }) {
       </div>
       <div data-role="mode">${modeHtml()}</div>${hist}`;
   }
+  
   function modeHtml() {
     if (s.mode === "notrecord") return `<div class="si-inline"><label class="si-f"><span>What is it?</span>
       <select data-f="why">${NOT_RECORD.map((x) => `<option>${x}</option>`).join("")}</select></label>
@@ -567,12 +603,33 @@ function openScan(it, { canFile, onDone }) {
     try {
       const res = await api(op, { fileId: it.id, ...body });
       if (res && res.problem) { showToast(res.problem); return; }
-      showToast(op === "fileIt" && res.followUps ? `${done} · ${plural(res.followUps, "follow-up")} made` : done || "Saved");
+      showToast(op === "fileIt" && res.followUps ? `${done} · ${plural(res.followUps, "follow-up")} made`
+        : op === "keepIt" && res.keptIn ? `Kept in ${res.keptIn}` : done || "Saved");
       close();
       onDone();
     } catch (err) {
       console.error(`Scan Inbox ${op} failed:`, err);
       showToast("That didn't save. Check your connection and try again.");
+    } finally {
+      s.busy = false;
+      if (dlg.isConnected) paint();
+    }
+  }
+
+  async function saveType() {
+    const name = s.tname.trim();
+    if (name.length < 2) { showToast("Type what it's called, e.g. Delivery docket."); return; }
+    if (s.busy) return;
+    s.busy = true; paint();
+    try {
+      const res = await api("addType", { name, hint: s.thint.trim() });
+      if (res && res.problem) { showToast(res.problem); return; }
+      types.push(res.type);
+      Object.assign(s, { kind: res.type.id, adding: false, tname: "", thint: "" });
+      showToast(`${res.type.name} saved. The portal looks for these from now on.`);
+    } catch (err) {
+      console.error("Scan kind not saved:", err);
+      showToast("That didn't save. Try again.");
     } finally {
       s.busy = false;
       if (dlg.isConnected) paint();
@@ -606,6 +663,8 @@ function openScan(it, { canFile, onDone }) {
     if (t.dataset.f === "date") s.date = t.value;
     else if (t.dataset.f === "clin") s.clin = t.value;
     else if (t.dataset.f === "title") s.title = t.value;
+    else if (t.dataset.f === "tname") s.tname = t.value;
+    else if (t.dataset.f === "thint") s.thint = t.value;
     else if (t.dataset.med !== undefined) s.meds[Number(t.dataset.med)] = t.value;
   });
 
@@ -629,7 +688,7 @@ function openScan(it, { canFile, onDone }) {
       paint(); return;
     }
     const kd = t.closest("[data-kind]");
-    if (kd) { s.kind = kd.dataset.kind; paint(); return; }
+    if (kd) { s.kind = kd.dataset.kind; s.adding = false; paint(); return; }
     const md = t.closest("[data-mode]");
     if (md) { s.mode = s.mode === md.dataset.mode ? "" : md.dataset.mode; paint(); return; }
     const a = t.closest("[data-a]");
@@ -637,6 +696,15 @@ function openScan(it, { canFile, onDone }) {
     const op = a.dataset.a;
     if (op === "clearpt") { s.pt = null; paint(); }
     else if (op === "addmed") { s.meds.push(""); paint(); }
+    else if (op === "addtype") {
+      s.adding = !s.adding;
+      if (s.adding && !s.thint && r.title) s.thint = `The printed title says "${r.title}"`;
+      paint();
+      if (s.adding) side.querySelector('[data-f="tname"]')?.focus();
+    }
+    else if (op === "canceltype") { s.adding = false; paint(); }
+    else if (op === "savetype") saveType();
+    else if (op === "keep") act("keepIt", { as: s.kind }, "Kept");
     else if (op === "bookings") {
       const box = side.querySelector('[data-role="bookings"]');
       box.innerHTML = '<div class="si-loading"><span class="si-spin"></span>Loading the bookings…</div>';
@@ -691,6 +759,18 @@ async function openSettings(onDone) {
   const startKey = cur.startAt ? dayOfIso(cur.startAt) : "";
   const hours = Array.from({ length: 25 }, (_, h) => h);
   const hText = (h) => (h === 0 || h === 24 ? "midnight" : h === 12 ? "midday" : `${h % 12} ${h < 12 ? "am" : "pm"}`);
+  const typeRow = (t) => `<div class="si-type" data-tid="${esc(t.id)}">
+    <div class="si-fields">
+      <label class="si-f"><span>Name</span><input data-tf="name" value="${esc(t.name)}" maxlength="40"></label>
+      <label class="si-f"><span>Google Drive folder ${t.folderId ? `· <a href="https://drive.google.com/drive/folders/${esc(t.folderId)}" target="_blank" rel="noopener">Open</a>` : ""}</span>
+        <input data-tf="folder" placeholder="Paste a folder link to change it"></label>
+      <label class="si-f si-wide"><span>How the portal spots one</span><textarea data-tf="hint" rows="2" maxlength="300">${esc(t.hint)}</textarea></label>
+    </div>
+    ${t.seen && t.seen.length ? `<p class="si-hint">Learnt from ones kept before: ${t.seen.map(esc).join(" · ")}</p>` : ""}
+    <div class="si-type-acts">
+      <label class="si-switch"><input type="checkbox" data-tf="auto" ${t.auto ? "checked" : ""}><span class="si-sw"></span><span><strong>Keep these by itself</strong><small>No one checks them first</small></span></label>
+      <button type="button" class="si-link si-type-del" data-tdel>Remove</button>
+    </div></div>`;
   const dlg = document.createElement("dialog");
   dlg.className = "si si-dlg si-set";
   dlg.innerHTML = `<div class="si-dlg-h"><div><h3>Scan Inbox settings</h3><p>Only Admins see these.</p></div>
@@ -706,6 +786,10 @@ async function openSettings(onDone) {
       <label class="si-switch"><input type="checkbox" data-s="bill" ${cur.autoBilling ? "checked" : ""}><span class="si-sw"></span><span><strong>File billing sheets by themselves</strong><small>When exactly one booking that day clearly matches</small></span></label>
       <label class="si-switch"><input type="checkbox" data-s="cons" ${cur.autoConsent ? "checked" : ""}><span class="si-sw"></span><span><strong>File consents by themselves</strong><small>The same check as billing sheets</small></span></label>
       <p class="si-hint">Treatment records always go to Paper records, and prescriptions always wait for a person to check the medicines.</p>
+      <div class="si-types"><strong>Other kinds of scan</strong>
+        ${(cur.types || []).length ? cur.types.map(typeRow).join("")
+          : '<p class="si-hint">None yet. When filing a scan, staff choose "+ Something else" to add one.</p>'}
+      </div>
     </div>
     <div class="si-dlg-f"><button type="button" class="si-ghost" data-x>Cancel</button><button type="button" class="si-primary" data-save>Save</button></div>`;
   document.body.appendChild(dlg);
@@ -713,6 +797,14 @@ async function openSettings(onDone) {
   dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(); });
   dlg.addEventListener("click", async (e) => {
     if (e.target.closest("[data-x]")) { close(); return; }
+    const del = e.target.closest("[data-tdel]");
+    if (del) {
+      const row = del.closest("[data-tid]");
+      const name = row.querySelector('[data-tf="name"]').value;
+      if (await confirmDialog({ title: `Remove ${name}?`, message: "The portal stops looking for these. Scans already kept stay in their Google Drive folder. It's removed when you press Save.",
+        confirmLabel: "Remove", tone: "warning" })) row.hidden = true;
+      return;
+    }
     const sv = e.target.closest("[data-save]");
     if (!sv) return;
     const q = (k) => dlg.querySelector(`[data-s="${k}"]`);
@@ -723,7 +815,10 @@ async function openSettings(onDone) {
     sv.disabled = true; sv.textContent = "Saving…";
     try {
       const res = await api("saveSettings", { on: q("on").checked, startDate: start, fromHour: Number(q("from").value),
-        toHour: Number(q("to").value), autoBilling: q("bill").checked, autoConsent: q("cons").checked });
+        toHour: Number(q("to").value), autoBilling: q("bill").checked, autoConsent: q("cons").checked,
+        types: [...dlg.querySelectorAll("[data-tid]")].filter((row) => !row.hidden).map((row) => ({
+          id: row.dataset.tid, name: row.querySelector('[data-tf="name"]').value, hint: row.querySelector('[data-tf="hint"]').value,
+          folder: row.querySelector('[data-tf="folder"]').value, auto: row.querySelector('[data-tf="auto"]').checked })) });
       if (res.problem) { showToast(res.problem); return; }
       showToast("Settings saved");
       close();
@@ -736,8 +831,8 @@ async function openSettings(onDone) {
 
 /* ===================== Test on past scans (Admins, read only) ===================== */
 
-const WOULD = { file: ["Would file by itself", "is-ok"], paper: ["Would go to Paper records", "is-acc"], needs: ["Would wait for someone", "is-warn"] };
-const LIVE = { reading: "being read", needs: "waiting to be filed", filed: "filed", paper: "in Paper records", notrecord: "marked not a record", gone: "removed" };
+const WOULD = { file: ["Would file by itself", "is-ok"], keep: ["Would keep it by itself", "is-ok"], paper: ["Would go to Paper records", "is-acc"], needs: ["Would wait for someone", "is-warn"] };
+const LIVE = { reading: "being read", needs: "waiting to be filed", filed: "filed", kept: "kept in its folder", paper: "in Paper records", notrecord: "marked not a record", gone: "removed" };
 
 async function openTest() {
   injectStyles();
@@ -773,7 +868,7 @@ async function openTest() {
         <span>${doneN} of ${plural(total, "scan")} done${k.queued ? (t.running ? " · reading…" : " · paused") : ""}</span></div>
       <div class="si-prog"><span style="width:${Math.round((doneN * 100) / total)}%"></span></div>
       <div class="si-tchips">${chip(k.file, "would file by itself", "is-ok")}${chip(k.paper, "to Paper records", "is-acc")}${
-        chip(k.needs, "would wait", "is-warn")}${chip(k.sorted, "already sorted", "is-mut")}${chip(k.error, "couldn't read", "is-bad")}</div>
+        chip(k.keep, "would keep by itself", "is-ok") + chip(k.needs, "would wait", "is-warn")}${chip(k.sorted, "already sorted", "is-mut")}${chip(k.error, "couldn't read", "is-bad")}</div>
     </div>`;
   }
 
@@ -787,6 +882,8 @@ async function openTest() {
         <span>${esc(x.kindName)} · ${esc(fmtLong(m.date))}${m.time ? ` · ${esc(m.time)}` : ""}${m.staff ? ` with ${esc(m.staff)}` : ""}</span>
         ${x.fus ? `<span>Would make ${plural(x.fus.book, "appointment")} to book and ${plural(x.fus.task, "task")}${
           x.fus.quote ? `, and save ${plural(x.fus.quote, "quote")}` : ""}</span>` : ""}</div></div>`;
+    } else if (x.would === "keep") {
+      banner = `<div class="si-banner is-ok">${IC.check}<div><strong>Would keep it by itself</strong><span>${esc(x.kindName)} · in its own Google Drive folder</span></div></div>`;
     } else if (x.would === "paper") {
       banner = `<div class="si-banner is-acc">${IC.doc}<div><strong>Would go to Paper records</strong>
         <span>${m && x.confident ? `Looks like ${esc(m.name)} (${esc(fmtLong(m.date))})` : "Treatment records are filed there, where the products used are entered."}</span></div></div>`;
@@ -825,7 +922,7 @@ async function openTest() {
       title = r.patientName ? `“${esc(r.patientName)}”` : '<span class="si-muted">No name read</span>';
       sub = `${esc(x.kindName || "Scan")} · ${x.would === "file" && m
         ? `for ${esc(m.name)}${m.time ? ` · booked ${esc(m.time)}` : ""}${m.staff ? ` with ${esc(m.staff)}` : ""}`
-        : x.would === "paper" ? "products entered there" : `<span class="si-warn">${esc(x.whyText)}</span>`}`;
+        : x.would === "paper" ? "products entered there" : x.would === "keep" ? "kept in its own folder" : `<span class="si-warn">${esc(x.whyText)}</span>`}`;
       pill = `<span class="si-pill ${cls}">${label}</span>`;
     }
     const on = t.sel === x.id;
@@ -1218,6 +1315,17 @@ function injectStyles() {
   .si-row{grid-template-columns:44px minmax(0,1fr) auto}.si-time{display:none}.si-th{width:44px;height:54px}
   .si-fu{grid-template-columns:36px minmax(0,1fr)}.si-fu-acts{grid-column:1/-1;justify-content:flex-start}.si-fu-more{grid-column:1/-1}
   .si-head{flex-wrap:wrap}.si-ghost span{display:none}.si-dlg{width:100vw;height:100vh;border-radius:0}
-  .si-fields,.si-kinds{grid-template-columns:1fr}.si input,.si select,.si textarea{font-size:16px!important}}`;
+  .si-fields,.si-kinds{grid-template-columns:1fr}.si input,.si select,.si textarea{font-size:16px!important}}
+.si-live.is-warn{background:#f59e0b;animation:none}
+.si-note.is-warn{background:var(--warnl);color:var(--warn)}
+.si-kinds .si-kind-add{grid-column:1/-1;border-style:dashed;color:var(--t)}
+.si-kinds .si-kind-add.is-on{background:var(--tl);border-color:var(--t2)}
+.si-addtype{display:grid;gap:10px;padding:12px;border:1px solid var(--line);border-radius:12px;background:#f8fafc}
+.si-types{display:grid;gap:10px;padding-top:14px;border-top:1px solid var(--line);font-size:14px}
+.si-type{display:grid;gap:8px;padding:12px;border:1px solid var(--line);border-radius:12px}
+.si-type-acts{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.si-type-del{color:#b91c1c}
+.si-set{max-height:calc(100vh - 24px)}
+.si-set-b{min-height:0}`;
   document.head.appendChild(s);
 }
