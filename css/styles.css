@@ -15115,3 +15115,26 @@ dialog.msx .msx-sel { width: 100%; min-height: 0; height: 36px; padding: 0 .45re
   .msx-v .msx-na { display: none; }
   .msx-main { padding: .8rem; }
 }
+
+/* Recall email window: the To row (recall-email-to.js) */
+.rem-to { display: flex; align-items: flex-start; gap: .6rem; padding: .45rem .9rem; border-bottom: 1px solid #e5e7eb; }
+.rem-to-label { flex: none; min-width: 3.2rem; padding-top: .35rem; color: #64748b; font-size: .85rem; }
+.rem-to-field { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .35rem; }
+.rem-to-chip {
+  display: inline-flex; align-items: center; gap: .35rem; align-self: flex-start; max-width: 100%;
+  padding: .3rem .65rem; border: 1px solid #e2e8f0; border-radius: 999px; background: #f8fafc;
+  color: inherit; font: inherit; font-size: .88rem; text-align: left; cursor: pointer;
+}
+.rem-to-chip:hover, .rem-to-chip:focus-visible { border-color: #0f766e; background: #f0fdfa; outline: none; }
+.rem-to-chip [data-to-show] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rem-to-chip.is-changed { border-color: #f59e0b; background: #fffbeb; }
+.rem-to-pen { color: #94a3b8; font-size: .8rem; }
+.rem-to-input {
+  width: 100%; padding: .45rem .65rem; border: 1px solid #cbd5e1; border-radius: 8px;
+  font: inherit; font-size: 1rem; /* 16px or more stops iPads zooming in when tapped */
+}
+.rem-to-input:focus { border-color: #0f766e; box-shadow: 0 0 0 3px rgba(15, 118, 110, .15); outline: none; }
+.rem-to-input.is-bad { border-color: #dc2626; }
+.rem-to-save { display: flex; align-items: center; gap: .4rem; color: #334155; font-size: .83rem; cursor: pointer; }
+.rem-to-err { color: #b91c1c; font-size: .8rem; }
+.rem-to [hidden] { display: none !important; }

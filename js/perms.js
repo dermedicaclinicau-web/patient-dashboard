@@ -17,6 +17,7 @@ export const PERM_KEYS = [
   "menu.prospects", "prospects.work", "prospects.manage",
   "social.plan", "social.approve", "rx.write",
   "scans.view", "scans.file", "scans.book", "scans.all",
+  "recall.work", "recall.manage", "sms.send",
 ];
 
 let admin = false;

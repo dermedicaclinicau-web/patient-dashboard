@@ -12,6 +12,7 @@ import { showToast } from "./utils.js";
 import { normRecallSettings } from "./recall-settings.js";
 import { loadRecallEmailTemplates } from "./recall-emails.js";
 import { fillDateTokens } from "./date-tokens.js";
+import { toRowHtml, wireToRow, readToRow } from "./recall-email-to.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -144,8 +145,7 @@ function compose(email, cardId) {
     const def = tpls.templates.find((t) => t.isDefault) || tpls.templates[0];
     box.querySelector('[data-role="title"]').textContent = `Email ${card.patientName || ""}`.trim();
     main.innerHTML = `
-      <div class="rem-row"><span class="rem-lbl">To</span>
-        <span class="rem-chip" title="${esc(email)}"><strong>${esc(card.patientName || "")}</strong> &lt;${esc(email)}&gt;</span></div>
+      ${toRowHtml(card.patientName || "", email)}
       <div class="rem-row"><span class="rem-lbl">Template</span>
         <select class="rem-select" data-role="tpl" aria-label="Template">${tpls.templates.map((t) =>
           `<option value="${esc(t.id)}"${t.id === def.id ? " selected" : ""}>${t.isDefault ? "★ " : ""}${esc(t.name)}</option>`).join("")}
@@ -167,6 +167,7 @@ function compose(email, cardId) {
       tokens: () => [],
     });
     apply(def);
+    wireToRow(main, card.email || email);
     main.querySelector('[data-role="subject"]').addEventListener("input", () => { touched = true; });
     main.querySelector('[data-role="tpl"]').addEventListener("change", async (e) => {
       const t = tpls.templates.find((x) => x.id === e.target.value) || null;
@@ -185,6 +186,8 @@ function compose(email, cardId) {
 
   async function send() {
     if (sending || !card) return;
+    const to = readToRow(main);
+    if (to.error) { showErr(to.error); return; }
     const subject = main.querySelector('[data-role="subject"]').value.replace(/\s+/g, " ").trim();
     const body = editor.getHtml();
     if (!subject) { showErr("Add a subject."); return; }
@@ -205,11 +208,12 @@ function compose(email, cardId) {
     };
     try {
       const html = emailShell(body, tpls.style, { clinic: clinicDetails(lh), hasLogo: !!lh.logo });
-      const res = await callApi({ action: "recall", op: "sendEmail", id: card.id, to: email, subject, html });
+      const res = await callApi({ action: "recall", op: "sendEmail", id: card.id, to: to.to, saveEmail: to.saveEmail, subject, html });
       // The server said why it can't send (do-not-contact, bounced address, too big…): show it, keep the draft
       if (res && res.problem) { reset(); showErr(res.problem); return; }
       if (res && res.ok === false) throw Object.assign(new Error(res.error || "Failed"), { detail: res.detail });
-      showToast(`Email sent to ${card.patientName || email}.`);
+      showToast(res && res.note ? res.note
+        : `Email sent to ${card.patientName || to.to}${res && res.saved ? ". Their email address has been updated too" : ""}.`);
       destroy();
     } catch (err) {
       console.error("Recall email failed:", err);
@@ -234,7 +238,13 @@ function compose(email, cardId) {
     }
   });
   box.addEventListener("keydown", (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); send(); }
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); send(); return; }
+    if (e.key === "Escape" && !box.classList.contains("is-min")) {
+      e.preventDefault();
+      e.stopPropagation();
+      box.classList.add("is-min");
+      box.classList.remove("is-max");
+    }
   });
   return api;
 }

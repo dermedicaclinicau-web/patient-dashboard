@@ -15,7 +15,8 @@ import { showToast } from "./utils.js";
 import { normRecallSettings } from "./recall-settings.js";
 import { installRecallEmail, openRecallEmail } from "./recall-email.js"; installRecallEmail();
 import { loadTagLib, tagChipsHtml, openTagPicker } from "./patient-tags.js";
-import { toRowHtml, wireToRow, readToRow } from "./recall-email-to.js";
+import { can as canPerm } from "./perms.js";
+import "./sms-count.js";
 
 const COL = "recalls";
 const PAGE = 50;
@@ -46,9 +47,13 @@ const REPLY_TAG = { yes: "Wants to book", stop: "Opted out", other: "Replied" };
 const STOP_LINE = "Reply STOP to opt out.";
 const withStop = (t) => { const s = String(t || "").replace(/\s+/g, " ").trim(); return /reply\s+stop/i.test(s) ? s : `${s}${s ? " " : ""}${STOP_LINE}`; };
 const smsCount = (t) => {
-  const n = withStop(t).length;
-  const parts = n <= 160 ? 1 : Math.ceil(n / 153);
-  return `${n} characters · ${parts} text${parts === 1 ? "" : "s"}`;
+  const full = withStop(t);
+  const r = typeof window.smsInfo === "function" ? window.smsInfo(full) : null;
+  const n = r ? r.chars : full.length;
+  const parts = r ? r.parts : (n <= 160 ? 1 : Math.ceil(n / 153));
+  const odd = r && r.unicode
+    ? ` · has ${Array.isArray(r.odd) && r.odd.length ? r.odd.join(" ") : "special characters"}, so it's split into 70-character parts` : "";
+  return `${n} characters · ${parts} text${parts === 1 ? "" : "s"}${odd}`;
 };
 const smsInfo = (t) => `${smsCount(t)}${/reply\s+stop/i.test(String(t || "")) ? "" : ` · "${STOP_LINE}" is added at the end`}`;
 
@@ -132,7 +137,7 @@ const mobileText = (m) => {
 const telOf = (m) => mobileText(m).replace(/[^\d+]/g, "");
 const isMobile = (m) => /^04\d{8}$/.test(telOf(m));
 const me = () => (auth.currentUser && auth.currentUser.uid) || "";
-const can = (staff, p) => !!staff && (/^admin$/i.test(String(staff.role || "")) || (Array.isArray(staff.perms) && staff.perms.includes(p)));
+const can = (_staff, p) => canPerm(p);   // from the login token (perms.js), so role ticks count too
 const nameKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9' -]/g, " ").replace(/\s+/g, " ").trim(); // same as recallKeys_
 const blank = () => ({ note: "", remind: "", reason: "", until: "", sms: null, smsKey: "main", all: null, holdUntil: "", holdWhy: "" });
 // "Stop all their recalls" starts ticked for reasons about the person, not one treatment
@@ -307,6 +312,7 @@ export function mountRecall(container, { staff = null } = {}) {
   const bySpend = (list) => (!spendFirst ? list : list.slice().sort((a, b) =>
     (TIER_RANK[a.spendTier] ?? 9) - (TIER_RANK[b.spendTier] ?? 9) || b.spend12 - a.spend12));
   let countTimer = 0, countSeq = 0, searchTimer = 0, searchSeq = 0;
+  let lastCounts = 0;   // when the numbers were last counted
   let jumpTo = "";            // a group to scroll to once My calls has loaded ("replies", "callbacks")
 
   // The call just logged: saved after UNDO_MS unless Undo is pressed. One at a time.
@@ -423,7 +429,7 @@ export function mountRecall(container, { staff = null } = {}) {
       drawStats();
       drawStart();
       if (jumpTo && sec.key === "mine") { const g = jumpTo; jumpTo = ""; scrollGroup(g); }
-      scheduleCounts();
+      if (Date.now() - lastCounts > 45000) scheduleCounts();   // others' changes: at most every 45 seconds
     }, (err) => {
       if (!root.isConnected) return;
       console.error("Recall list failed. If this mentions an index, open the link to create it:", err);
@@ -453,6 +459,7 @@ export function mountRecall(container, { staff = null } = {}) {
   async function loadCounts() {
     if (!root.isConnected) return;
     const seq = ++countSeq;
+    lastCounts = Date.now();
     const t = todayKey(), uid = me();
     const cat = [...(ui.cat ? [where("category", "==", ui.cat)] : []), ...apptWhere()];
     const lv = lvRange();
@@ -541,7 +548,8 @@ export function mountRecall(container, { staff = null } = {}) {
         <span class="rc-stat2-txt"><small>Replies waiting</small></span></button>
       <button type="button" class="rc-stat2${cbs ? " is-warn" : ""}" data-go="callbacks"><strong>${v(cbs)}</strong>
         <span class="rc-stat2-txt"><small>Call-backs due</small></span></button>
-      <button type="button" class="rc-stat2 is-good" data-go="booked"><strong>${v(counts.bookedMonth)}</strong>
+      <button type="button" class="rc-stat2 is-good" data-go="booked"
+        title="Recall cards booked since the 1st of this month, including patients who have since come in. The Booked tab shows the ones still waiting for their appointment."><strong>${v(counts.bookedMonth)}</strong>
         <span class="rc-stat2-txt"><small>Booked this month</small></span></button>`;
   }
 

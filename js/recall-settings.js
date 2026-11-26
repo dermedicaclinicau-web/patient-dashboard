@@ -5,6 +5,7 @@ import { doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/fi
 import { callApi } from "./appointments.js";
 import { showToast } from "./utils.js";
 import { loadTagLib, setTagLib, TAG_COLORS } from "./patient-tags.js";
+import "./sms-count.js";
 
 // The same defaults as RECALL_CATS_ / RECALL_REASONS_ in Code.gs
 export const RECALL_CATEGORIES = [["Wrinkle Relaxer", 4, true], ["Filler/Radiesse", 9, true], ["Laser/OPL/Peel", 6, true],
@@ -200,10 +201,13 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     };
   }
 
-  function setState() {
+  function setState(s) {
     const el = $("state");
-    el.className = `fe-state is-${dirty ? "dirty" : "saved"}`;
-    el.textContent = dirty ? "Unsaved changes" : "All changes saved";
+    if (!el) return;
+    const st = s || (dirty ? "dirty" : "saved");
+    el.className = `fe-state is-${st === "saved" ? "saved" : "dirty"}`;
+    el.textContent = st === "saving" ? "Saving…" : st === "error" ? "Couldn't save. Retrying…"
+      : st === "dirty" ? "Unsaved changes" : "All changes saved";
   }
 
   /* ---------- Texts ---------- */
@@ -219,8 +223,12 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
       .replace(/\{\s*clinic phone\s*\}/gi, phone || "")
       .replace(/\s+/g, " ").trim();
     if (!/reply\s+stop/i.test(t)) t += `${t ? " " : ""}${STOP_LINE}`;
-    const parts = t.length <= 160 ? 1 : Math.ceil(t.length / 153);
-    return { text: t, info: `${t.length} characters · ${parts} text${parts === 1 ? "" : "s"} each` };
+    const r = typeof window.smsInfo === "function" ? window.smsInfo(t) : null;
+    const chars = r ? r.chars : t.length;
+    const parts = r ? r.parts : (t.length <= 160 ? 1 : Math.ceil(t.length / 153));
+    const odd = r && r.unicode
+      ? ` · has ${Array.isArray(r.odd) && r.odd.length ? r.odd.join(" ") : "special characters"}, so it's split into 70-character parts` : "";
+    return { text: r ? r.text : t, info: `${chars} characters · ${parts} text${parts === 1 ? "" : "s"} each${odd}` };
   }
   function drawPreview() {
     [["smsTpl", "smsPreview"], ["missedTpl", "missedPreview"]].forEach(([tpl, out]) => {
@@ -275,6 +283,7 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     dirty = true;
     setState();
     drawPreview();
+    queueSave();
   }
 
   /* ---------- Not recalled from these services ---------- */
@@ -333,7 +342,6 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
         <span class="fe-state is-saved" data-role="state"></span>
         <span class="inv-spacer"></span>
         <button type="button" class="lh-btn" data-act="check">Check for due patients now</button>
-        <button type="button" class="btn-primary" data-act="save">Save</button>
       </div>
       <p class="muted" data-role="status">${esc(statusText())}</p>
       <div class="rs-grid">
@@ -479,12 +487,21 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     setState();
     drawSmsState();
     drawPreview();
+    if (dirty) queueSave();
   }
 
-  async function save() {
+  // Changes save by themselves a second after the last one
+  let saving = false, saveTimer = 0;
+  function queueSave(ms = 1000) { clearTimeout(saveTimer); saveTimer = setTimeout(autoSave, ms); }
+  // Saves what's on screen. false: it couldn't (it tries again by itself, unless there's no access)
+  async function autoSave() {
+    clearTimeout(saveTimer);
+    if (!dirty) return true;
+    if (saving) { queueSave(400); return true; }
+    saving = true;
+    dirty = false;
+    setState("saving");
     const s = collect(false);
-    const btn = root.querySelector('[data-act="save"]');
-    btn.disabled = true;
     try {
       const uid = auth.currentUser && auth.currentUser.uid;
       if (!uid) throw new Error("Your session has ended. Log in again.");
@@ -492,19 +509,31 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
         ...s, updatedAt: serverTimestamp(), updatedBy: String((staff && staff.name) || "").slice(0, 120), updatedByUid: uid,
       });
       set = normRecallSettings(s);
-      dirty = false;
-      draw();
-      showToast("Recall settings saved. The next check uses them.");
+      setState(dirty ? "dirty" : "saved");
+      if (dirty) queueSave(400);   // changed again while it was saving
+      return true;
     } catch (err) {
       console.error("Save recall settings failed:", err);
-      showToast(errText(err, "Couldn't save. Try again."));
+      dirty = true;
+      if (err && err.code === "permission-denied") { setState("dirty"); showToast(errText(err, "")); return false; }
+      setState("error");
+      queueSave(4000);
+      return false;
     } finally {
-      if (btn.isConnected) btn.disabled = false;
+      saving = false;
+    }
+  }
+  // Waits until everything on screen is saved (or it can't be)
+  async function settle() {
+    for (let i = 0; i < 40 && (dirty || saving); i++) {
+      if (saving) await new Promise((r) => setTimeout(r, 100));
+      else if (!(await autoSave())) break;
     }
   }
 
   async function check(btn) {
-    if (dirty) { showToast("Save your changes first."); return; }
+    await settle();
+    if (dirty) { showToast("Your changes haven't saved yet. Try again in a moment."); return; }
     btn.disabled = true;
     btn.textContent = "Checking… this can take a minute";
     try {
@@ -539,6 +568,7 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     if (e.target.dataset.role === "smsTestTo") return;   // not a setting
     dirty = true;
     setState();
+    queueSave();
     const r = e.target.dataset.role;
     if (r === "smsTpl" || r === "missedTpl" || r === "smsPhone" || e.target.dataset.f === "smsName") drawPreview();
   });
@@ -551,6 +581,7 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     if (e.target.dataset.role === "smsTestTo") return;
     dirty = true;
     setState();
+    queueSave();
   });
   root.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && e.target.dataset.role === "skipNew") { e.preventDefault(); addSkip(); }
@@ -599,7 +630,6 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     }
     const stg = e.target.closest('[data-act="save-tags"]');
     if (stg) { saveTags(stg); return; }
-    if (e.target.closest('[data-act="save"]')) { save(); return; }
     if (e.target.closest('[data-act="add-skip"]')) { addSkip(); return; }
     if (e.target.closest('[data-act="load-svcs"]')) { loadServices(); return; }
     const tk = e.target.closest("[data-tok]");
@@ -650,7 +680,16 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
       draw();
     }
   });
-  window.addEventListener("beforeunload", (e) => { if (dirty && root.isConnected) e.preventDefault(); });
+  window.addEventListener("beforeunload", (e) => {
+    if ((dirty || saving) && root.isConnected) { e.preventDefault(); e.returnValue = ""; }
+  });
+  window.addEventListener("hashchange", function off() {
+    setTimeout(() => {
+      if (root.isConnected) return;
+      window.removeEventListener("hashchange", off);
+      if (dirty) autoSave();   // left the page: what was typed is saved now
+    }, 0);
+  });
   draw();
   checkSms();
 }

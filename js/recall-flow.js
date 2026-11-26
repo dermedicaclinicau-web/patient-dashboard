@@ -20,6 +20,7 @@ import { showToast } from "./utils.js";
 import { normRecallSettings, recallTabsHtml } from "./recall-settings.js";
 import { loadRecallEmailTemplates } from "./recall-emails.js";
 import { fillDateTokens } from "./date-tokens.js";
+import "./sms-count.js";
 
 const MAX_STEPS = 40;
 let WHO_CACHE = null;   // the last "Who's in the flow" answer, so reopening it is instant
@@ -637,8 +638,13 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
   function smsPreview(text) {
     let t = fillTemplate(fillDateTokens(String(text || "")), sampleVals()).replace(/\s+/g, " ").trim();
     if (!/reply\s+stop/i.test(t)) t += `${t ? " " : ""}${STOP_LINE}`;
-    const parts = t.length <= 160 ? 1 : Math.ceil(t.length / 153);
-    return `<strong>Preview:</strong> ${esc(t)}<br><small>${t.length} characters · ${parts} text${parts === 1 ? "" : "s"} each</small>`;
+    const r = typeof window.smsInfo === "function" ? window.smsInfo(t) : null;
+    const shown = r ? r.text : t;
+    const chars = r ? r.chars : t.length;
+    const parts = r ? r.parts : (t.length <= 160 ? 1 : Math.ceil(t.length / 153));
+    const odd = r && r.unicode
+      ? ` · has ${Array.isArray(r.odd) && r.odd.length ? esc(r.odd.join(" ")) : "special characters"}, so it's split into 70-character parts` : "";
+    return `<strong>Preview:</strong> ${esc(shown)}<br><small>${chars} characters · ${parts} text${parts === 1 ? "" : "s"} each${odd}</small>`;
   }
 
   function flowSettingsHtml() {
