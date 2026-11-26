@@ -91,6 +91,7 @@ function defaultLayout() {
   return { paper: { preset: "A4", w: 210, h: 297 }, offset: { x: 0, y: 0 }, font: "Arial",
     bg: { x: 0, y: 0, w: 210, opacity: 0.5 }, copy: { on: true, dx: 105 },
     fix: { x: 100, y: 100 },   // how big the printer prints the page, in % (100 = true size)
+    edge: 4,                   // the outer strip (mm) the printer can't print at all, even at true size
     clinic: { address1: "", address2: "", phone: "" }, fields };
 }
 function mergeLayout(s) {
@@ -100,6 +101,7 @@ function mergeLayout(s) {
     offset: { ...d.offset, ...(s.offset || {}) }, bg: { ...d.bg, ...(s.bg || {}) },
     copy: s.copy ? { ...d.copy, ...s.copy } : { on: false, dx: 105 },   // a layout saved before this keeps printing one copy
     fix: { ...d.fix, ...(s.fix || {}) },
+    edge: Number.isFinite(Number(s.edge)) ? Number(s.edge) : d.edge,
     clinic: { ...d.clinic, ...(s.clinic || {}) }, fields: {} };
   FIELDS.forEach((f) => { out.fields[f.key] = { ...d.fields[f.key], ...((s.fields || {})[f.key] || {}) }; });
   return out;
@@ -195,6 +197,32 @@ const empty = (v) => v === undefined || v === null || v === "" || v === false ||
 // The text of the sheet. o: { dx, dy, outlines, labels, copies }
 // copies: how far right (mm) each copy prints. With "Print a second copy" on, the same text prints again beside it.
 const copiesOf = (L) => (L.copy && L.copy.on ? [0, num(L.copy.dx)] : [0]);
+
+// The strip around the edge the front desk printer can't reach. It shrinks each page to fit inside its own margins
+// (the "Printer prints at" %), and the portal makes the page bigger to undo that, so anything in this strip ends up off the page.
+function safeEdge(L) {
+  const W = num(L.paper.w, 210), H = num(L.paper.h, 297);
+  const cut = (size, f) => (f > 0 && f < 100 ? (size / 2) * (1 - f / 100) : 0);
+  const own = Math.max(0, num(L.edge, 4));
+  return { x: Math.max(own, cut(W, num(L.fix && L.fix.x, 100))), y: Math.max(own, cut(H, num(L.fix && L.fix.y, 100))), W, H };
+}
+// The boxes (on either copy) that go into that strip. Left-aligned writing only reaches as far right as its words,
+// so for those only the left, top and bottom edges count.
+function edgeClash(L) {
+  const e = safeEdge(L), out = [];
+  if (!(e.x > 0 || e.y > 0)) return out;
+  copiesOf(L).forEach((cx, ci) => FIELDS.forEach((d) => {
+    const f = L.fields[d.key];
+    if (!f || !f.on || (num(cx) && f.copy2 === false)) return;
+    const g = geom(d, f);
+    const x0 = num(f.x) + num(L.offset.x) + num(cx), y0 = num(f.y) + num(L.offset.y);
+    const toRight = d.key === "items" || (d.type !== "text" && d.type !== "area") || (f.align && f.align !== "left");
+    if (x0 < e.x - 0.01 || y0 < e.y - 0.01 || y0 + g.h > e.H - e.y + 0.01 || (toRight && x0 + g.w > e.W - e.x + 0.01)) {
+      out.push({ key: d.key, label: d.label, copy: ci });
+    }
+  }));
+  return out;
+}
 function sheetHtml(L, vals, o = {}) {
   return (o.copies || copiesOf(L)).map((cx, ci) => FIELDS.map((d) => {
     const f = L.fields[d.key];
@@ -357,6 +385,13 @@ async function buildPdf(L, vals, o = {}) {
     doc.setLineWidth(0.1); doc.setFont("helvetica", "normal"); doc.setFontSize(5.5); doc.setTextColor(150);
     for (let gx = 10; gx < PW; gx += 10) { doc.setDrawColor(gx % 50 ? 225 : 190); doc.line(gx, 0, gx, PH); doc.text(String(gx), gx + 0.6, 3); }
     for (let gy = 10; gy < PH; gy += 10) { doc.setDrawColor(gy % 50 ? 225 : 190); doc.line(0, gy, PW, gy); doc.text(String(gy), 1, gy + 2); }
+    // The printer can't reach outside this line: every box needs to be inside it
+    const e = safeEdge(L);
+    if (e.x > 0 || e.y > 0) {
+      doc.setDrawColor(220, 38, 38); doc.setLineWidth(0.4); doc.setLineDashPattern([2, 1.5], 0);
+      doc.rect(e.x + 0.5, e.y + 0.5, PW - 2 * e.x - 1, PH - 2 * e.y - 1);
+      doc.setLineDashPattern([], 0);
+    }
   }
   doc.setTextColor(0);
   copiesOf(L).forEach((cx) => FIELDS.forEach((d) => {
@@ -435,10 +470,12 @@ function printedNotice({ ok, title, message, retry = false }) {
 async function printTest(L, btn) {
   if (btn) btn.disabled = true;
   try {
-    await sendToPrinter(await buildPdf(L, SAMPLE, { grid: true, outlines: true }), { test: true });
+    const res = await sendToPrinter(await buildPdf(L, SAMPLE, { grid: true, outlines: true }), { test: true });
     store.set(TESTED_KEY, true);
     await printedNotice({ ok: true, title: "Test page sent to the printer",
-      message: "Please check the printer tray. Hold the page over a script against the light to check it lines up." });
+      message: res.via === "email"
+        ? "It was emailed to the printer, so the printer shrinks it to fit and can't print near the edges. Ask an Admin to save the PrintNode key in Apps Script (rxPrintNodeSave) so it prints at true size."
+        : "Please check the printer tray. Hold the page over a script against the light to check it lines up." });
   } catch (err) {
     console.error("Test page not sent:", err);
     await printedNotice({ ok: false, title: "The test page wasn't printed",
@@ -1460,8 +1497,12 @@ async function mountWriter(container, { patientId = "", recordId = "", copyOf = 
       if (over) tight.push(FIELD_LABELS[el.dataset.key] || "A box");
     });
     markFocus();
-    $("warn").innerHTML = tight.length ? `<div class="rxw-warn">⚠ Too long to fit: <strong>${[...new Set(tight)].map(esc).join(", ")}</strong>.
-      Shorten it, or make the space bigger in <a href="#/prescriptions/layout">Set up the paper</a>.</div>` : "";
+    const vals = values();
+    const edge = [...new Set(edgeClash(L).filter((c) => !empty(vals[c.key])).map((c) => c.label))];
+    $("warn").innerHTML = (tight.length ? `<div class="rxw-warn">⚠ Too long to fit: <strong>${[...new Set(tight)].map(esc).join(", ")}</strong>.
+      Shorten it, or make the space bigger in <a href="#/prescriptions/layout">Set up the paper</a>.</div>` : "") +
+      (edge.length ? `<div class="rxw-warn">⚠ Too close to the edge of the paper, so the printer cuts it off: <strong>${edge.map(esc).join(", ")}</strong>.
+      Move it in <a href="#/prescriptions/layout">Set up the paper</a>.</div>` : "");
     $("first").innerHTML = store.get(TESTED_KEY, false) ? "" : `<div class="rxw-tip">${IC.info}<div><strong>Not sure it lines up?</strong>
       Send a test page to the printer on plain paper and hold it over a script against the light.
       <button type="button" class="rxw-link-btn" data-act="test">Send a test page</button></div></div>`;
@@ -1930,7 +1971,9 @@ async function mountLayout(container, { staff }) {
         </div>
         <div class="rx-scroll" data-role="scroll"><div class="rx-zoom" data-role="zoom">
           <div class="rx-paper rx-ed-paper" data-role="paper"></div></div></div>
-        <p class="rx-hint">Drag a box to move it. Drag its corner to make it wider. Arrow keys move the chosen box 0.5 mm (hold Shift for 2 mm).</p>
+        <div data-role="edgewarn"></div>
+        <p class="rx-hint">Drag a box to move it. Drag its corner to make it wider. Arrow keys move the chosen box 0.5 mm (hold Shift for 2 mm).
+          The red border is the edge the printer can't reach: keep every box inside it.</p>
       </div>
       <aside class="rx-panel" data-role="panel"></aside>
     </div>`;
@@ -1971,15 +2014,30 @@ async function mountLayout(container, { staff }) {
     applyZoom();
     paper.innerHTML = (bg && showBg ? `<img class="rx-bg" alt="" src="${bg.data}" style="left:${num(L.bg.x)}mm;top:${num(L.bg.y)}mm;width:${num(L.bg.w, L.paper.w)}mm;opacity:${num(L.bg.opacity, 0.5)}">` : "") +
       (showGrid ? `<div class="rx-grid-lines"></div>${gridHtml(L).replace(/#eef0f3|#d1d5db/g, "transparent")}` : "") +
+      '<div class="rx-unsafe" data-role="unsafe"></div>' +
       FIELDS.map(fldHtml).join("") + '<div class="rx-ghost" data-role="ghost"></div>';
     $("bgtoggle").hidden = !bg;
     drawGhost();
+    drawEdge();
   }
   // The second copy, faded: it follows the boxes of the first
   function drawGhost() {
     const g = paper.querySelector('[data-role="ghost"]');
     if (!g) return;
     g.innerHTML = L.copy && L.copy.on ? sheetHtml(L, SAMPLE, { copies: [num(L.copy.dx)], outlines: true }) : "";
+  }
+  // The strip the printer can't reach, and the boxes that go into it
+  function drawEdge() {
+    const e = safeEdge(L);
+    const u = paper.querySelector('[data-role="unsafe"]');
+    if (u) { u.style.borderWidth = `${e.y}mm ${e.x}mm`; u.hidden = !(e.x > 0 || e.y > 0); }
+    const list = edgeClash(L);
+    paper.querySelectorAll(".rx-fld").forEach((el) => el.classList.toggle("is-edge", list.some((c) => c.key === el.dataset.key)));
+    const w = $("edgewarn");
+    if (!w) return;
+    const names = [...new Set(list.map((c) => c.label + (c.copy ? " (second copy)" : "")))];
+    w.innerHTML = names.length ? `<div class="rx-warn"><strong>The printer cuts these off:</strong> ${names.map(esc).join(", ")}.
+      Drag them inside the red border, or make them narrower.</div>` : "";
   }
   function place(key) {
     const el = paper.querySelector(`.rx-fld[data-key="${key}"]`);
@@ -1989,6 +2047,7 @@ async function mountLayout(container, { staff }) {
     el.classList.toggle("is-off", !f.on);
     el.querySelector(".rx-c").innerHTML = fieldInner(d, f, geom(d, f), SAMPLE[key]);
     drawGhost();
+    drawEdge();
   }
   function select(key) {
     sel = key || "";
@@ -2096,7 +2155,9 @@ async function mountLayout(container, { staff }) {
         <div class="rx-mini">
           <label class="rx-f"><span>Printer prints across at</span>${mmIn('data-fix="x"', num(L.fix && L.fix.x, 100), 0.1, "%", 80)}</label>
           <label class="rx-f"><span>Printer prints down at</span>${mmIn('data-fix="y"', num(L.fix && L.fix.y, 100), 0.1, "%", 80)}</label>
+          <label class="rx-f"><span>Printer can't print the outer</span>${mmIn('data-edge="1"', num(L.edge, 4), 0.5, "mm", 0)}</label>
         </div>
+        <p class="rx-note">The blank strip round the edge of a test page. Shown as the red border on the page.</p>
       </div>
       <div class="rx-card"><h3><span class="rx-step">5</span>Check it</h3>
         <p class="rx-note">Sends a test page to the front desk printer: a mm grid, each box's outline and sample text. Put plain paper in first, then hold the page over a script against the light. If everything is off by the same amount, use Margins above.</p>
@@ -2177,12 +2238,19 @@ async function mountLayout(container, { staff }) {
       return;
     }
     if (t.dataset.clinic) { change(() => { L.clinic[t.dataset.clinic] = t.value; }, true); return; }
-    if (t.dataset.copy === "dx") { change(() => { L.copy.dx = val; }, true); drawGhost(); return; }
+    if (t.dataset.copy === "dx") { change(() => { L.copy.dx = val; }, true); drawGhost(); drawEdge(); return; }
     if (t.dataset.copy === "on") { change(() => { L.copy.on = t.checked; }); drawPaper(); drawPanel(); return; }
     if (t.dataset.off) { change(() => { L.offset[t.dataset.off] = val; }, true); drawPaper(); return; }
+    if (t.dataset.edge) {
+      if (val < 0 || val > 15) return;
+      change(() => { L.edge = val; }, true);
+      drawEdge();
+      return;
+    }
     if (t.dataset.fix) {   // only changes what's sent to the printer, so the screen stays the same
       if (val < 80 || val > 120) return;
       change(() => { L.fix = { ...(L.fix || {}), [t.dataset.fix]: val }; }, true);
+      drawEdge();
       return;
     }
     if (t.dataset.bg) { change(() => { L.bg[t.dataset.bg] = val; }, true); drawPaper(); return; }
@@ -2449,6 +2517,10 @@ function injectStyles() {
 .rx-insp-card .rx-insp{border-top:0;padding-top:0}
 .rx-pickbox{flex:1;min-width:0;font:inherit;font-size:14px;font-weight:600;color:var(--ink);border:1px solid #d1d5db;border-radius:9px;padding:7px 10px;background:#fff}
 @media (max-width:1100px){.rx-panel{position:static;max-height:none;overflow:visible}}
+.rx-unsafe{position:absolute;inset:0;box-sizing:border-box;border:0 solid rgba(239,68,68,.16);pointer-events:none}
+.rx-unsafe::after{content:"";position:absolute;inset:0;border:calc(1px / var(--z,1)) dashed rgba(220,38,38,.7)}
+.rx-fld.is-edge{border-color:#dc2626;background:rgba(239,68,68,.14)}
+.rx-fld.is-edge .rx-tag{background:#dc2626;opacity:.92}
 .rx [hidden]{display:none!important}
 `;
   document.head.appendChild(s);
