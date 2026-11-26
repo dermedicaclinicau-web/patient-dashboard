@@ -5,6 +5,7 @@ import { cleanRichHtml } from "./rich-html.js";
 import { emailAftercare, printAftercare } from "./aftercare-send.js";
 import { deliveryError } from "./form-delivery.js";
 import { showToast } from "./utils.js";
+import { refreshPrinterStatus } from "./printer-status.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -90,6 +91,7 @@ export function mountAftercareField(w, f, { saved, onChange = () => {}, patient 
         <div class="ac-actions">
           <button type="button" class="ff-btn" data-ac-email>${MAIL}<span>Email aftercare</span></button>
           <button type="button" class="ff-btn" data-ac-print>${PRINT}<span>Print aftercare</span></button>
+          <span data-printer-status></span>
           <small class="muted">Uses the aftercare ticked “Send &amp; print”.</small>
         </div>` : "");
   }
@@ -139,6 +141,7 @@ export function mountAftercareField(w, f, { saved, onChange = () => {}, patient 
       } finally {
         btn.disabled = false;
         label.textContent = "Print aftercare";
+        refreshPrinterStatus(true);
       }
       return;
     }

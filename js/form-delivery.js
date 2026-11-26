@@ -35,7 +35,8 @@ export function takeDelivery(submissionId) {
 export function deliveryError(err) {
   switch (err && err.code) {
     case "UNAUTHORIZED": return "Your session has expired. Log out and back in, then try again.";
-    case "NO_PRINTER": return "No printer email address is set. An admin can add it in Form Builder, under Form settings.";
+    case "NO_PRINTER": return "No printer is set up. Ask an admin to set up PrintNode, or add the printer's email address in Form Builder → Form settings.";
+    case "PRINT_FAILED": return (err && err.detail) || "The printer couldn't be reached. Try again, or open the PDF and print it yourself.";
     case "FORBIDDEN": return "You don't have access to do this. Ask an admin to check your access in Staff.";
     case "BAD_EMAIL": return "Check the email address and try again.";
     case "RATE_LIMITED": return "You've sent a lot of emails in the last hour. Try again a little later.";
@@ -255,7 +256,7 @@ export function previewPdf(p) {
 export async function sendToPrinter({ sub, ver, letterhead }) {
   const payload = await pdfPayload(await formPdf({ sub, ver, letterhead }));
   const res = await callApi({ action: "sendFormPdf", submissionId: sub.id, kind: "print", ...payload });
-  return res.entry;
+  return res.entry ? { ...res.entry, note: res.note || "" } : res.entry;
 }
 
 /* ---------- Email window ---------- */
@@ -389,7 +390,7 @@ export async function openPrinterDialog(staff) {
     <form class="lh-form ec-form" novalidate>
       <div class="lh-dialog-head">
         <h3>Printer email address</h3>
-        <p>Save &amp; print and Send to printer email the PDF here. Use the printer's own email-print address.</p>
+        <p>Only used if PrintNode isn't set up, or can't be reached. Use the printer's own email-print address.</p>
       </div>
       <label class="lh-field"><span class="lh-label">Email address</span>
         <input type="email" data-k="printer" maxlength="254" value="${esc(current)}" placeholder="printer@example.com" />

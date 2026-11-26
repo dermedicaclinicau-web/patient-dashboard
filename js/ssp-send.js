@@ -10,6 +10,7 @@ import { callApi } from "./appointments.js";
 import { showToast } from "./utils.js";
 import { confirmDialog } from "./dialog.js";
 import { showPrintedPopup } from "./print-done.js";
+import { refreshPrinterStatus } from "./printer-status.js";
 
 // The last time this protocol went to the printer: { sentAt, sentBy, to }, or null
 const lastPrintOf = (rec) => (Array.isArray(rec && rec.deliveries) ? rec.deliveries : [])
@@ -63,7 +64,7 @@ export async function openSspPreview({ record, patient = null, staff = null, onS
     dlg.className = "lh-dialog ssp-prev";
     dlg.innerHTML = `
       <div class="ssp-prev-bar">
-        <div><strong>Skin Script Protocol</strong><span class="ssp-prev-state" data-role="state"></span></div>
+        <div><strong>Skin Script Protocol</strong><span class="ssp-prev-state" data-role="state"></span> <span data-printer-status></span></div>
         <div class="ssp-prev-acts">
           <button type="button" class="lh-btn is-quiet" data-act="close">Close</button>
           <button type="button" class="lh-btn" data-act="save" hidden>Save</button>
@@ -112,6 +113,7 @@ export async function openSspPreview({ record, patient = null, staff = null, onS
         busy = false;
         dlg.querySelectorAll(".ssp-prev-acts button").forEach((b) => { b.disabled = false; });
         btn.textContent = old;
+        if (btn.dataset.act === "print") refreshPrinterStatus(true);
       }
     }
 

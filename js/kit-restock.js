@@ -3,10 +3,13 @@
 // (an approver releases it to the Shelf), or take units from a colleague's opened vial.
 // bare: inside a dashboard card (no title of its own). onChange: called after a restock, instead of reloading itself.
 import {
-  listProducts, listKits, listReleases, isKitProduct, kitUnits, plural, myUid, expiryState, batchText,
+  listProducts, listKits, listReleases, listAllLots, listOpenContainers, openContainer, fefo,
+  isKitProduct, kitUnits, plural, myUid, expiryState, batchText,
 } from "./inventory-api.js";
 import { takeFromShelfDialog, borrowDialog, jtReleaseDialog } from "./inventory-kits.js";
-import { isInjector, can } from "./perms.js";
+import { restockDialog, chooseVialDialog } from "./consumables-field.js";
+import { isInjector, isAdmin, can } from "./perms.js";
+import { showToast } from "./utils.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(1));
@@ -24,11 +27,12 @@ const IC = {
 };
 
 function injectStyles() {
-  if (document.getElementById("kr-styles-3")) return;
+  if (document.getElementById("kr-styles-4")) return;
+  document.getElementById("kr-styles-3")?.remove();
   document.getElementById("kr-styles-2")?.remove();
   document.getElementById("kr-styles-1")?.remove();
   const s = document.createElement("style");
-  s.id = "kr-styles-3";
+  s.id = "kr-styles-4";
   s.textContent = `
 .kr-card{background:#fff;border:1px solid #e2e8f0;border-radius:18px;padding:18px 20px;box-shadow:0 1px 2px rgba(15,23,42,.04)}
 .kr-card svg,.kr-bare svg{width:18px;height:18px;flex:none}
@@ -72,6 +76,11 @@ function injectStyles() {
 .kr-act:disabled{cursor:default;opacity:.6}
 .kr-act.is-wait:disabled{opacity:1}
 .kr-msg{padding:12px;border-radius:12px;background:#fef2f2;color:#991b1b;font-size:13px}
+.kr-restock{grid-column:1/-1;display:flex;align-items:center;justify-content:center;gap:8px;min-height:48px;border:0;border-radius:14px;
+  background:linear-gradient(135deg,#14b8a6,#0f766e);color:#fff;font:inherit;font-size:14px;font-weight:700;cursor:pointer;box-shadow:0 6px 16px rgba(15,118,110,.25)}
+.kr-restock:hover:not(:disabled){filter:brightness(1.06)}
+.kr-restock:disabled{opacity:.6;cursor:default}
+.kr-info small.kr-wait{color:#1d4ed8}
 .kr-bare .kr-prod{padding:14px}
 .kr-bare .kr-acts{grid-template-columns:1fr}
 .kr-bare .kr-act{min-height:48px}
@@ -85,7 +94,7 @@ export function mountKitRestock(el, { staff, bare = false, onChange = null } = {
   if (!isInjector()) { el.hidden = true; return; }
   injectStyles();
   el.classList.add(bare ? "kr-bare" : "kr-card");
-  let products = [];
+  let products = [], kits = [], rels = [], lots = [], open = [];
   let lastLoad = 0;
   let loading = false;
 
@@ -101,21 +110,8 @@ export function mountKitRestock(el, { staff, bare = false, onChange = null } = {
     const tone = total <= 0 ? "empty" : total < p.dosePer ? "low" : "ok";
     const pct = Math.max(total > 0 ? 4 : 0, Math.min(100, Math.round((total / Math.max(1, p.dosePer)) * 100)));
     const pending = rels.find((r) => r.productId === p.id && r.requestedByUid === me && r.status === "pending");
-    const shelf = p.stock.shelf, jt = p.stock.jt;
     const unit = p.stockUnit;
     const exp = opened ? expiryState(opened.expiry) : "";
-
-    const shelfBtn = action("take", p.id, IC.shelf, "From the Shelf",
-      shelf > 0 ? `${plural(shelf, unit)} available` : "None on the Shelf",
-      { primary: shelf > 0, off: shelf <= 0 });
-    const jtBtn = pending
-      ? action("jt", p.id, IC.jt, "Waiting for approval", `Asked for ${plural(pending.qty, unit)}`, { wait: true, off: true })
-      : shelf > 0
-        ? action("jt", p.id, IC.jt, "From JT storage", `Shelf has ${shelf}: take from there first`, { off: true })
-        : jt > 0
-          ? action("jt", p.id, IC.jt, "From JT storage", `${jt} in JT · needs approval`, { primary: true })
-          : action("jt", p.id, IC.jt, "From JT storage", "None in JT storage", { off: true });
-    const colBtn = action("borrow", p.id, IC.people, "From a colleague", "Units from their opened vial");
 
     return `<div class="kr-prod">
       <div class="kr-ring is-${tone}" style="--p:${pct}" aria-label="${esc(`${fmt(total)} ${p.doseUnit} in your kit`)}">
@@ -128,8 +124,9 @@ export function mountKitRestock(el, { staff, bare = false, onChange = null } = {
           : "No opened vial"}${sealed ? ` · <b>${esc(plural(sealed, unit))}</b> unopened` : ""}</small>
         ${opened && opened.expiry ? `<small class="${exp ? `kr-exp${exp === "expired" ? " is-bad" : ""}` : ""}">Expires ${esc(niceDate(opened.expiry))}${
           exp === "expired" ? " · expired" : exp === "soon" ? " · soon" : ""}</small>` : ""}
+        ${pending ? `<small class="kr-wait">Asked JT storage for ${esc(plural(pending.qty, unit))} · waiting for approval</small>` : ""}
       </div>
-      <div class="kr-acts">${shelfBtn}${jtBtn}${colBtn}</div>
+      <button type="button" class="kr-restock" data-kr="restock" data-pid="${esc(p.id)}">${IC.kit}<span>Restock</span></button>
     </div>`;
   }
 
@@ -138,10 +135,11 @@ export function mountKitRestock(el, { staff, bare = false, onChange = null } = {
     loading = true;
     lastLoad = Date.now();
     if (!el.innerHTML) el.innerHTML = '<div class="skeleton" style="height:150px;border-radius:14px"></div>';
-    let kits, rels;
     try {
-      [products, kits, rels] = await Promise.all([
+      [products, kits, rels, lots, open] = await Promise.all([
         listProducts(), listKits({ mine: true }), listReleases(50).catch(() => []),
+        isAdmin() ? listAllLots().catch(() => []) : [],
+        isAdmin() ? listOpenContainers().catch(() => []) : [],
       ]);
     } catch (err) {
       console.error("My kit not loaded:", err);
@@ -165,6 +163,52 @@ export function mountKitRestock(el, { staff, bare = false, onChange = null } = {
       ${list.map((p) => productHtml(p, kits, rels, me)).join("")}`;
   }
 
+  // Where Restock can take it from: the same rules as Restock on a treatment record (consumables-field.js),
+  // without "Use my kit" (there's no treatment here). Admins open a vial in JT storage; everyone else asks for a release.
+  function restockOptions(p) {
+    const seeStock = can("inventory.manage");
+    const admin = isAdmin();
+    const shelfN = Number(p.stock.shelf) || 0;
+    const jtN = Number(p.stock.jt) || 0;
+    const opts = [{ k: "shelf", icon: "shelf", title: "From the Shelf", off: shelfN <= 0,
+      sub: shelfN > 0 ? `Into your kit${seeStock ? ` · ${plural(shelfN, p.stockUnit)} left` : ""}` : "None left on the Shelf" }];
+    if (admin) {
+      opts.push({ k: "vial", icon: "lock", admin: true, title: `Open a new ${p.stockUnit} from JT storage`, off: jtN <= 0,
+        sub: jtN > 0 ? `Choose the batch${seeStock ? ` · ${plural(jtN, p.stockUnit)} left` : ""}` : "None left in JT storage" });
+    }
+    opts.push({ k: "take", icon: "users", title: "Take from a colleague",
+      sub: `Into your kit, from their opened ${p.stockUnit}. They're asked to confirm.` });
+    if (!admin && shelfN <= 0 && jtN > 0) {
+      const pend = rels.find((r) => r.productId === p.id && r.requestedByUid === myUid() && r.status === "pending");
+      opts.push({ k: "release", icon: "send", title: "Ask for a JT storage release", off: !!pend,
+        sub: pend ? `Asked for ${plural(pend.qty, pend.unit || p.stockUnit)} · waiting for approval`
+          : "Sends a request to the approvers. Once it's approved, it goes on the Shelf." });
+    }
+    if (seeStock && shelfN <= 0 && jtN <= 0) {
+      opts.push({ k: "order", icon: "send", title: "Ask the ordering team for more", sub: "None left on the Shelf or in JT storage" });
+    }
+    return opts;
+  }
+
+  // Admins: open a new vial in JT storage (its units are used from there, not from a kit)
+  async function openJtVial(p) {
+    const jtLots = lots.filter((x) => x.productId === p.id && x.loc === "jt" && x.qty > 0).sort(fefo);
+    if (!jtLots.length) { showToast("None left in JT storage."); return false; }
+    const left = open.filter((c) => c.productId === p.id && c.kind === "vial" && c.from === "jt")
+      .reduce((a, c) => a + Math.max(0, (c.size || p.dosePer) - c.used), 0);
+    const lot = await chooseVialDialog(p, jtLots, { where: "JT storage", openLeft: Math.round(left * 10) / 10 });
+    if (!lot) return false;
+    try {
+      await openContainer(p, lot, staff);
+      showToast(`New ${p.stockUnit} opened in JT storage (${batchText(p, lot.batch) || "no batch number"}): ${fmt(p.dosePer)} ${p.doseUnit} ready.`);
+      return true;
+    } catch (err) {
+      console.error("Open vial failed:", err);
+      showToast(err && err.message && !err.code ? err.message : "Couldn't open it. Try again.");
+      return false;
+    }
+  }
+
   el.addEventListener("click", async (e) => {
     const b = e.target.closest("[data-kr]");
     if (!b || b.disabled) return;
@@ -173,9 +217,13 @@ export function mountKitRestock(el, { staff, bare = false, onChange = null } = {
     if (!p) return;
     b.disabled = true;
     try {
-      const done = b.dataset.kr === "take" ? await takeFromShelfDialog(p, staff)
-        : b.dataset.kr === "jt" ? await jtReleaseDialog(p, staff)
-        : await borrowDialog(p, staff);
+      const k = await restockDialog(p, restockOptions(p));
+      if (k === "order") { location.hash = `#/tasks/order/${encodeURIComponent(p.id)}`; return; }
+      const done = k === "shelf" ? await takeFromShelfDialog(p, staff)
+        : k === "take" ? await borrowDialog(p, staff)
+        : k === "release" ? await jtReleaseDialog(p, staff)
+        : k === "vial" ? await openJtVial(p)
+        : false;
       if (done && el.isConnected) { if (onChange) onChange(); else await load(); }
     } finally {
       if (b.isConnected) b.disabled = false;

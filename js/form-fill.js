@@ -1934,8 +1934,9 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
     printerBtn.disabled = true;
     printerBtn.querySelector("span").textContent = "Sending…";
     try {
-      addEntry(await sendToPrinter({ sub, ver, letterhead }));
-      showToast("Sent to the printer");
+      const entry = await sendToPrinter({ sub, ver, letterhead });
+      addEntry(entry);
+      showToast(entry && entry.note ? entry.note : "Sent to the printer");
     } catch (err) {
       console.error("Send to printer failed:", err);
       showToast(deliveryError(err));

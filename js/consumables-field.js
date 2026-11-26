@@ -69,7 +69,7 @@ function loadStock(force = false, kitUid = "") {
 
 // Restock: choose which batch the new vial comes from. Oldest expiry is chosen to start with; expired ones can't be.
 // lots: that place's batches with stock, oldest expiry first. Resolves the chosen lot, or null.
-function chooseVialDialog(p, lots, { where, openLeft = 0 }) {
+export function chooseVialDialog(p, lots, { where, openLeft = 0 }) {
   return new Promise((resolve) => {
     let out = null;
     const total = lots.reduce((a, x) => a + x.qty, 0);
@@ -135,7 +135,7 @@ function chooseVialDialog(p, lots, { where, openLeft = 0 }) {
 }
 
 // Restock: where to take a kit product from. opts: [{ k, icon, title, sub, off, admin }]. Resolves the chosen k, or null.
-function restockDialog(p, opts) {
+export function restockDialog(p, opts) {
   return new Promise((resolve) => {
     let out = null;
     const dlg = document.createElement("dialog");
@@ -946,7 +946,7 @@ export function mountConsumablesField(w, f, { staff, kitFor = null, onChange = (
     if (adminStore) opts.push({ ...vialOpt(p, l, "jt"), icon: "lock", admin: true });
     if (canKit) {
       opts.push({ k: "take", icon: "users", title: "Take from a colleague",
-        sub: `${p.doseUnit} from their opened ${p.stockUnit}. They're asked to confirm.` });
+        sub: `Into your kit, from their opened ${p.stockUnit}. They're asked to confirm.` });
     }
     // Not an Admin and the Shelf is empty: ask the approvers to release some from JT storage
     if (canKit && !adminStore && shelfN <= 0 && jtN > 0) {

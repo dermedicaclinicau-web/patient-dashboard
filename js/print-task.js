@@ -9,6 +9,7 @@ import { niceDate } from "./form-document.js";
 import { searchPatients } from "./task-runner.js";
 import { getPatient, patientIds } from "./patients.js";
 import { showToast } from "./utils.js";
+import { refreshPrinterStatus } from "./printer-status.js";
 
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -86,6 +87,7 @@ export async function mountPrintTask(container, { templateId, patientId = "" } =
           <div class="ff-bar-actions">
             <button type="button" class="ff-btn" data-act="open" disabled>${I.open}<span>Open PDF</span></button>
             <button type="button" class="ff-btn is-primary" data-act="print" disabled>${I.print}<span>Print</span></button>
+            <span data-printer-status></span> 
           </div>
         </div>
         <p class="ff-msg" data-role="msg" aria-live="polite"></p>
@@ -151,9 +153,7 @@ export async function mountPrintTask(container, { templateId, patientId = "" } =
       <section class="tb-card">
         <h4><span class="tb-num">3</span>Copies</h4>
         <div class="fe-num"><input class="fe-input" type="number" min="1" max="${MAX_COPIES}" data-role="copies" value="${st.copies}" aria-label="Copies" /><span>${st.copies === 1 ? "copy" : "copies"}</span></div>
-        <small class="muted">${printer
-          ? `Each copy is sent to the clinic printer (${esc(printer)}).`
-          : "No printer email address is set yet. An admin can add it in Form Builder, under Form settings. You can still open the PDF and print it yourself."}</small>
+        <small class="muted">Each copy is sent to the front desk printer. You can also open the PDF and print it yourself.</small>
       </section>`;
   }
 
@@ -285,10 +285,6 @@ export async function mountPrintTask(container, { templateId, patientId = "" } =
   // Printing runs in the background (see print-queue.js), so staff can carry on straight away
   function sendPrint() {
     if (!st.job) return;
-    if (!printer) {
-      msgEl.textContent = "No printer email address is set. An admin can add it in Form Builder, under Form settings. Use Open PDF to print it yourself.";
-      return;
-    }
     const saved = st.mode === "saved" ? (st.saved || []).find((x) => x.id === st.chosen) : null;
     const forPatient = st.mode !== "blank" && st.patient;
     queuePrint({
@@ -307,6 +303,7 @@ export async function mountPrintTask(container, { templateId, patientId = "" } =
     // A short pause so a double tap doesn't print it twice
     printBtn.disabled = true;
     printBtn.querySelector("span").textContent = "Sent to the print queue ✓";
+    setTimeout(() => refreshPrinterStatus(true), 4000);   // the pill shows if the printer is offline
     setTimeout(() => { if (root.isConnected) renderButtons(); }, 1500);
   }
 
