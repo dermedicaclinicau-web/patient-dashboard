@@ -1264,15 +1264,25 @@ match /inv_count_drafts/{id} {
     match /patient_list/{patientId} {
       allow read: if isStaff();
 
-      // Medicare: empty, or 10 digits starting 2–6. Reference number: empty, or 1–9. Expiry: empty, or YYYY-MM.
+      // Medicare: a card number, or one saved with "Save anyway" (digits, capital letters, spaces, / . -).
+      // Reference number: 1–9. Expiry: YYYY-MM. Each can also be empty.
+      function okMcNo(v) { return v is string && v.size() <= 24 && v.matches('^[0-9A-Z /.-]*$'); }
+      function okMcIrn(v) { return v is string && v.matches('^[1-9]?$'); }
+      function okMcExp(v) { return v is string && v.matches('^([0-9]{4}-(0[1-9]|1[0-2]))?$'); }
       function okMedicare(d) {
-        return d.get('Medicare Number', '') is string
-          && d.get('Medicare Number', '').matches('^([2-6][0-9]{9})?$')
-          && d.get('Medicare IRN', '') is string
-          && d.get('Medicare IRN', '').matches('^[1-9]?$')
-          && d.get('Medicare Expiry', '') is string
-          && d.get('Medicare Expiry', '').matches('^([0-9]{4}-(0[1-9]|1[0-2]))?$');
+        return okMcNo(d.get('Medicare Number', ''))
+          && okMcIrn(d.get('Medicare IRN', ''))
+          && okMcExp(d.get('Medicare Expiry', ''));
       }
+      // Edits: only the Medicare fields being changed are checked, so older records in other formats can still be edited
+      function okMedicareEdit() {
+        let changed = request.resource.data.diff(resource.data).affectedKeys();
+        let d = request.resource.data;
+        return (!changed.hasAny(['Medicare Number']) || okMcNo(d.get('Medicare Number', '')))
+          && (!changed.hasAny(['Medicare IRN']) || okMcIrn(d.get('Medicare IRN', '')))
+          && (!changed.hasAny(['Medicare Expiry']) || okMcExp(d.get('Medicare Expiry', '')));
+      }
+
       // New patients from the dashboard: ID is system-generated, document ID = PttID
       allow create: if can('patients.edit')
         && request.resource.data.keys().hasOnly([
@@ -1301,7 +1311,7 @@ match /inv_count_drafts/{id} {
         && request.resource.data['First Name'].size() > 0
         && request.resource.data['Last Name'] is string
         && request.resource.data['Last Name'].size() > 0
-        && okMedicare(request.resource.data);
+        && okMedicareEdit();
 
       // Merging duplicates: the kept record gains MergedIds; the others get MergedInto
       allow update: if can('patients.merge')
@@ -1311,7 +1321,7 @@ match /inv_count_drafts/{id} {
              'Medicare Number', 'Medicare IRN', 'Medicare Expiry',
              'MergedIds', 'MergedNames', 'MergedInto', 'MergedAt', 'MergedBy', 'MergedByUid',
              'UpdatedAt', 'UpdatedBy', 'UpdatedByUid'])
-        && okMedicare(request.resource.data);
+        && okMedicareEdit();
     }
     
     // Patient List index (built nightly by Apps Script)

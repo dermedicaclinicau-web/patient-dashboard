@@ -290,7 +290,7 @@ function cleanMedicare(input, { askFirst = false } = {}) {
       if (askFirst) throw Object.assign(new Error(msg), { code: "MEDICARE_CHECK" });
       throw new Error(`${msg} Check it, or leave it empty for now and add it on the patient's page.`);
     }
-    no = raw.toUpperCase().replace(/\s+/g, " ").slice(0, 20);   // saved as typed
+    no = raw.toUpperCase().replace(/[^0-9A-Z /.-]/g, "").replace(/\s+/g, " ").trim().slice(0, 20);   // saved as typed
   }
   if (irn && !/^[1-9]$/.test(irn)) throw new Error("The Medicare reference number is one digit, 1 to 9, beside the patient's name on the card.");
   if (exp === null) throw new Error("Check the Medicare expiry. Type it as it is on the card, for example 03/2028.");

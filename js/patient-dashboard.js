@@ -499,6 +499,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   form = dialog.querySelector("form");
   formError = dialog.querySelector(".form-error");
   saveBtn = dialog.querySelector("[type='submit']");
+  autoExpiry(form.elements.medicareExp);
   planView = createPlanOverview(root.querySelector('[data-role="mpbar"]'), {
     patient, staff,
     pre: () => preData,
@@ -1468,6 +1469,23 @@ function todayHtml(list, errorMsg = "") {
       </div>
     </div>`;
 }
+
+// Medicare expiry: "03" → "03/", "4" → "04/", so staff only type the numbers. Backspace isn't fought.
+function autoExpiry(input) {
+  input.addEventListener("input", (e) => {
+    const deleting = String(e.inputType || "").startsWith("delete");
+    const raw = input.value.trim();
+    const sep = /^(\d{1,2})\s*[/.\- ]\s*(\d{0,4})/.exec(raw);   // typed or pasted with its own separator
+    let d = sep ? sep[1].padStart(2, "0") + sep[2] : raw.replace(/\D/g, "");
+    d = d.slice(0, 6);
+    if (d.length === 1 && Number(d) > 1 && !deleting) d = `0${d}`;   // 2–9 can only be 02–09
+    const mm = Number(d.slice(0, 2));
+    if (d.length >= 2 && (mm < 1 || mm > 12)) d = d.slice(0, 1);    // no month 13, or 00
+    const v = d.length > 2 ? `${d.slice(0, 2)}/${d.slice(2)}`
+      : d.length === 2 && !deleting ? `${d}/` : d;
+    if (v !== input.value) input.value = v;
+  });
+}
 function dialogHtml() {
   return `
     <dialog class="dialog wide-dialog patient-dialog">
@@ -1483,7 +1501,7 @@ function dialogHtml() {
           <label class="field"><span>Medicare number</span><input name="medicareNo" maxlength="24" placeholder="2123 45670 1" autocomplete="off" />
             <small class="muted">10 digits on the card. If you add the reference number on the end, it goes in its own box.</small></label>
           <label class="field"><span>Medicare reference no.</span><input name="medicareIrn" inputmode="numeric" maxlength="1" placeholder="1–9" autocomplete="off" /></label>
-          <label class="field"><span>Medicare expiry</span><input name="medicareExp" maxlength="7" placeholder="MM/YYYY" autocomplete="off" /></label>
+          <label class="field"><span>Medicare expiry</span><input name="medicareExp" inputmode="numeric" maxlength="7" placeholder="MM/YYYY" autocomplete="off" /></label>
           <label class="field full"><span>Patient ID (can't be changed)</span><input name="pttId" disabled /></label>
         </div>
         <p class="form-error" role="alert"></p>
