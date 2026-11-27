@@ -4,7 +4,7 @@ import { db, auth, storage } from "./firebase-config.js";
 import {
   collection, doc, getDoc, getDocs, setDoc, updateDoc, query, where, limit, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { ref as sref, uploadBytes, getBlob } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+import { ref as sref, uploadBytes, getBlob, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 import { callApi } from "./appointments.js";
 
 const IMAGES = "image_bank";
@@ -263,6 +263,27 @@ export function thumbFor(item) {
 }
 /* ---------- Full-size pictures (by new ID or an older Google Drive ID) ---------- */
 
+// Waits until the login has been restored (a form opened in a new tab can start before Firebase has signed back in)
+async function authReady() {
+  try { if (auth.authStateReady) await auth.authStateReady(); } catch { /* carry on */ }
+}
+
+// A picture from Storage as a data URL. If the usual way fails (a login being refreshed, a busy moment),
+// its download link is tried instead, which doesn't depend on the login token.
+async function storageDataUrl(path) {
+  await authReady();
+  try {
+    return await blobToDataUrl(await getBlob(sref(storage, path)));
+  } catch (err) {
+    if (/object-not-found/.test(String(err && err.code))) throw err;   // really gone: no point trying again
+    console.warn(`Image Bank: ${path} didn't load (${(err && err.code) || err}). Trying its download link.`);
+    const url = await getDownloadURL(sref(storage, path));
+    const res = await fetch(url);
+    if (!res.ok) throw Object.assign(new Error(`Download failed (${res.status})`), { code: `http-${res.status}` });
+    return blobToDataUrl(await res.blob());
+  }
+}
+
 async function findMeta(id) {
   if (all) {
     const hit = all.images.get(id) || [...all.images.values()].find((m) => m.driveId === id);
@@ -278,12 +299,13 @@ const imageCache = new Map(); // id -> Promise<data URL>
 export function bankImage(id) {
   if (!imageCache.has(id)) {
     const job = (async () => {
+      await authReady();
       const meta = await findMeta(id);   // a failed lookup is retried, not sent to Google Drive
       if (meta && meta.fullPath) {
         const key = `full:${meta.id}`; // pictures never change, so they can be kept
         const saved = await idbGet(key);
         if (saved) return saved;
-        const url = await blobToDataUrl(await getBlob(sref(storage, meta.fullPath)));
+        const url = await storageDataUrl(meta.fullPath);
         idbPut(key, url);
         return url;
       }
@@ -300,23 +322,35 @@ export function bankImage(id) {
 // A picture that really has been deleted, rather than one that didn't load this time
 export const bankGone = (e) => /not.?found|missing|no such|deleted|404/i.test(String((e && (e.code || e.message)) || e || ""));
 
-// The picture, tried a few times: a weak connection or a busy moment shouldn't stop staff using it
-export async function bankImageTry(id, tries = 3) {
+// The picture, tried five times over about 15 seconds: a weak connection, a busy moment or a login being
+// refreshed shouldn't stop staff using it. Offline: it waits (up to 20 seconds) for the connection to come back.
+const waitOnline = () => (navigator.onLine ? Promise.resolve() : new Promise((r) => {
+  const t = setTimeout(r, 20000);
+  window.addEventListener("online", () => { clearTimeout(t); r(); }, { once: true });
+}));
+export async function bankImageTry(id, tries = 5) {
+  const waits = [1000, 2000, 4000, 8000];
   let last;
   for (let i = 0; i < tries; i++) {
+    await waitOnline();
     try { return await bankImage(id); } catch (e) {
       last = e;
       if (bankGone(e)) break;
-      await new Promise((r) => setTimeout(r, 800 * (i + 1)));
+      if (i < tries - 1) await new Promise((r) => setTimeout(r, waits[Math.min(i, waits.length - 1)]));
     }
   }
   throw last;
 }
 
+// A short reason for a picture that didn't load, shown small so a screenshot says what went wrong
+export const bankErrCode = (e) => String((e && (e.code || e.message)) || "").replace(/\s+/g, " ").trim().slice(0, 60);
+
 // What to show when it still won't load. retry: a Try again button (data-bank-retry)
 export function bankFailHtml(err, retry = false) {
   if (bankGone(err)) return '<span class="fe-img-missing">This picture is missing from the Image Bank. Ask an Admin to choose it again in Form Builder.</span>';
+  const why = bankErrCode(err);
   return `<span class="fe-img-missing" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">The picture didn't load.${
+    why ? ` <small class="muted">(${escAttr(why)})</small>` : ""}${
     retry ? ' <button type="button" class="lh-btn" data-bank-retry>Try again</button>' : " Reload the page to try again."}</span>`;
 }
 

@@ -3,7 +3,7 @@
 // then tap the picture. Number sets add up; label sets (e.g. SD, PO) are counted.
 // Erase removes one mark, dot or line. Undo steps back through every change (including Erase and Clear).
 // The markings are kept separately from the picture, so the Image Bank picture never changes.
-import { bankImageTry as loadBankImage, bankGone as isGone } from "./image-bank-api.js";
+import { bankImageTry as loadBankImage, bankGone as isGone, bankErrCode } from "./image-bank-api.js";
 import { traceShape, valueSvg, valueText, SHAPE_TEXT, textSize, shapeBottom, belowSize, belowColour } from "./marking-sets.js";
 
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -924,7 +924,7 @@ export function attachAnnotators(root, fields, { markSets = [], initial = null, 
           return;
         }
         box.innerHTML = `<span class="fe-img-missing" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-          The picture didn't load. The rest of the form still works.
+          The picture didn't load. The rest of the form still works.${bankErrCode(err) ? ` <small class="muted">(${esc(bankErrCode(err))})</small>` : ""}
           <button type="button" class="lh-btn" data-annot-retry>Try again</button></span>`;
         box.querySelector("[data-annot-retry]").addEventListener("click", start, { once: true });
         // Lost connection: load it again as soon as it's back
