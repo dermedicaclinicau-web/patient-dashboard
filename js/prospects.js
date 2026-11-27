@@ -104,6 +104,7 @@ const errText = (err, fb = "Couldn't save. Try again.") =>
 async function api(op, data = {}) {
   const r = await callApi({ action: "prospects", op, ...data });
   if (r && r.problem) throw new Error(r.problem);
+  if (r && r.prospect) r.prospect = tidyP(r.prospect);
   return r;
 }
 // Current prospects; the older enquiries (over 90 days, never worked) only when asked for
@@ -111,7 +112,7 @@ async function loadAll(withOld = false) {
   const qs = [getDocs(query(collection(db, "prospects"), where("historic", "==", false), limit(3000)))];
   if (withOld) qs.push(getDocs(query(collection(db, "prospects"), where("historic", "==", true), limit(5000))));
   const snaps = await Promise.all(qs);
-  return snaps.flatMap((s) => s.docs.map((d) => ({ id: d.id, ...d.data() })));
+  return snaps.flatMap((s) => s.docs.map((d) => tidyP({ id: d.id, ...d.data() })));
 }
 // Remembered for 5 minutes (Settings → Save reads it again)
 let setCache = null, setAt = 0;
@@ -236,7 +237,35 @@ const isPast = (p) => p.wasPatient === true || !!p.prev;
 const adText = (a) => (a ? ["Came from a Google ad", a.keyword ? `searched “${a.keyword}”` : "",
   a.landing ? `landed on ${a.landing}` : "", a.clicked ? `clicked ${fullDay(a.clicked)}` : ""].filter(Boolean).join(" · ") : "");
 const onRecall = (p) => !!(p.recall && p.recall.id);
+// The website's tracking (via=…; vland=…) and the form's name (*General Appt Request Form*) sometimes end up in
+// "Interested in". They're left out when prospects are read, so the board, reports and templates only see the interest.
+const TRACK_RE = /\b(?:via|vland|vseen|fvia|fland|fseen|vform|gclid|kw)=/i;
+const dirtyConcern = (s) => !!s && (TRACK_RE.test(s) || /\*[^*]+\*/.test(s));
+function cleanConcern(s) {
+  let c = String(s || "");
+  const m = TRACK_RE.exec(c);
+  if (m) c = c.slice(0, m.index);
+  return c.replace(/\*[^*]*\*/g, "").replace(/\s*,\s*,/g, ",").replace(/[\s,;:]+$/, "").replace(/^[\s,;:]+/, "").trim();
+}
+function tidyP(p) {
+  if (!p) return p;
+  const enq = Array.isArray(p.enquiries) && p.enquiries.some((q) => q && dirtyConcern(q.concern));
+  if (!dirtyConcern(p.concern) && !enq) return p;
+  return { ...p, concern: dirtyConcern(p.concern) ? cleanConcern(p.concern) : p.concern,
+    enquiries: enq ? p.enquiries.map((q) => (q && dirtyConcern(q.concern) ? { ...q, concern: cleanConcern(q.concern) } : q)) : p.enquiries };
+}
 
+// No next step: open, nothing booked, no follow-up, and nothing has happened for a week. This is where enquiries go cold.
+// "Not contacted" and "Cancelled, not rebooked" are flagged on their own. Treated is left to Recall.
+const STUCK_DAYS = 7;
+const lastActive = (p) => {
+  const log = p.log || [];
+  return Math.max(0, ...[p.lastContactAt, p.stageAt, p.lastEnquiryAt, p.createdAt, log.length ? log[log.length - 1].at : ""]
+    .map((x) => Date.parse(x || "") || 0));
+};
+const idleDays = (p) => Math.floor((Date.now() - lastActive(p)) / 864e5);
+const noNextStep = (p, set) => OPEN.includes(p.stage) && p.stage !== "treated" && !p.nextFollowUp
+  && !(p.nextAppt && p.nextAppt >= todayKey()) && !notContacted(p, set) && !cancelOpen(p) && idleDays(p) >= STUCK_DAYS;
 // How they found the website (the website's Visit tracking field → Code.gs prosViaParse_)
 const VIA_NAME = { g: "Google search", google: "Google search", s: "Other search", search: "Other search", bing: "Other search",
   a: "Google Ads", ad: "Google Ads", ads: "Google Ads", i: "AI assistant", ai: "AI assistant", chatgpt: "AI assistant",
@@ -281,6 +310,23 @@ const showVia = (p, v) => !!v && !(isAdVia(v) && p.ads);
     .pr-src-other{margin-top:6px}.pr-src-other[hidden]{display:none}`;
   document.head.appendChild(s);
 })();
+(function boardCss() {
+  if (typeof document === "undefined" || document.getElementById("pr-board2-css")) return;
+  const s = document.createElement("style");
+  s.id = "pr-board2-css";
+  s.textContent = `.pr-tiles{grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}
+    .pr-card .pr-tags{display:flex;flex-direction:row;flex-wrap:wrap;gap:4px;align-items:flex-start}
+    .pr-card .pr-tag{display:inline-flex;width:auto;flex:0 0 auto;max-width:100%;font-size:11.5px;line-height:1.4;padding:1px 7px;margin:0}
+    .pr-card .pr-tag.is-src{background:#f1f5f9;color:#475569}
+    .pr-card-concern{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .pr-card.is-cancel{border-left:3px solid #ef4444}
+    .pr-card.is-stuck{border-left:3px solid #f59e0b}
+    .pr-banner.is-warn{background:#fffbeb;border-color:#fde68a;color:#92400e}
+    .pr-plan{margin:6px 0 8px;padding-left:18px}.pr-plan li{margin:0 0 6px}
+    .pr-plan-q{display:block;color:#0f766e;font-weight:600}`;
+  document.head.appendChild(s);
+})();
+
 const monthYear = (k) => { if (!/^\d{4}-\d{2}/.test(k || "")) return ""; const [y, m] = k.split("-").map(Number);
   return new Date(y, m - 1, 1).toLocaleDateString("en-AU", { month: "short", year: "numeric" }); };
 const prevText = (pv) => (pv ? `${pv.count} visit${pv.count === 1 ? "" : "s"} before they enquired, last on ${fullDay(pv.last)}${
@@ -288,13 +334,15 @@ const prevText = (pv) => (pv ? `${pv.count} visit${pv.count === 1 ? "" : "s"} be
 // The "Show" chips on the board, and the "Who" filter on the reports
 const SHOW = [
   ["", "All", () => true],
-  ["action", "Needs action", (p, set) => notContacted(p, set) || cancelOpen(p) || ["today", "overdue"].includes(followState(p))],
+  ["action", "Needs action", (p, set) => notContacted(p, set) || cancelOpen(p) || ["today", "overdue"].includes(followState(p)) || noNextStep(p, set)],
   ["new", "New to the clinic", (p) => !isPast(p)],
   ["past", "Past patients", isPast],
   ["recall", "Also on recall", onRecall],
   ["cancel", "Cancelled, not rebooked", (p) => cancelOpen(p)],
   ["nocontact", "Not contacted", (p, set) => notContacted(p, set)],
   ["follow", "Follow-ups due", (p) => ["today", "overdue"].includes(followState(p))],
+  ["stuck", "No next step", (p, set) => noNextStep(p, set)],
+  ["consulted_no_tx", "Consulted, no treatment", (p) => p.stage === "consulted" && !(p.nextAppt && p.nextAppt >= todayKey())],
   ["booked", "Booked directly", (p) => p.fromBook === true],
   ["ads", "From Google Ads", (p) => !!p.ads],
   ["seo", "From Google search", (p) => isGoogleVia(viaOfP(p))],
@@ -320,6 +368,7 @@ const IC = {
   gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
   trophy: '<path d="M8 21h8"/><path d="M12 17v4"/><path d="M7 4h10v5a5 5 0 0 1-10 0z"/><path d="M17 5h3v2a3 3 0 0 1-3 3"/><path d="M7 5H4v2a3 3 0 0 0 3 3"/>',
   chart: '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
+  pause: '<circle cx="12" cy="12" r="10"/><line x1="10" y1="15" x2="10" y2="9"/><line x1="14" y1="15" x2="14" y2="9"/>',
   refresh: '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
 };
 const KIND_IC = { enquiry: "inbox", contact: "phone", text: "text", email: "mail", note: "note", stage: "flag",
@@ -492,7 +541,7 @@ export function mountMyFollowUps(el, { bare = false, onCount = null, alive = nul
       <a href="#/prospects/followups">All follow-ups →</a></div>`) + followListHtml(list, { work });
   };
   const stop = onSnapshot(query(collection(db, "prospects"), where("assignedToId", "==", uid), where("historic", "==", false)),
-    (snap) => { list = snap.docs.map((d) => ({ id: d.id, ...d.data() })); loaded = true; draw(); },
+    (snap) => { list = snap.docs.map((d) => tidyP({ id: d.id, ...d.data() })); loaded = true; draw(); },
     (err) => { console.warn("My follow-ups:", err); el.innerHTML = '<p class="tb-none">Couldn\'t load your follow-ups.</p>'; });
   el.addEventListener("click", (e) => {
     const b = e.target.closest("[data-fu]");
@@ -562,6 +611,7 @@ async function mountBoard(container, { view, staff }) {
     { ic: "flag", n: all.filter(cancelOpen).length, l: "Cancelled, not rebooked", tone: "bad", show: "cancel" },
     { ic: "inbox", n: all.filter((p) => !isJunk(p, set) && Date.now() - Date.parse(p.createdAt || "") < 7 * 864e5).length, l: "New enquiries this week", tone: "sky", range: "7" },
     { ic: "clock", n: all.filter((p) => ["today", "overdue"].includes(followState(p))).length, l: "Follow-ups due", tone: "amber", show: "follow" },
+    { ic: "pause", n: all.filter((p) => noNextStep(p, set)).length, l: "No next step for a week", tone: "amber", show: "stuck" },
     // The date of their first treatment (from the appointment book), or when staff moved them there by hand
     { ic: "trophy", n: all.filter((p) => {
       const d = (p.milestones || {}).treated || (["treated", "active"].includes(p.stage) ? keyOf(p.stageAt) : "");
@@ -621,7 +671,8 @@ async function mountBoard(container, { view, staff }) {
     return `${p.name} ${p.email} ${p.concern} ${p.patientName || ""}`.toLowerCase().includes(st.q) ||
       (digits.length >= 3 && String(p.phoneKey || "").includes(digits));
   };
-  const urgency = (p) => (notContacted(p, set) ? 0 : cancelOpen(p) ? 1 : followState(p) === "overdue" ? 2 : followState(p) === "today" ? 3 : 4);
+  const urgency = (p) => (notContacted(p, set) ? 0 : cancelOpen(p) ? 1 : followState(p) === "overdue" ? 2
+    : followState(p) === "today" ? 3 : noNextStep(p, set) ? 4 : 5);
   const byUrgency = (a, b) => urgency(a) - urgency(b) ||
     `${a.nextFollowUp || "9"} ${a.nextFollowUpTime || "99"}`.localeCompare(`${b.nextFollowUp || "9"} ${b.nextFollowUpTime || "99"}`) ||
     String(b.lastEnquiryAt || "").localeCompare(String(a.lastEnquiryAt || ""));
@@ -633,28 +684,38 @@ async function mountBoard(container, { view, staff }) {
     ${p.ads ? `<span class="pr-tag is-ad" title="${esc(adText(p.ads))}">Google Ads</span>` : ""}
     ${(() => { const v = viaOfP(p); return showVia(p, v) ? `<span class="pr-tag is-via" title="${esc(viaText(v))}">${esc(v.name)}</span>` : ""; })()}`;
 
+  // A card: what needs doing first, then the booking, then where they came from. Tags sit side by side where they fit.
   const card = (p) => {
     const fs = followState(p);
     const late = notContacted(p, set);
-    return `<a class="pr-card${late ? " is-late" : ""}" href="#/prospects/${enc(p.id)}" data-id="${esc(p.id)}" draggable="${work}">
+    const stuck = noNextStep(p, set);
+    const v = viaOfP(p);
+    const from = [p.source || "Other", showVia(p, v) && normR(v.name) !== normR(p.source) ? v.name : ""].filter(Boolean).join(" · ");
+    const tags = [
+      late && '<span class="pr-tag is-bad">Not contacted</span>',
+      cancelOpen(p) && `<span class="pr-tag is-bad">${cancelWord(p)}, not rebooked</span>`,
+      fs === "overdue" && `<span class="pr-tag is-bad">Follow-up overdue${p.nextFollowUp === todayKey() && p.nextFollowUpTime
+        ? ` · ${esc(hmText(p.nextFollowUpTime))}` : ""}</span>`,
+      fs === "today" && `<span class="pr-tag is-warn">Follow up ${p.nextFollowUpTime ? esc(hmText(p.nextFollowUpTime)) : "today"}</span>`,
+      stuck && `<span class="pr-tag is-warn">No next step · ${idleDays(p)} days</span>`,
+      p.patientId && p.linkWeak && '<span class="pr-tag is-warn">Check match</span>',
+      p.nextAppt && OPEN.includes(p.stage) && p.nextAppt >= todayKey() && `<span class="pr-tag is-pt">Booked ${esc(niceDay(p.nextAppt))}</span>`,
+      fs === "later" && `<span class="pr-tag">${esc(fuText(p))}</span>`,
+      p.stage === "lost" && p.lostReason && `<span class="pr-tag">${esc(p.lostReason)}${isJunk(p, set) ? " · not counted" : ""}</span>`,
+      `<span class="pr-tag is-src"${showVia(p, v) ? ` title="${esc(viaText(v))}"` : ""}>${esc(from)}</span>`,
+      p.patientId && isPast(p) && `<span class="pr-tag is-old" title="${esc(prevText(p.prev) || "Had a visit before they enquired")}">Past patient${
+        p.prev && p.prev.last ? ` · last ${esc(monthYear(p.prev.last))}` : ""}</span>`,
+      p.patientId && !isPast(p) && ["new", "contacted"].includes(p.stage || "new") && '<span class="pr-tag is-pt">Patient</span>',
+      onRecall(p) && `<span class="pr-tag is-recall" title="${esc(`${p.recall.category}, due ${fullDay(p.recall.due)}`)}">On recall</span>`,
+      p.ads && `<span class="pr-tag is-ad" title="${esc(adText(p.ads))}">Google Ads</span>`,
+    ].filter(Boolean).join("");
+    const contacts = p.contacts ? `${p.contacts} contact${p.contacts === 1 ? "" : "s"}` : p.fromBook ? "Booked themselves" : "Not contacted";
+    return `<a class="pr-card${late ? " is-late" : ""}${cancelOpen(p) ? " is-cancel" : stuck ? " is-stuck" : ""}" href="#/prospects/${enc(p.id)}" data-id="${esc(p.id)}" draggable="${work}">
       <span class="pr-card-top"><strong>${esc(p.name || "No name")}</strong>${p.assignedToName
         ? `<i class="pr-av" title="${esc(p.assignedToName)}">${esc(initials(p.assignedToName))}</i>` : ""}</span>
-      ${p.concern ? `<small class="pr-card-concern">${esc(p.concern)}</small>` : ""}
-      <span class="pr-tags">
-        <span class="pr-tag">${esc(p.source || "Other")}</span>
-        ${typeTags(p)}
-        ${p.patientId && p.linkWeak ? '<span class="pr-tag is-warn">Check match</span>' : ""}
-        ${p.nextAppt && OPEN.includes(p.stage) ? `<span class="pr-tag is-pt">Booked ${esc(niceDay(p.nextAppt))}</span>` : ""}
-        ${late ? '<span class="pr-tag is-bad">Not contacted</span>' : ""}
-        ${cancelOpen(p) ? `<span class="pr-tag is-bad">${cancelWord(p)}, not rebooked</span>` : ""}
-        ${fs === "overdue" ? `<span class="pr-tag is-bad">Follow-up overdue${p.nextFollowUp === todayKey() && p.nextFollowUpTime
-            ? ` · ${esc(hmText(p.nextFollowUpTime))}` : ""}</span>`
-          : fs === "today" ? `<span class="pr-tag is-warn">Follow up ${p.nextFollowUpTime ? esc(hmText(p.nextFollowUpTime)) : "today"}</span>`
-          : fs === "later" ? `<span class="pr-tag">${esc(fuText(p))}</span>` : ""}
-        ${p.stage === "lost" && p.lostReason ? `<span class="pr-tag">${esc(p.lostReason)}${isJunk(p, set) ? " · not counted" : ""}</span>` : ""}
-      </span>
-      <span class="pr-card-foot"><small>${esc(ago(p.lastEnquiryAt || p.createdAt))}</small>${p.contacts
-        ? `<small>${p.contacts} contact${p.contacts === 1 ? "" : "s"}</small>` : "<small>Not contacted</small>"}</span>
+      ${p.concern ? `<small class="pr-card-concern" title="${esc(p.concern)}">${esc(p.concern)}</small>` : ""}
+      <span class="pr-tags">${tags}</span>
+      <span class="pr-card-foot"><small>${esc(ago(p.lastEnquiryAt || p.createdAt))} · ${contacts}</small></span>
     </a>`;
   };
 
@@ -799,7 +860,12 @@ async function mountBoard(container, { view, staff }) {
     box.querySelector('[data-role="from"]').value = st.from;
     box.querySelector('[data-role="to"]').value = st.to;
   };
-
+  function clearFilters() {
+    Object.assign(st, { q: "", qRaw: "", source: "", who: "all", show: "", range: "", from: "", to: "" });
+    ["q", "source", "range", "from", "to"].forEach((r) => setVal(r, ""));
+    setVal("who", "all");
+    syncDates();
+  }
   const replace = (p) => { const i = all.findIndex((x) => x.id === p.id); if (i >= 0) all[i] = p; else all.unshift(p); drawBody(); };
   async function move(id, to) {
     const p = all.find((x) => x.id === id);
@@ -857,6 +923,16 @@ async function mountBoard(container, { view, staff }) {
     }
     const mb = e.target.closest("[data-more]");
     if (mb) { st.more[mb.dataset.more] = (st.more[mb.dataset.more] || COL_MAX) + COL_MAX * 2; drawBody(); return; }
+    // A tile counts the whole board, so it clears the filters and shows exactly the ones it counted
+    const tile = e.target.closest(".pr-tile[data-show], .pr-tile[data-range]");
+    if (tile) {
+      const on = tile.dataset.show ? st.show === tile.dataset.show : st.range === tile.dataset.range;
+      clearFilters();
+      if (!on && tile.dataset.show) st.show = tile.dataset.show;
+      if (!on && tile.dataset.range) { st.range = tile.dataset.range; setVal("range", st.range); }
+      drawBody();
+      return;
+    }
     const sh = e.target.closest("[data-show]");
     if (sh) { st.show = st.show === sh.dataset.show ? "" : sh.dataset.show; drawBody(); return; }
     const rg = e.target.closest("[data-range]");
@@ -867,14 +943,7 @@ async function mountBoard(container, { view, staff }) {
     }
     const a = e.target.closest("[data-act]");
     if (!a) return;
-    if (a.dataset.act === "clear") {
-      Object.assign(st, { q: "", qRaw: "", source: "", who: "all", show: "", range: "", from: "", to: "" });
-      ["q", "source", "range", "from", "to"].forEach((r) => { const el = root.querySelector(`[data-role="${r}"]`); if (el) el.value = ""; });
-      root.querySelector('[data-role="who"]').value = "all";
-      syncDates();
-      drawBody();
-      return;
-    }
+    if (a.dataset.act === "clear") { clearFilters(); drawBody(); return; }
     if (a.dataset.act === "lost") { st.showLost = !st.showLost; drawBody(); }
     if (a.dataset.act === "refresh") { refreshNow(a); return; }
     if (a.dataset.act === "old") setOld(!st.old);
@@ -1098,13 +1167,19 @@ function settingsDialog(set, onSaved, onImported) {
 
       ${sec("mail", "teal", "Automatic emails", "Turn each one on or off for everyone.",
         toggle("emailDaily", set.emailDaily !== false, "Daily “Prospects to follow up today” email",
-          "After 8 am, each person gets their follow-ups due today or overdue, and anyone not contacted yet. Prospects given to nobody go to the people ticked under “Email these people”, or the Admins.")
+          "After 8 am, each person gets their follow-ups due today or overdue, anyone not contacted yet, and anyone with no next step for a week. Prospects given to nobody go to the people ticked under “Email these people”, or the Admins.")
         + toggle("emailNew", set.emailNew !== false, "Email when a new enquiry arrives",
           "To the person it's given to and the people ticked above. Replies to campaign texts are still emailed.")
         + toggle("emailFollowTime", set.emailFollowTime !== false, "Email at the follow-up time",
           "For follow-ups with a time. The reminder in the corner of the portal still shows either way.")
         + toggle("cancelFollow", set.cancelFollow !== false, "Add a follow-up when someone cancels",
-          "When a prospect cancels or doesn't come and hasn't rebooked, a follow-up is set for that day to call them. Turn off if these are filling up the daily email."))}
+          "When a prospect cancels or doesn't come and hasn't rebooked, a follow-up is set for that day to call them. Turn off if these are filling up the daily email.")
+        + `<div class="prs-block prs-inline">
+            <div><span class="prs-label">Follow up after a consultation with no treatment booked</span>
+              <p class="prs-help">A follow-up is added this many days after their consultation, noting what they were quoted. 0 turns it off.</p></div>
+            <div class="prs-hours"><input name="consultDays" type="number" min="0" max="30" inputmode="numeric" class="fe-input"
+              value="${esc(set.consultFollowDays ?? 3)}" aria-label="Days" /><span>days</span></div>
+          </div>`)}
 
       ${sec("text", "teal", "SMS and email templates", "Ready-made messages for each situation, like booked then cancelled, or consulted but no treatment.",
         `<div class="prs-block prs-inline">
@@ -1263,6 +1338,7 @@ function settingsDialog(set, onSaved, onImported) {
         emailNew: f.elements.emailNew.checked,
         emailFollowTime: f.elements.emailFollowTime.checked,
         cancelFollow: f.elements.cancelFollow.checked,
+        consultFollowDays: Math.max(0, Math.min(30, Math.round(Number(f.elements.consultDays.value) || 0))),
         notify: pick("notify"), team: pick("team"),
         respondHours: Math.min(168, Math.max(1, Math.round(Number(f.elements.hours.value) || 24))),
         tawkSkipPatients: f.elements.tawkSkip.checked,
@@ -1520,7 +1596,7 @@ async function mountProspect(container, id, staff) {
     } else {
       const [snap, s] = await Promise.all([getDoc(doc(db, "prospects", id)), loadSettings()]);
       set = s;
-      if (snap.exists()) p = { id: snap.id, ...snap.data() };
+      if (snap.exists()) p = tidyP({ id: snap.id, ...snap.data() });
     }
   } catch (err) { console.error("Prospect failed:", err); }
   if (!root.isConnected) return;
@@ -1561,7 +1637,7 @@ async function mountProspect(container, id, staff) {
         pending--;
         if (!pending && failed) {
           failed = false;
-          try { const s = await getDoc(doc(db, "prospects", pid)); if (s.exists()) p = { id: s.id, ...s.data() }; } catch { /* keep what's shown */ }
+          try { const s = await getDoc(doc(db, "prospects", pid)); if (s.exists()) p = tidyP({ id: s.id, ...s.data() }); } catch { /* keep what's shown */ }
         }
         if (root.isConnected && p.id === pid) draw();
       });
@@ -1635,6 +1711,8 @@ async function mountProspect(container, id, staff) {
       ${late ? `<div class="pr-banner is-bad">${I(IC.alert)}<div><strong>Not contacted yet</strong><small>They enquired ${esc(ago(p.waitingSince))}.</small></div></div>` : ""}
       ${cancelOpen(p) ? `<div class="pr-banner is-bad">${I(IC.alert)}<div><strong>${cancelWord(p)} on ${esc(fullDay(p.lastCancel.date))}, not rebooked yet</strong>${
         p.lastCancel.svcs && p.lastCancel.svcs.length ? `<small>${esc(p.lastCancel.svcs.join(", "))}</small>` : ""}</div></div>` : ""}
+      ${noNextStep(p, set) ? `<div class="pr-banner is-warn">${I(IC.pause)}<div><strong>No next step</strong><small>Nothing booked, no follow-up,
+        and nothing logged for ${idleDays(p)} days. Set a follow-up below, or mark them as lost.</small></div></div>` : ""}
       ${stepper()}
       ${work ? `<div class="pr-actions">
         ${tel ? `<a class="lh-btn" href="${esc(tel)}" data-act="call">${I(IC.phone)} Call</a>` : ""}
@@ -1688,6 +1766,11 @@ async function mountProspect(container, id, staff) {
               p.recall.more ? ` ${p.recall.more} more recall${p.recall.more === 1 ? "" : "s"} due.` : ""}
               The recall team can see they enquired. Agree who's calling them, so they only hear from one of you.</p>
             ${can("recall.work") || can("recall.manage") ? '<a class="lh-btn" href="#/recall">Open Recall</a>' : ""}</section>` : ""}
+          ${p.plan && Array.isArray(p.plan.items) && p.plan.items.length ? `<section class="pr-sec"><h3>${I(IC.note)} Their treatment plan</h3>
+            ${p.plan.at ? `<small class="muted">Made ${esc(fullDay(keyOf(p.plan.at)))}${p.plan.by ? ` by ${esc(p.plan.by)}` : ""}</small>` : ""}
+            <ul class="pr-plan">${p.plan.items.map((x) => `<li><strong>${esc(x.treatment)}</strong>${
+              x.concern ? ` <small class="muted">· ${esc(x.concern)}</small>` : ""}${x.quote ? `<span class="pr-plan-q">${esc(x.quote)}</span>` : ""}</li>`).join("")}</ul>
+            ${p.patientId ? `<a href="#/patient/${enc(p.patientId)}">Open the full plan →</a>` : ""}</section>` : ""}
           ${p.patientId ? `<section class="pr-sec"><h3>${I(IC.flag)} Journey</h3>
             ${JOURNEY.some(([k]) => (p.milestones || {})[k]) || p.nextAppt || p.lastVisit || p.cancels ? `<dl class="pr-journey">
               ${JOURNEY.filter(([k]) => (p.milestones || {})[k]).map(([k, l]) =>
@@ -1899,7 +1982,7 @@ async function mountProspect(container, id, staff) {
 
   render();
   if (fresh) fresh.then((s) => {
-    if (s.exists() && !pending && root.isConnected && p.id === id) { p = { id: s.id, ...s.data() }; draw(); }
+    if (s.exists() && !pending && root.isConnected && p.id === id) { p = tidyP({ id: s.id, ...s.data() }); draw(); }
   }).catch(() => {});
 }
 /* ===================== Reports (#/prospects/reports) ===================== */

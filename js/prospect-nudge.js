@@ -24,7 +24,9 @@ function perthNow() {
 const hmText = (hm) => { const m = /^(\d{2}):(\d{2})$/.exec(hm || ""); if (!m) return ""; const h = +m[1]; return `${h % 12 || 12}:${m[2]} ${h < 12 ? "am" : "pm"}`; };
 const minsPast = (hm, now) => { const a = hm.split(":").map(Number), b = now.split(":").map(Number); return (b[0] * 60 + b[1]) - (a[0] * 60 + a[1]); };
 const keyOf = (p) => `${p.id}|${p.nextFollowUp}|${p.nextFollowUpTime}`;
-
+// The website's tracking text (via=…) sometimes ends up in "Interested in": left out here
+const concernOf = (s) => String(s || "").split(/\b(?:via|vland|vseen|fvia|fland|fseen|vform|gclid|kw)=/i)[0]
+  .replace(/\*[^*]*\*/g, "").replace(/\s*,\s*,/g, ",").replace(/[\s,;:]+$/, "").replace(/^[\s,;:]+/, "").trim();
 function readState() { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch { return {}; } }
 function writeState(k, v) {
   const s = readState();
@@ -85,7 +87,7 @@ function draw(due, nowHm = perthNow().hm) {
       <button type="button" class="pn-main" data-act="open" title="Open ${esc(p.name || "the prospect")}">
         <span class="pn-ic">${CLOCK}</span>
         <span class="pn-txt"><strong>Follow up: ${esc(p.name || "a prospect")}</strong>
-          <small>${esc([when, p.concern].filter(Boolean).join(" · "))}</small>
+          <small>${esc([when, concernOf(p.concern)].filter(Boolean).join(" · "))}</small>
           ${p.followNote ? `<small class="pn-note">“${esc(p.followNote)}”</small>` : ""}</span>
       </button>
       <div class="pn-acts"><button type="button" data-act="snooze">Snooze 10 min</button></div>
