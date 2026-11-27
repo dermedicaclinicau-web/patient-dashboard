@@ -963,7 +963,8 @@ export function createField(type, id) {
     case "consent_status": f.consentFormId = ""; f.months = 12; f.block = false; break;
     case "prescription_status": f.consentFormId = ""; f.months = 6; f.block = false; break;
     case "aftercare": f.mode = "fixed"; f.items = []; f.preselect = true; f.emailTemplate = ""; f.confirm = "each"; break;
-    case "consumables": f.items = []; f.allowExtra = true; f.ifShort = "flag"; break;
+    case "consumables": f.items = []; f.allowExtra = true; f.ifShort = "flag";
+      f.showLeft = false; f.leftWho = "managers"; f.leftTotal = true; f.leftLow = 20; break;
     case "specialist": f.parts = [...SP_KEYS]; f.speciality = ""; f.allowAdd = true; f.allowEdit = true; f.show = "letter"; break;
     case "button": f.url = ""; f.newTab = true; f.look = "primary"; f.size = "medium"; break;
   }
@@ -1173,6 +1174,12 @@ export function cleanField(f) {
         }));
       out.allowExtra = f.allowExtra !== false;
       out.ifShort = pick(f.ifShort, ["flag", "block"], "flag");
+      out.showLeft = f.showLeft === true;
+      if (out.showLeft) {
+        out.leftWho = f.leftWho === "all" ? "all" : "managers";
+        out.leftTotal = f.leftTotal !== false;
+        out.leftLow = int(f.leftLow, 0, 90, 20);
+      }
       break;
     case "button":
       out.url = clip(String(f.url || "").trim(), 1000); // checked when it's used, so half-typed links aren't lost
@@ -1527,7 +1534,8 @@ export function renderField(f, ctx = {}) {
               || ((ctx.fields || []).find((x) => x.id === it.from) || {}).fileName || "the form")}`
               : it.amount ? ` · ${esc(it.amount)} ${esc(it.unit)} by default` : ""}${it.max ? ` · up to ${esc(it.max)}` : ""}</small></div>`).join("")}</div>`
         : `<div class="fe-img-empty">${svg(ICONS.consumables)}<span>Choose products in the settings panel</span></div>`) +
-        (f.allowExtra !== false ? '<div class="fe-help fe-help-after">Staff can add other products while filling in.</div>' : "");
+        (f.allowExtra !== false ? '<div class="fe-help fe-help-after">Staff can add other products while filling in.</div>' : "") +
+        (f.showLeft ? '<div class="fe-help fe-help-after">Shows what\'s left in each batch after use.</div>' : "");
     }
     case "specialist": {
       if (live) return head + '<div class="sp-host" data-sp-host><p class="fe-help">Loading specialists…</p></div>';
@@ -2005,6 +2013,19 @@ function typeSettings(f, ctx = {}) {
           ["flag", "Save, and flag it for the ordering team"], ["block", "Don't allow saving"],
         ], f.ifShort || "flag"), "Flagging is safest for clinical records: the treatment is always recorded.") +
         `<label class="fe-check"><input type="checkbox" data-k="allowExtra"${f.allowExtra !== false ? " checked" : ""} /> Staff can add other products while filling in</label>` +
+        `<label class="fe-check"><input type="checkbox" data-k="showLeft" data-rerender=""${f.showLeft ? " checked" : ""} /> Show what's left in each batch after this treatment</label>` +
+        (f.showLeft
+          ? setting("Who sees it", choose("leftWho", [
+              ["managers", "Staff who manage inventory (and Admins)"], ["all", "Everyone filling in the form"],
+            ], f.leftWho === "all" ? "all" : "managers", false, true),
+              f.leftWho === "all"
+                ? '<span class="fe-bad">Injectors will see their kit numbers, so their End of Day count is no longer blind.</span>'
+                : "Other staff see the form as it is now, so kit counts stay blind.") +
+            `<label class="fe-check"><input type="checkbox" data-k="leftTotal"${f.leftTotal !== false ? " checked" : ""} /> Also show the product's total after saving</label>` +
+            setting("Amber when a vial has less than", `<div class="fe-num"><input class="fe-input" type="number" min="0" max="90" step="5" data-k="leftLow" data-num="" value="${
+              Number.isFinite(Number(f.leftLow)) ? Number(f.leftLow) : 20}" /><span>% left</span></div>`,
+              "For kit products and opened vials. Other products turn amber at their reorder level. 0 turns amber off.")
+          : "") +
         '<p class="fe-note fe-pad">Stock comes off when the form is saved: kit products (e.g. Xeomin) from the clinician\'s own kit in units, everything else from the Shelf (JT storage for Dr Teh). The batches are saved on the record.</p>';
     }
   }

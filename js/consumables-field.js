@@ -183,6 +183,12 @@ export function mountConsumablesField(w, f, { staff, kitFor = null, onChange = (
   const adminStore = isAdmin();
   // Stock numbers: Manage inventory (and Admins) only. Everyone else counts blind.
   const seeStock = can("inventory.manage");
+  // Form Builder → Consumables → "Show what's left after use". Only for people who may see stock numbers,
+  // unless the form says everyone (then the End of Day kit count is no longer blind).
+  const leftOn = f.showLeft === true && (seeStock || f.leftWho === "all");
+  const leftTotal = f.leftTotal !== false;
+  const lowPct = Number.isFinite(Number(f.leftLow)) ? Math.max(0, Math.min(90, Number(f.leftLow))) : 20;
+  const showNums = seeStock || leftOn;   // stock numbers on the batch cards
   // Form Builder → Consumables → "Can use more than one batch" (on unless it's been turned off)
   const multiOf = (l) => !(l.item && l.item.multi === false);
   const defLoc = isTeh(forOther ? kitFor : staff) ? "jt" : "shelf";
@@ -239,7 +245,7 @@ export function mountConsumablesField(w, f, { staff, kitFor = null, onChange = (
   /* ---------- Opened vials in JT storage / on the Shelf ---------- */
   function vialStock(l, p) {
     const open = (stock.open || []).filter((c) => c.productId === p.id && c.kind === "vial" && c.from === l.loc)
-      .map((c) => ({ id: c.id, batch: c.batch, expiry: c.expiry, left: r2(Math.max(0, (c.size || p.dosePer) - c.used)) }))
+      .map((c) => ({ id: c.id, batch: c.batch, expiry: c.expiry, openedAt: c.openedAt, left: r2(Math.max(0, (c.size || p.dosePer) - c.used)) }))
       .filter((c) => c.left > 0);
     const lots = stock.lots.filter((x) => x.productId === p.id && x.loc === l.loc && x.qty > 0).sort(fefo);
     const units = r2(open.reduce((a, c) => a + c.left, 0) + lots.reduce((a, x) => a + x.qty, 0) * p.dosePer);
@@ -496,7 +502,15 @@ export function mountConsumablesField(w, f, { staff, kitFor = null, onChange = (
         return `<span class="cs-warn">${left > 0 ? `Only ${esc(fmt(left))} ${esc(cu)} left in the opened ${esc(p.stockUnit)}.` : `No ${esc(p.stockUnit)} is open.`}
           Press Restock to open a new one. (If you don't, it's opened when you save.)</span>`;
       }
-      return `<span class="cs-ok">✓ ${fmt(total)} ${esc(cu)} from the opened ${esc(p.stockUnit)}</span>`;
+      // Each opened vial it comes from (two can share a batch number, so they're told apart by when they were opened)
+      const per = new Map();
+      sp.rows.forEach((x) => per.set(x.openId, r2((per.get(x.openId) || 0) + x.units)));
+      if (per.size <= 1) return `<span class="cs-ok">✓ ${fmt(total)} ${esc(cu)} from the opened ${esc(p.stockUnit)}</span>`;
+      const parts = [...per].map(([id, u]) => {
+        const c = sp.stock.open.find((o) => o.id === id) || {};
+        return `${fmt(u)} from ${c.batch || "No number"}${c.openedAt ? ` (opened ${shortDate(c.openedAt)})` : ""}`;
+      });
+      return `<span class="cs-ok">✓ ${fmt(total)} ${esc(cu)} from ${per.size} opened ${esc(unitPlural(p.stockUnit))}: ${esc(parts.join(" · "))}</span>`;
     }
     if (dosed(p)) {
       const syr = l.rows.reduce((a, r) => a + num(r.amount), 0);
@@ -531,6 +545,123 @@ export function mountConsumablesField(w, f, { staff, kitFor = null, onChange = (
         value="${esc(r.amount)}" placeholder="0" aria-label="Amount used" /><span>${esc(kit ? p.doseUnit : unitPlural(p.stockUnit))}</span></div>
       ${del}</div>`;
   }
+  /* ---------- What's left once this form is saved (Form Builder → "Show what's left after use") ---------- */
+  const leftUnit = (p, n) => (isKit(p) || vial(p) ? p.doseUnit : Math.abs(n) === 1 ? p.stockUnit : unitPlural(p.stockUnit));
+  // Kit products and Shelf products: each batch, in the line's own units (kit: units; Shelf: items or syringes)
+  function leftPlan(l, src = sources(l)) {
+    const used = new Map();
+    l.rows.forEach((r) => { const a = num(r.amount); if (a > 0 && r.ref) used.set(r.ref, r2((used.get(r.ref) || 0) + a)); });
+    return new Map(src.map((s) => {
+      const u = used.get(s.ref) || 0;
+      return [s.ref, { before: r2(s.avail), used: u, after: r2(s.avail - u) }];
+    }));
+  }
+  // Opened vials in JT storage / on the Shelf, and each new vial this form would open
+  function vialLeft(l, p) {
+    const sp = vialSplit(l, p);
+    const usedBy = new Map();
+    sp.rows.filter((x) => !x.isNew).forEach((x) => usedBy.set(x.openId, r2((usedBy.get(x.openId) || 0) + x.units)));
+    const open = sp.stock.open.map((c) => {
+      const u = usedBy.get(c.id) || 0;
+      return { ...c, before: c.left, used: u, after: r2(c.left - u) };
+    });
+    const fresh = sp.rows.filter((x) => x.isNew).map((x) => ({
+      batch: x.batch, expiry: x.expiry, before: p.dosePer, used: x.units, after: r2(p.dosePer - x.units), isNew: true,
+    }));
+    return { open, fresh, sp };
+  }
+  // ok · low (under the Form Builder's % of a full vial) · zero · short
+  function leftTone(p, x) {
+    if (x.after < -0.001) return "short";
+    if (x.after < 0.001) return "zero";
+    const full = isKit(p) || vial(p) ? num(p.dosePer) : 0;
+    return full && lowPct && x.after < (full * lowPct) / 100 ? "low" : "ok";
+  }
+  function leftPillHtml(p, x) {
+    const t = leftTone(p, x);
+    const text = t === "short" ? `${fmt(-x.after)} ${leftUnit(p, -x.after)} short`
+      : t === "zero" ? (vial(p) ? `Finishes this ${p.stockUnit}` : isKit(p) ? "Batch used up" : "None left after this")
+      : `${fmt(x.after)} ${leftUnit(p, x.after)} left after`;
+    return `<em class="cs-leftpill is-${t}">${esc(text)}</em>`;
+  }
+  // The short version, for the table
+  function leftChipHtml(p, x, tag = "") {
+    const t = leftTone(p, x);
+    const a = Math.max(0, x.after);
+    const text = t === "short" ? `${fmt(-x.after)} short`
+      : t === "zero" ? (vial(p) ? `0 · ${p.stockUnit} finished` : isKit(p) ? "0 · batch used up" : "0 left")
+      : `${fmt(a)} ${leftUnit(p, a)}`;
+    return `<em class="cs-leftpill is-${t}">${esc(text)}${tag ? ` · ${esc(tag)}` : ""}</em>`;
+  }
+  // "36 → 0 units" with a bar: teal is what stays, amber is what this treatment takes
+  function leftCardHtml(p, x, max) {
+    const keep = Math.max(0, x.after);
+    const take = Math.min(x.used, Math.max(0, x.before));
+    const pc = (n) => Math.round((Math.max(0, n) / Math.max(1, max)) * 100);
+    return `<span class="cs-card-left">${esc(fmt(x.before))} → <b class="cs-after is-${leftTone(p, x)}">${esc(fmt(keep))}</b> ${esc(leftUnit(p, keep))}</span>
+      <span class="cs-bar is-split"><i style="width:${pc(keep)}%"></i><i class="is-take" style="width:${pc(take)}%"></i></span>
+      ${leftPillHtml(p, x)}`;
+  }
+  function leftCellHtml(p, r, plan) {
+    const x = r && num(r.amount) > 0 && plan.get(r.ref);
+    return x ? leftChipHtml(p, x) : "—";
+  }
+  function vialLeftCellHtml(l, p, j) {
+    const lv = vialLeft(l, p);
+    const seen = new Set();
+    const out = lv.sp.rows.filter((x) => x.j === j).map((x) => {
+      if (!x.isNew) { if (seen.has(x.openId)) return ""; seen.add(x.openId); }
+      const y = x.isNew ? { before: p.dosePer, used: x.units, after: r2(p.dosePer - x.units) } : lv.open.find((o) => o.id === x.openId);
+      return y ? leftChipHtml(p, y, x.isNew ? `new ${p.stockUnit}` : "") : "";
+    }).filter(Boolean);
+    return out.length ? out.join(" ") : "—";
+  }
+  // "Your kit after saving: 108 units" (Form Builder → also show the product total)
+  function leftSumHtml(l, p) {
+    if (!leftOn || !leftTotal || !p || shared(p)) return "";
+    let before, after, where;
+    if (vial(p)) {
+      const sp = vialSplit(l, p);
+      before = sp.stock.units;
+      after = r2(before - (clinicalTotal(l, p) - sp.short));
+      where = whereOf(l);
+    } else {
+      const plan = [...leftPlan(l).values()];
+      before = r2(plan.reduce((a, x) => a + x.before, 0));
+      const used = l.rows.reduce((a, r) => a + num(r.amount), 0);
+      after = r2(before - Math.min(used, before));
+      where = isKit(p) ? yourKit : whereOf(l);
+    }
+    if (!(before - after > 0)) return "";
+    const reorder = p.reorder ? p.reorder[l.loc] : null;
+    const low = isKit(p) || vial(p) ? !!(lowPct && p.dosePer && after < (p.dosePer * lowPct) / 100)
+      : reorder !== null && reorder !== undefined && after <= reorder;
+    const t = after <= 0 ? "zero" : low ? "low" : "ok";
+    return `<span class="cs-leftsum is-${t}">${esc(where.charAt(0).toUpperCase() + where.slice(1))} after saving: <b>${esc(fmt(after))} ${esc(leftUnit(p, after))}</b>${
+      t === "low" && !isKit(p) && !vial(p) ? " · at or below the reorder level" : t === "zero" ? " · none left" : ""}</span>`;
+  }
+  // While typing: the cards, the Left after column and the total follow
+  function paintLeft(li, l, p) {
+    if (shared(p)) return;
+    const sum = li.querySelector('[data-role="leftsum"]');
+    if (sum) sum.innerHTML = leftSumHtml(l, p);
+    if (vial(p)) {   // the vial cards are redrawn by the input handler already
+      li.querySelectorAll(".cs-row[data-j]").forEach((tr) => {
+        const c = tr.querySelector('[data-role="left"]');
+        if (c) c.innerHTML = vialLeftCellHtml(l, p, Number(tr.dataset.j));
+      });
+      return;
+    }
+    const src = sources(l);
+    const cards = li.querySelector(".cs-cards");
+    if (cards && (isKit(p) || p.tracked)) cards.outerHTML = cardsHtml(l, p, src);
+    const plan = leftPlan(l, src);
+    li.querySelectorAll(".cs-row[data-j]").forEach((tr) => {
+      const c = tr.querySelector('[data-role="left"]');
+      if (c) c.innerHTML = leftCellHtml(p, l.rows[Number(tr.dataset.j)], plan);
+    });
+  }
+
   /* ---------- Opened vials: cards to choose from, and a row per vial used ---------- */
   // One row's batch and expiry, following where its units come from
   function vialCells(l, p, j = 0) {
@@ -552,31 +683,39 @@ export function mountConsumablesField(w, f, { staff, kitFor = null, onChange = (
 
   function vialCardsHtml(l, p) {
     const v = vialStock(l, p);
+    const lv = leftOn ? vialLeft(l, p) : null;
+    // A new vial this form would open
+    const fresh = lv ? lv.fresh.map((x) => `<span class="cs-card cs-card-vial is-new">
+        <span class="cs-card-top"><strong>${esc(x.batch || "No number")}</strong><em>New ${esc(p.stockUnit)}</em></span>
+        <small>Exp ${esc(expMY(x.expiry))} · opened when you save</small>
+        ${leftCardHtml(p, x, p.dosePer)}</span>`).join("") : "";
     if (!v.open.length) {
       return `<div class="cs-cards"><div class="cs-card cs-card-empty"><strong>No vial open</strong>
-        <small>${v.lots.length ? "Press Restock to open one." : `None left in ${esc(whereOf(l))}. Order more.`}</small></div></div>`;
+        <small>${v.lots.length ? "Press Restock to open one." : `None left in ${esc(whereOf(l))}. Order more.`}</small></div>${fresh}</div>`;
     }
     const chosen = new Set(l.rows.map((r) => r.openId).filter(Boolean));
     const using = new Set(vialSplit(l, p).rows.filter((x) => !x.isNew).map((x) => x.openId));
     return `<div class="cs-cards">${v.open.map((c, i) => {
       const on = chosen.has(c.id) || (!chosen.size && using.has(c.id));
       const tag = chosen.has(c.id) ? "Selected" : using.has(c.id) ? "Using" : !chosen.size && !using.size && i === 0 ? "Used first" : "";
+      const x = lv ? lv.open.find((o) => o.id === c.id) : null;
       return `<button type="button" class="cs-card cs-card-vial${on ? " is-on" : ""}" data-cs="vpick" data-open="${esc(c.id)}" aria-pressed="${on}">
         <span class="cs-card-top"><strong>${esc(c.batch || "No number")}</strong>${tag ? `<em>${tag}</em>` : ""}</span>
-        <small>Exp ${esc(expMY(c.expiry))}</small>
-        <span class="cs-vial-left"><b>${esc(fmt(c.left))}</b> ${esc(p.doseUnit)} remaining</span>
-        <span class="cs-bar"><i style="width:${Math.round(Math.min(1, c.left / p.dosePer) * 100)}%"></i></span>
+        <small>Exp ${esc(expMY(c.expiry))}${c.openedAt ? ` · opened ${esc(shortDate(c.openedAt))}` : ""}</small>
+        ${x && x.used > 0 ? leftCardHtml(p, x, p.dosePer)
+          : `<span class="cs-vial-left"><b>${esc(fmt(c.left))}</b> ${esc(p.doseUnit)} remaining</span>
+        <span class="cs-bar"><i style="width:${Math.round(Math.min(1, c.left / p.dosePer) * 100)}%"></i></span>`}
       </button>`;
-    }).join("")}${v.open.length > 1 && multiOf(l) && v.open.length > l.rows.length
+    }).join("")}${fresh}${v.open.length > 1 && multiOf(l) && v.open.length > l.rows.length
       ? '<button type="button" class="cs-card cs-card-add" data-cs="add-row">+ Use another vial</button>' : ""}</div>`;
   }
-
   function vialTableHtml(l, p) {
     const v = vialStock(l, p);
     const pick = v.open.length > 1;
     const rows = l.rows.length ? l.rows : [newRow()];
     const total = rows.reduce((a, r) => a + num(r.amount), 0);
-    return `<table class="cs-table is-vial"><thead><tr><th>${esc(batchName(p))}</th><th>Expiry</th><th>${esc(p.doseUnit)} used</th><th></th></tr></thead>
+    return `<table class="cs-table is-vial"><thead><tr><th>${esc(batchName(p))}</th><th>Expiry</th><th>${esc(p.doseUnit)} used</th>${
+      leftOn ? "<th>Left after</th>" : ""}<th></th></tr></thead>
       <tbody>${rows.map((r, j) => {
         const c = vialCells(l, p, j);
         const batchCell = pick
@@ -591,13 +730,13 @@ export function mountConsumablesField(w, f, { staff, kitFor = null, onChange = (
           <td class="cs-exp" data-role="vexp">${c.exp}</td>
           <td><div class="fe-num"><input class="fe-in" type="number" min="0" step="0.5" inputmode="decimal" data-f="amount"
             value="${esc(r.amount)}" placeholder="0" aria-label="${esc(p.doseUnit)} used" /><span>${esc(p.doseUnit)}</span></div></td>
+          ${leftOn ? `<td class="cs-left" data-role="left">${vialLeftCellHtml(l, p, j)}</td>` : ""}
           <td>${rows.length > 1 ? '<button type="button" class="hx-x" data-cs="remove-row" aria-label="Remove this vial">×</button>' : ""}</td>
         </tr>`;
       }).join("")}</tbody>
-      <tfoot><tr><td colspan="4">Total ${esc(p.doseUnit)} used: <strong data-role="total">${esc(fmt(total))}</strong> ${esc(p.doseUnit)}</td></tr></tfoot>
+      <tfoot><tr><td colspan="${leftOn ? 5 : 4}">Total ${esc(p.doseUnit)} used: <strong data-role="total">${esc(fmt(total))}</strong> ${esc(p.doseUnit)}</td></tr></tfoot>
     </table>`;
   }
-
 
   /* ---------- Batch cards and the table (kit products and products with batch & expiry) ---------- */
   const expMY = (k) => { const m = /^(\d{4})-(\d{2})/.exec(k || ""); return m ? `${m[2]}/${m[1]}` : "—"; };
@@ -608,27 +747,29 @@ export function mountConsumablesField(w, f, { staff, kitFor = null, onChange = (
   function cardsHtml(l, p, src) {
     if (!src.length) return `<p class="cs-none">${isKit(p) ? `Nothing in ${esc(yourKit)}` : `None in ${esc(whereOf(l))}`}</p>`;
     const used = new Set(l.rows.map((r) => r.ref));
+    const plan = leftOn ? leftPlan(l, src) : null;
     const max = Math.max(1, ...src.map((s) => s.avail));
     return `<div class="cs-cards">${src.map((s) => {
       const on = used.has(s.ref);
+      const x = plan && plan.get(s.ref);
       return `<button type="button" class="cs-card${on ? " is-on" : ""}" data-cs="pick" data-ref="${esc(s.ref)}" aria-pressed="${on}">
         <span class="cs-card-top"><strong>${esc(s.batch || "No number")}</strong>${on ? "<em>Selected</em>" : ""}</span>
         <small>Exp ${esc(expMY(s.expiry))}</small>
-        ${seeStock ? `<span class="cs-card-left">${esc(availText(p, s))}</span>
+        ${x && x.used > 0 ? leftCardHtml(p, x, max) : showNums ? `<span class="cs-card-left">${esc(availText(p, s))}</span>
           <span class="cs-bar"><i style="width:${Math.round((s.avail / max) * 100)}%"></i></span>` : ""}
       </button>`;
     }).join("")}${multiOf(l) && src.length > l.rows.length
       ? '<button type="button" class="cs-card cs-card-add" data-cs="add-row">+ Add batch</button>' : ""}</div>`;
   }
-
   function tableHtml(l, p, src) {
     const dz = dosed(p);
     const cu = clinicalUnit(p);
+    const plan = leftOn ? leftPlan(l, src) : null;
     const opt = (r) => (src.length
       ? src.map((x) => `<option value="${esc(x.ref)}"${x.ref === r.ref ? " selected" : ""}>${esc(seeStock ? x.label : x.plain)}</option>`).join("")
       : `<option value="">${isKit(p) ? `Nothing in ${esc(yourKit)}` : "None in stock here"}</option>`);
     return `<table class="cs-table"><thead><tr><th>${esc(batchName(p))}</th><th>Expiry</th><th>${esc(cu)} used</th>${
-      dz ? `<th>${esc(unitPlural(p.stockUnit))} opened</th>` : ""}<th></th></tr></thead><tbody>${l.rows.map((r, j) => {
+      dz ? `<th>${esc(unitPlural(p.stockUnit))} opened</th>` : ""}${leftOn ? "<th>Left after</th>" : ""}<th></th></tr></thead><tbody>${l.rows.map((r, j) => {
       const s = src.find((x) => x.ref === r.ref);
       return `<tr class="cs-row" data-j="${j}">
         <td><select class="fe-in" data-f="ref" aria-label="${esc(batchName(p))}">${opt(r)}</select></td>
@@ -637,13 +778,13 @@ export function mountConsumablesField(w, f, { staff, kitFor = null, onChange = (
           data-f="${dz ? "dose" : "amount"}" value="${esc(dz ? r.dose : r.amount)}" placeholder="0" aria-label="${esc(cu)} used" /><span>${esc(cu)}</span></div></td>
         ${dz ? `<td><div class="fe-num"><input class="fe-in" type="number" min="0" step="1" inputmode="numeric" data-f="amount"
           value="${esc(r.amount)}" placeholder="0" aria-label="${esc(unitPlural(p.stockUnit))} opened" /></div></td>` : ""}
+        ${leftOn ? `<td class="cs-left" data-role="left">${leftCellHtml(p, r, plan)}</td>` : ""}
         <td>${l.rows.length > 1 ? '<button type="button" class="hx-x" data-cs="remove-row" aria-label="Remove this batch">×</button>' : ""}</td>
       </tr>`;
     }).join("")}</tbody>
-      <tfoot><tr><td colspan="${dz ? 5 : 4}">Total ${esc(cu)} used: <strong data-role="total">${esc(fmt(clinicalTotal(l, p)))}</strong> ${esc(cu)}</td></tr></tfoot>
+      <tfoot><tr><td colspan="${(dz ? 5 : 4) + (leftOn ? 1 : 0)}">Total ${esc(cu)} used: <strong data-role="total">${esc(fmt(clinicalTotal(l, p)))}</strong> ${esc(cu)}</td></tr></tfoot>
     </table>`;
   }
-
   function lineHtml(l, i) {
     const p = productOf(l);
     const req = l.item && l.item.required ? ' <span class="fe-req">*</span>' : "";
@@ -684,7 +825,7 @@ export function mountConsumablesField(w, f, { staff, kitFor = null, onChange = (
         </div>
         ${vialCardsHtml(l, p)}
         ${vialTableHtml(l, p)}
-        <div class="cs-foot"><span data-role="msg">${msgHtml(l)}</span></div>
+        <div class="cs-foot"><span data-role="msg">${msgHtml(l)}</span><span data-role="leftsum">${leftSumHtml(l, p)}</span></div>
       </div>`;
     }
     if (kit || p.tracked) {   // batches: cards to choose from, and a table of what was used
@@ -698,7 +839,7 @@ export function mountConsumablesField(w, f, { staff, kitFor = null, onChange = (
         </div>
         ${cardsHtml(l, p, src)}
         ${tableHtml(l, p, src)}
-        <div class="cs-foot"><span data-role="msg">${msgHtml(l)}</span></div>
+        <div class="cs-foot"><span data-role="msg">${msgHtml(l)}</span><span data-role="leftsum">${leftSumHtml(l, p)}</span></div>
       </div>`;
     }
     return `<div class="cs-line${shortOf(l, src) > 0 ? " is-short" : ""}" data-i="${i}">
@@ -711,6 +852,7 @@ export function mountConsumablesField(w, f, { staff, kitFor = null, onChange = (
       ${l.rows.map((r, j) => rowHtml(l, p, src, r, j)).join("")}
       <div class="cs-foot">
         <span data-role="msg">${msgHtml(l)}</span>
+        <span data-role="leftsum">${leftSumHtml(l, p)}</span>
         <span class="cs-acts">
           ${multiOf(l) && src.length > l.rows.length ? '<button type="button" class="cs-link" data-cs="add-row">+ Another batch</button>' : ""}
         </span>
@@ -821,6 +963,7 @@ export function mountConsumablesField(w, f, { staff, kitFor = null, onChange = (
     }
     li.querySelector('[data-role="msg"]').innerHTML = msgHtml(l);
     li.classList.toggle("is-short", shortOf(l) > 0 || !!(p && vial(p) && needsVial(l, p)));
+    if (leftOn && p) paintLeft(li, l, p);
     onChange();
   });
 

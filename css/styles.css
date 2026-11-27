@@ -15199,3 +15199,23 @@ dialog.msx .msx-sel { width: 100%; min-height: 0; height: 36px; padding: 0 .45re
 .ff-wrap .ff-bar.is-stuck .ff-bar-title strong,
 .ff-wrap .ff-bar.is-stuck .ff-bar-title > span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ff-wrap .ff-bar.is-stuck .ff-return { display: none; }          /* the longer notes come back at the top of the page */
+
+/* Consumables: what's left after use */
+.cs-bar.is-split { display: flex; overflow: hidden; }
+.cs-bar.is-split i { flex: none; }
+.cs-bar.is-split i.is-take { background: #f59e0b; }
+.cs-after.is-ok { color: #0f766e; }
+.cs-after.is-low { color: #b45309; }
+.cs-after.is-zero { color: #64748b; }
+.cs-after.is-short { color: #b91c1c; }
+.cs-leftpill { display: inline-block; margin-top: 6px; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-style: normal; white-space: nowrap; }
+.cs-leftpill.is-ok { background: #e6f4f2; color: #115e59; }
+.cs-leftpill.is-low { background: #fef3c7; color: #92400e; }
+.cs-leftpill.is-zero { background: #f1f5f9; color: #475569; }
+.cs-leftpill.is-short { background: #fee2e2; color: #b91c1c; }
+.cs-left .cs-leftpill { margin: 2px 2px 2px 0; }
+.cs-card.is-new { border-style: dashed; cursor: default; }
+.cs-leftsum { margin-left: auto; font-size: 13px; color: #475569; }
+.cs-leftsum b { color: #0f172a; font-weight: 600; }
+.cs-leftsum.is-low b { color: #b45309; }
+.cs-leftsum.is-zero b { color: #64748b; }
