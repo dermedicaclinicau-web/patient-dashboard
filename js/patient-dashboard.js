@@ -64,6 +64,14 @@ const DOC_ACTIONS = [
 ];
 // Shown first on phones; the rest sit behind "Show more" (icon names from DOC_ACTIONS)
 const DOC_TOP = ["consent", "treatment", "rx", "bell"];
+// Short names for the Add row in the patient bar (shown once the page is scrolled)
+const DOC_SHORT = { consent: "Consent", treatment: "Tx record", rx: "Prescription", script: "Script", ssp: "SSP",
+  note: "Note", lock: "Personal note", paste: "Heidi notes", bell: "Reminder", staff: "Staff task" };
+// The actions this person can use: the same list for the tiles and the Add row
+const docActions = () => DOC_ACTIONS.filter(([, , action]) =>
+  (action !== "staff-task" || (can("tasks.run") && can("tasks.staff"))) &&
+  (action !== "paste-notes" || can("consult.record")) &&
+  (action !== "rx-write" || can("rx.write")));
 // Order and look of the Pre-Consultation section.
 // field = pcn_results column | unit = pill wording ("one|many", or "value" to show the value itself)
 // tone = colour style | action = [button label, "coming soon" name]
@@ -438,10 +446,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     <div>
       <p class="eyebrow">Clinical documentation</p>
       ${(() => {
-          const tiles = DOC_ACTIONS.filter(([, , action]) =>
-            (action !== "staff-task" || (can("tasks.run") && can("tasks.staff"))) &&
-            (action !== "paste-notes" || can("consult.record")) &&
-            (action !== "rx-write" || can("rx.write")));
+          const tiles = docActions();
           const extra = tiles.filter(([, icon]) => !DOC_TOP.includes(icon)).length;
           return `<div class="doc-tiles">
             ${tiles.map(([label, icon, action]) =>
@@ -543,7 +548,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   };
   window.addEventListener("scroll", onScroll, { passive: true });
   function renderTop() {
-    bar.innerHTML = barHtml(patient, todayAppts, preData, allergies, mentions, extras);
+    bar.innerHTML = barHtml(patient, todayAppts, preData, allergies, mentions, extras) + quickAddHtml();
   }
 
   function openEdit(focus = "") {
@@ -1164,6 +1169,17 @@ function mentionChipHtml(list) {
         <span class="pb-mn-t"><b>${escapeHtml(m.by)}${m.kind === "help" ? " · Help" : ""}</b><small>${escapeHtml(m.text || "Linked this patient")}</small></span>
         <em>${escapeHtml(day(m.at))}</em></button>`).join("")}
     </div></details>`;
+}
+
+// The Clinical documentation tiles again, as small pills along the bottom of the patient bar.
+// Only shown once the bar is compact (styles.css). Same buttons, so they do exactly what the tiles do.
+function quickAddHtml() {
+  return `<div class="pb-qa" role="toolbar" aria-label="Add to this patient's record">
+    <span class="pb-qa-l">Add</span>
+    <div class="pb-qa-row">${docActions().map(([label, icon, action]) =>
+      `<button type="button" class="doc-tile pb-qa-btn is-${icon}" ${action ? `data-action="${action}"` : `data-soon="${escapeHtml(label)}"`}
+        title="${escapeHtml(label)}">${ICONS[icon]}<span>${escapeHtml(DOC_SHORT[icon] || label)}</span></button>`).join("")}</div>
+  </div>`;
 }
 
 function barHtml(p, today = [], pre = null, allergies = null, mentions = [], extras = null) {
