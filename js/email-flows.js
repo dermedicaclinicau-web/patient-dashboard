@@ -66,6 +66,7 @@ const TYPES = {
   sms: { label: "Send text to patient", short: "Send text", icon: "sms", tone: "is-patient" },
   task: { label: "Send a task's email", short: "Task email", icon: "doc", tone: "is-patient" },
   wait: { label: "Wait", short: "Wait", icon: "clock", tone: "" },
+  until: { label: "Wait until before the appointment", short: "Wait until", icon: "clock", tone: "" },
   reply: { label: "Wait for a reply", short: "Wait for reply", icon: "reply", tone: "is-branch" },
   branch: { label: "If / else", short: "If / else", icon: "branch", tone: "is-branch" },
   staff: { label: "Notify staff", short: "Notify staff", icon: "bell", tone: "is-staff" },
@@ -73,7 +74,7 @@ const TYPES = {
   update: { label: "Update their details", short: "Update details", icon: "user", tone: "is-staff" },
   stop: { label: "End flow", short: "End flow", icon: "stop", tone: "" },
 };
-const ADDABLE = ["email", "sms", "task", "wait", "reply", "branch", "staff", "todo", "update", "stop"];
+const ADDABLE = ["email", "sms", "task", "wait", "until", "reply", "branch", "staff", "todo", "update", "stop"];
 // Texts: how long it is and roughly how many texts it costs. Curly quotes and emoji make each text shorter.
 function smsInfo(raw) {
   const t = /reply\s+stop/i.test(raw) ? raw : `${raw.trim()}\nReply STOP to opt out.`;
@@ -92,9 +93,15 @@ const TRIGGERS = [
   ["task", "A task is sent from Task Manager", false],
   ["form", "A patient fills in a form online", false],
   ["missed", "An appointment is cancelled or missed", false],
+  ["upcoming", "An appointment is coming up", false],
   ["ssp_created", "A Skin Script is created", true],
 ];
-const TRIG_ICON = { purchase: "cart", visit: "cal", daily: "sun", task: "doc", form: "user", missed: "calx" };
+const TRIG_ICON = { purchase: "cart", visit: "cal", daily: "sun", task: "doc", form: "user", missed: "calx", upcoming: "cal" };
+const AHEAD_DAYS = [[7, "7 days away or less"], [14, "2 weeks away or less"], [21, "3 weeks away or less"],
+  [28, "4 weeks away or less"], [42, "6 weeks away or less"], [60, "60 days away or less"], [90, "90 days away or less"]];
+const UNTIL_UNITS = [["days", "days"], ["weeks", "weeks"]];
+const UNTIL_LATE = [["skip", "Skip to the next “Wait until” card"], ["go", "Carry on now"]];
+const APPT_MONTHS = [[3, "The next 3 months"], [6, "The next 6 months"], [12, "The next 12 months"]];
 const MISS_KINDS = [["cancelled", "Cancelled"], ["noshow", "Didn't come (no-show or DNA)"]];
 const MISS_SCOPES = [["any", "Any appointment"], ["some", "Only appointments for these services"],
   ["except", "All appointments except these services"]];
@@ -134,6 +141,7 @@ const PATIENT_TOKENS = [
   { title: "Patient", tokens: ["First name", "Full name"] },
   { title: "This purchase", tokens: ["Product name", "Purchase date", "How to use"] },
   { title: "This visit", tokens: ["Visit date", "Visit services"] },
+  { title: "Their appointments", tokens: ["Upcoming appointments"], smart: true },
   { title: "Their Skin Script", tokens: ["Skin Script table", "SSP date", "SSP expiry date", "SSP step", "AM instructions", "PM instructions", "When to use", "SSP clinician"], smart: true },
   { title: "Clinic", tokens: ["Clinic phone", "Clinic email", "Clinic address"] },
 ];
@@ -212,6 +220,7 @@ function blank(type) {
   const cfg = type === "email" ? { subject: "", body: "", promo: false, mode: "rich", code: "", bare: false, skipDays: 0 }
     : type === "sms" ? { text: "", promo: false }
     : type === "wait" ? { num: 1, unit: "weeks" }
+    : type === "until" ? { num: 7, unit: "days", late: "skip" }
     : type === "branch" ? { cond: "in_ssp", rules: blankGroup(), yes: [], no: [] }
     : type === "staff" ? { to: "ssp_creator", roles: [], staffIds: [], subject: "", message: "" }
     : type === "reply" ? { num: 3, unit: "days", yes: [], no: [] }
@@ -268,6 +277,7 @@ function summary(s) {
   if (s.type === "email") return c.subject.trim() || "No subject yet";
   if (s.type === "sms") return (String(c.text || "").trim() || "No message yet").slice(0, 90);
   if (s.type === "wait") return `${Number(c.num) || 0} ${unitWord(c.num, c.unit)}`;
+  if (s.type === "until") return `${Number(c.num) || 0} ${unitWord(c.num, c.unit)} before the appointment`;
   if (s.type === "branch") return c.cond === "rules" ? describeGroup(c.rules) : label(CONDS, c.cond);
   if (s.type === "staff") {
     const to = c.to === "roles" && c.roles.length ? c.roles.join(", ") : STAFF_SHORT[c.to] || "Staff";
@@ -296,6 +306,10 @@ function stepProblems(s, depth) {
     else if (!/dermedica/i.test(t)) out.push("Say it's from Dermedica");
     if (t.length > 560) out.push("Keep the text under 560 characters");
     if (PLACEHOLDER_RE.test(t)) out.push("Replace the text in [square brackets]");
+  } else if (s.type === "until") {
+    const max = c.unit === "weeks" ? 52 : 365;
+    const n = Number(c.num);
+    if (!Number.isInteger(n) || n < 0 || n > max) out.push(`Choose 0 to ${max} ${c.unit}`);
   } else if (s.type === "wait" || s.type === "reply") {
     const max = (UNITS.find((u) => u[0] === c.unit) || UNITS[0])[2];
     const n = Number(c.num);
@@ -355,8 +369,8 @@ function flowProblems(flow, tasks) {
   if (t.event === "task" && !t.taskIds.length) out.push("Choose which task starts the flow.");
   if (t.event === "form" && !t.formIds.length) out.push("Choose which form starts the flow.");
   if (t.event === "missed" && !t.missKinds.length) out.push("Choose cancelled, didn't come, or both.");
-  if (t.event === "missed" && t.serviceScope === "some" && !t.services.length) out.push("Choose at least one service for the trigger, or pick Any appointment.");
-  if (t.event === "missed" && t.serviceScope === "except" && !t.services.length) out.push("Choose at least one service to leave out, or pick Any appointment.");
+  if ((t.event === "missed" || t.event === "upcoming") && t.serviceScope === "some" && !t.services.length) out.push("Choose at least one service for the trigger, or pick Any appointment.");
+  if ((t.event === "missed" || t.event === "upcoming") && t.serviceScope === "except" && !t.services.length) out.push("Choose at least one service to leave out, or pick Any appointment.");
   const tp = groupProblem(t.rules, t.event === "daily");
   if (tp) out.push(t.event === "daily" ? `Daily check: ${tp}.` : `Start rules: ${tp}.`);
   const sp = groupProblem(flow.stop.rules, false);
@@ -369,6 +383,7 @@ function flowProblems(flow, tasks) {
     const p = stepProblems(s, depth);
     if (s.type === "reply" && t.event !== "task" && !emailBefore(flow.steps, s.id)) p.push("Add an email before this card, so there's something to reply to");
     if (s.type === "update" && t.event !== "form") p.push("Only works when the flow starts from an online form");
+    if (s.type === "until" && t.event !== "upcoming") p.push("Only works when the flow starts from an appointment coming up");
     if (s.type === "task" && s.cfg.taskId && Array.isArray(tasks)) {
       const tt = tasks.find((x) => x.id === s.cfg.taskId);
       if (!tt) p.push("The task isn't published any more");
@@ -391,7 +406,7 @@ function snapshot(d = {}) {
     description: String(d.description || ""),
     trigger: {
       event: "purchase", scope: "any", serviceScope: "any", repeatDays: 0, dailyMax: 25, existing: false, again: "restart",
-      skipRebooked: true, missGap: 30, missBack: 0, missFuture: false, ...t,
+      skipRebooked: true, missGap: 30, missBack: 0, missFuture: false, aheadDays: 21, ...t,
       products: cleanNames(t.products), services: cleanNames(t.services), taskIds: cleanNames(t.taskIds),
       formIds: cleanNames(t.formIds), rules: cleanGroup(t.rules),
       missKinds: Array.isArray(t.missKinds) ? cleanNames(t.missKinds).filter((k) => MISS_KINDS.some((m) => m[0] === k)) : ["cancelled", "noshow"],
@@ -1080,6 +1095,12 @@ async function mountFlowEditor(container, { id, staff }) {
       return `An appointment is ${k}` + (t.serviceScope === "some" ? ` (${n} service${n === 1 ? "" : "s"})`
         : t.serviceScope === "except" ? ` (not ${n} service${n === 1 ? "" : "s"})` : "") + rules;
     }
+    if (t.event === "upcoming") {
+      const n = t.services.length;
+      return "An appointment is coming up" + (t.serviceScope === "some" ? ` (${n} service${n === 1 ? "" : "s"})`
+        : t.serviceScope === "except" ? ` (not ${n} service${n === 1 ? "" : "s"})` : "") +
+        ` · from ${Number(t.aheadDays) || 21} days away` + rules;
+    }
     if (t.event === "daily") return "Daily check" + (r ? rules : " · no rules yet");
     const n = t.products.length;
     const what = t.scope === "catalogue" ? " (Skin Script catalogue)" : t.scope === "list" ? ` (${n} product${n === 1 ? "" : "s"})` : "";
@@ -1144,6 +1165,7 @@ async function mountFlowEditor(container, { id, staff }) {
       : s.type === "sms" ? `Text them “${summary(s).slice(0, 70)}${String(c.text || "").trim().length > 70 ? "…" : ""}”${c.promo ? " (promotional)" : ""}`
       : s.type === "task" ? (c.taskName ? `Send the “${c.taskName}” task email` : "Send a task's email (none chosen yet)")
       : s.type === "wait" ? `Wait ${summary(s)}`
+      : s.type === "until" ? `Wait until ${summary(s)}${c.late === "go" ? "" : " (skipping ahead if that's already passed)"}`
       : s.type === "staff" ? `Email staff: ${summary(s)}`
       : s.type === "todo" ? `Give staff a to-do: “${summary(s)}”`
       : s.type === "update" ? `Update their details: ${summary(s)}`
@@ -1156,6 +1178,7 @@ async function mountFlowEditor(container, { id, staff }) {
     const stops = ["they unsubscribe", "there's no email address for them"];
     if (st.rebuy && t.event === "purchase") stops.push("they buy the same product again (it starts over)");
     if (st.rebuy && t.event === "visit") stops.push("they come in again (it starts over)");
+    if (t.event === "upcoming") stops.push("their appointment is cancelled or moved");
     if (st.booking) stops.push("they book an appointment");
     if (ruleCount(st.rules)) stops.push(`this matches: ${describeGroup(st.rules)}`);
     const gap = Number(st.gapDays) || 0;
@@ -1358,6 +1381,8 @@ async function mountFlowEditor(container, { id, staff }) {
     const reply = hasReply ? [{ title: "Their reply", tokens: ["Reply"], smart: true }] : [];
     if (flow.trigger.event === "missed") return [...base, { title: "This appointment", smart: true,
       tokens: ["Appointment date", "Appointment time", "Appointment services", "Appointment staff", "Cancelled or missed"] }, ...reply];
+    if (flow.trigger.event === "upcoming") return [...base, { title: "This appointment", smart: true,
+      tokens: ["Appointment date", "Appointment time", "Appointment services", "Appointment staff"] }, ...reply];
     if (flow.trigger.event === "form") return [...base, { title: "The form", tokens: ["Form name"], smart: true }, ...reply];
     if (flow.trigger.event !== "task") return [...base, ...reply];
     const raws = [...new Set(taskFieldList().map((f) => f.raw))];
@@ -1439,6 +1464,25 @@ async function mountFlowEditor(container, { id, staff }) {
 
   function triggerHtml() {
     const t = flow.trigger;
+    if (t.event === "upcoming") {
+      return `
+        <label class="tb-field"><span>Which appointments</span>
+          <select class="fb-select" data-f="trigger.serviceScope">${opt(MISS_SCOPES, t.serviceScope)}</select></label>
+        ${t.serviceScope === "some" || t.serviceScope === "except" ? `<div class="tb-field"><span>${t.serviceScope === "except" ? "Services to leave out" : "Services"}</span><div class="fr-pp" data-role="trig-services"></div>
+          <small class="muted">${t.serviceScope === "except"
+            ? "An appointment is left out only if every service on it contains one of these, so leaving out “Review” still includes “WR Forehead + Review”."
+            : "An appointment matches if any of its services contains one of these, so “WR” matches “WR Forehead”."}</small></div>` : ""}
+        <label class="tb-field"><span>Start the flow when the appointment is</span>
+          <select class="fb-select" data-f="trigger.aheadDays">${opt(AHEAD_DAYS, t.aheadDays)}</select></label>
+        <div class="tb-field"><span>Only start for patients who… <small>(optional)</small></span><div data-role="trig-rules"></div></div>
+        <label class="tb-field"><span>If they have more than one appointment coming up</span>
+          <select class="fb-select" data-f="trigger.again">${opt([["first", "Only the soonest one (the next starts after it)"],
+            ["each", "A flow for each appointment"]], t.again === "each" ? "each" : "first")}</select></label>
+        <p class="tb-info">Checked after each appointment sync and each PCN update. Cancelled and DNA appointments don't count, and each
+          appointment starts the flow once. If an appointment is cancelled or moved, the flow stops for it, and a moved one starts again
+          for its new date. Time the emails with <strong>Wait until … before the appointment</strong> cards: when someone books late,
+          the ones whose time has passed are skipped.</p>`;
+    }
     if (t.event === "form") {
       const list = onlineForms === null ? '<p class="tb-none">Loading forms…</p>'
         : !onlineForms.length ? '<p class="tb-none">No forms are set up for patients to fill in online. In Form Builder → Form settings, tick "Patients can fill this in online", then publish the form.</p>'
@@ -1598,6 +1642,7 @@ async function mountFlowEditor(container, { id, staff }) {
         : flow.trigger.event === "visit" ? "Anyone who comes in starts the flow."
         : flow.trigger.event === "task" ? "Everyone the task is sent to starts the flow."
         : flow.trigger.event === "missed" ? "Anyone who cancels or misses a matching appointment starts the flow."
+        : flow.trigger.event === "upcoming" ? "Anyone with a matching appointment coming up starts the flow."
         : flow.trigger.event === "form" ? "Everyone who sends the form starts the flow."
         : "Anyone who makes a matching purchase starts the flow." });
     const sr = side.querySelector('[data-role="stop-rules"]');
@@ -1630,6 +1675,11 @@ async function mountFlowEditor(container, { id, staff }) {
           ${dateInsertHtml()}
           <small class="muted">Tap a blank to add it where your cursor is. Blanks fill in with each patient's details when it's sent.
             Dates like {Today + 30 days} are worked out on the day it goes out.</small>
+          <label class="tb-field"><span>{Upcoming appointments} lists</span>
+            <select class="fb-select" data-k="apptMonths">${opt(APPT_MONTHS, Number(c.apptMonths) || 6)}</select>
+            <small class="muted">Everything they have booked in that time: one line per day, with the services and who it's with.</small></label>
+          ${flow.trigger.serviceScope === "except" ? `<label class="fe-check"><input type="checkbox" data-k="apptSkip"${c.apptSkip ? " checked" : ""} />
+            Leave out appointments that are only for the services this flow leaves out</label>` : ""}
           <label class="fe-check"><input type="checkbox" data-k="promo" data-rerender${c.promo ? " checked" : ""} />
             This is promotional <small class="muted">(an offer, a reorder reminder or a booking invitation)</small></label>
           ${c.promo ? '<p class="tb-info">Promotional emails only go to patients who agreed to marketing emails, and always end with an unsubscribe link.</p>' : ""}
@@ -1640,7 +1690,7 @@ async function mountFlowEditor(container, { id, staff }) {
         <section class="ef-sec"><h4>Preview <small>(with example details)</small></h4><div data-role="prev"></div></section>`;
     }
     if (s.type === "sms") {
-      const toks = tokensFor(false).map((g) => ({ ...g, tokens: g.tokens.filter((t) => t !== "Skin Script table") }))
+      const toks = tokensFor(false).map((g) => ({ ...g, tokens: g.tokens.filter((t) => !["Skin Script table", "Upcoming appointments"].includes(t)) }))
         .filter((g) => g.tokens.length);
       return `
         <section class="ef-sec">
@@ -1668,6 +1718,22 @@ async function mountFlowEditor(container, { id, staff }) {
               <select class="fb-select" data-k="unit">${opt(UNITS, c.unit)}</select>
             </div></div>
           <p class="tb-info">Counted from the card before. Emails are sent between 9 am and 6 pm Perth time, so one that comes due overnight goes out the next morning.</p>
+        </section>`;
+    }
+    if (s.type === "until") {
+      return `
+        <section class="ef-sec">
+          <div class="tb-field"><span>Wait until</span>
+            <div class="fe-num ef-wait">
+              <input class="fe-input" type="number" min="0" max="365" step="1" data-k="num" value="${esc(c.num)}" />
+              <select class="fb-select" data-k="unit">${opt(UNTIL_UNITS, c.unit)}</select>
+            </div><small class="muted">before the appointment (0 days = the day of the appointment)</small></div>
+          <label class="tb-field"><span>If it's already closer than that when the flow gets here</span>
+            <select class="fb-select" data-k="late">${opt(UNTIL_LATE, c.late || "skip")}</select></label>
+          <p class="tb-info">The cards after this one go out from 9 am that day. <strong>Skip</strong> jumps over every card up to the
+            next <strong>Wait until</strong> card, so someone who books 10 days ahead doesn't get the 3-week email.
+            Use <strong>Carry on now</strong> on the last one, so late bookings still get one email.</p>
+          ${flow.trigger.event !== "upcoming" ? '<div class="tb-problems">This only works when the flow starts from an appointment coming up (When this happens → An appointment is coming up).</div>' : ""}
         </section>`;
     }
     if (s.type === "branch") {
@@ -1923,7 +1989,7 @@ async function mountFlowEditor(container, { id, staff }) {
       .finally(redrawSideSoon);
   }
 
-  const NUM_PATHS = ["stop.gapDays", "trigger.repeatDays", "trigger.dailyMax", "trigger.missGap", "trigger.missBack"];
+  const NUM_PATHS = ["stop.gapDays", "trigger.repeatDays", "trigger.dailyMax", "trigger.missGap", "trigger.missBack", "trigger.aheadDays"];
   const RERENDER_PATHS = ["trigger.event", "trigger.scope", "trigger.serviceScope"];
   function setFlowValue(path, el) {
     const v = el.type === "checkbox" ? el.checked : el.value;
@@ -1944,6 +2010,7 @@ async function mountFlowEditor(container, { id, staff }) {
       if (el.dataset.f === "trigger.event") {
         matchData = null; buyData = null;
         if (el.value === "missed") { flow.stop.booking = true; flow.trigger.again = "ignore"; }
+        else if (el.value === "upcoming") { flow.stop.booking = false; flow.trigger.again = "first"; }
         else if (el.value !== "visit" && flow.trigger.serviceScope === "except") flow.trigger.serviceScope = "any";
       }
       renderCanvas();
@@ -2532,6 +2599,7 @@ async function mountFlowEditor(container, { id, staff }) {
   function runWhat(r) {
     if (r.kind === "visit") return [`Visit on ${r.visitDate || r.purchaseDate || ""}`, (r.visitServices || []).join(", ")];
     if (r.kind === "task") return [`“${r.taskName || "Task"}” sent ${String(r.startedAt || "").slice(0, 10)}`, r.reply ? "Replied" : ""];
+    if (r.kind === "upcoming") return [`Appointment on ${r.visitDate || ""}${r.apptTime ? " at " + r.apptTime : ""}`, (r.visitServices || []).join(", ")];
     if (r.kind === "missed") return [`${r.missKind === "noshow" ? "Missed" : "Cancelled"} appointment on ${r.visitDate || ""}`, (r.visitServices || []).join(", ")];
     if (r.kind === "form") return [`“${r.formName || "Form"}” filled in ${String(r.startedAt || "").slice(0, 10)}`];
     if (r.kind === "daily") return [`Daily check · started ${String(r.startedAt || "").slice(0, 10)}`];
@@ -2575,6 +2643,7 @@ async function mountFlowEditor(container, { id, staff }) {
     const ev = flow.trigger.event;
     const waiting = ev === "form" ? "Patients start the flow when they send the form."
       : ev === "missed" ? "Patients start the flow after a Day Sheet upload shows a cancelled or missed appointment."
+      : ev === "upcoming" ? `Patients start the flow when an appointment is ${Number(flow.trigger.aheadDays) || 21} days away or less.`
       : ev === "task" ? "Patients start the flow when the task is sent to them."
       : ev === "visit" ? "Patients start the flow the morning after a matching visit."
       : ev === "daily" ? "Patients start the flow when the morning check finds them."
@@ -2622,6 +2691,11 @@ async function mountFlowEditor(container, { id, staff }) {
           <select name="miss" class="fb-select"><option value="cancelled">cancelled an appointment in 2 days</option>
             <option value="noshow">didn't come yesterday</option></select></label>
         <label class="lh-field"><span class="lh-label">Services at the appointment <small>(optional, separate with commas)</small></span>
+          <input type="text" name="extra" maxlength="300" list="ef-test-list" placeholder="e.g. WR Forehead" /></label>
+        <datalist id="ef-test-list">${serviceNames.map((n) => `<option value="${esc(n)}"></option>`).join("")}</datalist>`
+      : ev === "upcoming" ? `
+        <p class="tb-info">Uses their next booking. If they have nothing booked, a pretend appointment in 3 weeks is used.</p>
+        <label class="lh-field"><span class="lh-label">Services for a pretend appointment <small>(optional, separate with commas)</small></span>
           <input type="text" name="extra" maxlength="300" list="ef-test-list" placeholder="e.g. WR Forehead" /></label>
         <datalist id="ef-test-list">${serviceNames.map((n) => `<option value="${esc(n)}"></option>`).join("")}</datalist>`
       : ev === "form" ? '<p class="tb-info">Uses what they sent the last time they filled in the form online. Their record isn\'t changed in a test.</p>'
@@ -2701,7 +2775,7 @@ async function mountFlowEditor(container, { id, staff }) {
       try {
         await settle();
         const res = await callApi({ action: "emailFlow", op: "test", flowId: id, patientId: chosen.id,
-          product: ev === "purchase" ? extraVal : "", services: ev === "visit" || ev === "missed" ? extraVal : "",
+          product: ev === "purchase" ? extraVal : "", services: ev === "visit" || ev === "missed" || ev === "upcoming" ? extraVal : "",
           miss: ev === "missed" ? form.elements.miss.value : "",
           reply: ev === "task" ? extraVal : (form.elements.replyText ? form.elements.replyText.value.trim() : "") });
         out.innerHTML = `<div class="tb-ready">${res.sent} test email${res.sent === 1 ? "" : "s"} sent to ${esc(res.to)}</div>
@@ -2775,6 +2849,7 @@ async function mountFlowEditor(container, { id, staff }) {
           ? `Within 15 minutes, patients with ${[Number(flow.trigger.missBack) ? `a cancelled or missed appointment in the last ${flow.trigger.missBack} days` : "",
               flow.trigger.missFuture ? "an upcoming appointment that's already cancelled" : ""].filter(Boolean).join(" or ")} start the flow (unless they've rebooked). After that, new ones start after each Day Sheet upload`
           : "Patients who cancel or miss an appointment from now on start the flow after the next Day Sheet upload. Cancellations already in the book are only noted")
+        : ev === "upcoming" ? `Patients with a matching appointment ${Number(flow.trigger.aheadDays) || 21} days away or less start the flow within 15 minutes, and others as their appointments come closer`
         : ev === "task" ? "Patients start the flow as soon as the task is sent to them"
         : ev === "visit" ? "Patients who come in from today start the flow the next morning"
         : ev === "daily" ? (flow.trigger.existing
