@@ -374,7 +374,6 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   }
   img.addEventListener("load", setup);
   img.src = src;
-  if (img.complete && img.naturalWidth) setup();
 
   // A mark from the active set's chosen value, carrying its own look
   function makeMark(at) {
@@ -786,6 +785,8 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     }
   });
   showTotal();
+  // A picture already in memory may not fire "load" again: set it up now, once everything above exists
+  if (img.complete && img.naturalWidth && !W) setup();
 
   return {
     isEmpty: () => !ops.length && !baseImg,
