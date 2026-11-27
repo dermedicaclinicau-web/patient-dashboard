@@ -15188,3 +15188,14 @@ dialog.msx .msx-sel { width: 100%; min-height: 0; height: 36px; padding: 0 .45re
 .patient-bar .pb-qa .doc-tile.pb-qa-btn:focus-visible { background: #f0fdfa; border-color: #5eead4; color: #0f766e; outline: none; }
 .patient-bar .pb-qa .doc-tile.pb-qa-btn[aria-expanded="true"] { background: #0f766e; border-color: #0f766e; color: #fff; }
 .patient-bar .pb-qa .doc-tile.pb-qa-btn[aria-expanded="true"] svg { color: #fff; }
+
+/* Live form: the whole bar stays at the top, a little tighter once stuck */
+.ff-wrap .ff-bar { z-index: 40; }
+.ff-wrap .ff-bar .ff-bar-actions { position: static; }          /* the bar sticks as a whole now, not just the buttons */
+.ff-bar-pt { color: #0f172a; font-weight: 600; }
+.ff-wrap .ff-bar.is-stuck .ff-bar-inner { padding-top: .55rem; padding-bottom: .55rem; row-gap: .45rem; }
+.ff-wrap .ff-bar.is-stuck .ff-bar-title { min-width: 0; }
+.ff-wrap .ff-bar.is-stuck .ff-bar-title strong { font-size: 1rem; }
+.ff-wrap .ff-bar.is-stuck .ff-bar-title strong,
+.ff-wrap .ff-bar.is-stuck .ff-bar-title > span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ff-wrap .ff-bar.is-stuck .ff-return { display: none; }          /* the longer notes come back at the top of the page */

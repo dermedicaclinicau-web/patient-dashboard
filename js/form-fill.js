@@ -118,15 +118,21 @@ const isoOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, 
 const todayIso = () => isoOf(new Date());
 const $all = (el, s) => [...el.querySelectorAll(s)];
 
-// The action bar: a stronger look once it's stuck at the top while scrolling, so staff can always find it
+// The whole action bar stays at the top while scrolling (form name, patient, allergies and the buttons),
+// under the portal's top bar if that stays on screen. Once stuck it gets a stronger, tighter look (styles.css).
 function watchBar(root) {
   const bar = root.querySelector(".ff-bar");
-  if (!bar || !("IntersectionObserver" in window)) return;
+  if (!bar) return;
+  const tb = document.querySelector(".topbar");
+  const tbPos = tb ? getComputedStyle(tb).position : "";
+  const offset = tb && (tbPos === "sticky" || tbPos === "fixed") ? Math.round(tb.getBoundingClientRect().height) : 0;
+  bar.style.position = "sticky";
+  bar.style.top = `${offset}px`;
+  if (!("IntersectionObserver" in window)) return;
   const mark = document.createElement("div");
   mark.className = "ff-bar-mark";
   mark.setAttribute("aria-hidden", "true");
   bar.before(mark);
-  const offset = Math.round(parseFloat(getComputedStyle(bar).top) || 0);   // where it sticks (under the portal's top bar)
   const obs = new IntersectionObserver(([e]) => {
     if (!bar.isConnected) { obs.disconnect(); return; }
     bar.classList.toggle("is-stuck", !e.isIntersecting);
@@ -627,7 +633,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
             : `<a class="ff-back" href="${exitHref}" aria-label="Back" title="Back">${BAR_ICONS.back}</a>`}
           <div class="ff-bar-title">
             <strong>${editing ? "Editing: " : ""}${esc(ver.name)}</strong>
-            <span>${esc(patient.name)} · ${esc(categoryLabel(tpl.category))} · Version ${ver.version}${editing ? ` · saved ${esc(niceDate(sub.recordDate))}` : ""}</span>
+            <span><b class="ff-bar-pt">${esc(patient.name)}</b> · ${esc(categoryLabel(tpl.category))} · Version ${ver.version}${editing ? ` · saved ${esc(niceDate(sub.recordDate))}` : ""}</span>
             ${showAlerts ? '<button type="button" class="ff-allergy" data-role="allergy-chip" hidden></button>' : ""}
           </div>
           <span class="ff-progress" data-role="progress" hidden></span>
