@@ -117,6 +117,22 @@ function askCode({ title, text, confirm, hide = false, check }) {
 const isoOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const todayIso = () => isoOf(new Date());
 const $all = (el, s) => [...el.querySelectorAll(s)];
+
+// The action bar: a stronger look once it's stuck at the top while scrolling, so staff can always find it
+function watchBar(root) {
+  const bar = root.querySelector(".ff-bar");
+  if (!bar || !("IntersectionObserver" in window)) return;
+  const mark = document.createElement("div");
+  mark.className = "ff-bar-mark";
+  mark.setAttribute("aria-hidden", "true");
+  bar.before(mark);
+  const offset = Math.round(parseFloat(getComputedStyle(bar).top) || 0);   // where it sticks (under the portal's top bar)
+  const obs = new IntersectionObserver(([e]) => {
+    if (!bar.isConnected) { obs.disconnect(); return; }
+    bar.classList.toggle("is-stuck", !e.isIntersecting);
+  }, { rootMargin: `-${offset + 1}px 0px 0px 0px` });
+  obs.observe(mark);
+}
 // "Fill in consent now": remembers the treatment form while the consent is filled in
 const RETURN_KEY = "dm.consentReturn";
 function readReturn() {
@@ -660,6 +676,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
 
   const sheet = root.querySelector('[data-role="sheet"]');
   hydrateBankImages(sheet);
+  watchBar(root);
   // Allergies and medical history, loaded in the background (the form never waits for it)
   if (showAlerts) {
     const host = root.querySelector('[data-role="alerts"]');
@@ -1891,6 +1908,7 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
 
   const sheet = root.querySelector('[data-role="sheet"]');
   hydrateBankImages(sheet);
+  watchBar(root);
   const shownIds = visibleIds(fields, sub.answers);
   fields.forEach((f) => {
     const w = sheet.querySelector(`[data-fid="${CSS.escape(f.id)}"]`);
