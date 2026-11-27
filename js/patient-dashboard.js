@@ -1,4 +1,4 @@
-import { getPatient, updatePatient, patientIds, formatMedicare, formatMedicareExpiry, medicareExpired } from "./patients.js";
+import { getPatient, updatePatient, patientIds, formatMedicare, formatMedicareExpiry, medicareExpired, medicareLooksRight } from "./patients.js";
 import { fetchDayAppointments, fetchPreconsult } from "./appointments.js";
 import { fetchOpenReminders, completeReminder } from "./reminders.js";
 import { openReminderDialog } from "./reminder-dialog.js";
@@ -570,8 +570,13 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     if (focus && f[focus]) f[focus].focus();   // "+ Add Medicare" lands on the Medicare box
   }
 
-  form.addEventListener("submit", async (e) => {
+  form.addEventListener("submit", (e) => {
     e.preventDefault();
+    saveEdit(false);
+  });
+
+  // medicareOk: staff said "Save anyway" to a Medicare number that isn't a standard card number
+  async function saveEdit(medicareOk) {
     const f = form.elements;
     saveBtn.disabled = true;
     saveBtn.textContent = "Saving…";
@@ -587,6 +592,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
         medicareNo: f.medicareNo.value,
         medicareIrn: f.medicareIrn.value,
         medicareExp: f.medicareExp.value,
+        medicareOk,
       }, staff);
       if (changed) {
         patient = (await getPatient(patient.id)) || patient;
@@ -597,16 +603,29 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       }
       dialog.close();
     } catch (err) {
+      if (err.code === "MEDICARE_CHECK") {
+        saveBtn.disabled = false;
+        saveBtn.textContent = "Save changes";
+        const ok = await confirmDialog({
+          title: "Save this Medicare number?",
+          message: `${err.message}\n\nIf it's right (for example a DVA or overseas number), save it as it's typed.`,
+          confirmLabel: "Save anyway", tone: "warning",
+        });
+        if (ok) await saveEdit(true);
+        else f.medicareNo.focus();
+        return;
+      }
       console.error("Update patient failed:", err);
       formError.textContent = err.code === "permission-denied"
         ? "You don't have permission to make this change."
         : err.code ? "Couldn't save changes. Please try again." : err.message;
     } finally {
-      saveBtn.disabled = false;
-      saveBtn.textContent = "Save changes";
+      if (saveBtn.textContent === "Saving…") {
+        saveBtn.disabled = false;
+        saveBtn.textContent = "Save changes";
+      }
     }
-  });
-
+  }
   renderTop();
 
   // What staff look at first loads straight away
@@ -1218,6 +1237,7 @@ function barHtml(p, today = [], pre = null, allergies = null, mentions = [], ext
 
   const medicare = p.medicareNo
     ? `<span class="pb-val is-wrap">${escapeHtml(formatMedicare(p.medicareNo))}${
+        medicareLooksRight(p.medicareNo) ? "" : ' <span class="missing" title="Saved with Save anyway: check it against their card">not a standard Medicare number</span>'}${
         p.medicareIrn ? ` <span class="pb-age">· Ref ${escapeHtml(p.medicareIrn)}</span>` : ""}${
         p.medicareExp ? ` <span class="pb-age">· Exp ${escapeHtml(formatMedicareExpiry(p.medicareExp))}</span>${
           medicareExpired(p.medicareExp) ? ' <span class="missing">expired</span>' : ""}` : ""}</span>`
@@ -1460,7 +1480,8 @@ function dialogHtml() {
           <label class="field"><span>Mobile</span><input name="mobile" type="tel" maxlength="20" /></label>
           <label class="field full"><span>Email</span><input name="email" type="email" maxlength="120" /></label>
           <label class="field full"><span>Address</span><input name="address" maxlength="200" /></label>
-          <label class="field"><span>Medicare number</span><input name="medicareNo" inputmode="numeric" maxlength="14" placeholder="2123 45670 1" autocomplete="off" /></label>
+          <label class="field"><span>Medicare number</span><input name="medicareNo" maxlength="24" placeholder="2123 45670 1" autocomplete="off" />
+            <small class="muted">10 digits on the card. If you add the reference number on the end, it goes in its own box.</small></label>
           <label class="field"><span>Medicare reference no.</span><input name="medicareIrn" inputmode="numeric" maxlength="1" placeholder="1–9" autocomplete="off" /></label>
           <label class="field"><span>Medicare expiry</span><input name="medicareExp" maxlength="7" placeholder="MM/YYYY" autocomplete="off" /></label>
           <label class="field full"><span>Patient ID (can't be changed)</span><input name="pttId" disabled /></label>

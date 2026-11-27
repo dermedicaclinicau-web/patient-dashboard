@@ -163,7 +163,8 @@ export async function updatePatient(current, input, staff) {
       medicareNo: input.medicareNo ?? current.medicareNo,
       medicareIrn: input.medicareIrn ?? current.medicareIrn,
       medicareExp: input.medicareExp ?? current.medicareExp,
-    });
+      medicareOk: input.medicareOk === true,
+    }, { askFirst: true });
     if (mc.no !== current.medicareNo) updates["Medicare Number"] = mc.no;
     if (mc.irn !== current.medicareIrn) updates["Medicare IRN"] = mc.irn;
     if (mc.exp !== current.medicareExp) updates["Medicare Expiry"] = mc.exp;
@@ -223,10 +224,24 @@ export function medicareValid(s) {
   const sum = [1, 3, 7, 9, 1, 3, 7, 9].reduce((a, w, i) => a + w * Number(d[i]), 0);
   return sum % 10 === Number(d[8]);
 }
-// "2123456701" -> "2123 45670 1"
+// The card check on the first 9 digits (works with or without the 10th, the issue number)
+function medicareCheckOk(d) {
+  if (!/^[2-6]\d{8,9}$/.test(d)) return false;
+  const sum = [1, 3, 7, 9, 1, 3, 7, 9].reduce((a, w, i) => a + w * Number(d[i]), 0);
+  return sum % 10 === Number(d[8]);
+}
+// A real Medicare card number (9 or 10 digits that pass the check). Anything else was saved with "Save anyway".
+export function medicareLooksRight(s) {
+  const t = String(s ?? "").replace(/\s/g, "");
+  return /^\d+$/.test(t) && medicareCheckOk(t);
+}
+// "2123456701" -> "2123 45670 1", "212345670" -> "2123 45670". Anything else as it was typed.
 export function formatMedicare(s) {
-  const d = medicareDigits(s);
-  return d.length === 10 ? `${d.slice(0, 4)} ${d.slice(4, 9)} ${d.slice(9)}` : String(s ?? "");
+  const t = String(s ?? "").replace(/\s/g, "");
+  if (!/^\d+$/.test(t)) return String(s ?? "");
+  if (t.length === 10) return `${t.slice(0, 4)} ${t.slice(4, 9)} ${t.slice(9)}`;
+  if (t.length === 9) return `${t.slice(0, 4)} ${t.slice(4)}`;
+  return String(s ?? "");
 }
 // The card's "valid to" month: "03/28", "3/2028" or "2028-03" -> "2028-03". "" if empty, null if it can't be read.
 const monthKey = (y, mo) => (mo >= 1 && mo <= 12 && y >= 2000 && y <= 2100 ? `${y}-${String(mo).padStart(2, "0")}` : null);
@@ -249,11 +264,34 @@ export function medicareExpired(k) {
   return !!k && k < `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 // Checks what was typed. Returns { no, irn, exp } or throws a message for staff.
-function cleanMedicare(input) {
-  const no = medicareDigits(input.medicareNo);
-  const irn = String(input.medicareIrn ?? "").replace(/\D/g, "");
+// 11 digits: the last one is the reference number. 9 digits: no issue number, fine.
+// Anything else (a digit wrong, letters, a DVA or overseas number) needs input.medicareOk ("Save anyway"),
+// and is then kept exactly as typed. askFirst: the error has code MEDICARE_CHECK, so the page can ask.
+function cleanMedicare(input, { askFirst = false } = {}) {
+  const raw = String(input.medicareNo ?? "").trim();
+  const letters = /[a-z]/i.test(raw);
+  let no = medicareDigits(raw);
+  let irn = String(input.medicareIrn ?? "").replace(/\D/g, "");
   const exp = medicareExpiryKey(input.medicareExp);
-  if (no && !medicareValid(no)) throw new Error("Check the Medicare number. It's the 10 digits on the card.");
+  if (!letters && no.length === 11) {
+    const last = no[10];
+    if (irn && irn !== last) {
+      throw new Error(`The Medicare number has 11 digits. The last one (${last}) looks like the reference number, but the reference box says ${irn}. Check which is right.`);
+    }
+    no = no.slice(0, 10);
+    irn = irn || last;
+  }
+  if (raw && (letters || ![9, 10].includes(no.length) || !medicareCheckOk(no))) {
+    const why = letters ? "It has letters in it, so it isn't a Medicare card number (a DVA or overseas number?)."
+      : ![9, 10].includes(no.length) ? `It has ${no.length} digits. A Medicare card number has 10 (9 without the issue number).`
+      : "It doesn't pass the Medicare card check, so a digit may be wrong.";
+    if (!input.medicareOk) {
+      const msg = `Check the Medicare number. ${why}`;
+      if (askFirst) throw Object.assign(new Error(msg), { code: "MEDICARE_CHECK" });
+      throw new Error(`${msg} Check it, or leave it empty for now and add it on the patient's page.`);
+    }
+    no = raw.toUpperCase().replace(/\s+/g, " ").slice(0, 20);   // saved as typed
+  }
   if (irn && !/^[1-9]$/.test(irn)) throw new Error("The Medicare reference number is one digit, 1 to 9, beside the patient's name on the card.");
   if (exp === null) throw new Error("Check the Medicare expiry. Type it as it is on the card, for example 03/2028.");
   if ((irn || exp) && !no) throw new Error("Add the Medicare number as well.");
